@@ -50,6 +50,9 @@ from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
+from meho_backplane.api.v1.agent_principals import (
+    router as api_v1_agent_principals_router,
+)
 from meho_backplane.api.v1.agent_runs import router as api_v1_agent_runs_router
 from meho_backplane.api.v1.agents import router as api_v1_agents_router
 from meho_backplane.api.v1.approvals import router as api_v1_approvals_router
@@ -561,6 +564,12 @@ app.include_router(api_v1_broadcast_overrides_router)
 # existence is not leaked across tenant boundaries. Every mutation
 # writes an audit row and broadcasts under op_class=write.
 app.include_router(api_v1_agents_router)
+# G11.2-T1 (#815) -- agent-principal lifecycle (register / list / revoke).
+# register creates a Keycloak client tagged kind=agent + inserts a DB row.
+# revoke disables the Keycloak client (kill switch) + marks the row revoked.
+# Reads gated to operator+; writes gated to tenant_admin.
+# Tenant-scoped via the JWT; cross-tenant probes return 404.
+app.include_router(api_v1_agent_principals_router)
 # G11.1-T4 (#811) -- agent invocation surface. POST /agents/{name}/run
 # (sync block-and-return, or async handle on the timeout / async flag),
 # GET /agents/runs/{handle} (poll the durable run state), and POST

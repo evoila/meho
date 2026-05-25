@@ -14,11 +14,12 @@ call:
 * :func:`validate_params` -- jsonschema 2020-12 (OpenAPI 3.1
   compatible) validation. Returns a list of structured error dicts;
   empty list = valid.
-* :func:`policy_gate` -- v0.2 default-allow with the
-  ``requires_approval`` honor. G11.2-T4 (#817) replaces the v0.2
-  hard-deny with a ``needs_approval`` verdict so the dispatcher can
-  write a durable pending row and return an ``awaiting_approval``
-  result instead of a denial. G7 / G10 can extend the gate further
+* :func:`policy_gate` -- G11.2-T3 per-(principal, op, target) verdict
+  resolution: effective = user-role-allows ∩ agent-permission ∩
+  op-requirement. Returns the three-state
+  :class:`~meho_backplane.db.models.PermissionVerdict` so the
+  dispatcher can handle ``auto-execute``, ``needs-approval``, and
+  ``deny`` paths distinctly. G7 / G10 will extend the gate further
   without re-touching every dispatch call site.
 """
 
@@ -26,32 +27,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Literal
+from typing import Any
 
 import structlog
 from jsonschema import Draft202012Validator
 
-from meho_backplane.auth.operator import Operator
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
-    "PolicyVerdict",
     "compute_params_hash",
     "policy_gate",
     "validate_params",
 ]
-
-_log = structlog.get_logger(__name__)
-
-#: Three-valued verdict returned by :func:`policy_gate`. The dispatcher
-#: branches on this value:
-#:
-#: * ``"allow"`` -- proceed to connector resolution + execution.
-#: * ``"needs_approval"`` -- write a durable :class:`~meho_backplane.db.models.ApprovalRequest`
-#:   row and return an ``awaiting_approval`` result to the caller.
-#: * ``"deny"`` -- write a ``denied`` audit row and return a ``denied``
-#:   result (reserved for outright blocks; not used in v0.2).
-PolicyVerdict = Literal["allow", "needs_approval", "deny"]
 
 
 def compute_params_hash(params: dict[str, Any]) -> str:
@@ -105,50 +97,92 @@ def validate_params(
     return out
 
 
-def policy_gate(
+async def policy_gate(
     *,
     operator: Operator,
     descriptor: EndpointDescriptor,
     target: Any,
-) -> tuple[PolicyVerdict, str | None]:
-    """v0.2 default-allow policy gate.
+) -> tuple[PermissionVerdict, str | None]:
+    """G11.2-T3 per-(principal, op, target) policy gate.
 
-    Returns ``(verdict, reason_or_None)`` where *verdict* is a
-    :data:`PolicyVerdict` literal:
+    Returns ``(verdict, reason_or_None)`` where *verdict* is one of
+    :attr:`~meho_backplane.db.models.PermissionVerdict.AUTO_EXECUTE`,
+    :attr:`~meho_backplane.db.models.PermissionVerdict.NEEDS_APPROVAL`,
+    or :attr:`~meho_backplane.db.models.PermissionVerdict.DENY`.
 
-    * ``"allow"`` -- proceed to connector resolution + execution.
-    * ``"needs_approval"`` -- the op is flagged ``requires_approval``; the
-      dispatcher must write a durable :class:`~meho_backplane.db.models.ApprovalRequest`
-      row and return an ``awaiting_approval`` result. The *reason* string
-      carries a human-readable explanation for the audit row.
-    * ``"deny"`` -- outright block (reserved for future G7 / G10 policy
-      rules; not emitted in v0.2).
+    The dispatcher branches on *verdict*:
 
-    G7 / G10 extend this function -- when those Goals land, the body
-    grows real policy decisions and the dispatcher's call site stays
-    unchanged. The structured-log line ``policy_gate_default_allow`` is
-    the operator's signal that no real policy is in effect (a future
-    audit query can count these events to verify the upgrade landed
-    everywhere).
+    * ``auto-execute`` — proceed to connector resolution + execution.
+    * ``needs-approval`` — write an audit row in ``pending`` status,
+      return :func:`~meho_backplane.operations._errors.result_pending`
+      to the caller. The durable approval-queue mechanics (G11.2-T4,
+      #817) will turn this into a real pending row + resume path.
+    * ``deny`` — write an audit row in ``denied`` status, return
+      :func:`~meho_backplane.operations._errors.result_denied` with the
+      *reason* string so the agent can reason about the refusal.
 
-    The function is intentionally synchronous -- v0.2's only decision is
-    "did the connector author flag this op as requiring approval?".
-    Async I/O against a remote policy service is a G7+ concern; the
-    call site already awaits the surrounding context so promoting this
-    to async later is a non-breaking change.
+    Effective verdict = user-role-allows ∩ agent-permission ∩
+    op-requirement, resolved by
+    :func:`~meho_backplane.auth.permissions.resolve_verdict`. See that
+    module for the full resolution algorithm.
+
+    Principal-kind branch
+    ---------------------
+
+    The per-(principal, op, target) agent-permission model gates **agent
+    principals** (``principal_kind == agent``). Human operators and
+    service accounts keep the v0.2 contract — default-allow except an op
+    flagged ``requires_approval`` — so a caution/dangerous op a human
+    has always been able to run does not silently start pending/denying.
+    This is exactly G11.2-T4 (#817)'s stated split: replace the
+    ``requires_approval`` hard-deny with the pending path *for agents*;
+    humans keep current behaviour. The agent path additionally folds
+    ``requires_approval`` into the verdict as a ``needs-approval`` floor,
+    so an op the connector author marked as requiring approval is never
+    auto-executed by an agent regardless of its ``safety_level``.
+
+    The function is **async** — it opens its own DB session to load the
+    caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
+    mirroring the same pattern :func:`audit_and_broadcast_safe` uses.
+    The dispatcher's call site changes only in adding ``await``; the
+    signature (operator / descriptor / target) stays identical to v0.2.
     """
+    # --- Human / service principals: preserve the v0.2 contract --------
+    if operator.principal_kind is not PrincipalKind.AGENT:
+        if descriptor.requires_approval:
+            # v0.2 hard-deny is retained for non-agent principals; the
+            # approval queue (G11.2-T4) routes only agent runs to the
+            # pending path.
+            return (
+                PermissionVerdict.DENY,
+                "requires_approval is True; only agent principals are routed "
+                "to the approval queue (G11.2-T4)",
+            )
+        _log.info(
+            "policy_gate_default_allow",
+            operator_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+            target_id=str(getattr(target, "id", None)) if target is not None else None,
+        )
+        return PermissionVerdict.AUTO_EXECUTE, None
+
+    # --- Agent principals: per-(principal, op, target) verdict ----------
+    target_id = getattr(target, "id", target) if target is not None else None
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        verdict, reason = await resolve_verdict(
+            session=session,
+            operator=operator,
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+            target_id=target_id,
+        )
     if descriptor.requires_approval:
-        # G11.2-T4 (#817): replace the v0.2 hard-deny with a pending path.
-        # The dispatcher writes a durable ApprovalRequest row and returns
-        # an awaiting_approval result; the run parks in awaiting_approval
-        # until a reviewer approves or rejects.
-        return "needs_approval", f"op {descriptor.op_id!r} requires approval"
-    _log.info(
-        "policy_gate_default_allow",
-        operator_sub=operator.sub,
-        tenant_id=str(operator.tenant_id),
-        op_id=descriptor.op_id,
-        safety_level=descriptor.safety_level,
-        target_id=str(getattr(target, "id", None)) if target is not None else None,
-    )
-    return "allow", None
+        floored = _more_restrictive(verdict, PermissionVerdict.NEEDS_APPROVAL)
+        if floored is not verdict:
+            reason = f"{reason}; floored to needs-approval (descriptor.requires_approval)"
+            verdict = floored
+    return verdict, reason

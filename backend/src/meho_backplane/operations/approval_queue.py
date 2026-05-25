@@ -485,6 +485,9 @@ async def expire_stale_requests(
     Returns:
         List of the expired :class:`ApprovalRequest` rows (may be empty).
     """
+    # Enforce the operator-role floor the docstring promises, mirroring
+    # approve_request / reject_request (CodeRabbit #1086).
+    _check_reviewer_role(operator)
     cutoff = now or _now()
 
     stmt = (

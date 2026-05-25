@@ -45,7 +45,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.operations._validate import compute_params_hash
@@ -112,7 +112,12 @@ def _make_operator(
     sub: str = "reviewer-sub",
     role: TenantRole = TenantRole.OPERATOR,
     tenant_id: uuid.UUID = _TENANT_ID,
+    principal_kind: PrincipalKind = PrincipalKind.AGENT,
 ) -> Operator:
+    # Defaults to an AGENT principal: the approval queue only fires for
+    # agent principals (the G11.2-T3 gate hard-denies requires_approval
+    # for human/service principals). Service-level tests that call the
+    # approval API directly are unaffected by the kind.
     return Operator(
         sub=sub,
         name="Test Reviewer",
@@ -120,6 +125,7 @@ def _make_operator(
         raw_jwt="<test-raw-jwt>",
         tenant_id=tenant_id,
         tenant_role=role,
+        principal_kind=principal_kind,
     )
 
 

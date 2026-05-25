@@ -20,6 +20,12 @@ criteria map onto the tests as:
 * ``test_child_run_linked_to_parent_in_lineage`` -- the recorder is called with
   the parent run id, so the cascade tree (``parent_run_id`` lineage) is
   reconstructable.
+* ``test_finalizer_closes_child_on_success`` /
+  ``test_finalizer_closes_child_on_failure`` -- a recorded child row is closed
+  via the finalizer after the child loop (G11.1-T8 #1087): on success with the
+  output, on ``AgentRunError`` with the error before re-raising ``ModelRetry``.
+* ``test_finalizer_not_called_without_recorder`` -- no recorder means no child
+  run id, so the finalizer is never reached (nothing to close).
 * ``test_unknown_child_agent_is_a_model_retry`` -- an unresolvable agent name is
   a recoverable ``ModelRetry``, not a crash.
 
@@ -51,6 +57,8 @@ from meho_backplane.agent import (
     AgentDefinition,
     AgentInvocationDepthExceeded,
     AgentRunError,
+    ChildAgentResolver,
+    ChildRunRecorder,
     agent_invoke_depth_var,
     current_agent_run_id_var,
     make_invoke_agent_tool,
@@ -372,6 +380,122 @@ async def test_child_run_linked_to_parent_in_lineage() -> None:
     assert recorded[0]["tenant_id"] == _TENANT_A
     # Inside the child loop the lineage contextvar was the recorded child id.
     assert seen_run_id_in_child == [child_run_id]
+
+
+def _resolver_for(child_def: AgentDefinition) -> ChildAgentResolver:
+    """A resolver that always returns *child_def* (single-child cascade tests)."""
+
+    async def resolver(operator: Operator, agent_name: str) -> AgentDefinition | None:
+        return child_def
+
+    return resolver
+
+
+async def _recorder_returning(child_run_id: UUID) -> ChildRunRecorder:
+    """A recorder that records the requested child and returns *child_run_id*."""
+
+    async def recorder(
+        *,
+        operator: Operator,
+        definition: AgentDefinition,
+        parent_run_id: UUID | None,
+    ) -> UUID:
+        return child_run_id
+
+    return recorder
+
+
+async def test_finalizer_closes_child_on_success() -> None:
+    """A successful child loop calls the finalizer with its output, ``error=None``.
+
+    The seam-level invariant behind #1087: the recorded child row must reach a
+    terminal state, so the tool calls the finalizer after the child loop returns.
+    """
+    child_run_id = uuid4()
+    finalized: list[tuple[UUID, Any, str | None]] = []
+    child_def = AgentDefinition(name="closer", system_prompt="answer", request_limit=5)
+
+    async def child_runner(
+        *, definition: AgentDefinition, operator: Operator, inputs: str, usage: RunUsage
+    ) -> Any:
+        return "child answer"
+
+    async def finalizer(run_id: UUID, *, output: Any, error: str | None) -> None:
+        finalized.append((run_id, output, error))
+
+    invoke_tool = make_invoke_agent_tool(
+        resolver=_resolver_for(child_def),
+        child_runner=child_runner,
+        recorder=await _recorder_returning(child_run_id),
+        finalizer=finalizer,
+    )
+
+    ctx = _FakeCtx(deps=_make_operator(), usage=RunUsage())
+    out = await invoke_tool.function(ctx, agent_name="closer", inputs="go")
+
+    assert out == {"agent": "closer", "output": "child answer"}
+    assert finalized == [(child_run_id, "child answer", None)]
+
+
+async def test_finalizer_closes_child_on_failure() -> None:
+    """A failed child loop calls the finalizer with the error, ``output=None``,
+    *before* the tool re-raises the recoverable ``ModelRetry``."""
+    child_run_id = uuid4()
+    finalized: list[tuple[UUID, Any, str | None]] = []
+    child_def = AgentDefinition(name="faulter", system_prompt="answer", request_limit=5)
+
+    async def child_runner(
+        *, definition: AgentDefinition, operator: Operator, inputs: str, usage: RunUsage
+    ) -> Any:
+        raise AgentRunError("turn budget exhausted: boom")
+
+    async def finalizer(run_id: UUID, *, output: Any, error: str | None) -> None:
+        finalized.append((run_id, output, error))
+
+    invoke_tool = make_invoke_agent_tool(
+        resolver=_resolver_for(child_def),
+        child_runner=child_runner,
+        recorder=await _recorder_returning(child_run_id),
+        finalizer=finalizer,
+    )
+
+    ctx = _FakeCtx(deps=_make_operator(), usage=RunUsage())
+    with pytest.raises(ModelRetry, match="child agent 'faulter' failed"):
+        await invoke_tool.function(ctx, agent_name="faulter", inputs="go")
+
+    assert len(finalized) == 1
+    run_id, output, error = finalized[0]
+    assert run_id == child_run_id
+    assert output is None
+    assert error is not None
+    assert "turn budget exhausted" in error
+
+
+async def test_finalizer_not_called_without_recorder() -> None:
+    """No recorder -> no child run id -> the finalizer is never called (there is
+    no row to close); the in-process path is unchanged."""
+    finalized: list[UUID] = []
+    child_def = AgentDefinition(name="orphan", system_prompt="answer", request_limit=5)
+
+    async def child_runner(
+        *, definition: AgentDefinition, operator: Operator, inputs: str, usage: RunUsage
+    ) -> Any:
+        return "child answer"
+
+    async def finalizer(run_id: UUID, *, output: Any, error: str | None) -> None:
+        finalized.append(run_id)
+
+    invoke_tool = make_invoke_agent_tool(
+        resolver=_resolver_for(child_def),
+        child_runner=child_runner,
+        finalizer=finalizer,  # wired, but no recorder -> never reached
+    )
+
+    ctx = _FakeCtx(deps=_make_operator(), usage=RunUsage())
+    out = await invoke_tool.function(ctx, agent_name="orphan", inputs="go")
+
+    assert out == {"agent": "orphan", "output": "child answer"}
+    assert finalized == []
 
 
 async def test_unknown_child_agent_is_a_model_retry() -> None:

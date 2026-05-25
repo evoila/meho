@@ -100,6 +100,7 @@ from typing import Any, Final, Literal
 import structlog
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.broadcast import (
     BroadcastEvent,
     compute_effective_broadcast_detail,
@@ -336,6 +337,7 @@ async def _write_audit_row(
             id=audit_id,
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
+            actor_sub=resolve_actor_sub(),
             tenant_id=tenant_id,
             target_id=target_id,
             method=method,

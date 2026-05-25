@@ -105,7 +105,20 @@ def result_handler_unreachable(
 
 
 def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResult:
-    """Policy gate issued an outright ``deny`` verdict."""
+    """Policy gate denied the call.
+
+    Returned when the effective verdict is
+    :attr:`~meho_backplane.db.models.PermissionVerdict.DENY` — either
+    because the op is ``dangerous`` and no explicit grant overrides it,
+    or because an explicit ``deny`` row was found, or because the
+    principal's role ceiling forced the verdict to ``deny`` (for an
+    agent principal), or because a human/service principal hit a
+    ``requires_approval`` op (which is hard-denied for non-agents).
+
+    The ``reason`` string is agent-readable: it names the verdict
+    source and any ceilings that were applied so an agent can diagnose
+    the refusal without human intervention.
+    """
     return OperationResult(
         status="denied",
         op_id=op_id,
@@ -120,9 +133,11 @@ def result_awaiting_approval(
     approval_request_id: uuid.UUID,
     duration_ms: float,
 ) -> OperationResult:
-    """Policy gate issued a ``needs_approval`` verdict; pending row created.
+    """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
-    G11.2-T4 (#817). The dispatcher calls this after creating a durable
+    G11.2-T4 (#817). The dispatcher calls this (for an agent principal,
+    via the G11.2-T3 :attr:`~meho_backplane.db.models.PermissionVerdict.NEEDS_APPROVAL`
+    verdict) after creating a durable
     :class:`~meho_backplane.db.models.ApprovalRequest` row for the call.
     The ``approval_request_id`` in ``extras`` is the UUID of the pending
     row; callers (the agent runtime, REST consumers) can poll or surface
@@ -201,9 +216,10 @@ def status_code_for_result(result_status: str) -> int:
     The ``audit_log.status_code`` column is NOT NULL :class:`int` --
     optimised for the HTTP middleware path. The dispatcher contract is
     not HTTP, so the dispatcher synthesises one: ``200`` for ok,
-    ``202`` for awaiting approval (accepted but not yet executed),
-    ``403`` for denied, ``500`` for error. The synthetic values are
-    not surfaced to operators; the canonical signal lives in
+    ``202`` for awaiting approval / pending (accepted but not yet
+    executed — the agent needs-approval path), ``403`` for denied,
+    ``500`` for error. The synthetic values are not surfaced to
+    operators; the canonical signal lives in
     ``payload["result_status"]`` on the audit row.
     """
     if result_status == "ok":
@@ -212,4 +228,6 @@ def status_code_for_result(result_status: str) -> int:
         return 202
     if result_status == "denied":
         return 403
+    if result_status == "pending":
+        return 202
     return 500

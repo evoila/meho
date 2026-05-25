@@ -1,0 +1,54 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  G10.5-T3 (#882) polling-refresh fragment.
+
+  The graph view's outer wrapper (``#topology-graph-data-wrapper``)
+  triggers an HTMX GET against ``/ui/topology?view=graph...`` every
+  30 seconds with the active query params; the server returns just
+  this fragment which HTMX swaps via ``outerHTML``. The
+  ``topology-graph.js`` controller listens for ``htmx:afterSwap`` on
+  the wrapper, re-reads the embedded data islands, and re-renders
+  Cytoscape preserving pan + zoom.
+
+  The fragment carries:
+
+  * ``topology-graph-data`` -- Cytoscape elements bag.
+  * ``topology-graph-selected`` -- cross-link selection (always
+    empty on the overlay branches; round-tripped on the full view).
+  * ``topology-graph-overlay`` -- the active overlay mode + path
+    metadata so the JS can update the chrome (root label, hop count,
+    truncation banner) without a full re-render. ``mode`` is one of
+    ``""`` (full inventory), ``"dependents"`` / ``"dependencies"``
+    (subgraph), ``"path"``.
+
+  The wrapper element ``div#topology-graph-data-wrapper`` is the
+  HTMX swap target -- swapping its outerHTML replaces both the data
+  islands AND re-installs the same wrapper attributes so the
+  ``hx-trigger="every 30s"`` keeps firing on the new element.
+
+  ``hx-headers`` carries the CSRF token so the chassis middleware
+  accepts the refresh on tenants that require it.
+-#}
+<div
+  id="topology-graph-data-wrapper"
+  hx-get="{{ refresh_url | default('') }}"
+  hx-trigger="every 30s"
+  hx-swap="outerHTML"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+  data-overlay-mode="{{ overlay_mode | default('') }}"
+  data-overlay-root="{{ overlay_root_name | default('') }}"
+  data-overlay-direction="{{ overlay_direction | default('') }}"
+  data-overlay-depth="{{ overlay_depth | default('') }}"
+  data-overlay-to="{{ overlay_to_name | default('') }}"
+  data-overlay-total-hops="{{ overlay_total_hops | default('') }}"
+  data-overlay-path-found="{{ 'true' if overlay_path_found else 'false' }}"
+  data-truncated="{{ 'true' if truncated else 'false' }}"
+  data-node-count="{{ node_count }}"
+  data-edge-count="{{ edge_count }}"
+>
+  <script type="application/json" id="topology-graph-data">{{ elements | tojson }}</script>
+  <script type="application/json" id="topology-graph-selected">{{ selected_id | tojson }}</script>
+  <script type="application/json" id="topology-graph-path-nodes">{{ overlay_path_node_ids | tojson }}</script>
+</div>

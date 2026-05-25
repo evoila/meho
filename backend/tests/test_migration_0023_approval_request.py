@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0020_create_approval_request``.
+"""Behavioural tests for Alembic migration ``0023_create_approval_request``.
 
 Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
 migration adds the ``approval_request`` table — one row per
@@ -13,7 +13,7 @@ Test matrix
 * **Upgrade creates the table + columns + indexes.** ``upgrade head``
   from a clean DB leaves ``approval_request`` present with every
   documented column and its three named indexes.
-* **Reversibility round-trip.** ``downgrade "0017"`` (0020's
+* **Reversibility round-trip.** ``downgrade "0022"`` (0023's
   ``down_revision``) drops the table; a subsequent ``upgrade head``
   re-creates it.
 * **audit_log untouched.** The migration must not disturb the
@@ -52,7 +52,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0020.db"
+    db_path = tmp_path / "migration_0023.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -170,12 +170,12 @@ def test_upgrade_creates_named_indexes(
 def test_reversibility_round_trip(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """downgrade to 0017 drops the table; upgrade recreates it."""
+    """downgrade to 0022 drops the table; upgrade recreates it."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
     assert "approval_request" in _table_names(sync_url)
 
-    command.downgrade(cfg, "0017")
+    command.downgrade(cfg, "0022")
     assert "approval_request" not in _table_names(sync_url)
 
     command.upgrade(cfg, "head")
@@ -223,8 +223,8 @@ def test_nullable_columns_permit_null(
         )
 
 
-def _load_migration_0020() -> object:
-    """Load migration ``0020`` as a module via its file path.
+def _load_migration_0023() -> object:
+    """Load migration ``0023`` as a module via its file path.
 
     Alembic version files are digit-prefixed and not importable as normal
     dotted modules. Loading by file path with :mod:`importlib.util` is the
@@ -237,9 +237,9 @@ def _load_migration_0020() -> object:
         Path(__file__).resolve().parent.parent
         / "alembic"
         / "versions"
-        / "0020_create_approval_request.py"
+        / "0023_create_approval_request.py"
     )
-    spec = importlib.util.spec_from_file_location("_migration_0020", path)
+    spec = importlib.util.spec_from_file_location("_migration_0023", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)  # type: ignore[union-attr]
@@ -252,7 +252,7 @@ def test_status_check_matches_enum() -> None:
     Drift guard: if a new member is added to the enum without a migration
     update, this test catches the mismatch.
     """
-    migration = _load_migration_0020()
+    migration = _load_migration_0023()
 
     model_values = {s.value for s in ApprovalRequestStatus}
     migration_values = set(migration._APPROVAL_REQUEST_STATUSES)  # type: ignore[attr-defined]

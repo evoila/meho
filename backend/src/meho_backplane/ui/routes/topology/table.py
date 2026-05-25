@@ -1,50 +1,88 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``GET /ui/topology`` -- the tenant topology tabular surface.
+"""``GET /ui/topology`` -- the tenant topology tabular + graph surface.
 
-Initiative #342 (G10.5 Topology UI), Task #880 (G10.5-T1) work item
-#1. Renders the per-tenant node inventory as a server-side sortable +
-HTMX-filterable table with multi-row checkbox select.
+Initiative #342 (G10.5 Topology UI), Task #880 (G10.5-T1) shipped the
+tabular view; Task #881 (G10.5-T2) layered the Cytoscape graph view on
+top of the same path via the ``?view=graph`` branch.
 
-Two response shapes share one handler:
+Three response shapes share one handler:
 
-* **Full page** -- a normal browser navigation to ``/ui/topology``
-  (no ``HX-Request`` header) returns the full ``topology/table.html``
-  page (extends ``base.html``; renders the navbar, sidebar, filter
-  bar, sort headers, table body, and the empty ``#node-drawer``
-  slot the per-node drawer swaps into).
+* **Tabular full page** (``?view=table`` or unset) -- a normal browser
+  navigation returns the full ``topology/table.html`` page (extends
+  ``base.html``; navbar, sidebar, filter bar, sort headers, table
+  body, and the empty ``#node-drawer`` slot the per-node drawer
+  swaps into).
 
-* **Fragment** -- an HTMX-driven sort / filter
-  (``hx-get="/ui/topology" hx-target="#topology-table-body"`` plus
-  ``hx-trigger="input changed delay:300ms, keyup changed delay:300ms"``
-  on the filter inputs) carries ``HX-Request: true`` and the handler
-  returns the ``topology/_table_rows.html`` partial -- just the
-  ``<tbody>`` content swapped into the existing table without a
-  full-page reload.
+* **Tabular HTMX fragment** (``?view=table`` or unset with
+  ``HX-Request: true``) -- a sort / filter swap returns the
+  ``topology/_table_rows.html`` partial swapped into the existing
+  table without a full-page reload.
+
+* **Graph full page** (``?view=graph``) -- returns the
+  ``topology/graph.html`` page with a server-rendered Cytoscape.js
+  island; elements + cross-link selection ride into the page as a
+  ``<script type="application/json">`` data island the init script
+  reads on load. The graph view does not have an HTMX-fragment
+  variant: layout switches happen client-side via
+  ``cy.layout({name}).run()``; filter / kind changes round-trip to
+  the server (full-page reload) so the URL captures the active mode
+  for copy/paste.
 
 Tenant scoping is non-overrideable. Every call to
-:func:`meho_backplane.topology.query.list_nodes` passes
-``operator.tenant_id`` from the session-bound
-:class:`UISessionContext`; no query parameter or body field carries
-a tenant id. Another tenant's node never renders -- the acceptance
-criterion is enforced at the substrate layer (the listing SQL's
-first ``WHERE`` clause), not the template.
+:func:`meho_backplane.topology.query.list_nodes` (table) and the
+graph-route's edge-and-node fetch passes ``operator.tenant_id`` from
+the session-bound :class:`UISessionContext`; no query parameter or
+body field carries a tenant id. Another tenant's node never renders
+-- the acceptance criterion is enforced at the substrate layer (the
+listing SQL's first ``WHERE`` clause), not the template.
 
 Sort column + direction defaults are the ``name`` column ascending
--- a stable, human-meaningful order. ``view=table`` in the query
-string is currently a no-op (T2 (#881) will introduce ``view=graph``
-and switch routing accordingly); the route accepts but does not
-require it so a future graph view can land without an external URL
-contract change.
+-- a stable, human-meaningful order. ``view=graph`` switches to the
+Cytoscape view; ``view=table`` (or unset) keeps the tabular surface.
+``selected`` (a UUID) cross-links between the two: a graph node's
+tap arrives at ``?view=table&selected=<id>`` (the row scrolls into
+view + highlights) and vice versa.
+
+T3 (#882) URL contract::
+
+    GET /ui/topology
+        [?view=table|graph
+         &sort=...&direction=...
+         &kind=...&q=...
+         &selected=<uuid>
+         # G10.5-T3 graph overlays (view=graph only):
+         &from=<name>[&from_kind=<kind>][&depth=N]
+         [&direction=dependents|dependencies]
+         &from=A&to=B[&from_kind=...&to_kind=...&max_hops=N]]
+
+``direction`` is dual-purpose by branch:
+
+* **Table branch** (default) -- the sort direction: ``asc`` (default)
+  or ``desc``. Out-of-range -> 422.
+* **Graph branch** with ``?from=<name>&to=`` unset -- the overlay
+  direction: ``dependents`` (default) or ``dependencies``. Out-of-
+  range silently defaults so a graph<->table toggle preserving
+  ``direction=asc`` does not 422 on the graph side.
+* **Graph branch** with ``?from=A&to=B`` -- ignored (a path has no
+  direction).
+* **Graph branch** with ``?from=`` unset -- ignored (the full-
+  inventory view has no direction).
+
+The dual-purpose contract keeps the URL surface aligned with the
+issue #882 spec (``?direction=dependencies``) without forcing the
+table-sort and graph-overlay senses into separate params, which
+would have widened the OpenAPI footprint with no operator benefit.
 """
 
 from __future__ import annotations
 
+import uuid
 from enum import StrEnum
 from typing import Final
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,9 +91,31 @@ from meho_backplane.db.models import _GRAPH_NODE_KINDS
 from meho_backplane.topology.query import list_nodes
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.topology.graph import OverlayDirection, render_graph
+from meho_backplane.ui.routes.topology.queries import (
+    DEFAULT_OVERLAY_DEPTH,
+    DEFAULT_PATH_MAX_HOPS,
+    MAX_OVERLAY_DEPTH,
+    MAX_PATH_MAX_HOPS,
+)
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_table_router"]
+
+
+class _ViewMode(StrEnum):
+    """Closed enum of view modes exposed on ``GET /ui/topology``.
+
+    ``table`` is the default (T1 / #880); ``graph`` switches to the
+    Cytoscape.js surface (T2 / #881). The enum's ``str`` mixin keeps
+    template URL building stable -- ``str(_ViewMode.GRAPH)`` is
+    ``"graph"`` (not ``"_ViewMode.GRAPH"``). An out-of-range value
+    fails Pydantic validation (422) at the HTTP boundary so the route
+    body never sees an unknown mode.
+    """
+
+    TABLE = "table"
+    GRAPH = "graph"
 
 
 class _SortColumn(StrEnum):
@@ -131,10 +191,11 @@ async def _render_table(
     kind: str | None = None,
     name_contains: str | None = None,
     limit: int = _LIMIT_DEFAULT,
+    selected_id: uuid.UUID | None = None,
     session_ctx: UISessionContext = Depends(require_ui_session),
     db_session: AsyncSession = Depends(get_raw_session),
 ) -> HTMLResponse:
-    """Render ``GET /ui/topology``.
+    """Render ``GET /ui/topology[?view=table]``.
 
     Pulls the tenant's nodes via :func:`list_nodes` and renders
     either the full page (browser nav) or the table-body fragment
@@ -146,6 +207,13 @@ async def _render_table(
     active-direction arrow, the filter input keeps its text). Both
     the page and the fragment receive the same context shape so the
     template fragments stay interchangeable.
+
+    ``selected_id`` is the cross-link payload from the graph view's
+    node tap: when present, the matching row is marked with
+    ``data-selected="true"`` so a small inline script can scroll it
+    into view + highlight it. Cross-tenant ids decay safely: the row
+    simply does not exist in the rendered fragment, so the
+    ``data-selected`` marker no-ops.
     """
     nodes = await list_nodes(
         db_session,
@@ -159,6 +227,7 @@ async def _render_table(
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context = {
         "page_title": "Topology",
+        "active_surface": "topology",
         "nodes": nodes,
         "sort": sort,
         "direction": direction,
@@ -167,6 +236,11 @@ async def _render_table(
         "csrf_token": csrf_token,
         "next_direction_for": _next_direction_factory(sort, direction),
         "node_kind_options": _node_kind_options(),
+        # ``selected_id`` is the cross-link payload from the graph
+        # surface ("show in table" / a Cytoscape node tap). The empty
+        # string represents "no selection" so Jinja's ``StrictUndefined``
+        # env does not raise on a missing-key read in the template.
+        "selected_id": str(selected_id) if selected_id is not None else "",
         # The footer in ``base.html`` reads ``ready`` to colour the
         # readiness pill; topology does not poll readiness itself
         # (the dashboard owns that surface), so ship ``False`` so
@@ -245,11 +319,93 @@ _require_ui_session_dep = Depends(require_ui_session)
 _get_raw_session_dep = Depends(get_raw_session)
 
 
+def _resolve_overlay_direction(
+    *,
+    direction: str,
+    from_: str | None,
+    to: str | None,
+) -> OverlayDirection | None:
+    """Decide whether ``direction`` carries an overlay sense on the graph branch.
+
+    Returns the parsed :class:`OverlayDirection` when the dependents/
+    dependencies overlay is active (``from`` set, ``to`` unset) and
+    ``direction`` parses as one of the enum members. Returns ``None``
+    otherwise -- the route's default (dependents) applies. An
+    out-of-range value on the graph branch is a silent default (rather
+    than 422) so the same ``direction=asc`` value can ride through the
+    URL when an operator toggles between table and graph without
+    breaking the "preserve filters" contract documented in #881.
+    """
+    if from_ is None or to is not None:
+        return None
+    try:
+        return OverlayDirection(direction)
+    except ValueError:
+        return None
+
+
+def _resolve_overlay_depth(
+    *,
+    depth: int | None,
+    from_: str | None,
+    to: str | None,
+) -> int | None:
+    """Pick the effective ``depth`` for the active branch.
+
+    Active overlay (``from`` set, ``to`` unset) -> ``depth`` if
+    supplied, else :data:`DEFAULT_OVERLAY_DEPTH`. Inactive branches
+    (full inventory, path overlay) -> ``None`` (depth does not
+    apply).
+    """
+    if depth is not None:
+        return depth
+    if from_ is not None and to is None:
+        return DEFAULT_OVERLAY_DEPTH
+    return None
+
+
+def _resolve_path_max_hops(
+    *,
+    max_hops: int | None,
+    from_: str | None,
+    to: str | None,
+) -> int | None:
+    """Pick the effective ``max_hops`` for the path overlay.
+
+    Path overlay (both ``from`` + ``to`` set) -> ``max_hops`` if
+    supplied, else :data:`DEFAULT_PATH_MAX_HOPS`. Other branches ->
+    ``None``.
+    """
+    if max_hops is not None:
+        return max_hops
+    if from_ is not None and to is not None:
+        return DEFAULT_PATH_MAX_HOPS
+    return None
+
+
+def _validate_sort_direction(direction: str) -> _SortDirection:
+    """Parse ``direction`` against the table-branch sort enum.
+
+    Out-of-range -> :class:`HTTPException` 422 with a structured
+    diagnostic. Same posture as the pre-T3 Pydantic enum validator.
+    """
+    try:
+        return _SortDirection(direction)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"direction must be one of {[d.value for d in _SortDirection]}; got {direction!r}"
+            ),
+        ) from exc
+
+
 def build_table_router() -> APIRouter:
     """Construct the topology-table :class:`APIRouter`.
 
-    Registers the single ``GET /ui/topology`` route that serves both
-    the full page and the HTMX fragment from one handler. The route
+    Registers the single ``GET /ui/topology`` route that serves the
+    full page, the HTMX table fragment, and the Cytoscape graph
+    surface from one handler -- branching on ``?view=``. The route
     name (``ui_topology_table``) is referenced by ``url_for`` in the
     chassis sidebar template -- a future rename here must update the
     sidebar in lockstep.
@@ -259,28 +415,75 @@ def build_table_router() -> APIRouter:
     async def _handler(
         request: Request,
         sort: _SortColumn = Query(default=_SortColumn.NAME),
-        direction: _SortDirection = Query(default=_SortDirection.ASC),
+        # ``direction`` is dual-purpose: the table branch consumes
+        # ``asc``/``desc`` (sort order, validated again by
+        # ``_validate_sort_direction``); the graph overlay branch
+        # consumes ``dependents``/``dependencies`` (traversal
+        # direction, validated by ``_resolve_overlay_direction``).
+        # The OpenAPI ``pattern`` constrains the union of accepted
+        # values so the generated CLI client + downstream contract
+        # consumers see the real vocabulary rather than a free-form
+        # ``string``. Out-of-union values 422 at the HTTP boundary --
+        # ``asc``/``desc`` still ride through cleanly when the
+        # operator toggles between table and graph views (the
+        # "preserve filters" contract documented in #881).
+        direction: str = Query(
+            default=_SortDirection.ASC.value,
+            max_length=32,
+            pattern=r"^(asc|desc|dependents|dependencies)$",
+            description=(
+                "Dual-purpose: ``asc`` / ``desc`` on the table branch "
+                "(``view=table``), ``dependents`` / ``dependencies`` on "
+                "the graph overlay branch (``view=graph&from=<name>``)."
+            ),
+        ),
         kind: str | None = Query(default=None, max_length=64),
         q: str | None = Query(default=None, max_length=256),
         limit: int = Query(default=_LIMIT_DEFAULT, ge=1, le=_LIMIT_MAX),
-        view: str | None = Query(default=None, max_length=16),
+        view: _ViewMode = Query(default=_ViewMode.TABLE),
+        selected: uuid.UUID | None = Query(default=None),
+        # G10.5-T3 (#882) overlay query params. ``from`` / ``to`` are
+        # reserved Python keywords so they ride as ``alias=`` on the
+        # FastAPI Query so the URL contract reads ``?from=&to=`` and
+        # the Python signature stays clean (a bare ``from`` would be
+        # a Python parse error).
+        from_: str | None = Query(default=None, alias="from", max_length=256),
+        from_kind: str | None = Query(default=None, max_length=64),
+        to: str | None = Query(default=None, max_length=256),
+        to_kind: str | None = Query(default=None, max_length=64),
+        depth: int | None = Query(default=None, ge=1, le=MAX_OVERLAY_DEPTH),
+        max_hops: int | None = Query(default=None, ge=1, le=MAX_PATH_MAX_HOPS),
         session_ctx: UISessionContext = _require_ui_session_dep,
         db_session: AsyncSession = _get_raw_session_dep,
     ) -> HTMLResponse:
-        """``GET /ui/topology[?view=table&sort=...&direction=...&kind=...&q=...]``.
-
-        ``view`` is accepted but unused in T1 (the only mode is the
-        table); T2 (#881) will branch on ``view`` to render the
-        Cytoscape graph instead. Documenting the param in the
-        signature now keeps the URL contract forward-compatible.
+        """Serve the topology UI, branching on ``?view=``. See module
+        docstring for the URL contract + dual-purpose ``direction``
+        semantics (table sort vs graph overlay).
         """
+        if view == _ViewMode.GRAPH:
+            return await render_graph(
+                request,
+                session_ctx=session_ctx,
+                db_session=db_session,
+                kind=kind,
+                name_contains=q,
+                selected_id=selected,
+                from_name=from_,
+                from_kind=from_kind,
+                to_name=to,
+                to_kind=to_kind,
+                direction=_resolve_overlay_direction(direction=direction, from_=from_, to=to),
+                depth=_resolve_overlay_depth(depth=depth, from_=from_, to=to),
+                max_hops=_resolve_path_max_hops(max_hops=max_hops, from_=from_, to=to),
+            )
         return await _render_table(
             request,
             sort=sort,
-            direction=direction,
+            direction=_validate_sort_direction(direction),
             kind=kind,
             name_contains=q,
             limit=limit,
+            selected_id=selected,
             session_ctx=session_ctx,
             db_session=db_session,
         )
@@ -291,5 +494,31 @@ def build_table_router() -> APIRouter:
         methods=["GET"],
         name="ui_topology_table",
         response_class=HTMLResponse,
+        # The ``?view=graph`` overlay branches (dependents / dependencies
+        # / path) call :func:`render_graph`, which catches
+        # :class:`NodeNotFoundError` / :class:`AmbiguousNodeError` and
+        # returns an ``HTMLResponse(status_code=404|409)`` carrying the
+        # overlay-error fragment. Surfacing those statuses in the
+        # OpenAPI snapshot keeps the generated CLI client + downstream
+        # contract consumers in sync with the runtime behaviour.
+        responses={
+            404: {
+                "description": (
+                    "Overlay anchor (``?from=<name>``) or path endpoint "
+                    "(``?from=&to=``) does not resolve in the caller's "
+                    "tenant. Returns the overlay-error fragment."
+                ),
+                "content": {"text/html": {}},
+            },
+            409: {
+                "description": (
+                    "Overlay anchor or path endpoint is a bare name that "
+                    "resolves to multiple kinds in the caller's tenant "
+                    "(``kind=`` disambiguation required). Returns the "
+                    "overlay-error fragment with the candidate kinds."
+                ),
+                "content": {"text/html": {}},
+            },
+        },
     )
     return router

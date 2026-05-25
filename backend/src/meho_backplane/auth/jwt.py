@@ -85,7 +85,7 @@ from authlib.jose.errors import (
 )
 from fastapi import Header, HTTPException, status
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
 
@@ -621,6 +621,42 @@ def _extract_tenant_role(claims: Any, settings: Settings) -> TenantRole:
         raise _http_401("unknown_tenant_role") from exc
 
 
+def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
+    """Extract ``principal_kind`` from *claims* with a ``user`` default.
+
+    G11.2-T1 (#815): the ``principal_kind`` claim is **optional** — a
+    JWT that carries no ``principal_kind`` claim is treated as a human
+    user (the pre-G11.2 default). This keeps all existing human-operator
+    tokens working without a Keycloak mapper update.
+
+    Only three values are accepted: ``user``, ``service``, ``agent``.
+    An unrecognised value is logged and defaults to ``user`` (not a 401)
+    — an unknown principal kind should not lock out an operator whose
+    realm emits a custom value; G11.2-T3 will enforce per-kind permission
+    restrictions and can surface a more targeted error at that point.
+
+    The claim name is configurable via ``JWT_PRINCIPAL_KIND_CLAIM_NAME``
+    (default ``principal_kind``) in :class:`~meho_backplane.settings.Settings`
+    so realms that surface the discriminator under a different attribute
+    can be accommodated without code changes.
+    """
+    claim_name = settings.jwt_principal_kind_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        # Claim absent → legacy human-operator token. Graceful fallback.
+        return PrincipalKind.USER
+    try:
+        return PrincipalKind(raw)
+    except ValueError:
+        log = structlog.get_logger(__name__)
+        log.warning(
+            "unknown_principal_kind",
+            claim_name=claim_name,
+            value=raw,
+        )
+        return PrincipalKind.USER
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -640,6 +676,10 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     / ``missing_tenant_role_claim`` / ``unknown_tenant_role``) so the
     bare ``invalid_token`` fallback is reserved for unexpected
     pydantic validation failures (the malformed-email regression case).
+
+    ``principal_kind`` extraction is graceful (unknown value → ``user``
+    default) per G11.2-T1 — an unrecognised kind must not break existing
+    human-operator flows.
     """
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:
@@ -663,6 +703,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     email = claims.get("email")
     tenant_id = _extract_tenant_id(claims, settings)
     tenant_role = _extract_tenant_role(claims, settings)
+    principal_kind = _extract_principal_kind(claims, settings)
     try:
         return Operator(
             sub=sub,
@@ -671,6 +712,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             raw_jwt=raw_jwt,
             tenant_id=tenant_id,
             tenant_role=tenant_role,
+            principal_kind=principal_kind,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

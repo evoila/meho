@@ -3,8 +3,8 @@
 
 """Create the ``approval_request`` table for the durable approval queue.
 
-Revision ID: 0020
-Revises: 0018
+Revision ID: 0023
+Revises: 0022
 Create Date: 2026-05-25
 
 This migration is the schema substrate of Initiative #803 (G11.2 Agent
@@ -74,7 +74,7 @@ Schema
   :class:`~meho_backplane.db.models.ApprovalRequestStatus` vocabulary
   (``pending`` / ``approved`` / ``rejected`` / ``expired``). The enum
   and the constraint move in lock-step; the drift guard
-  :mod:`tests.test_migration_0020_approval_request` asserts equality.
+  :mod:`tests.test_migration_0023_approval_request` asserts equality.
 
 * ``reviewed_by`` -- Text nullable. The ``sub`` of the operator who
   approved or rejected the request; NULL while pending / expired
@@ -157,8 +157,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0020"
-down_revision: str | None = "0018"
+revision: str = "0023"
+down_revision: str | None = "0022"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -168,7 +168,7 @@ depends_on: str | Sequence[str] | None = None
 #: as a literal tuple (not imported) so the migration's recorded DDL is a
 #: frozen snapshot independent of any later edit to the model enum — the same
 #: self-contained discipline migration ``0007`` follows for graph-node kinds.
-#: The drift guard in :mod:`tests.test_migration_0020_approval_request`
+#: The drift guard in :mod:`tests.test_migration_0023_approval_request`
 #: asserts the model enum and the live ``CHECK`` constraint agree.
 _APPROVAL_REQUEST_STATUSES: tuple[str, ...] = (
     "pending",

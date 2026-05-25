@@ -235,8 +235,6 @@ __all__ = [
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
-    "ApprovalRequest",
-    "ApprovalRequestStatus",
     "AuditLog",
     "Base",
     "BroadcastOverride",
@@ -432,6 +430,19 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # RFC 8693 actor (``act.sub``) — the agent that acted on behalf of
+    # ``operator_sub`` in a user-initiated agent run (G11.2-T2 #816). MEHO
+    # synthesises the delegation binding at the resource server (Keycloak has
+    # no delegation token exchange), binding the acting agent's principal into
+    # the audit context for the run's lifetime. ``NULL`` for direct-user
+    # requests and for autonomous (``client_credentials``) agent runs, where
+    # the agent is the subject and there is no separate actor. Added by
+    # migration ``0021``.
+    actor_sub: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -462,6 +473,11 @@ class AuditLog(Base):
         Index(
             "audit_log_agent_session_id_idx",
             "agent_session_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "audit_log_actor_sub_idx",
+            "actor_sub",
             postgresql_using="btree",
         ),
     )
@@ -2802,6 +2818,650 @@ class AgentRun(Base):
         sa.CheckConstraint(
             _ck_in("trigger", _AGENT_RUN_TRIGGERS),
             name="ck_agent_run_trigger",
+        ),
+    )
+
+
+class AgentPrincipal(Base):
+    """A MEHO-managed agent principal — a Keycloak client tagged ``kind=agent``.
+
+    G11.2-T1 (#815) under Initiative #803 (G11.2 Agent identity + RBAC +
+    approval). Each row represents one agent identity registered by the
+    ``meho agent-principal register`` lifecycle verb. The row's lifecycle
+    mirrors the Keycloak client it shadows:
+
+    * **register** creates the Keycloak client (confidential,
+      service-accounts-enabled, ``kind=agent`` attribute) and inserts
+      this row.
+    * **revoke** sets ``enabled=false`` on the Keycloak client (kill
+      switch; new token grants are refused immediately) and marks
+      ``revoked=true`` on this row. The row is never hard-deleted so
+      the audit trail stays intact.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key; PG ``gen_random_uuid()`` via migration
+      ``0018``; ORM ``default=uuid.uuid4`` for SQLite / out-of-band inserts.
+
+    * ``tenant_id`` -- UUID NOT NULL, FK to ``tenant.id``. An agent
+      principal must belong to a real tenant — there is no out-of-band
+      path that would create an orphan row, and the ``NO ACTION`` default
+      FK prevents deleting a tenant that still has live agent principals.
+
+    * ``name`` -- Text NOT NULL. The operator-facing handle (e.g.
+      ``incident-triage``). Unique within a tenant (enforced by
+      ``agent_principal_tenant_name_idx``). Mirrors the naming discipline
+      for ``agent_definition.name`` (G11.1-T2).
+
+    * ``keycloak_client_id`` -- Text NOT NULL UNIQUE. The OAuth
+      ``clientId`` in Keycloak — conventionally ``agent:<name>`` to keep
+      agent clients visually distinct in the Admin Console from user/
+      service clients. Globally unique across all tenants (Keycloak has
+      no per-realm per-tenant namespace for client ids).
+
+    * ``keycloak_internal_id`` -- Text NOT NULL. Keycloak's internal UUID
+      for the client (the ``id`` field in the admin representation,
+      distinct from ``clientId``). Used by the revoke path to issue the
+      ``PUT /clients/{id}`` call without first doing a lookup-by-clientId.
+
+    * ``owner_sub`` -- Text NOT NULL. The ``sub`` of the operator who
+      registered this principal. Never nullable: every agent must have an
+      owner (the NHI governance kill-switch model; see Initiative #803).
+
+    * ``revoked`` -- Boolean NOT NULL DEFAULT false. Set to ``true`` by
+      the revoke path alongside the Keycloak ``enabled=false`` call.
+      Revoked principals are excluded from list results by default but
+      the row stays for audit traceability.
+
+    * ``created_by_sub`` -- Text NOT NULL. Operator sub at insert time.
+      Distinct from ``owner_sub``: the owner is the long-term responsible
+      party; ``created_by_sub`` is the identity that pressed the button.
+      For the initial register they are the same; a future reassignment
+      path may differ.
+
+    * ``created_at`` / ``updated_at`` -- ``timestamptz`` NOT NULL. PG
+      server defaults; ORM ``lambda: datetime.now(UTC)`` for SQLite.
+
+    Indexes
+    -------
+
+    * ``agent_principal_tenant_name_idx`` -- unique composite b-tree on
+      ``(tenant_id, name)``. Enforces per-tenant name uniqueness and
+      drives the tenant-scoped list query.
+    * ``agent_principal_keycloak_client_id_idx`` -- unique b-tree on
+      ``keycloak_client_id``. Required for the revoke-by-name path and
+      for the Keycloak-side uniqueness invariant.
+    """
+
+    __tablename__ = "agent_principal"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK to tenant.id -- brand-new table, no chassis-era rows.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    keycloak_client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    keycloak_internal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    revoked: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "agent_principal_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        Index(
+            "agent_principal_keycloak_client_id_idx",
+            "keycloak_client_id",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T3 — per-(principal, op, target) permission model
+# ---------------------------------------------------------------------------
+
+
+class PermissionVerdict(StrEnum):
+    """Three-state verdict returned by the permission resolver.
+
+    :attr:`AUTO_EXECUTE` — the op proceeds without human review.
+    :attr:`NEEDS_APPROVAL` — the op is parked pending an operator
+    decision; the approval queue (G11.2-T4) handles the resume path.
+    :attr:`DENY` — the op is refused immediately with a structured,
+    agent-reasonable error.
+
+    The vocabulary is intentionally closed: a fourth verdict would
+    require a code + migration change, which is the cheapest way to
+    prevent drift between the DB layer and the policy engine.
+    """
+
+    AUTO_EXECUTE = "auto-execute"
+    NEEDS_APPROVAL = "needs-approval"
+    DENY = "deny"
+
+
+#: Closed tuple mirrored in the migration's CHECK constraint.
+_PERMISSION_VERDICTS: tuple[str, ...] = tuple(v.value for v in PermissionVerdict)
+
+
+class AgentPermission(Base):
+    """Per-(principal, op-pattern, target-scope) permission grant row.
+
+    G11.2-T3 (#820) under Initiative #803 (the P3 agent identity +
+    RBAC + approval gate). One row grants a *principal* (identified by
+    their JWT ``sub``) a specific *verdict* for dispatches that match
+    an *op_pattern* on a *target_scope*.
+
+    Design decisions
+    ----------------
+
+    **Principal is ``sub``, not a dedicated table row.** T1 (#815) adds
+    Keycloak-registered agent principals (:class:`AgentPrincipal`); this
+    table keeps a *soft* reference on ``principal_sub`` (the JWT ``sub``)
+    rather than an FK, consistent with the soft-FK discipline on
+    :attr:`AgentDefinition.identity_ref`. The same stable ``sub`` claim
+    keys grants for humans and agents alike; the resolver only consults
+    agent grants for principals whose token carries
+    ``principal_kind=agent`` (see :mod:`meho_backplane.auth.permissions`).
+
+    **op_pattern is an fnmatch glob string.** Examples: ``"*"`` (every
+    op), ``"GET:/api/vcenter/*"`` (all vCenter GET ops), ``"vault.kv.*"``
+    (all vault kv ops). The resolver scores patterns by the literal
+    prefix before the first glob metacharacter and prefers the most
+    specific match; ties fold to the most-restrictive verdict
+    (fail-closed).
+
+    **target_scope is NOT NULL, defaulting to ``"*"``.** ``"*"`` means
+    "any target"; any other value is a target UUID string the grant is
+    scoped to. Storing ``"*"`` rather than ``NULL`` for the any-target
+    case keeps the uniqueness key total — a ``NULL`` here would let
+    Postgres treat two otherwise-identical any-target rows as distinct
+    (``NULL != NULL``) and silently defeat
+    ``uq_agent_permission_grant``.
+
+    **verdict drives the policy engine.** The resolver returns the
+    most-specific matching row's :class:`PermissionVerdict`. When no row
+    matches, the default comes from the op's ``safety_level`` (``safe`` →
+    ``auto-execute``; ``caution`` → ``needs-approval``; ``dangerous`` →
+    ``deny``). The ``safety_level`` ceiling can *tighten* a grant but
+    never loosen it past the per-level cap (``caution`` and ``dangerous``
+    grants are capped at ``needs-approval`` — a destructive op is never
+    auto-executed, but it *is* grantable up to human approval).
+
+    **Tenant scoping.** Every row is owned by a tenant; the resolver
+    only matches rows for the requesting operator's tenant.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` — UUID primary key. Same portable :class:`Uuid` shape.
+    * ``tenant_id`` — UUID NOT NULL with a real ``REFERENCES tenant.id``
+      FK. Clean-slate table; same rationale as :class:`AgentDefinition`.
+    * ``principal_sub`` — Text NOT NULL. JWT ``sub`` of the principal.
+    * ``op_pattern`` — Text NOT NULL. fnmatch glob; ``"*"`` is a valid
+      catch-all grant.
+    * ``target_scope`` — Text NOT NULL, default ``"*"``. ``"*"`` = any
+      target; otherwise a target UUID string.
+    * ``verdict`` — Text NOT NULL, DB-layer ``CHECK`` against the three
+      closed values.
+    * ``created_by_sub`` — Text NOT NULL. JWT ``sub`` of the
+      tenant-admin who created the row.
+    * ``created_at`` / ``updated_at`` — ``timestamptz`` NOT NULL.
+
+    Indexes / constraints
+    ---------------------
+
+    * ``agent_permission_tenant_principal_idx`` — b-tree on
+      ``(tenant_id, principal_sub)`` — the dominant query: "all grants
+      for principal P in tenant T."
+    * ``uq_agent_permission_grant`` — UNIQUE on ``(tenant_id,
+      principal_sub, op_pattern, target_scope)`` — the row is *keyed*
+      by this tuple; a duplicate would feed a nondeterministic verdict
+      selection. The unique index prevents that at the DB layer.
+
+    The model ships no helper methods — the resolver logic lives in
+    :mod:`meho_backplane.auth.permissions`.
+    """
+
+    __tablename__ = "agent_permission"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real REFERENCES tenant(id) FK -- same rationale as AgentDefinition.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # JWT ``sub`` of the principal being granted the permission.
+    # Soft reference -- no FK to the agent principal table (T1's scope).
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # fnmatch-compatible glob string. "*" = every op.
+    op_pattern: Mapped[str] = mapped_column(Text, nullable=False)
+    # "*" = any target; UUID string = exactly one target. NOT NULL so
+    # the uniqueness key stays total (NULL would defeat the unique index).
+    target_scope: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="*",
+    )
+    # Three-state verdict: "auto-execute" | "needs-approval" | "deny".
+    verdict: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "agent_permission_tenant_principal_idx",
+            "tenant_id",
+            "principal_sub",
+            postgresql_using="btree",
+        ),
+        sa.UniqueConstraint(
+            "tenant_id",
+            "principal_sub",
+            "op_pattern",
+            "target_scope",
+            name="uq_agent_permission_grant",
+        ),
+        sa.CheckConstraint(
+            _ck_in("verdict", _PERMISSION_VERDICTS),
+            name="ck_agent_permission_verdict",
+        ),
+    )
+
+
+class ScheduledTriggerKind(StrEnum):
+    """Closed enum of trigger shapes the G11.3 scheduler dispatches.
+
+    Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+    :class:`ScheduledTrigger` row carries exactly one of three shapes,
+    selected by this discriminator; the discriminated-union invariant is
+    enforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``
+    that pairs each kind with its mandatory column.
+
+    Members:
+
+    * :attr:`CRON` -- recurring trigger driven by a 5-field cron
+      expression (``cron_expr`` column). The dispatcher (T2 #823) reads
+      the expression via ``croniter`` and materialises ``next_fire_at``.
+    * :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+      (``fire_at`` column). The dispatcher fires it once then marks
+      ``status = 'cancelled'`` (or the row stays inactive via
+      ``next_fire_at IS NULL``).
+    * :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+      filter (``event_filter`` column). The transactional outbox (T3
+      #824) matches rows against the filter and dispatches.
+
+    Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+    coordinated DB + model change so the enum and the
+    :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0020``'s
+    frozen tuple) cannot drift. The lock-step discipline mirrors
+    :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+    in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+    unit-test time.
+    """
+
+    CRON = "cron"
+    ONE_OFF = "one_off"
+    EVENT = "event"
+
+
+class ScheduledTriggerStatus(StrEnum):
+    """Closed lifecycle status of a :class:`ScheduledTrigger`.
+
+    Initiative #804 (G11.3 Scheduler), Task #822 (T1). The admin
+    surface (T5 #826) walks triggers through this state machine; the
+    dispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.
+
+    Members:
+
+    * :attr:`ACTIVE` -- the trigger is eligible for dispatch.
+    * :attr:`PAUSED` -- the trigger is temporarily disabled by an
+      operator. ``next_fire_at`` is preserved so resuming reactivates
+      without recomputing.
+    * :attr:`CANCELLED` -- terminal. The trigger row is retained for
+      audit purposes but never fires again.
+    """
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+
+
+class ScheduledTriggerInFlightPolicy(StrEnum):
+    """Closed policy of what happens to a fired run that gets killed mid-flight.
+
+    Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+    T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+    storage shape and the dispatch behaviour aligned across the
+    Initiative.
+
+    Members:
+
+    * :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+      resume a killed run from its last recorded state. At-least-once
+      semantics; the underlying agent run should be idempotent-friendly.
+    * :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed`` with
+      a clean audit row explaining the interruption; the next trigger
+      tick fires a fresh run. The consumer doc (``agent-runtime-for-ops-
+      spec.md`` §P2) explicitly accepts this outcome as the default
+      policy -- which is why Option A (extend roll-our-own) is viable at
+      all without DBOS-style automatic resume.
+
+    Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+    the conservative policy that requires no extra infrastructure (just
+    audit) and matches the consumer's accepted-outcome statement.
+    Operators opt into :attr:`RESUME` per definition.
+    """
+
+    RESUME = "resume"
+    FAIL_INTO_AUDIT = "fail_into_audit"
+
+
+#: Closed enum of :attr:`ScheduledTrigger.kind` -- derived from
+#: :class:`ScheduledTriggerKind` so the enum and the DB-layer ``CHECK``
+#: constraint cannot drift. The drift guard in
+#: :mod:`tests.test_db_scheduled_trigger` enforces equality at
+#: unit-test time. Migration ``0020`` records its own frozen literal
+#: tuple of the same shape (an independent snapshot).
+_SCHEDULED_TRIGGER_KINDS: tuple[str, ...] = tuple(k.value for k in ScheduledTriggerKind)
+
+#: Closed enum of :attr:`ScheduledTrigger.status` -- derived from
+#: :class:`ScheduledTriggerStatus`; same lock-step discipline as
+#: :data:`_SCHEDULED_TRIGGER_KINDS`.
+_SCHEDULED_TRIGGER_STATUSES: tuple[str, ...] = tuple(s.value for s in ScheduledTriggerStatus)
+
+#: Closed enum of :attr:`ScheduledTrigger.in_flight_policy` -- derived
+#: from :class:`ScheduledTriggerInFlightPolicy`; same lock-step
+#: discipline as :data:`_SCHEDULED_TRIGGER_KINDS`.
+_SCHEDULED_TRIGGER_IN_FLIGHT_POLICIES: tuple[str, ...] = tuple(
+    p.value for p in ScheduledTriggerInFlightPolicy
+)
+
+
+class ScheduledTrigger(Base):
+    """One row per durable trigger that fires a G11.1 agent run.
+
+    Initiative #804 (G11.3 Scheduler), Task #822 (T1). T1 settles the
+    durability-substrate fork the Initiative left open: **Option A --
+    extend the existing roll-our-own pattern** (asyncio +
+    ``pg_try_advisory_lock``; see :mod:`meho_backplane.topology.scheduler`
+    and :mod:`meho_backplane.memory.expiry` for the precedent). DBOS
+    Transact was the alternative; the decision rationale is recorded in
+    the PR body for #822. T2 / T3 / T4 / T5 build on the storage shape
+    landed here.
+
+    Single-table discriminated union
+    --------------------------------
+
+    A single ``scheduled_trigger`` table stores all three trigger shapes
+    because the dispatcher (T2/T3) scans the table with one "claim the
+    next due row" query -- splitting into three tables would force three
+    scanners with three advisory locks. The shape is the
+    discriminated-union pattern: the :attr:`kind` column picks which of
+    :attr:`cron_expr` / :attr:`fire_at` / :attr:`event_filter` carries
+    the semantics. A DB-side ``CHECK`` constraint
+    (``ck_scheduled_trigger_kind_fields``) enforces the invariant -- the
+    right column populated, the others NULL -- so a malformed row
+    cannot land at the substrate boundary.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key. Same portable :class:`Uuid` shape the
+      rest of the chassis uses; PG production gets ``gen_random_uuid()``
+      via migration ``0020``, the ORM falls back to
+      ``default=uuid.uuid4`` for the SQLite dev/test path.
+
+    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES tenant(id)``
+      FK. Clean-slate substrate -- no chassis-era rows -- so the FK is
+      enforced at the DB layer (same discipline :class:`AgentRun` /
+      :class:`AgentDefinition` follow). An orphan trigger for a typo'd /
+      replayed tenant id surfaces as :class:`IntegrityError` at insert.
+
+    * ``agent_definition_id`` -- UUID NOT NULL with a real
+      ``REFERENCES agent_definition(id)`` FK. The parent table already
+      exists at HEAD (``0016`` shipped ahead of this work), so the FK is
+      tightened here -- the sibling :class:`AgentRun` (``0017``) had to
+      use a soft-FK only because its migration landed in parallel with
+      ``0016``. A trigger cannot point at a deleted definition.
+
+    * ``kind`` -- Text NOT NULL with a DB-layer ``CHECK kind IN (...)``
+      constraint enforcing the closed
+      :class:`ScheduledTriggerKind` vocabulary.
+
+    * ``cron_expr`` -- Text nullable. Populated only when
+      ``kind = 'cron'``; the dispatcher (T2 #823) parses it via the
+      ``croniter`` library (not added in this Task; T2's dependency).
+      The 5-field cron grammar is fixed; storing the literal preserves
+      operator intent on read-back.
+
+    * ``fire_at`` -- ``timestamptz`` nullable. Populated only when
+      ``kind = 'one_off'``; the dispatcher fires the trigger once at or
+      after this wall-clock time, then either cancels the row or marks
+      it idle via ``next_fire_at = NULL``.
+
+    * ``event_filter`` -- portable JSON -> JSONB nullable. Populated
+      only when ``kind = 'event'``; T3 #824 matches transactional-outbox
+      rows against this filter to drive the dispatch. Shape is
+      consumer-defined (a typed schema lives at the API layer; the
+      column is the forward-compat substrate).
+
+    * ``status`` -- Text NOT NULL with a DB-layer ``CHECK status IN (...)``
+      constraint enforcing the closed :class:`ScheduledTriggerStatus`
+      vocabulary. Defaults to ``active`` on insert. The dispatcher only
+      fires ``active`` rows.
+
+    * ``in_flight_policy`` -- Text NOT NULL with a DB-layer ``CHECK
+      in_flight_policy IN (...)`` constraint enforcing the closed
+      :class:`ScheduledTriggerInFlightPolicy` vocabulary. Defaults to
+      ``fail_into_audit``. T4 #825 owns the dispatch-time policy
+      mechanics; this Task only stores the column.
+
+    * ``next_fire_at`` -- ``timestamptz`` nullable. Materialised
+      next-fire timestamp the dispatcher claims on (T2/T3). NULL on a
+      freshly-created trigger before T2's "compute next" pass runs.
+      Indexed (with ``status``) to drive the dispatch claim query.
+
+    * ``last_fired_at`` -- ``timestamptz`` nullable. Set by the
+      dispatcher after a successful fire; observable via the admin
+      surface (T5).
+
+    * ``created_by_sub`` -- Text NOT NULL. JWT ``sub`` of the
+      tenant-admin who created the trigger. The chassis has no
+      ``operator`` table; the Keycloak ``sub`` is the stable identifier
+      (the precedent :attr:`AgentDefinition.created_by_sub` and
+      :attr:`BroadcastOverride.created_by_sub` set).
+
+    * ``created_at`` / ``updated_at`` -- ``timestamptz`` NOT NULL.
+      PG-side ``now()`` server defaults via the migration; the ORM also
+      declares ``default=lambda: datetime.now(UTC)`` plus
+      ``onupdate=lambda: datetime.now(UTC)`` on ``updated_at`` so
+      ORM-side edits bump the timestamp.
+
+    Indexes
+    -------
+
+    * ``scheduled_trigger_next_fire_at_idx`` -- b-tree on
+      ``(status, next_fire_at)`` (partial on PG with
+      ``WHERE status = 'active'``). Drives the dispatcher's "what fires
+      next" claim query.
+    * ``scheduled_trigger_tenant_idx`` -- b-tree on
+      ``(tenant_id, kind)``. Drives the admin surface's tenant-scoped
+      list (T5 #826) without sequential-scanning the table.
+
+    The model is storage-only -- no helper / transition logic lives on
+    the class (the discipline :class:`AgentRun` / :class:`AuditLog` /
+    :class:`WebSession` follow). The dispatcher (T2/T3), policy (T4),
+    and admin (T5) services own every mutation.
+    """
+
+    __tablename__ = "scheduled_trigger"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real REFERENCES tenant(id) FK -- see class docstring.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Real REFERENCES agent_definition(id) FK -- the parent table exists
+    # at HEAD (0016) so this Task tightens the FK 0017 had to leave soft.
+    agent_definition_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("agent_definition.id"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # Discriminated by ``kind`` -- exactly one populated; the DB-side
+    # ``ck_scheduled_trigger_kind_fields`` CHECK enforces the invariant.
+    cron_expr: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    fire_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # ``none_as_null=True`` is load-bearing: the discriminated-union CHECK
+    # ``ck_scheduled_trigger_kind_fields`` predicates on
+    # ``event_filter IS NULL`` for the non-event kinds. Without
+    # ``none_as_null``, SQLAlchemy's :class:`JSON` type serialises a
+    # Python ``None`` as the JSON literal string ``'null'`` (the value
+    # stored is non-NULL at the SQL layer), so the CHECK fires when a
+    # cron / one_off row leaves ``event_filter`` defaulted. The flag flips
+    # the bind-side behaviour to insert SQL ``NULL`` for ``None``, which
+    # is what the CHECK expects. The same shape applies on PG's JSONB
+    # variant -- the kwarg is forwarded to the underlying type.
+    event_filter: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=ScheduledTriggerStatus.ACTIVE.value,
+    )
+    in_flight_policy: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
+    )
+    next_fire_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    last_fired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "scheduled_trigger_next_fire_at_idx",
+            "status",
+            "next_fire_at",
+            postgresql_using="btree",
+            postgresql_where=sa.text("status = 'active'"),
+        ),
+        Index(
+            "scheduled_trigger_tenant_idx",
+            "tenant_id",
+            "kind",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("kind", _SCHEDULED_TRIGGER_KINDS),
+            name="ck_scheduled_trigger_kind",
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _SCHEDULED_TRIGGER_STATUSES),
+            name="ck_scheduled_trigger_status",
+        ),
+        sa.CheckConstraint(
+            _ck_in("in_flight_policy", _SCHEDULED_TRIGGER_IN_FLIGHT_POLICIES),
+            name="ck_scheduled_trigger_in_flight_policy",
+        ),
+        # Discriminated-union invariant: exactly one of the three
+        # discriminator columns carries the semantics, the other two are
+        # NULL. The ``(kind = '...' AND col IS NOT NULL AND other IS
+        # NULL)`` form is portable across PG and SQLite -- no
+        # dialect-specific syntax. The migration's recorded body
+        # (_KIND_FIELDS_CHECK in 0020) is the frozen snapshot of the
+        # same predicate; the drift guard in
+        # :mod:`tests.test_db_scheduled_trigger` asserts equality.
+        sa.CheckConstraint(
+            (
+                "("
+                "(kind = 'cron' AND cron_expr IS NOT NULL "
+                "AND fire_at IS NULL AND event_filter IS NULL) OR "
+                "(kind = 'one_off' AND fire_at IS NOT NULL "
+                "AND cron_expr IS NULL AND event_filter IS NULL) OR "
+                "(kind = 'event' AND event_filter IS NOT NULL "
+                "AND cron_expr IS NULL AND fire_at IS NULL)"
+                ")"
+            ),
+            name="ck_scheduled_trigger_kind_fields",
         ),
     )
 

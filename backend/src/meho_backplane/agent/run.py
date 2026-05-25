@@ -81,6 +81,7 @@ from pydantic_ai.usage import RunUsage
 
 from meho_backplane.agent.invoke import (
     ChildAgentResolver,
+    ChildRunFinalizer,
     ChildRunRecorder,
     make_invoke_agent_tool,
 )
@@ -508,6 +509,12 @@ class PydanticAgentRun:
     #: :func:`~meho_backplane.agent.invoke.make_invoke_agent_tool`. ``None``
     #: keeps the in-process bounds without writing the lineage row.
     child_run_recorder: ChildRunRecorder | None = None
+    #: Optional finalizer that closes a recorded child ``agent_run`` row to its
+    #: terminal state (G11.1-T8 #1087). Passed straight to
+    #: :func:`~meho_backplane.agent.invoke.make_invoke_agent_tool`. ``None``
+    #: leaves recorded child rows un-finalized (only meaningful alongside
+    #: :attr:`child_run_recorder`).
+    child_run_finalizer: ChildRunFinalizer | None = None
 
     def _build_agent(
         self,
@@ -568,6 +575,7 @@ class PydanticAgentRun:
             resolver=self.child_agent_resolver,
             child_runner=self.run_child,
             recorder=self.child_run_recorder,
+            finalizer=self.child_run_finalizer,
         )
 
     async def _run_loop(

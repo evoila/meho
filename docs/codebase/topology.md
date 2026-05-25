@@ -1301,8 +1301,17 @@ shape.
   resolution is deferred to the CLI/MCP fronts (T6/T7).
 - Streaming refresh progress for very large topologies — v0.2 is
   single-shot; deferred per Initiative #363.
-- Graph history / time-travel — soft-delete here only makes a node
-  invisible to default queries; the history surface is G9.3.
+- Soft-delete is retention-only for the traversal verbs —
+  `find_dependents` / `find_dependencies` / `find_path` do **not**
+  filter `last_seen IS NULL`, so a soft-deleted node stays reachable
+  (last-refresh-wins). Only the list verbs (`list_edges` /
+  `list_nodes`) exclude soft-deleted rows by default. Point-in-time
+  visibility ("when did this disappear?") is answered by the dedicated
+  history/diff/timeline verbs (G9.3,
+  [#365](https://github.com/evoila/meho/issues/365)) over the retained
+  rows — G9.3 did not add `last_seen` filtering to the traversal CTE.
+  See `docs/architecture/topology.md` §Soft-delete semantics; pinned by
+  `test_scenario4_soft_delete_retains_row`.
 - Per-connector `discover_topology` overrides — each G3.x Initiative.
 - The advisory lock is a multi-replica stampede guard only; a single
   process serialises naturally and the SQLite test path no-ops it.

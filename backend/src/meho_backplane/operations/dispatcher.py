@@ -17,11 +17,18 @@ phases the parent Initiative names:
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
    Invalid -> structured ``invalid_params`` error.
-4. Policy gate (v0.2 default-allow;
-   :func:`~meho_backplane.operations._validate.policy_gate`) --
-   ``requires_approval=True`` -> ``needs_approval`` verdict ->
+4. Policy gate (G11.2-T3 + T4;
+   :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
+   principals resolve a three-state
+   :class:`~meho_backplane.db.models.PermissionVerdict` via the
+   per-(principal, op, target) permission model; **human / service**
+   principals keep the v0.2 contract (default-allow except
+   ``requires_approval=True`` -> ``deny``). Branches:
+   ``auto-execute`` proceeds; ``needs-approval`` ->
    :func:`~meho_backplane.operations.approval_queue.create_pending_request`
-   + ``awaiting_approval`` result; ``deny`` verdict -> ``denied`` result.
+   writes a durable :class:`~meho_backplane.db.models.ApprovalRequest`
+   row and returns an ``awaiting_approval`` result (G11.2-T4 #817);
+   ``deny`` -> ``denied`` result. Any other verdict fails closed.
 5. Resolve the connector class via
    :func:`~meho_backplane.connectors.resolver.resolve_connector` and
    instantiate it (cached at module level). Resolver miss ->
@@ -108,7 +115,7 @@ from meho_backplane.connectors import (
     resolve_connector,
 )
 from meho_backplane.connectors.base import Connector
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._audit import (
     audit_and_broadcast_safe,
     parent_audit_id_var,
@@ -579,20 +586,13 @@ async def dispatch(
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
 
     # --- Step 4: policy gate ---------------------------------------------
-    verdict, gate_reason = policy_gate(operator=operator, descriptor=descriptor, target=target)
-    if verdict == "needs_approval":
-        duration_ms = _elapsed_ms(started)
-        return await _handle_needs_approval(
-            op_id=op_id,
-            connector_id=connector_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            duration_ms=duration_ms,
-        )
-    if verdict == "deny":
+    # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
+    # / deny). The call site signature is unchanged; the function now
+    # awaits a DB read to load the principal's AgentPermission rows.
+    verdict, gate_reason = await policy_gate(
+        operator=operator, descriptor=descriptor, target=target
+    )
+    if verdict == PermissionVerdict.DENY:
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(
             audit_id=uuid.uuid4(),
@@ -605,6 +605,42 @@ async def dispatch(
             duration_ms=duration_ms,
         )
         return result_denied(op_id, gate_reason or "policy denied", duration_ms)
+    if verdict == PermissionVerdict.NEEDS_APPROVAL:
+        # G11.2-T4 (#817): write a durable ApprovalRequest row (+ its
+        # synchronous "request" audit row) and return an awaiting_approval
+        # result. Only agent principals reach this branch — the T3 gate
+        # hard-denies requires_approval for human/service principals.
+        duration_ms = _elapsed_ms(started)
+        return await _handle_needs_approval(
+            op_id=op_id,
+            connector_id=connector_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    if verdict is not PermissionVerdict.AUTO_EXECUTE:
+        # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds to
+        # execution. Any unexpected verdict (a future enum member, a bug
+        # in the resolver) denies rather than silently executing.
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=uuid.uuid4(),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="denied",
+            duration_ms=duration_ms,
+        )
+        return result_denied(
+            op_id,
+            gate_reason or f"unexpected policy verdict {verdict!r}; denied",
+            duration_ms,
+        )
 
     # --- Step 5: connector resolution -------------------------------------
     connector_instance, resolution_error = await _resolve_connector_instance(descriptor, target)

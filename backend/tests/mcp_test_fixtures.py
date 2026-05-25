@@ -159,6 +159,7 @@ def isolated_registry() -> Iterator[None]:
         topology,
         topology_create_node,
     )
+    from meho_backplane.mcp.tools import broadcast as broadcast_tools
     from meho_backplane.mcp.tools import memory as memory_tools
     from meho_backplane.mcp.tools import memory_promote as memory_promote_tool
 
@@ -168,6 +169,11 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(connector_admin)
     importlib.reload(audit)
     importlib.reload(broadcast_overrides)
+    # G6.4-T1 (#1091): meho.broadcast.recent (agent-facing read of recent
+    # broadcast events). T2 (announce, #1092) and T3 (watch, #1093) will
+    # land additional tools in this module; the single reload covers all
+    # three because they share one file by design.
+    importlib.reload(broadcast_tools)
     importlib.reload(knowledge)
     importlib.reload(topology)
     importlib.reload(topology_create_node)

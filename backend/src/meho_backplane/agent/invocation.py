@@ -543,15 +543,17 @@ class AgentInvoker:
         )
         entry = await self._load_definition(operator, name)
         # Bind the run to the authenticating agent: the definition's
-        # ``identity_ref`` must be the agent principal's own sub. Without this,
-        # agent A's credentials could launch agent B's definition (any enabled
-        # one in the tenant) and misattribute the audit trail. The contract —
-        # ``identity_ref`` == the agent principal's Keycloak sub — also keeps a
-        # user-initiated run's ``actor_sub`` (= ``identity_ref``) in the same
-        # identifier space as an autonomous run's ``operator_sub``.
-        if entry.identity_ref != operator.sub:
+        # ``identity_ref`` must name the client whose credentials authenticated
+        # this call (``agent_client_id`` — the grant only succeeds if its secret
+        # matches, so it is proven). Without this, agent A's credentials could
+        # launch agent B's definition (any enabled one in the tenant) and
+        # misattribute the audit trail. ``identity_ref`` is the ``agent:<name>``
+        # client-id reference set at definition-create time, so the comparison
+        # is against ``agent_client_id`` — not ``operator.sub`` (the service-
+        # account UUID), which lives in a different identifier space.
+        if entry.identity_ref != agent_client_id:
             raise AgentInvocationError(
-                f"scheduled run rejected: agent credentials (sub={operator.sub!r}) "
+                f"scheduled run rejected: agent credentials for {agent_client_id!r} "
                 f"do not own definition {name!r} (identity_ref={entry.identity_ref!r})"
             )
         definition = self._to_agent_definition(entry)

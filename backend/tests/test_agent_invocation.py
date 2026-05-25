@@ -739,27 +739,26 @@ async def test_run_scheduled_rejects_cross_agent_definition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A scheduled run fails closed when the definition's identity_ref does not
-    match the authenticated agent's sub (no DB run row is created)."""
+    name the authenticated client (no DB run row is created)."""
     from types import SimpleNamespace
 
     # The runtime is never reached — the identity guard raises first.
     invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: _final_text("ok")))
 
-    # The agent authenticated as "agent-A" ...
-    agent_op = _make_operator(sub="agent-A")
     monkeypatch.setattr(
         "meho_backplane.agent.invocation.get_client_credentials_token",
         AsyncMock(return_value="agent-token"),
     )
     monkeypatch.setattr(
         "meho_backplane.agent.invocation.verify_jwt_for_audience",
-        AsyncMock(return_value=agent_op),
+        AsyncMock(return_value=_make_operator(sub="sa-uuid-a")),
     )
-    # ... but the named definition belongs to "agent-B".
+    # Credentials authenticate client "agent:a" but the named definition
+    # belongs to "agent:b" — cross-agent launch must be refused.
     monkeypatch.setattr(
         invoker,
         "_load_definition",
-        AsyncMock(return_value=SimpleNamespace(name="other-bot", identity_ref="agent-B")),
+        AsyncMock(return_value=SimpleNamespace(name="other-bot", identity_ref="agent:b")),
     )
     create_spy = AsyncMock()
     monkeypatch.setattr(invoker, "_create_run_row", create_spy)
@@ -773,3 +772,46 @@ async def test_run_scheduled_rejects_cross_agent_definition(
         )
     # Fail-closed before persisting anything.
     create_spy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_allows_matching_agent_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When identity_ref names the authenticated client, the guard passes and
+    the run is created (stopped at _create_run_row to avoid the full loop)."""
+    from types import SimpleNamespace
+
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: _final_text("ok")))
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.get_client_credentials_token",
+        AsyncMock(return_value="agent-token"),
+    )
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(return_value=_make_operator(sub="sa-uuid-a")),
+    )
+    monkeypatch.setattr(
+        invoker,
+        "_load_definition",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                name="a-bot", identity_ref="agent:a", model_tier="standard", id=uuid4()
+            )
+        ),
+    )
+    # Pass the guard, then stop the flow at run-row creation.
+    monkeypatch.setattr(invoker, "_to_agent_definition", lambda entry: object())
+    boom = RuntimeError("stop-after-guard")
+    create_spy = AsyncMock(side_effect=boom)
+    monkeypatch.setattr(invoker, "_create_run_row", create_spy)
+
+    with pytest.raises(RuntimeError, match="stop-after-guard"):
+        await invoker.run_scheduled(
+            "a-bot",
+            "do the thing",
+            agent_client_id="agent:a",
+            agent_client_secret="s3cr3t",
+        )
+    # Guard passed — the run row creation was reached.
+    create_spy.assert_awaited_once()

@@ -383,7 +383,8 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   constraint``.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_run, audit_log, documents, graph_edge, "
+                "TRUNCATE TABLE agent_permission, agent_run, audit_log, "
+                "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",
             ),
@@ -443,7 +444,8 @@ async def pg_engine_empty_tenant(
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_run, audit_log, documents, graph_edge, "
+                "TRUNCATE TABLE agent_permission, agent_run, audit_log, "
+                "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",
             ),

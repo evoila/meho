@@ -361,6 +361,31 @@ type AgentDefinitionUpdate struct {
 // * “deep“ -- a more capable tier for harder reasoning.
 type AgentModelTier string
 
+// AgentPrincipalCreate Input shape for :meth:`AgentPrincipalService.register`.
+type AgentPrincipalCreate struct {
+	Name     string  `json:"name"`
+	OwnerSub *string `json:"owner_sub"`
+}
+
+// AgentPrincipalListResponse Response envelope for “GET /api/v1/agent-principals“.
+type AgentPrincipalListResponse struct {
+	Principals []AgentPrincipalRead `json:"principals"`
+}
+
+// AgentPrincipalRead Row representation returned by every accessor.
+type AgentPrincipalRead struct {
+	CreatedAt          time.Time          `json:"created_at"`
+	CreatedBySub       string             `json:"created_by_sub"`
+	Id                 openapi_types.UUID `json:"id"`
+	KeycloakClientId   string             `json:"keycloak_client_id"`
+	KeycloakInternalId string             `json:"keycloak_internal_id"`
+	Name               string             `json:"name"`
+	OwnerSub           string             `json:"owner_sub"`
+	Revoked            bool               `json:"revoked"`
+	TenantId           openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+}
+
 // AgentRunRequest POST body for “/agents/{name}/run“.
 //
 // “extra="forbid"“ rejects unknown fields with 422 (catches a client
@@ -2663,6 +2688,29 @@ type UnderscoreSortColumn string
 // body never sees an unknown mode.
 type UnderscoreViewMode string
 
+// ListAgentPrincipalsApiV1AgentPrincipalsGetParams defines parameters for ListAgentPrincipalsApiV1AgentPrincipalsGet.
+type ListAgentPrincipalsApiV1AgentPrincipalsGetParams struct {
+	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset         *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	IncludeRevoked *bool   `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
+	Authorization  *string `json:"authorization,omitempty"`
+}
+
+// RegisterAgentPrincipalApiV1AgentPrincipalsPostParams defines parameters for RegisterAgentPrincipalApiV1AgentPrincipalsPost.
+type RegisterAgentPrincipalApiV1AgentPrincipalsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowAgentPrincipalApiV1AgentPrincipalsNameGetParams defines parameters for ShowAgentPrincipalApiV1AgentPrincipalsNameGet.
+type ShowAgentPrincipalApiV1AgentPrincipalsNameGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteParams defines parameters for RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDelete.
+type RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListAgentsApiV1AgentsGetParams defines parameters for ListAgentsApiV1AgentsGet.
 type ListAgentsApiV1AgentsGetParams struct {
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -3159,6 +3207,9 @@ type UiTopologyTableUiTopologyGetParams struct {
 	MaxHops   *int                `form:"max_hops,omitempty" json:"max_hops,omitempty"`
 }
 
+// RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody defines body for RegisterAgentPrincipalApiV1AgentPrincipalsPost for application/json ContentType.
+type RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody = AgentPrincipalCreate
+
 // CreateAgentApiV1AgentsPostJSONRequestBody defines body for CreateAgentApiV1AgentsPost for application/json ContentType.
 type CreateAgentApiV1AgentsPostJSONRequestBody = AgentDefinitionCreate
 
@@ -3368,6 +3419,20 @@ type ClientInterface interface {
 
 	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGet request
 	ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListAgentPrincipalsApiV1AgentPrincipalsGet request
+	ListAgentPrincipalsApiV1AgentPrincipalsGet(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RegisterAgentPrincipalApiV1AgentPrincipalsPostWithBody request with any body
+	RegisterAgentPrincipalApiV1AgentPrincipalsPostWithBody(ctx context.Context, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RegisterAgentPrincipalApiV1AgentPrincipalsPost(ctx context.Context, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, body RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowAgentPrincipalApiV1AgentPrincipalsNameGet request
+	ShowAgentPrincipalApiV1AgentPrincipalsNameGet(ctx context.Context, name string, params *ShowAgentPrincipalApiV1AgentPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDelete request
+	RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListAgentsApiV1AgentsGet request
 	ListAgentsApiV1AgentsGet(ctx context.Context, params *ListAgentsApiV1AgentsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3691,6 +3756,66 @@ func (c *Client) RootGet(ctx context.Context, reqEditors ...RequestEditorFn) (*h
 
 func (c *Client) ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewProtectedResourceMetadataWellKnownOauthProtectedResourceGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListAgentPrincipalsApiV1AgentPrincipalsGet(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListAgentPrincipalsApiV1AgentPrincipalsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterAgentPrincipalApiV1AgentPrincipalsPostWithBody(ctx context.Context, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterAgentPrincipalApiV1AgentPrincipalsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterAgentPrincipalApiV1AgentPrincipalsPost(ctx context.Context, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, body RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterAgentPrincipalApiV1AgentPrincipalsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowAgentPrincipalApiV1AgentPrincipalsNameGet(ctx context.Context, name string, params *ShowAgentPrincipalApiV1AgentPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowAgentPrincipalApiV1AgentPrincipalsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5070,6 +5195,255 @@ func NewProtectedResourceMetadataWellKnownOauthProtectedResourceGetRequest(serve
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListAgentPrincipalsApiV1AgentPrincipalsGetRequest generates requests for ListAgentPrincipalsApiV1AgentPrincipalsGet
+func NewListAgentPrincipalsApiV1AgentPrincipalsGetRequest(server string, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-principals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeRevoked != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_revoked", runtime.ParamLocationQuery, *params.IncludeRevoked); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRegisterAgentPrincipalApiV1AgentPrincipalsPostRequest calls the generic RegisterAgentPrincipalApiV1AgentPrincipalsPost builder with application/json body
+func NewRegisterAgentPrincipalApiV1AgentPrincipalsPostRequest(server string, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, body RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRegisterAgentPrincipalApiV1AgentPrincipalsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewRegisterAgentPrincipalApiV1AgentPrincipalsPostRequestWithBody generates requests for RegisterAgentPrincipalApiV1AgentPrincipalsPost with any type of body
+func NewRegisterAgentPrincipalApiV1AgentPrincipalsPostRequestWithBody(server string, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-principals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowAgentPrincipalApiV1AgentPrincipalsNameGetRequest generates requests for ShowAgentPrincipalApiV1AgentPrincipalsNameGet
+func NewShowAgentPrincipalApiV1AgentPrincipalsNameGetRequest(server string, name string, params *ShowAgentPrincipalApiV1AgentPrincipalsNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-principals/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteRequest generates requests for RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDelete
+func NewRevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteRequest(server string, name string, params *RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agent-principals/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
 	}
 
 	return req, nil
@@ -10842,6 +11216,20 @@ type ClientWithResponsesInterface interface {
 	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse request
 	ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse, error)
 
+	// ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse request
+	ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListAgentPrincipalsApiV1AgentPrincipalsGetResponse, error)
+
+	// RegisterAgentPrincipalApiV1AgentPrincipalsPostWithBodyWithResponse request with any body
+	RegisterAgentPrincipalApiV1AgentPrincipalsPostWithBodyWithResponse(ctx context.Context, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse, error)
+
+	RegisterAgentPrincipalApiV1AgentPrincipalsPostWithResponse(ctx context.Context, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, body RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse, error)
+
+	// ShowAgentPrincipalApiV1AgentPrincipalsNameGetWithResponse request
+	ShowAgentPrincipalApiV1AgentPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowAgentPrincipalApiV1AgentPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse, error)
+
+	// RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteWithResponse request
+	RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteWithResponse(ctx context.Context, name string, params *RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse, error)
+
 	// ListAgentsApiV1AgentsGetWithResponse request
 	ListAgentsApiV1AgentsGetWithResponse(ctx context.Context, params *ListAgentsApiV1AgentsGetParams, reqEditors ...RequestEditorFn) (*ListAgentsApiV1AgentsGetResponse, error)
 
@@ -11188,6 +11576,98 @@ func (r ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse) Sta
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListAgentPrincipalsApiV1AgentPrincipalsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentPrincipalListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListAgentPrincipalsApiV1AgentPrincipalsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListAgentPrincipalsApiV1AgentPrincipalsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *AgentPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -13201,6 +13681,50 @@ func (c *ClientWithResponses) ProtectedResourceMetadataWellKnownOauthProtectedRe
 	return ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rsp)
 }
 
+// ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse request returning *ListAgentPrincipalsApiV1AgentPrincipalsGetResponse
+func (c *ClientWithResponses) ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListAgentPrincipalsApiV1AgentPrincipalsGetResponse, error) {
+	rsp, err := c.ListAgentPrincipalsApiV1AgentPrincipalsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListAgentPrincipalsApiV1AgentPrincipalsGetResponse(rsp)
+}
+
+// RegisterAgentPrincipalApiV1AgentPrincipalsPostWithBodyWithResponse request with arbitrary body returning *RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse
+func (c *ClientWithResponses) RegisterAgentPrincipalApiV1AgentPrincipalsPostWithBodyWithResponse(ctx context.Context, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse, error) {
+	rsp, err := c.RegisterAgentPrincipalApiV1AgentPrincipalsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterAgentPrincipalApiV1AgentPrincipalsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RegisterAgentPrincipalApiV1AgentPrincipalsPostWithResponse(ctx context.Context, params *RegisterAgentPrincipalApiV1AgentPrincipalsPostParams, body RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse, error) {
+	rsp, err := c.RegisterAgentPrincipalApiV1AgentPrincipalsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterAgentPrincipalApiV1AgentPrincipalsPostResponse(rsp)
+}
+
+// ShowAgentPrincipalApiV1AgentPrincipalsNameGetWithResponse request returning *ShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse
+func (c *ClientWithResponses) ShowAgentPrincipalApiV1AgentPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowAgentPrincipalApiV1AgentPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse, error) {
+	rsp, err := c.ShowAgentPrincipalApiV1AgentPrincipalsNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse(rsp)
+}
+
+// RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteWithResponse request returning *RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse
+func (c *ClientWithResponses) RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteWithResponse(ctx context.Context, name string, params *RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse, error) {
+	rsp, err := c.RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDelete(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse(rsp)
+}
+
 // ListAgentsApiV1AgentsGetWithResponse request returning *ListAgentsApiV1AgentsGetResponse
 func (c *ClientWithResponses) ListAgentsApiV1AgentsGetWithResponse(ctx context.Context, params *ListAgentsApiV1AgentsGetParams, reqEditors ...RequestEditorFn) (*ListAgentsApiV1AgentsGetResponse, error) {
 	rsp, err := c.ListAgentsApiV1AgentsGet(ctx, params, reqEditors...)
@@ -14214,6 +14738,138 @@ func ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rs
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListAgentPrincipalsApiV1AgentPrincipalsGetResponse parses an HTTP response from a ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse call
+func ParseListAgentPrincipalsApiV1AgentPrincipalsGetResponse(rsp *http.Response) (*ListAgentPrincipalsApiV1AgentPrincipalsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListAgentPrincipalsApiV1AgentPrincipalsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentPrincipalListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRegisterAgentPrincipalApiV1AgentPrincipalsPostResponse parses an HTTP response from a RegisterAgentPrincipalApiV1AgentPrincipalsPostWithResponse call
+func ParseRegisterAgentPrincipalApiV1AgentPrincipalsPostResponse(rsp *http.Response) (*RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest AgentPrincipalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse parses an HTTP response from a ShowAgentPrincipalApiV1AgentPrincipalsNameGetWithResponse call
+func ParseShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse(rsp *http.Response) (*ShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowAgentPrincipalApiV1AgentPrincipalsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentPrincipalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse parses an HTTP response from a RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteWithResponse call
+func ParseRevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse(rsp *http.Response) (*RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeAgentPrincipalApiV1AgentPrincipalsNameRevokeDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentPrincipalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
 
 	}
 

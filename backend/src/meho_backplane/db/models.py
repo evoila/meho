@@ -2802,3 +2802,126 @@ class AgentRun(Base):
             name="ck_agent_run_trigger",
         ),
     )
+
+
+class AgentPrincipal(Base):
+    """A MEHO-managed agent principal — a Keycloak client tagged ``kind=agent``.
+
+    G11.2-T1 (#815) under Initiative #803 (G11.2 Agent identity + RBAC +
+    approval). Each row represents one agent identity registered by the
+    ``meho agent-principal register`` lifecycle verb. The row's lifecycle
+    mirrors the Keycloak client it shadows:
+
+    * **register** creates the Keycloak client (confidential,
+      service-accounts-enabled, ``kind=agent`` attribute) and inserts
+      this row.
+    * **revoke** sets ``enabled=false`` on the Keycloak client (kill
+      switch; new token grants are refused immediately) and marks
+      ``revoked=true`` on this row. The row is never hard-deleted so
+      the audit trail stays intact.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key; PG ``gen_random_uuid()`` via migration
+      ``0018``; ORM ``default=uuid.uuid4`` for SQLite / out-of-band inserts.
+
+    * ``tenant_id`` -- UUID NOT NULL, FK to ``tenant.id``. An agent
+      principal must belong to a real tenant — there is no out-of-band
+      path that would create an orphan row, and the ``NO ACTION`` default
+      FK prevents deleting a tenant that still has live agent principals.
+
+    * ``name`` -- Text NOT NULL. The operator-facing handle (e.g.
+      ``incident-triage``). Unique within a tenant (enforced by
+      ``agent_principal_tenant_name_idx``). Mirrors the naming discipline
+      for ``agent_definition.name`` (G11.1-T2).
+
+    * ``keycloak_client_id`` -- Text NOT NULL UNIQUE. The OAuth
+      ``clientId`` in Keycloak — conventionally ``agent:<name>`` to keep
+      agent clients visually distinct in the Admin Console from user/
+      service clients. Globally unique across all tenants (Keycloak has
+      no per-realm per-tenant namespace for client ids).
+
+    * ``keycloak_internal_id`` -- Text NOT NULL. Keycloak's internal UUID
+      for the client (the ``id`` field in the admin representation,
+      distinct from ``clientId``). Used by the revoke path to issue the
+      ``PUT /clients/{id}`` call without first doing a lookup-by-clientId.
+
+    * ``owner_sub`` -- Text NOT NULL. The ``sub`` of the operator who
+      registered this principal. Never nullable: every agent must have an
+      owner (the NHI governance kill-switch model; see Initiative #803).
+
+    * ``revoked`` -- Boolean NOT NULL DEFAULT false. Set to ``true`` by
+      the revoke path alongside the Keycloak ``enabled=false`` call.
+      Revoked principals are excluded from list results by default but
+      the row stays for audit traceability.
+
+    * ``created_by_sub`` -- Text NOT NULL. Operator sub at insert time.
+      Distinct from ``owner_sub``: the owner is the long-term responsible
+      party; ``created_by_sub`` is the identity that pressed the button.
+      For the initial register they are the same; a future reassignment
+      path may differ.
+
+    * ``created_at`` / ``updated_at`` -- ``timestamptz`` NOT NULL. PG
+      server defaults; ORM ``lambda: datetime.now(UTC)`` for SQLite.
+
+    Indexes
+    -------
+
+    * ``agent_principal_tenant_name_idx`` -- unique composite b-tree on
+      ``(tenant_id, name)``. Enforces per-tenant name uniqueness and
+      drives the tenant-scoped list query.
+    * ``agent_principal_keycloak_client_id_idx`` -- unique b-tree on
+      ``keycloak_client_id``. Required for the revoke-by-name path and
+      for the Keycloak-side uniqueness invariant.
+    """
+
+    __tablename__ = "agent_principal"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK to tenant.id -- brand-new table, no chassis-era rows.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    keycloak_client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    keycloak_internal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    revoked: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "agent_principal_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        Index(
+            "agent_principal_keycloak_client_id_idx",
+            "keycloak_client_id",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )

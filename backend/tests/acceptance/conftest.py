@@ -167,6 +167,13 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # ``0016`` (#809 G11.1-T2). Listed here so the per-test TRUNCATE stays
     # non-cascading once that table exists.
     "agent_definition",
+    # ``agent_principal.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
+    # from migration ``0018`` (G11.2-T1 #815). PG rejects truncating
+    # ``tenant`` unless every referencing table is listed in the same
+    # statement, so ``agent_principal`` must appear here or every PG-backed
+    # acceptance test errors at setup with ``cannot truncate a table
+    # referenced in a foreign key constraint``.
+    "agent_principal",
     # ``agent_run.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0017`` (G11.1-T6 #813). PG rejects truncating ``tenant``
     # unless every referencing table is listed in the same statement, so

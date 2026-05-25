@@ -27,7 +27,7 @@ cache helpers and threadpool wrappers are test-only.
 """
 
 from meho_backplane.auth.jwt import keycloak_readiness_probe, verify_jwt
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.vault import (
     VaultClientError,
     VaultRoleDeniedError,
@@ -38,6 +38,7 @@ from meho_backplane.auth.vault import (
 
 __all__ = [
     "Operator",
+    "PrincipalKind",
     "VaultClientError",
     "VaultRoleDeniedError",
     "VaultUnreachableError",

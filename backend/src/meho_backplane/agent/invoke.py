@@ -109,6 +109,7 @@ __all__ = [
     "AGENT_INVOKE_DEPTH_TOP_LEVEL",
     "AgentInvocationDepthExceeded",
     "ChildAgentResolver",
+    "ChildRunFinalizer",
     "ChildRunRecorder",
     "ChildRunner",
     "agent_invoke_depth_var",
@@ -251,6 +252,36 @@ class ChildRunRecorder(Protocol):
     ) -> uuid.UUID: ...
 
 
+class ChildRunFinalizer(Protocol):
+    """Record a recorded child ``agent_run`` row's terminal state.
+
+    The companion to :class:`ChildRunRecorder`: the recorder creates the child
+    row and transitions it to ``running``; this hook closes the lifecycle when
+    the child loop returns or fails. Optional -- injected by the same T4 #811 /
+    T6 #813 surface that owns the DB session. Called only when a child run was
+    recorded (so there is a row to finalize), *after* the child loop: on
+    success with the child's loop ``output`` (``error=None``), on
+    :class:`~meho_backplane.agent.run.AgentRunError` with the ``error``
+    (``output=None``). The ``output`` is the child loop's raw result; the
+    implementation projects it onto the run row's JSON column (the same
+    ``_project_output`` contract the parent run uses), so this seam stays free
+    of the row's storage shape. Mirrors :meth:`AgentInvoker._finalize_run`: load
+    the row fresh, apply ``succeed_run`` / ``fail_run``, and swallow
+    :class:`~meho_backplane.operations.agent_run.IllegalTransitionError` when a
+    terminal state already landed (e.g. the row was cancelled mid-flight). When
+    no finalizer is wired the child row is simply not finalized -- the in-process
+    bounds and the recorder's lineage row are unaffected.
+    """
+
+    async def __call__(
+        self,
+        run_id: uuid.UUID,
+        *,
+        output: Any,
+        error: str | None,
+    ) -> None: ...
+
+
 def _check_invoke_depth(child_agent_name: str) -> int:
     """Read + check the per-task invocation depth; return the next depth.
 
@@ -278,6 +309,7 @@ def make_invoke_agent_tool(
     resolver: ChildAgentResolver,
     child_runner: ChildRunner,
     recorder: ChildRunRecorder | None = None,
+    finalizer: ChildRunFinalizer | None = None,
 ) -> Tool[Operator]:
     """Build the ``invoke_agent`` meta-tool for a running agent's loop.
 
@@ -294,6 +326,12 @@ def make_invoke_agent_tool(
             budget (owns the ``pydantic_ai`` ``Agent`` + ``usage=`` call).
         recorder: Optional persistence of the child ``agent_run`` lineage row.
             ``None`` for the pure in-process path (bounds still apply).
+        finalizer: Optional terminal-state recorder for a recorded child row.
+            Called after the child loop only when ``recorder`` returned a run
+            id: on success with the child's output, on
+            :class:`~meho_backplane.agent.run.AgentRunError` with the error.
+            ``None`` leaves the child row un-finalized (the recorder's lineage
+            row and the in-process bounds are unaffected).
 
     Returns:
         The ``invoke_agent`` :class:`pydantic_ai.Tool`.
@@ -304,11 +342,15 @@ def make_invoke_agent_tool(
     # per child invocation.
     from meho_backplane.agent.run import AgentRunError
 
-    async def _invoke_agent(
+    async def _invoke_agent(  # code-quality-allow: function-size — one cohesive control flow
         ctx: RunContext[Operator],
         agent_name: str,
         inputs: str,
     ) -> dict[str, Any]:
+        # The tool body is a single top-to-bottom path the two bounds + the
+        # lineage/finalize wiring must read in order (depth check -> resolve ->
+        # record -> run-with-shared-budget -> finalize -> reset contextvars).
+        # Splitting it fragments that ordering for no readability gain.
         operator = ctx.deps
 
         # Bound 1 -- depth. Checked BEFORE any resolution / spend, so an
@@ -391,6 +433,12 @@ def make_invoke_agent_tool(
                 error=str(exc),
                 operator_sub=operator.sub,
             )
+            # Close the recorded child row to ``failed`` before re-raising, so a
+            # failed / over-budget child does not stay stuck ``running``. Only a
+            # recorded child has a row to finalize (no recorder -> child_run_id
+            # is None -> nothing to close).
+            if child_run_id is not None and finalizer is not None:
+                await finalizer(child_run_id, output=None, error=str(exc))
             # A failed child (budget exhausted, tool raised, model errored) is
             # a tool-level outcome the parent model can reason about, not a
             # crash that aborts the parent run.
@@ -402,6 +450,11 @@ def make_invoke_agent_tool(
             current_agent_run_id_var.reset(run_id_token)
             _agent_name_chain_var.reset(chain_token)
             agent_invoke_depth_var.reset(depth_token)
+
+        # Close the recorded child row to ``succeeded`` with its output (the
+        # finalizer projects the raw loop output onto the row's JSON column).
+        if child_run_id is not None and finalizer is not None:
+            await finalizer(child_run_id, output=output, error=None)
 
         return {"agent": definition.name, "output": output}
 

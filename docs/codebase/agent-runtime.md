@@ -251,11 +251,13 @@ invoking another.
 `invoke_agent` is **off by default**. It is appended to a built agent only when
 the `PydanticAgentRun` carries a `child_agent_resolver`. The live `AgentInvoker`
 (T7 #1067) wires it: its default runtime injects `_resolve_child_definition`
-(the tenant-scoped `AgentDefinitionService` lookup) and `_record_child_run` (the
-`agent_run` lineage recorder), and binds `current_agent_run_id_var` to each run's
+(the tenant-scoped `AgentDefinitionService` lookup), `_record_child_run` (the
+`agent_run` lineage recorder), and `_finalize_child_run` (T8 #1087 — the
+terminal-state finalizer), and binds `current_agent_run_id_var` to each run's
 id, so a run started from the deployed REST/MCP/CLI surface can invoke another
-agent and the child is recorded against its parent. A runtime built without a
-resolver (the T1/T3 surface, and tests that don't opt in) is unchanged.
+agent, the child is recorded against its parent, and the child row reaches
+`succeeded` / `failed` rather than staying stuck `running`. A runtime built
+without a resolver (the T1/T3 surface, and tests that don't opt in) is unchanged.
 
 ### Two independent bounds keep a cascade from escaping
 
@@ -291,9 +293,13 @@ The child run is recorded as a child of the parent in two parallel lineages:
 - **Run lineage** — the child `agent_run` row's `parent_run_id` points at the
   parent run's id, and its `trigger` is `agent-invoked` (`AgentRunTrigger`).
   Recording the row is delegated to an injected `ChildRunRecorder` callback (the
-  T4/T6 surface owns the DB session); when no recorder is wired (the pure
-  in-process path) the depth + budget bounds still apply, the row is just not
-  persisted.
+  T4/T6 surface owns the DB session); a companion `ChildRunFinalizer` callback
+  (T8 #1087) closes the recorded row to `succeeded` (with the child's output) or
+  `failed` (with the error) after the child loop, mirroring the parent run's
+  `_finalize_run` (load fresh → `succeed_run` / `fail_run` → commit, swallowing
+  `IllegalTransitionError`). When no recorder is wired (the pure in-process path)
+  the depth + budget bounds still apply, the row is just not persisted (and there
+  is nothing for the finalizer to close).
 - **Session lineage** — `current_agent_run_id_var` carries the current run's id
   for the duration of a child invocation, so a nested `invoke_agent` reads it as
   the next child's `parent_run_id` and per-tool-call audit rows correlate to
@@ -303,10 +309,12 @@ The child run is recorded as a child of the parent in two parallel lineages:
 
 The acceptance criterion is that a *running agent* can invoke another — so the
 mechanism is a registered tool, reachable from inside the loop. The factory
-shape (`make_invoke_agent_tool(resolver, child_runner, recorder)`) injects the
-`child_runner` (`PydanticAgentRun.run_child`, which owns the framework `Agent`
-construction + the `usage=ctx.usage` call, keeping `pydantic_ai` confined to
-`agent/run.py`) without `invoke.py` importing the framework's loop driver.
+shape (`make_invoke_agent_tool(resolver, child_runner, recorder, finalizer)`)
+injects the `child_runner` (`PydanticAgentRun.run_child`, which owns the
+framework `Agent` construction + the `usage=ctx.usage` call, keeping
+`pydantic_ai` confined to `agent/run.py`) plus the optional `recorder` /
+`finalizer` (the durable child-row create / close hooks the live invoker owns)
+without `invoke.py` importing the framework's loop driver or the DB session.
 
 ## Dependencies
 
@@ -396,13 +404,13 @@ Foundation) is G11.5.
   work cross-worker. Cancellation of an in-flight loop is the T6
   `cancel_run` path (records durable intent); wiring the loop to observe it
   at a turn boundary is future work.
-- The child `agent_run` rows the recorder writes (T7 #1067) are created +
-  transitioned to `running` but **not finalized** (`succeeded` / `failed`):
-  the `ChildRunRecorder` protocol returns only the new id, and the child
-  loop's outcome surfaces through the parent run. Finalizing child rows needs
-  a protocol extension (a finalizer hook) — a follow-up. The lineage
-  (`parent_run_id` + `trigger=agent-invoked`) is recorded, so the cascade tree
-  is reconstructable regardless.
+- Cancellation propagation parent→child is not wired: a running child does not
+  observe the *parent's* `cancel_run` at a turn boundary and stop. The child's
+  own lifecycle is finalized (below), but a cancel issued against the parent
+  while a child is mid-loop only terminates the parent — a separate task. (A
+  child row already in a terminal state when the finalizer runs — e.g. a direct
+  cancel against the child — is handled: the finalizer swallows the resulting
+  `IllegalTransitionError`.)
 - The identity-permission side of the intersection is the tenant role today.
   When the G11.2 per-op permission model lands, the resolver's role gate is
   the seam to extend (or replace) with the real per-op grant check — the

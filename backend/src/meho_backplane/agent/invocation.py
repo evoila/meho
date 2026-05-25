@@ -90,6 +90,9 @@ from meho_backplane.agent.run import (
 )
 from meho_backplane.agents.schemas import AgentDefinitionRead
 from meho_backplane.agents.service import AgentDefinitionService
+from meho_backplane.auth.agent_token import get_client_credentials_token
+from meho_backplane.auth.delegation import actor_delegation
+from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
@@ -316,13 +319,16 @@ class AgentInvoker:
         *,
         provider: str,
         model: str,
+        trigger: AgentRunTrigger = AgentRunTrigger.DIRECT,
     ) -> uuid.UUID:
         """Insert a ``pending`` run row, transition it to ``running``, commit.
 
         Done in its own committed transaction *before* the loop starts so
         the run is pollable the instant :meth:`run` returns a handle — even
         in async mode where the background task has not made progress yet.
-        Returns the run id (the durable handle + audit-lineage key).
+        Returns the run id (the durable handle + audit-lineage key). A
+        human-initiated :meth:`run` records ``DIRECT``; an autonomous
+        :meth:`run_scheduled` records ``SCHEDULED``.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -330,7 +336,7 @@ class AgentInvoker:
                 session,
                 tenant_id=operator.tenant_id,
                 identity_sub=operator.sub,
-                trigger=AgentRunTrigger.DIRECT,
+                trigger=trigger,
                 model_tier=entry.model_tier,
                 agent_definition_id=entry.id,
             )
@@ -439,7 +445,15 @@ class AgentInvoker:
         settings = get_settings()
         provider, model = _split_model_id(settings.agent_default_model)
         run_id = await self._create_run_row(operator, entry, provider=provider, model=model)
-        task = self._launch_run(run_id, definition, operator, inputs)
+        # Resource-server delegation (G11.2-T2 #816): a human triggered this
+        # run, so bind the acting agent's principal as the RFC 8693 actor
+        # while the loop task is created. ``asyncio.create_task`` snapshots
+        # the contextvars, so the background task inherits actor_sub for its
+        # whole life; every audit row its in-process tool calls produce records
+        # operator_sub=human + actor_sub=agent. Keycloak has no delegation
+        # token exchange, so MEHO synthesises the sub+act binding here.
+        with actor_delegation(entry.identity_ref):
+            task = self._launch_run(run_id, definition, operator, inputs)
 
         _log.info(
             "agent_invoke_started",
@@ -472,6 +486,75 @@ class AgentInvoker:
                 converted_to_async=True,
             )
 
+        view = await self.poll(operator, run_id)
+        return AgentRunOutcome(
+            run_id=run_id,
+            status=view.status,
+            output=view.output,
+            error=view.error,
+        )
+
+    async def run_scheduled(
+        self,
+        name: str,
+        inputs: str,
+        *,
+        agent_client_id: str,
+        agent_client_secret: str,
+    ) -> AgentRunOutcome:
+        """Run an agent autonomously under its own ``client_credentials`` identity.
+
+        No human initiator: the agent authenticates as itself via the
+        ``client_credentials`` grant (a single
+        :func:`~meho_backplane.auth.agent_token.get_client_credentials_token`
+        call), so it is the *subject* (``operator_sub``=agent) and there is no
+        separate actor — ``actor_sub`` stays ``NULL`` on every audit row the
+        run produces (this method deliberately does **not** bind
+        :func:`~meho_backplane.auth.delegation.actor_delegation`, unlike the
+        human-initiated :meth:`run`).
+
+        The scheduler that decides *when* to fire a run and supplies the agent
+        credentials (from Vault / config) is G11.3's
+        ``SCHEDULED``-trigger scope; this method is the authentication +
+        audit-shape seam it calls. Blocks until the loop completes (autonomous
+        runs have no client waiting on a sync timeout).
+
+        Raises:
+            AgentTokenError: the ``client_credentials`` grant failed.
+            AgentNotFoundError / AgentDisabledError: no enabled definition
+                named *name* in the agent's tenant.
+        """
+        settings = get_settings()
+        token = await get_client_credentials_token(
+            issuer_url=str(settings.keycloak_issuer_url),
+            client_id=agent_client_id,
+            client_secret=agent_client_secret,
+        )
+        operator = await verify_jwt_for_audience(
+            f"Bearer {token}",
+            expected_audience=settings.keycloak_audience,
+        )
+        entry = await self._load_definition(operator, name)
+        definition = self._to_agent_definition(entry)
+        provider, model = _split_model_id(settings.agent_default_model)
+        run_id = await self._create_run_row(
+            operator,
+            entry,
+            provider=provider,
+            model=model,
+            trigger=AgentRunTrigger.SCHEDULED,
+        )
+        # No actor_delegation: the agent is the subject, not an actor on behalf
+        # of a human, so actor_sub stays NULL.
+        task = self._launch_run(run_id, definition, operator, inputs)
+        _log.info(
+            "agent_scheduled_started",
+            run_id=str(run_id),
+            agent=name,
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+        )
+        await task
         view = await self.poll(operator, run_id)
         return AgentRunOutcome(
             run_id=run_id,

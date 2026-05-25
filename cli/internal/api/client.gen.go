@@ -27,12 +27,20 @@ const (
 
 // Defines values for AgentRunStatus.
 const (
-	AwaitingApproval AgentRunStatus = "awaiting_approval"
-	Cancelled        AgentRunStatus = "cancelled"
-	Failed           AgentRunStatus = "failed"
-	Pending          AgentRunStatus = "pending"
-	Running          AgentRunStatus = "running"
-	Succeeded        AgentRunStatus = "succeeded"
+	AgentRunStatusAwaitingApproval AgentRunStatus = "awaiting_approval"
+	AgentRunStatusCancelled        AgentRunStatus = "cancelled"
+	AgentRunStatusFailed           AgentRunStatus = "failed"
+	AgentRunStatusPending          AgentRunStatus = "pending"
+	AgentRunStatusRunning          AgentRunStatus = "running"
+	AgentRunStatusSucceeded        AgentRunStatus = "succeeded"
+)
+
+// Defines values for ApprovalStatus.
+const (
+	ApprovalStatusApproved ApprovalStatus = "approved"
+	ApprovalStatusExpired  ApprovalStatus = "expired"
+	ApprovalStatusPending  ApprovalStatus = "pending"
+	ApprovalStatusRejected ApprovalStatus = "rejected"
 )
 
 // Defines values for AuthModel.
@@ -456,6 +464,130 @@ type AgentRunStatusResponse struct {
 	Status AgentRunStatus `json:"status"`
 	Turns  int            `json:"turns"`
 }
+
+// ApprovalDecision Approve or reject decision body.
+//
+// Posted to “POST /api/v1/approvals/{id}/approve“ (or “/reject“)
+// and to the MCP elicitation URL-mode endpoint
+// “POST /api/v1/approvals/{id}/decide“.
+type ApprovalDecision struct {
+	// Reason Optional human-readable rationale for the decision.
+	Reason *string `json:"reason"`
+}
+
+// ApprovalListResponse Paginated list of approval requests.
+type ApprovalListResponse struct {
+	Items  []ApprovalRequestSummary `json:"items"`
+	Limit  int                      `json:"limit"`
+	Offset int                      `json:"offset"`
+	Total  int                      `json:"total"`
+}
+
+// ApprovalRequestDetail Full detail for show/inspect responses.
+//
+// “elicitation_url“ is the MCP elicitation URL-mode forward wire
+// address: “<backplane_base>/api/v1/approvals/{id}/decide“. Clients
+// that support MCP elicitation can POST the operator's structured
+// decision directly to this URL.
+type ApprovalRequestDetail struct {
+	AgentRunId      *openapi_types.UUID `json:"agent_run_id"`
+	ConnectorId     string              `json:"connector_id"`
+	CreatedAt       time.Time           `json:"created_at"`
+	DecidedAt       *time.Time          `json:"decided_at"`
+	DecisionAuditId *openapi_types.UUID `json:"decision_audit_id"`
+
+	// ElicitationUrl MCP elicitation URL-mode address for this request. POST a decision payload ({decision: 'approve'|'reject', reason?: string}) here to resolve the approval inline. See https://workos.com/blog/mcp-elicitation for the wire format.
+	ElicitationUrl *string                 `json:"elicitation_url"`
+	ExpiresAt      *time.Time              `json:"expires_at"`
+	Id             openapi_types.UUID      `json:"id"`
+	OpId           string                  `json:"op_id"`
+	ParamsHash     string                  `json:"params_hash"`
+	PrincipalAct   *string                 `json:"principal_act"`
+	PrincipalSub   string                  `json:"principal_sub"`
+	ProposedEffect *map[string]interface{} `json:"proposed_effect"`
+	RequestAuditId *openapi_types.UUID     `json:"request_audit_id"`
+	ReviewedBy     *string                 `json:"reviewed_by"`
+
+	// Status Closed lifecycle status of an :class:`ApprovalRequest`.
+	//
+	// Initiative #803 (G11.2 Agent identity + RBAC + approval), Task #818
+	// (T5 — approval surfacing channel). Four terminal/non-terminal states:
+	//
+	// * :attr:`PENDING` — the request was created and is awaiting a
+	//   human decision. Initial state on insert.
+	// * :attr:`APPROVED` — an authorised operator approved the request.
+	//   The T4 resume API has been called (or will be called); the
+	//   paused agent run continues.
+	// * :attr:`REJECTED` — an authorised operator rejected the request.
+	//   The T4 resume API has been called with ``reject=true``; the
+	//   paused run aborts.
+	// * :attr:`EXPIRED` — the request was not acted on before
+	//   ``expires_at`` and the expiry sweep closed it. The paused run
+	//   is also aborted by the sweep.
+	//
+	// The enum and the DB ``CHECK (status IN (...))`` constraint move in
+	// lock-step via migration ``0021``; a drift guard in
+	// :mod:`tests.test_db_approval_request` enforces equality at test time.
+	Status   ApprovalStatus      `json:"status"`
+	TargetId *openapi_types.UUID `json:"target_id"`
+	TenantId openapi_types.UUID  `json:"tenant_id"`
+}
+
+// ApprovalRequestSummary Compact row for list responses — enough to triage without the full detail.
+type ApprovalRequestSummary struct {
+	ConnectorId  string             `json:"connector_id"`
+	CreatedAt    time.Time          `json:"created_at"`
+	ExpiresAt    *time.Time         `json:"expires_at"`
+	Id           openapi_types.UUID `json:"id"`
+	OpId         string             `json:"op_id"`
+	PrincipalAct *string            `json:"principal_act"`
+	PrincipalSub string             `json:"principal_sub"`
+
+	// Status Closed lifecycle status of an :class:`ApprovalRequest`.
+	//
+	// Initiative #803 (G11.2 Agent identity + RBAC + approval), Task #818
+	// (T5 — approval surfacing channel). Four terminal/non-terminal states:
+	//
+	// * :attr:`PENDING` — the request was created and is awaiting a
+	//   human decision. Initial state on insert.
+	// * :attr:`APPROVED` — an authorised operator approved the request.
+	//   The T4 resume API has been called (or will be called); the
+	//   paused agent run continues.
+	// * :attr:`REJECTED` — an authorised operator rejected the request.
+	//   The T4 resume API has been called with ``reject=true``; the
+	//   paused run aborts.
+	// * :attr:`EXPIRED` — the request was not acted on before
+	//   ``expires_at`` and the expiry sweep closed it. The paused run
+	//   is also aborted by the sweep.
+	//
+	// The enum and the DB ``CHECK (status IN (...))`` constraint move in
+	// lock-step via migration ``0021``; a drift guard in
+	// :mod:`tests.test_db_approval_request` enforces equality at test time.
+	Status   ApprovalStatus     `json:"status"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+}
+
+// ApprovalStatus Closed lifecycle status of an :class:`ApprovalRequest`.
+//
+// Initiative #803 (G11.2 Agent identity + RBAC + approval), Task #818
+// (T5 — approval surfacing channel). Four terminal/non-terminal states:
+//
+//   - :attr:`PENDING` — the request was created and is awaiting a
+//     human decision. Initial state on insert.
+//   - :attr:`APPROVED` — an authorised operator approved the request.
+//     The T4 resume API has been called (or will be called); the
+//     paused agent run continues.
+//   - :attr:`REJECTED` — an authorised operator rejected the request.
+//     The T4 resume API has been called with “reject=true“; the
+//     paused run aborts.
+//   - :attr:`EXPIRED` — the request was not acted on before
+//     “expires_at“ and the expiry sweep closed it. The paused run
+//     is also aborted by the sweep.
+//
+// The enum and the DB “CHECK (status IN (...))“ constraint move in
+// lock-step via migration “0021“; a drift guard in
+// :mod:`tests.test_db_approval_request` enforces equality at test time.
+type ApprovalStatus string
 
 // AuditEntry One row of the audit query result.
 //
@@ -2628,6 +2760,20 @@ type UnderscoreBulkImportRowResponse struct {
 	ToName     string   `json:"to_name"`
 }
 
+// UnderscoreDecideBody Extended body for the MCP elicitation URL-mode decide endpoint.
+//
+// The MCP elicitation spec requires a “decision“ field in the submitted
+// content. The REST approve/reject verbs encode the decision in the URL
+// path; the elicitation URL-mode endpoint uses a single path + a body
+// field so MCP clients that construct the elicitation form dynamically
+// have one stable URL to point at.
+type UnderscoreDecideBody struct {
+	Decision string `json:"decision"`
+
+	// Reason Optional human-readable rationale for the decision.
+	Reason *string `json:"reason"`
+}
+
 // UnderscoreEdgeEndpoint Inbound JSON shape for one annotation endpoint.
 //
 // Mirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:
@@ -2695,6 +2841,35 @@ type RunAgentApiV1AgentsNameRunPostParams struct {
 
 // RunAgentEventsApiV1AgentsNameRunEventsPostParams defines parameters for RunAgentEventsApiV1AgentsNameRunEventsPost.
 type RunAgentEventsApiV1AgentsNameRunEventsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListApprovalsApiV1ApprovalsGetParams defines parameters for ListApprovalsApiV1ApprovalsGet.
+type ListApprovalsApiV1ApprovalsGetParams struct {
+	// Status Filter by status (pending|approved|rejected|expired).
+	Status        *string `form:"status,omitempty" json:"status,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetApprovalApiV1ApprovalsRequestIdGetParams defines parameters for GetApprovalApiV1ApprovalsRequestIdGet.
+type GetApprovalApiV1ApprovalsRequestIdGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams defines parameters for ApproveApprovalApiV1ApprovalsRequestIdApprovePost.
+type ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DecideApprovalApiV1ApprovalsRequestIdDecidePostParams defines parameters for DecideApprovalApiV1ApprovalsRequestIdDecidePost.
+type DecideApprovalApiV1ApprovalsRequestIdDecidePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RejectApprovalApiV1ApprovalsRequestIdRejectPostParams defines parameters for RejectApprovalApiV1ApprovalsRequestIdRejectPost.
+type RejectApprovalApiV1ApprovalsRequestIdRejectPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -3155,6 +3330,15 @@ type RunAgentApiV1AgentsNameRunPostJSONRequestBody = AgentRunRequest
 // RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody defines body for RunAgentEventsApiV1AgentsNameRunEventsPost for application/json ContentType.
 type RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody = AgentRunRequest
 
+// ApproveApprovalApiV1ApprovalsRequestIdApprovePostJSONRequestBody defines body for ApproveApprovalApiV1ApprovalsRequestIdApprovePost for application/json ContentType.
+type ApproveApprovalApiV1ApprovalsRequestIdApprovePostJSONRequestBody = ApprovalDecision
+
+// DecideApprovalApiV1ApprovalsRequestIdDecidePostJSONRequestBody defines body for DecideApprovalApiV1ApprovalsRequestIdDecidePost for application/json ContentType.
+type DecideApprovalApiV1ApprovalsRequestIdDecidePostJSONRequestBody = UnderscoreDecideBody
+
+// RejectApprovalApiV1ApprovalsRequestIdRejectPostJSONRequestBody defines body for RejectApprovalApiV1ApprovalsRequestIdRejectPost for application/json ContentType.
+type RejectApprovalApiV1ApprovalsRequestIdRejectPostJSONRequestBody = ApprovalDecision
+
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 
@@ -3384,6 +3568,27 @@ type ClientInterface interface {
 	RunAgentEventsApiV1AgentsNameRunEventsPostWithBody(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RunAgentEventsApiV1AgentsNameRunEventsPost(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, body RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListApprovalsApiV1ApprovalsGet request
+	ListApprovalsApiV1ApprovalsGet(ctx context.Context, params *ListApprovalsApiV1ApprovalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetApprovalApiV1ApprovalsRequestIdGet request
+	GetApprovalApiV1ApprovalsRequestIdGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalApiV1ApprovalsRequestIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithBody request with any body
+	ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithBody(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ApproveApprovalApiV1ApprovalsRequestIdApprovePost(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, body ApproveApprovalApiV1ApprovalsRequestIdApprovePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DecideApprovalApiV1ApprovalsRequestIdDecidePostWithBody request with any body
+	DecideApprovalApiV1ApprovalsRequestIdDecidePostWithBody(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DecideApprovalApiV1ApprovalsRequestIdDecidePost(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RejectApprovalApiV1ApprovalsRequestIdRejectPostWithBody request with any body
+	RejectApprovalApiV1ApprovalsRequestIdRejectPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RejectApprovalApiV1ApprovalsRequestIdRejectPost(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalApiV1ApprovalsRequestIdRejectPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// MyRecentApiV1AuditMyRecentGet request
 	MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3819,6 +4024,102 @@ func (c *Client) RunAgentEventsApiV1AgentsNameRunEventsPostWithBody(ctx context.
 
 func (c *Client) RunAgentEventsApiV1AgentsNameRunEventsPost(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, body RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRunAgentEventsApiV1AgentsNameRunEventsPostRequest(c.Server, name, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListApprovalsApiV1ApprovalsGet(ctx context.Context, params *ListApprovalsApiV1ApprovalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListApprovalsApiV1ApprovalsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetApprovalApiV1ApprovalsRequestIdGet(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalApiV1ApprovalsRequestIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetApprovalApiV1ApprovalsRequestIdGetRequest(c.Server, requestId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithBody(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApproveApprovalApiV1ApprovalsRequestIdApprovePostRequestWithBody(c.Server, requestId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ApproveApprovalApiV1ApprovalsRequestIdApprovePost(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, body ApproveApprovalApiV1ApprovalsRequestIdApprovePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewApproveApprovalApiV1ApprovalsRequestIdApprovePostRequest(c.Server, requestId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DecideApprovalApiV1ApprovalsRequestIdDecidePostWithBody(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDecideApprovalApiV1ApprovalsRequestIdDecidePostRequestWithBody(c.Server, requestId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DecideApprovalApiV1ApprovalsRequestIdDecidePost(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDecideApprovalApiV1ApprovalsRequestIdDecidePostRequest(c.Server, requestId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RejectApprovalApiV1ApprovalsRequestIdRejectPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRejectApprovalApiV1ApprovalsRequestIdRejectPostRequestWithBody(c.Server, requestId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RejectApprovalApiV1ApprovalsRequestIdRejectPost(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalApiV1ApprovalsRequestIdRejectPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRejectApprovalApiV1ApprovalsRequestIdRejectPostRequest(c.Server, requestId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5493,6 +5794,337 @@ func NewRunAgentEventsApiV1AgentsNameRunEventsPostRequestWithBody(server string,
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/agents/%s/run/events", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListApprovalsApiV1ApprovalsGetRequest generates requests for ListApprovalsApiV1ApprovalsGet
+func NewListApprovalsApiV1ApprovalsGetRequest(server string, params *ListApprovalsApiV1ApprovalsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetApprovalApiV1ApprovalsRequestIdGetRequest generates requests for GetApprovalApiV1ApprovalsRequestIdGet
+func NewGetApprovalApiV1ApprovalsRequestIdGetRequest(server string, requestId openapi_types.UUID, params *GetApprovalApiV1ApprovalsRequestIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewApproveApprovalApiV1ApprovalsRequestIdApprovePostRequest calls the generic ApproveApprovalApiV1ApprovalsRequestIdApprovePost builder with application/json body
+func NewApproveApprovalApiV1ApprovalsRequestIdApprovePostRequest(server string, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, body ApproveApprovalApiV1ApprovalsRequestIdApprovePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewApproveApprovalApiV1ApprovalsRequestIdApprovePostRequestWithBody(server, requestId, params, "application/json", bodyReader)
+}
+
+// NewApproveApprovalApiV1ApprovalsRequestIdApprovePostRequestWithBody generates requests for ApproveApprovalApiV1ApprovalsRequestIdApprovePost with any type of body
+func NewApproveApprovalApiV1ApprovalsRequestIdApprovePostRequestWithBody(server string, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/approve", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDecideApprovalApiV1ApprovalsRequestIdDecidePostRequest calls the generic DecideApprovalApiV1ApprovalsRequestIdDecidePost builder with application/json body
+func NewDecideApprovalApiV1ApprovalsRequestIdDecidePostRequest(server string, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalApiV1ApprovalsRequestIdDecidePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDecideApprovalApiV1ApprovalsRequestIdDecidePostRequestWithBody(server, requestId, params, "application/json", bodyReader)
+}
+
+// NewDecideApprovalApiV1ApprovalsRequestIdDecidePostRequestWithBody generates requests for DecideApprovalApiV1ApprovalsRequestIdDecidePost with any type of body
+func NewDecideApprovalApiV1ApprovalsRequestIdDecidePostRequestWithBody(server string, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/decide", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRejectApprovalApiV1ApprovalsRequestIdRejectPostRequest calls the generic RejectApprovalApiV1ApprovalsRequestIdRejectPost builder with application/json body
+func NewRejectApprovalApiV1ApprovalsRequestIdRejectPostRequest(server string, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalApiV1ApprovalsRequestIdRejectPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRejectApprovalApiV1ApprovalsRequestIdRejectPostRequestWithBody(server, requestId, params, "application/json", bodyReader)
+}
+
+// NewRejectApprovalApiV1ApprovalsRequestIdRejectPostRequestWithBody generates requests for RejectApprovalApiV1ApprovalsRequestIdRejectPost with any type of body
+func NewRejectApprovalApiV1ApprovalsRequestIdRejectPostRequestWithBody(server string, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/reject", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -10746,6 +11378,27 @@ type ClientWithResponsesInterface interface {
 
 	RunAgentEventsApiV1AgentsNameRunEventsPostWithResponse(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, body RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RunAgentEventsApiV1AgentsNameRunEventsPostResponse, error)
 
+	// ListApprovalsApiV1ApprovalsGetWithResponse request
+	ListApprovalsApiV1ApprovalsGetWithResponse(ctx context.Context, params *ListApprovalsApiV1ApprovalsGetParams, reqEditors ...RequestEditorFn) (*ListApprovalsApiV1ApprovalsGetResponse, error)
+
+	// GetApprovalApiV1ApprovalsRequestIdGetWithResponse request
+	GetApprovalApiV1ApprovalsRequestIdGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalApiV1ApprovalsRequestIdGetParams, reqEditors ...RequestEditorFn) (*GetApprovalApiV1ApprovalsRequestIdGetResponse, error)
+
+	// ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithBodyWithResponse request with any body
+	ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse, error)
+
+	ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, body ApproveApprovalApiV1ApprovalsRequestIdApprovePostJSONRequestBody, reqEditors ...RequestEditorFn) (*ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse, error)
+
+	// DecideApprovalApiV1ApprovalsRequestIdDecidePostWithBodyWithResponse request with any body
+	DecideApprovalApiV1ApprovalsRequestIdDecidePostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse, error)
+
+	DecideApprovalApiV1ApprovalsRequestIdDecidePostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse, error)
+
+	// RejectApprovalApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse request with any body
+	RejectApprovalApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse, error)
+
+	RejectApprovalApiV1ApprovalsRequestIdRejectPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalApiV1ApprovalsRequestIdRejectPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse, error)
+
 	// MyRecentApiV1AuditMyRecentGetWithResponse request
 	MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error)
 
@@ -11243,6 +11896,121 @@ func (r RunAgentEventsApiV1AgentsNameRunEventsPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RunAgentEventsApiV1AgentsNameRunEventsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListApprovalsApiV1ApprovalsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListApprovalsApiV1ApprovalsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListApprovalsApiV1ApprovalsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetApprovalApiV1ApprovalsRequestIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalRequestDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetApprovalApiV1ApprovalsRequestIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetApprovalApiV1ApprovalsRequestIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalRequestDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalRequestDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ApprovalRequestDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -13177,6 +13945,75 @@ func (c *ClientWithResponses) RunAgentEventsApiV1AgentsNameRunEventsPostWithResp
 	return ParseRunAgentEventsApiV1AgentsNameRunEventsPostResponse(rsp)
 }
 
+// ListApprovalsApiV1ApprovalsGetWithResponse request returning *ListApprovalsApiV1ApprovalsGetResponse
+func (c *ClientWithResponses) ListApprovalsApiV1ApprovalsGetWithResponse(ctx context.Context, params *ListApprovalsApiV1ApprovalsGetParams, reqEditors ...RequestEditorFn) (*ListApprovalsApiV1ApprovalsGetResponse, error) {
+	rsp, err := c.ListApprovalsApiV1ApprovalsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListApprovalsApiV1ApprovalsGetResponse(rsp)
+}
+
+// GetApprovalApiV1ApprovalsRequestIdGetWithResponse request returning *GetApprovalApiV1ApprovalsRequestIdGetResponse
+func (c *ClientWithResponses) GetApprovalApiV1ApprovalsRequestIdGetWithResponse(ctx context.Context, requestId openapi_types.UUID, params *GetApprovalApiV1ApprovalsRequestIdGetParams, reqEditors ...RequestEditorFn) (*GetApprovalApiV1ApprovalsRequestIdGetResponse, error) {
+	rsp, err := c.GetApprovalApiV1ApprovalsRequestIdGet(ctx, requestId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetApprovalApiV1ApprovalsRequestIdGetResponse(rsp)
+}
+
+// ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithBodyWithResponse request with arbitrary body returning *ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse
+func (c *ClientWithResponses) ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse, error) {
+	rsp, err := c.ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalApiV1ApprovalsRequestIdApprovePostParams, body ApproveApprovalApiV1ApprovalsRequestIdApprovePostJSONRequestBody, reqEditors ...RequestEditorFn) (*ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse, error) {
+	rsp, err := c.ApproveApprovalApiV1ApprovalsRequestIdApprovePost(ctx, requestId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse(rsp)
+}
+
+// DecideApprovalApiV1ApprovalsRequestIdDecidePostWithBodyWithResponse request with arbitrary body returning *DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse
+func (c *ClientWithResponses) DecideApprovalApiV1ApprovalsRequestIdDecidePostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse, error) {
+	rsp, err := c.DecideApprovalApiV1ApprovalsRequestIdDecidePostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDecideApprovalApiV1ApprovalsRequestIdDecidePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) DecideApprovalApiV1ApprovalsRequestIdDecidePostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse, error) {
+	rsp, err := c.DecideApprovalApiV1ApprovalsRequestIdDecidePost(ctx, requestId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDecideApprovalApiV1ApprovalsRequestIdDecidePostResponse(rsp)
+}
+
+// RejectApprovalApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse request with arbitrary body returning *RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse
+func (c *ClientWithResponses) RejectApprovalApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse, error) {
+	rsp, err := c.RejectApprovalApiV1ApprovalsRequestIdRejectPostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRejectApprovalApiV1ApprovalsRequestIdRejectPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RejectApprovalApiV1ApprovalsRequestIdRejectPostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalApiV1ApprovalsRequestIdRejectPostParams, body RejectApprovalApiV1ApprovalsRequestIdRejectPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse, error) {
+	rsp, err := c.RejectApprovalApiV1ApprovalsRequestIdRejectPost(ctx, requestId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRejectApprovalApiV1ApprovalsRequestIdRejectPostResponse(rsp)
+}
+
 // MyRecentApiV1AuditMyRecentGetWithResponse request returning *MyRecentApiV1AuditMyRecentGetResponse
 func (c *ClientWithResponses) MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
 	rsp, err := c.MyRecentApiV1AuditMyRecentGet(ctx, params, reqEditors...)
@@ -14332,6 +15169,171 @@ func ParseRunAgentEventsApiV1AgentsNameRunEventsPostResponse(rsp *http.Response)
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListApprovalsApiV1ApprovalsGetResponse parses an HTTP response from a ListApprovalsApiV1ApprovalsGetWithResponse call
+func ParseListApprovalsApiV1ApprovalsGetResponse(rsp *http.Response) (*ListApprovalsApiV1ApprovalsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListApprovalsApiV1ApprovalsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetApprovalApiV1ApprovalsRequestIdGetResponse parses an HTTP response from a GetApprovalApiV1ApprovalsRequestIdGetWithResponse call
+func ParseGetApprovalApiV1ApprovalsRequestIdGetResponse(rsp *http.Response) (*GetApprovalApiV1ApprovalsRequestIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetApprovalApiV1ApprovalsRequestIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalRequestDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse parses an HTTP response from a ApproveApprovalApiV1ApprovalsRequestIdApprovePostWithResponse call
+func ParseApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse(rsp *http.Response) (*ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ApproveApprovalApiV1ApprovalsRequestIdApprovePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalRequestDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDecideApprovalApiV1ApprovalsRequestIdDecidePostResponse parses an HTTP response from a DecideApprovalApiV1ApprovalsRequestIdDecidePostWithResponse call
+func ParseDecideApprovalApiV1ApprovalsRequestIdDecidePostResponse(rsp *http.Response) (*DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DecideApprovalApiV1ApprovalsRequestIdDecidePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalRequestDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRejectApprovalApiV1ApprovalsRequestIdRejectPostResponse parses an HTTP response from a RejectApprovalApiV1ApprovalsRequestIdRejectPostWithResponse call
+func ParseRejectApprovalApiV1ApprovalsRequestIdRejectPostResponse(rsp *http.Response) (*RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RejectApprovalApiV1ApprovalsRequestIdRejectPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ApprovalRequestDetail
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

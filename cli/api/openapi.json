@@ -4150,6 +4150,331 @@
         }
       }
     },
+    "/api/v1/approvals": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "List Approvals",
+        "description": "List approval requests for the operator's tenant.\n\nReturns newest-first, paginated. The ``status=pending`` query is the\nmost common operator pattern: \"show me what I need to decide on\".",
+        "operationId": "list_approvals_api_v1_approvals_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by status (pending|approved|rejected|expired).",
+              "title": "Status"
+            },
+            "description": "Filter by status (pending|approved|rejected|expired)."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Get Approval",
+        "description": "Inspect a single approval request.\n\nReturns the full detail including ``proposed_effect`` and the\n``elicitation_url`` for MCP elicitation URL-mode integration.\nCross-tenant requests and absent ids both 404.",
+        "operationId": "get_approval_api_v1_approvals__request_id__get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/approve": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Approve Approval",
+        "description": "Approve a pending approval request.\n\nFlips the request to ``approved``, calls the T4 resume path to\ncontinue the paused agent run, and publishes a ``approval.approved``\nbroadcast event. Only ``pending`` requests may be approved; any other\nstatus yields 409.",
+        "operationId": "approve_approval_api_v1_approvals__request_id__approve_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecision"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/reject": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Reject Approval",
+        "description": "Reject a pending approval request.\n\nFlips the request to ``rejected``, calls the T4 resume path to\nabort the paused agent run, and publishes a ``approval.rejected``\nbroadcast event. Only ``pending`` requests may be rejected; any other\nstatus yields 409.",
+        "operationId": "reject_approval_api_v1_approvals__request_id__reject_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecision"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/decide": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Decide Approval",
+        "description": "MCP elicitation URL-mode decision endpoint.\n\nAccepts ``{\"decision\": \"approve\"|\"reject\", \"reason\": \"...\"}`` from\nan MCP elicitation UI. Routes to :func:`approve_approval` or\n:func:`reject_approval` based on the ``decision`` field.\n\nThis endpoint is the ``elicitation_url`` value the ``GET /{id}``\nresponse carries; an MCP client that received this URL via an\n``elicitation/create`` response can POST the operator's structured\nanswer here.\n\nSee https://workos.com/blog/mcp-elicitation for the MCP elicitation\nURL-mode specification.",
+        "operationId": "decide_approval_api_v1_approvals__request_id__decide_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_DecideBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conventions": {
       "get": {
         "tags": [
@@ -5561,6 +5886,240 @@
         ],
         "title": "AgentRunStatusResponse",
         "description": "Poll response for ``GET /agents/runs/{handle}``."
+      },
+      "ApprovalDecision": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason",
+            "description": "Optional human-readable rationale for the decision."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ApprovalDecision",
+        "description": "Approve or reject decision body.\n\nPosted to ``POST /api/v1/approvals/{id}/approve`` (or ``/reject``)\nand to the MCP elicitation URL-mode endpoint\n``POST /api/v1/approvals/{id}/decide``."
+      },
+      "ApprovalListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalRequestSummary"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "ApprovalListResponse",
+        "description": "Paginated list of approval requests."
+      },
+      "ApprovalRequestDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ApprovalStatus"
+          },
+          "agent_run_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Run Id"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id"
+          },
+          "params_hash": {
+            "type": "string",
+            "title": "Params Hash"
+          },
+          "proposed_effect": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Proposed Effect"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "principal_act": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Act"
+          },
+          "reviewed_by": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reviewed By"
+          },
+          "decided_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Decided At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "request_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Audit Id"
+          },
+          "decision_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Decision Audit Id"
+          },
+          "elicitation_url": {
+            "type": "string",
+            "nullable": true,
+            "title": "Elicitation Url",
+            "description": "MCP elicitation URL-mode address for this request. POST a decision payload ({decision: 'approve'|'reject', reason?: string}) here to resolve the approval inline. See https://workos.com/blog/mcp-elicitation for the wire format."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "status",
+          "agent_run_id",
+          "connector_id",
+          "op_id",
+          "target_id",
+          "params_hash",
+          "proposed_effect",
+          "principal_sub",
+          "principal_act",
+          "reviewed_by",
+          "decided_at",
+          "expires_at",
+          "created_at",
+          "request_audit_id",
+          "decision_audit_id"
+        ],
+        "title": "ApprovalRequestDetail",
+        "description": "Full detail for show/inspect responses.\n\n``elicitation_url`` is the MCP elicitation URL-mode forward wire\naddress: ``<backplane_base>/api/v1/approvals/{id}/decide``. Clients\nthat support MCP elicitation can POST the operator's structured\ndecision directly to this URL."
+      },
+      "ApprovalRequestSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ApprovalStatus"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "principal_act": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Act"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "status",
+          "connector_id",
+          "op_id",
+          "principal_sub",
+          "principal_act",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "ApprovalRequestSummary",
+        "description": "Compact row for list responses \u2014 enough to triage without the full detail."
+      },
+      "ApprovalStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "approved",
+          "rejected",
+          "expired"
+        ],
+        "title": "ApprovalStatus",
+        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent identity + RBAC + approval), Task #818\n(T5 \u2014 approval surfacing channel). Four terminal/non-terminal states:\n\n* :attr:`PENDING` \u2014 the request was created and is awaiting a\n  human decision. Initial state on insert.\n* :attr:`APPROVED` \u2014 an authorised operator approved the request.\n  The T4 resume API has been called (or will be called); the\n  paused agent run continues.\n* :attr:`REJECTED` \u2014 an authorised operator rejected the request.\n  The T4 resume API has been called with ``reject=true``; the\n  paused run aborts.\n* :attr:`EXPIRED` \u2014 the request was not acted on before\n  ``expires_at`` and the expiry sweep closed it. The paused run\n  is also aborted by the sweep.\n\nThe enum and the DB ``CHECK (status IN (...))`` constraint move in\nlock-step via migration ``0021``; a drift guard in\n:mod:`tests.test_db_approval_request` enforces equality at test time."
       },
       "AuditEntry": {
         "properties": {
@@ -9285,6 +9844,27 @@
         ],
         "title": "_BulkImportRowResponse",
         "description": "One row's outcome in the ``POST /edges/bulk`` response.\n\nMirrors :class:`~meho_backplane.topology.bulk_import.BulkEdgeResult`\non the wire. ``edge_id`` is null in dry-run mode (no row exists)\nand on the apply-pass ``create`` rows where the service hasn't\nbeen called yet at validation time \u2014 the apply path always\npopulates it."
+      },
+      "_DecideBody": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason",
+            "description": "Optional human-readable rationale for the decision."
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "title": "_DecideBody",
+        "description": "Extended body for the MCP elicitation URL-mode decide endpoint.\n\nThe MCP elicitation spec requires a ``decision`` field in the submitted\ncontent. The REST approve/reject verbs encode the decision in the URL\npath; the elicitation URL-mode endpoint uses a single path + a body\nfield so MCP clients that construct the elicitation form dynamically\nhave one stable URL to point at."
       },
       "_EdgeEndpoint": {
         "properties": {

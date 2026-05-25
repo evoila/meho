@@ -10,12 +10,11 @@ principal lifecycle service needs:
 
 * :meth:`create_client` — POST a new Keycloak client with
   ``kind=agent`` in its attributes and return the Keycloak-assigned id.
-* :meth:`list_clients` — GET the clients matching a query string (by
-  ``client_id`` prefix or attribute filter). Returns raw Keycloak
-  client representations.
-* :meth:`disable_client` — PATCH the client's ``enabled=false``
-  (kill switch). Tokens already issued remain valid until their ``exp``;
-  ``enabled=false`` blocks *new* token grants immediately.
+* :meth:`disable_client` — GET-then-PUT the client's ``enabled=false``
+  (kill switch): the full representation is round-tripped so the PUT
+  does not wipe collection fields like ``attributes`` (see the method
+  docstring; keycloak#24920). Tokens already issued remain valid until
+  their ``exp``; ``enabled=false`` blocks *new* token grants immediately.
 * :meth:`delete_client` — DELETE the client outright. Used to roll back
   a created client when the DB row that records it cannot be written, so
   register never leaves an orphaned, unrevocable token-issuing identity.
@@ -288,49 +287,6 @@ class KeycloakAdminClient:
             )
         return internal_id
 
-    async def list_clients(
-        self,
-        *,
-        q: str | None = None,
-        first: int = 0,
-        max_results: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Return Keycloak client representations matching *q*.
-
-        *q* is a Keycloak Admin API search string matched against
-        ``clientId``. Passing ``q=agent:`` returns all agent-registered
-        clients (the naming convention ``agent:<name>`` enforced by the
-        service layer).
-
-        The caller is responsible for filtering further if needed; the
-        raw Keycloak representation is returned so the service layer can
-        project only the fields it needs without a round-trip.
-        """
-        assert self._http is not None
-        assert self._token
-        params: dict[str, str | int] = {"first": first, "max": max_results}
-        if q:
-            params["search"] = q
-        try:
-            resp = await self._http.get(
-                f"{self._admin_url}/clients",
-                params=params,
-                headers=self._auth_headers(),
-            )
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise KeycloakAdminError(
-                f"Keycloak list_clients failed: HTTP {exc.response.status_code}"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise KeycloakAdminError(
-                f"Keycloak list_clients network error: {type(exc).__name__}"
-            ) from exc
-        result: Any = resp.json()
-        if not isinstance(result, list):
-            raise KeycloakAdminError("Keycloak list_clients returned unexpected JSON shape")
-        return result
-
     async def disable_client(self, keycloak_internal_id: str) -> None:
         """Disable the Keycloak client identified by *keycloak_internal_id*.
 
@@ -340,6 +296,13 @@ class KeycloakAdminClient:
         The MEHO service layer also marks the :class:`~meho_backplane.db.models.AgentPrincipal`
         row as ``revoked=true`` in the same transaction.
 
+        The Keycloak Admin REST API ``PUT /clients/{id}`` **replaces** the
+        entire client representation — a partial payload (only
+        ``{"enabled": false}``) would wipe all other attributes, including the
+        ``kind=agent`` custom attribute that the principal-kind discriminator
+        relies on. This method therefore GETs the current representation first,
+        sets ``enabled=False``, and PUTs the full representation back.
+
         Raises :class:`KeycloakClientNotFoundError` when the internal id
         is unknown (Keycloak 404). This is expected when a client was
         already cleaned up out-of-band.
@@ -347,26 +310,42 @@ class KeycloakAdminClient:
         assert self._http is not None
         assert self._token
         log = structlog.get_logger(__name__)
-        payload: dict[str, Any] = {"enabled": False}
+        url = f"{self._admin_url}/clients/{keycloak_internal_id}"
         try:
-            resp = await self._http.put(
-                f"{self._admin_url}/clients/{keycloak_internal_id}",
-                content=json.dumps(payload),
+            get_resp = await self._http.get(url, headers=self._auth_headers())
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak disable_client GET network error: {type(exc).__name__}"
+            ) from exc
+        if get_resp.status_code == 404:
+            raise KeycloakClientNotFoundError(f"Keycloak client {keycloak_internal_id!r} not found")
+        if get_resp.status_code != 200:
+            raise KeycloakAdminError(
+                f"Keycloak disable_client GET failed: HTTP {get_resp.status_code}"
+            )
+        representation: dict[str, Any] = get_resp.json()
+        representation["enabled"] = False
+        try:
+            put_resp = await self._http.put(
+                url,
+                content=json.dumps(representation),
                 headers={**self._auth_headers(), "Content-Type": "application/json"},
             )
         except httpx.HTTPError as exc:
             raise KeycloakAdminError(
-                f"Keycloak disable_client network error: {type(exc).__name__}"
+                f"Keycloak disable_client PUT network error: {type(exc).__name__}"
             ) from exc
-        if resp.status_code == 404:
+        if put_resp.status_code == 404:
             raise KeycloakClientNotFoundError(f"Keycloak client {keycloak_internal_id!r} not found")
-        if resp.status_code not in (200, 204):
+        if put_resp.status_code not in (200, 204):
             log.warning(
                 "keycloak_disable_client_failed",
                 keycloak_internal_id=keycloak_internal_id,
-                status=resp.status_code,
+                status=put_resp.status_code,
             )
-            raise KeycloakAdminError(f"Keycloak disable_client failed: HTTP {resp.status_code}")
+            raise KeycloakAdminError(
+                f"Keycloak disable_client PUT failed: HTTP {put_resp.status_code}"
+            )
 
     async def delete_client(self, keycloak_internal_id: str) -> None:
         """Delete the Keycloak client identified by *keycloak_internal_id*.

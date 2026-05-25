@@ -33,6 +33,7 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminError,
@@ -55,6 +56,23 @@ _TENANT_B = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 # A fake Keycloak internal UUID returned by our mock create_client.
 _KC_INTERNAL_ID = "cc000000-0000-0000-0000-000000000001"
+
+
+@pytest.fixture(autouse=True)
+def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence the broadcast publisher so tests don't time out on Valkey.
+
+    AuditMiddleware calls ``publish_event`` after every request.  Without a
+    running Valkey the redis-py client stalls for ``socket_connect_timeout``
+    (3 s) on each call, adding ~3 s per API call to the test wall-clock.
+    Patching the name in ``meho_backplane.audit``'s module namespace skips
+    the real XADD; broadcast behaviour is covered by test_broadcast_publisher.
+    """
+
+    async def _noop(*_a: object, **_kw: object) -> None:
+        pass
+
+    monkeypatch.setattr(_audit_module, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)
@@ -523,6 +541,46 @@ async def test_revoke_swallows_keycloak_not_found(client: TestClient) -> None:
         assert resp.json()["revoked"] is True
 
     mock_client.disable_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_revoke_aborts_without_marking_revoked_when_disable_fails(
+    client: TestClient,
+) -> None:
+    """A non-404 Keycloak disable failure aborts revoke (502) and leaves the
+    row active — MEHO never reports a still-live principal as revoked."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-rev-fail")
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value=_KC_INTERNAL_ID)
+    mock_client.disable_client = AsyncMock(
+        side_effect=KeycloakAdminError("keycloak disable failed")
+    )
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        client.post("/api/v1/agent-principals", json={"name": "stuck-bot"}, headers=headers)
+        resp = client.delete("/api/v1/agent-principals/stuck-bot/revoke", headers=headers)
+        assert resp.status_code == 502, resp.text
+
+    # The disable failed before any DB write, so the row stays active.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(AgentPrincipal).where(AgentPrincipal.name == "stuck-bot")
+        )
+        row = result.scalar_one()
+    assert row.revoked is False
 
 
 @pytest.mark.asyncio

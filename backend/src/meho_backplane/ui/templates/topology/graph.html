@@ -107,6 +107,44 @@
     </div>
   </header>
 
+  {# ---------- Overlay status pill (G10.5-T3 #882) ----------
+     When the graph is rendering a dependents / dependencies subgraph
+     or a path overlay, surface a status pill so the operator knows
+     which subset of the inventory they're looking at + a "clear
+     overlay" link to return to the full view. The full-inventory
+     branch (``overlay_mode == ''``) renders nothing here. -#}
+  {% if overlay_mode %}
+    <div
+      class="alert alert-info text-sm"
+      role="status"
+      aria-live="polite"
+      data-test="overlay-status"
+    >
+      {% if overlay_mode == "dependents" or overlay_mode == "dependencies" %}
+        <span>
+          {% if overlay_mode == "dependents" %}Dependents{% else %}Dependencies{% endif %}
+          of
+          <span class="font-mono">{{ overlay_root_name }}</span>{% if overlay_root_kind %}
+            <span class="badge badge-ghost badge-sm">{{ overlay_root_kind }}</span>{% endif %},
+          depth {{ overlay_depth }}.
+        </span>
+      {% elif overlay_mode == "path" %}
+        <span>
+          Path from <span class="font-mono">{{ overlay_root_name }}</span>
+          to <span class="font-mono">{{ overlay_to_name }}</span>:
+          {% if overlay_path_found %}
+            {{ overlay_total_hops }} hop{% if overlay_total_hops != 1 %}s{% endif %}.
+          {% else %}
+            <strong>no path found</strong> within the hop ceiling.
+          {% endif %}
+        </span>
+      {% endif %}
+      <a class="btn btn-xs btn-ghost ml-auto" href="/ui/topology?view=graph">
+        Clear overlay
+      </a>
+    </div>
+  {% endif %}
+
   {# ---------- Filter bar ----------
      Server round-trip on submit; the graph needs the full server-side
      re-render to refresh the elements data island. ``hx-push-url`` is
@@ -213,15 +251,19 @@
     </div>
   </aside>
 
-  {# ---------- Data island ----------
-     The elements bag the init script ingests. ``| tojson`` escapes
-     for the script-element text context so a connector-populated
-     node name containing ``"`` / ``<`` / ``</script>`` cannot break
-     out (same posture as broadcast/_history.html PR #1044 B1).
-     ``selected_id`` rides on a second island so the init script can
-     pick up the cross-link target without re-parsing the URL. -#}
-  <script type="application/json" id="topology-graph-data">{{ elements | tojson }}</script>
-  <script type="application/json" id="topology-graph-selected">{{ selected_id | tojson }}</script>
+  {# ---------- Data island wrapper (G10.5-T3 #882) ----------
+     The wrapper carries the HTMX polling trigger
+     (``hx-trigger="every 30s"``) plus the data islands the
+     Cytoscape controller reads. Polling re-renders this wrapper
+     via ``outerHTML`` swap; the controller listens for
+     ``htmx:afterSwap`` on the wrapper and re-renders Cytoscape
+     preserving pan + zoom.
+
+     ``data-overlay-*`` attributes carry the active overlay state
+     so the JS controller can update the chrome without parsing
+     the URL: dependents/dependencies subgraph, path mode + total
+     hops, or empty for the full inventory view. -#}
+  {% include "topology/_graph_data_island.html" %}
 </section>
 {% endblock %}
 

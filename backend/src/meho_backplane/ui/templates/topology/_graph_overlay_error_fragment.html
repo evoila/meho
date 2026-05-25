@@ -1,0 +1,28 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  G10.5-T3 (#882) overlay error fragment for HTMX polling-refresh.
+
+  When the 30s polling refresh hits an overlay whose anchor just got
+  hard-deleted between renders, the fragment surfaces the error in
+  the data-island wrapper slot without rewriting the surrounding
+  chrome. The polling continues; if the anchor returns (transient
+  deletion / re-creation), the next 30s tick recovers the overlay.
+-#}
+<div
+  id="topology-graph-data-wrapper"
+  hx-get="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}"
+  hx-trigger="every 30s"
+  hx-swap="outerHTML"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+  data-test="overlay-error-fragment"
+  data-error-status="{{ error_status }}"
+>
+  <div class="alert alert-warning text-sm" role="alert">
+    Overlay refresh failed ({{ error_status }}): {{ error_message }}
+  </div>
+  <script type="application/json" id="topology-graph-data">[]</script>
+  <script type="application/json" id="topology-graph-selected">""</script>
+  <script type="application/json" id="topology-graph-path-nodes">[]</script>
+</div>

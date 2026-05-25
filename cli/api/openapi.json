@@ -5015,7 +5015,7 @@
           "ui-topology"
         ],
         "summary": "Ui Topology Table",
-        "description": "Serve the topology UI, branching on ``?view=``.\n\nURL contract::\n\n    GET /ui/topology\n        [?view=table|graph\n         &sort=...&direction=...\n         &kind=...&q=...\n         &selected=<uuid>]\n\n``view=graph`` delegates to\n:func:`meho_backplane.ui.routes.topology.graph.render_graph`;\n``view=table`` (the default) keeps the tabular surface T1\nships. ``selected`` (an optional UUID) round-trips the\ncross-link selection between the two surfaces.",
+        "description": "Serve the topology UI, branching on ``?view=``. See module\ndocstring for the URL contract + dual-purpose ``direction``\nsemantics (table sort vs graph overlay).",
         "operationId": "ui_topology_table_ui_topology_get",
         "parameters": [
           {
@@ -5032,8 +5032,10 @@
             "in": "query",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/_SortDirection",
-              "default": "asc"
+              "type": "string",
+              "maxLength": 32,
+              "default": "asc",
+              "title": "Direction"
             }
           },
           {
@@ -5088,6 +5090,74 @@
               "format": "uuid",
               "nullable": true,
               "title": "Selected"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "From"
+            }
+          },
+          {
+            "name": "from_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "From Kind"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "To"
+            }
+          },
+          {
+            "name": "to_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "To Kind"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 16,
+              "minimum": 1,
+              "nullable": true,
+              "title": "Depth"
+            }
+          },
+          {
+            "name": "max_hops",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 16,
+              "minimum": 1,
+              "nullable": true,
+              "title": "Max Hops"
             }
           }
         ],
@@ -9327,15 +9397,6 @@
         ],
         "title": "_SortColumn",
         "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
-      },
-      "_SortDirection": {
-        "type": "string",
-        "enum": [
-          "asc",
-          "desc"
-        ],
-        "title": "_SortDirection",
-        "description": "Sort direction enum -- ``asc`` (default) or ``desc``."
       },
       "_ViewMode": {
         "type": "string",

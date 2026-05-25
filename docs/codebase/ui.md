@@ -908,14 +908,119 @@ one.
 - **No dark-mode toggle UI** even though DaisyUI's `dim` theme is
   enabled — out of scope per Initiative #337.
 
+## Topology query overlays + 30s polling-refresh (Task #882)
+
+Initiative [#342](https://github.com/evoila/meho/issues/342) (G10.5
+Topology UI), Task [#882](https://github.com/evoila/meho/issues/882)
+(G10.5-T3) layers dependents/dependencies subgraph + shortest-path
+overlays on the existing `?view=graph` surface (T2 / #881) plus a
+30-second HTMX polling refresh so the rendered view stays in sync
+with the live graph without losing the operator's pan/zoom.
+
+### URL contract (graph branch additions)
+
+| Query | Render |
+| --- | --- |
+| `?view=graph&from=<name>[&from_kind=<kind>][&depth=N]` | Dependents subgraph rooted at `<name>` |
+| `?view=graph&from=<name>&direction=dependencies[&from_kind=<kind>][&depth=N]` | Dependencies subgraph rooted at `<name>` |
+| `?view=graph&from=A&to=B[&from_kind=...&to_kind=...&max_hops=N]` | Shortest path between `A` and `B` (highlighted edges) |
+
+`depth` defaults to `3` (operator-friendly v0.2 value); `max_hops`
+defaults to `8`. `direction` is dual-purpose by branch (sort
+direction on the table, overlay direction on the graph) -- see
+`backend/src/meho_backplane/ui/routes/topology/table.py` module
+docstring for the resolution rules.
+
+### Substrate split (UI-facing helpers, dialect-portable)
+
+| Module | Responsibility |
+| --- | --- |
+| `meho_backplane.ui.routes.topology.queries` | `fetch_dependents_subgraph` / `fetch_dependencies_subgraph` -- bounded BFS over the closed neighbour set, returns `SubgraphResult(nodes, edges, truncated)`. Public `resolve_anchor` resolves `(tenant_id, name [, kind])` into a `GraphNode` row (raises `NodeNotFoundError` / `AmbiguousNodeError`). |
+| `meho_backplane.ui.routes.topology.path_queries` | `fetch_path_subgraph` -- bidirectional BFS shortest-path. Returns `PathSubgraphResult(path_node_ids, nodes, edges, highlighted_edge_ids, total_hops)`. |
+| `meho_backplane.ui.routes.topology.graph` | `render_graph` dispatcher: dispatches to `_render_full_inventory`, `_render_dependents_or_dependencies_overlay`, or `_render_path_overlay` based on `?from=` + `?to=` presence; serves either the full page or the HTMX data-island fragment (on `HX-Request`). |
+
+The UI-facing helpers are intentionally separate from the substrate
+`meho_backplane.topology.query.find_dependents` /
+`find_dependencies` / `find_path` verbs:
+
+1. **Dialect portability** -- the chassis unit-test fixture uses
+   SQLite; the substrate verbs are PG-only (PG `WITH RECURSIVE ...
+   CYCLE`). The UI helpers use plain SQLAlchemy ORM `select(...)`
+   so the unit suite covers the route end-to-end.
+2. **`tenant_id` + `db_session` shape** matches `list_nodes` rather
+   than the substrate's `Operator` requirement.
+3. **Subgraph emission** -- the substrate returns flat closure
+   lists; Cytoscape needs the edges between visited nodes too.
+
+The substrate verbs stay the source of truth for the REST + CLI +
+MCP surfaces.
+
+### Tenant-scoping defense in depth
+
+Every overlay edge query enforces the tenant boundary at three
+points: the edge row itself + both endpoint joins (aliased
+`from_alias` / `to_alias` on `GraphNode`). Same posture
+`...graph._fetch_edges_for_nodes` and `...detail._fetch_edges`
+established for the existing surfaces. The cross-tenant isolation
+acceptance criterion (`test_dependents_overlay_isolates_other_tenants_graph`,
+`test_path_overlay_isolates_other_tenants_graph`) covers each
+overlay flavour.
+
+### 30s polling-refresh wiring
+
+The graph view's data-island wrapper carries:
+
+```html
+<div id="topology-graph-data-wrapper"
+     hx-get="{{ refresh_url }}"
+     hx-trigger="every 30s"
+     hx-swap="outerHTML"
+     hx-headers='{"X-CSRF-Token": "..."}'>
+  <script type="application/json" id="topology-graph-data">[...]</script>
+  <script type="application/json" id="topology-graph-selected">"..."</script>
+  <script type="application/json" id="topology-graph-path-nodes">[...]</script>
+</div>
+```
+
+On every 30s tick HTMX issues `GET /ui/topology?view=graph...`
+with `HX-Request: true`; the route returns the
+`topology/_graph_data_island.html` fragment only. The
+`topology-graph.js` controller listens for `htmx:afterSwap` on the
+wrapper, snapshots `cy.pan()` + `cy.zoom()`, replaces the elements
+via `cy.batch(...)`, re-runs the active layout, then restores the
+pan + zoom so the operator's pinned viewport survives the refresh.
+
+### Error surface
+
+| Status | Reason | Template |
+| --- | --- | --- |
+| 404 | Unknown name (or kind-pinned anchor missing in this tenant) | `topology/_graph_overlay_error.html` (full page) / `topology/_graph_overlay_error_fragment.html` (HX-Request) |
+| 409 | Ambiguous bare name resolves to multiple kinds | Same templates as 404 with a kind-disambiguation hint |
+
+The error fragment keeps the polling trigger active so a transient
+hard-delete + re-create recovers automatically on the next tick.
+
+### Tests
+
+`backend/tests/test_ui_topology_queries.py` covers every acceptance
+criterion: dependents/dependencies subgraph rendering,
+depth-bounding, path overlay + highlighted edges, polling endpoint
+shape (HTMX fragment), cross-tenant isolation (both overlay
+flavours), 404 unknown-name, 409 ambiguous-name, drawer cross-link
+to `?from=`. 17 tests, all pass against the SQLite fixture.
+
 ## References
 
 - v0.2 decisions [#9 / #10 / #11](../planning/v0.2-decisions.md).
 - HTMX 2 — https://htmx.org/
+- HTMX `hx-trigger="every Ns"` — https://htmx.org/attributes/hx-trigger/
+- HTMX `htmx:afterSwap` event — https://htmx.org/events/#htmx:afterSwap
 - Jinja2 — https://jinja.palletsprojects.com/
 - Tailwind CSS 4 — https://tailwindcss.com/blog/tailwindcss-v4
 - Tailwind 4 standalone CLI install — https://tailwindcss.com/docs/installation
 - DaisyUI 5 install — https://daisyui.com/docs/install/
 - Alpine.js — https://alpinejs.dev/
 - Cytoscape.js — https://js.cytoscape.org/
+- Cytoscape `cy.pan` / `cy.zoom` — https://js.cytoscape.org/#cy.pan
+- Cytoscape selector classes — https://js.cytoscape.org/#selectors/class
 - FastAPI `StaticFiles` (consumed by T5) — https://fastapi.tiangolo.com/tutorial/static-files/

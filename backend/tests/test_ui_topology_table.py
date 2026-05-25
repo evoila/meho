@@ -505,10 +505,13 @@ def test_drawer_renders_node_properties_and_edges() -> None:
     # Outgoing edge surfaces (vm -> host-1).
     assert "host-1" in body
     assert "runs-on" in body
-    # The "show dependents" link points at the future T3 graph view.
+    # The "show dependents" link points at the T3 (#882) graph
+    # overlay. The URL contract is ``?from=<name>&from_kind=<kind>``;
+    # the link target carries both. ``&`` is HTML-escaped to ``&amp;``
+    # by Jinja's ``href`` autoescape (browsers decode both forms).
     assert "Show dependents" in body
     assert "view=graph" in body
-    assert "root=vm-on-host-1" in body
+    assert "from=vm-on-host-1" in body
 
 
 def test_drawer_renders_recent_ops_for_target_backed_node() -> None:
@@ -593,7 +596,7 @@ def test_drawer_isolates_other_tenants_node_id() -> None:
 def test_drawer_dependents_href_percent_encodes_node_name_with_reserved_chars() -> None:
     """A node name containing ``&`` and a space renders a percent-encoded href.
 
-    Regression test for the pre-fix ``f"...&root={node.name}&kind={node.kind}"``
+    Regression test for the pre-fix ``f"...&from={node.name}&from_kind={node.kind}"``
     builder: a connector-populated ``graph_node.name`` containing reserved URL
     characters (``&`` ``?`` ``#`` ``+`` ``%`` space) would silently corrupt
     the dependents-view query string. The route now wraps both segments in
@@ -616,11 +619,11 @@ def test_drawer_dependents_href_percent_encodes_node_name_with_reserved_chars() 
     body = response.text
     # The raw "&" inside the name would break the URL's query parsing
     # if interpolated verbatim. The percent-encoded form survives.
-    assert "root=vm%20prod%20%26%20staging" in body
-    assert "kind=vm" in body
+    assert "from=vm%20prod%20%26%20staging" in body
+    assert "from_kind=vm" in body
     # Negative assertion: the unencoded form must NOT appear in the
     # dependents href -- the regression we are guarding against.
-    assert 'href="/ui/topology?view=graph&root=vm prod & staging' not in body
+    assert 'href="/ui/topology?view=graph&from=vm prod & staging' not in body
 
 
 def test_table_filter_href_percent_encodes_filters_with_reserved_chars() -> None:

@@ -183,6 +183,48 @@
     });
   }
 
+  // Style extensions for overlays (G10.5-T3 #882). Path overlay
+  // edges with the ``highlight`` class render in red/thick; the
+  // ``root`` node class (on dependents/dependencies subgraphs)
+  // renders with a thicker border so the anchor is obvious.
+  function buildOverlayStyle() {
+    return [
+      {
+        selector: "edge.highlight",
+        style: {
+          "width": 3,
+          "line-color": "#dc2626",
+          "target-arrow-color": "#dc2626",
+        },
+      },
+      {
+        selector: "node.root",
+        style: {
+          "border-width": 3,
+          "border-color": "#dc2626",
+        },
+      },
+    ];
+  }
+
+  // Apply the path-node highlight on the active path nodes -- the
+  // server emits the path node id list as a separate data island so
+  // the JS can paint them after the elements island re-renders
+  // (a path subgraph emits *only* the path's nodes + edges, so this
+  // is a small bookkeeping step rather than a filter).
+  function highlightPathNodes(cy, pathNodeIds) {
+    if (!Array.isArray(pathNodeIds) || pathNodeIds.length === 0) {
+      return;
+    }
+    cy.elements("node").removeClass("highlight");
+    for (const id of pathNodeIds) {
+      const node = cy.getElementById(id);
+      if (node && node.length > 0) {
+        node.addClass("highlight");
+      }
+    }
+  }
+
   function init() {
     const container = document.getElementById("cy");
     if (!container || typeof window.cytoscape !== "function") {
@@ -205,16 +247,19 @@
     const elements = readJsonIsland("topology-graph-data") || [];
     const selectedRaw = readJsonIsland("topology-graph-selected");
     const selectedId = typeof selectedRaw === "string" && selectedRaw.length > 0 ? selectedRaw : null;
+    const pathNodeIds = readJsonIsland("topology-graph-path-nodes") || [];
 
     const cy = window.cytoscape({
       container: container,
       elements: elements,
-      style: buildStyle(),
+      style: buildStyle().concat(buildOverlayStyle()),
       layout: layoutOptions("cose-bilkent"),
       wheelSensitivity: 0.2,
       minZoom: 0.1,
       maxZoom: 4,
     });
+
+    highlightPathNodes(cy, pathNodeIds);
 
     // Expose for debugging / a future ``/auto-implement-initiative``
     // E2E harness; non-enumerable so it stays out of the
@@ -266,6 +311,55 @@
         }
       });
     }
+
+    // ----- G10.5-T3 (#882) polling-refresh handler -----
+    //
+    // The data island wrapper carries
+    // ``hx-trigger="every 30s"`` + ``hx-swap="outerHTML"``. When
+    // HTMX swaps in the new wrapper, we re-read the elements island
+    // and replace the Cytoscape graph in place, preserving the
+    // operator's current pan + zoom (the layout re-run would
+    // otherwise center the graph and zoom-fit, throwing the
+    // operator off the node they were inspecting).
+    //
+    // The handler is bound on ``document.body`` so it survives the
+    // wrapper element being replaced (HTMX rebuilds it on every
+    // swap). The ``detail.target`` check pins it to the topology
+    // graph wrapper -- other surfaces' HTMX swaps on the same page
+    // are no-ops here.
+    function applyRefreshedIsland() {
+      const fresh = readJsonIsland("topology-graph-data");
+      if (!Array.isArray(fresh)) {
+        return;
+      }
+      // Snapshot the current viewport so the layout re-run does not
+      // throw the operator off their pinned position.
+      const pan = cy.pan();
+      const zoom = cy.zoom();
+      cy.batch(function () {
+        cy.elements().remove();
+        cy.add(fresh);
+      });
+      // Re-run the layout. The pan + zoom restore below overrides
+      // the layout's centering -- the operator stays exactly where
+      // they were before the refresh.
+      const layoutSelectEl = document.getElementById("topology-graph-layout");
+      const layoutName = layoutSelectEl ? layoutSelectEl.value : "cose-bilkent";
+      cy.layout(layoutOptions(layoutName)).run();
+      cy.zoom(zoom);
+      cy.pan(pan);
+      // Re-apply the path highlight if the new payload carries one.
+      const newPathNodes = readJsonIsland("topology-graph-path-nodes") || [];
+      highlightPathNodes(cy, newPathNodes);
+    }
+
+    document.body.addEventListener("htmx:afterSwap", function (event) {
+      const target = event && event.detail ? event.detail.target : null;
+      if (!target || target.id !== "topology-graph-data-wrapper") {
+        return;
+      }
+      applyRefreshedIsland();
+    });
   }
 
   if (document.readyState === "loading") {

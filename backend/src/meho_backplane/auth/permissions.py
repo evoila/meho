@@ -102,11 +102,12 @@ References
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from fnmatch import fnmatch
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -237,12 +238,23 @@ async def _load_rows(
     query fast.  Pattern matching and target scoping are done in
     Python after loading; the result set for a single principal is
     expected to be small (tens of rows, not thousands).
+
+    Expired time-bounded elevations (G11.2-T6 #819) are excluded here:
+    a row with a non-null ``expires_at`` at or before *now* no longer
+    grants, so the agent reverts to baseline **immediately at expiry**
+    even before the grant-expiry sweeper deletes the row (the sweep is
+    eventual; this filter makes the revert exact).
     """
+    now = datetime.now(UTC)
     result = await session.execute(
         select(AgentPermission)
         .where(
             AgentPermission.tenant_id == tenant_id,
             AgentPermission.principal_sub == principal_sub,
+            or_(
+                AgentPermission.expires_at.is_(None),
+                AgentPermission.expires_at > now,
+            ),
         )
         # Stable ORDER BY so logged row ordering is deterministic across
         # runs/DBs. Verdict selection itself does not depend on row order

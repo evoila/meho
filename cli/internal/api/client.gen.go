@@ -144,6 +144,13 @@ const (
 	MemoryScopeUserTenant MemoryScope = "user-tenant"
 )
 
+// Defines values for PermissionVerdict.
+const (
+	AutoExecute   PermissionVerdict = "auto-execute"
+	Deny          PermissionVerdict = "deny"
+	NeedsApproval PermissionVerdict = "needs-approval"
+)
+
 // Defines values for RetireChecklistReportOverallVerdict.
 const (
 	RetireChecklistReportOverallVerdictNOTYET         RetireChecklistReportOverallVerdict = "NOT YET"
@@ -350,6 +357,95 @@ type AgentDefinitionUpdate struct {
 	SystemPrompt *string                 `json:"system_prompt"`
 	Toolset      *map[string]interface{} `json:"toolset"`
 	TurnBudget   *int                    `json:"turn_budget"`
+}
+
+// AgentElevationCreate Convenience alias for time-bounded elevations.
+//
+// Identical to :class:`AgentGrantCreate` but “expires_at“ is
+// required. The REST surface accepts both; the MCP surface exposes
+// a dedicated “meho.agents.grant.elevate“ tool that uses this schema
+// so the field-level validation message is specific:
+// "expires_at is required for elevations".
+type AgentElevationCreate struct {
+	// ExpiresAt Required UTC expiry timestamp for the elevation. Must be a future datetime.
+	ExpiresAt time.Time `json:"expires_at"`
+
+	// OpPattern fnmatch glob matching operation IDs. '*' = all ops.
+	OpPattern string `json:"op_pattern"`
+
+	// PrincipalSub JWT sub of the principal being granted the permission.
+	PrincipalSub string `json:"principal_sub"`
+
+	// TargetScope Target UUID, '*', or null (null = any target). A non-null non-wildcard value must be a valid UUID string.
+	TargetScope *string `json:"target_scope"`
+
+	// Verdict Three-state verdict returned by the permission resolver.
+	//
+	// :attr:`AUTO_EXECUTE` — the op proceeds without human review.
+	// :attr:`NEEDS_APPROVAL` — the op is parked pending an operator
+	// decision; the approval queue (G11.2-T4) handles the resume path.
+	// :attr:`DENY` — the op is refused immediately with a structured,
+	// agent-reasonable error.
+	//
+	// The vocabulary is intentionally closed: a fourth verdict would
+	// require a code + migration change, which is the cheapest way to
+	// prevent drift between the DB layer and the policy engine.
+	Verdict PermissionVerdict `json:"verdict"`
+}
+
+// AgentGrantCreate Body for creating a permission grant (permanent or time-bounded).
+//
+// “extra="forbid"“ rejects unknown fields with 422. “expires_at“
+// is optional — omit it for a permanent grant, supply a future UTC
+// datetime for a time-bounded elevation.
+type AgentGrantCreate struct {
+	// ExpiresAt UTC expiry timestamp for time-bounded elevations. Null = permanent grant. Must be in the future.
+	ExpiresAt *time.Time `json:"expires_at"`
+
+	// OpPattern fnmatch glob matching operation IDs. '*' = all ops.
+	OpPattern string `json:"op_pattern"`
+
+	// PrincipalSub JWT sub of the principal being granted the permission.
+	PrincipalSub string `json:"principal_sub"`
+
+	// TargetScope Target UUID, '*', or null (null = any target). A non-null non-wildcard value must be a valid UUID string.
+	TargetScope *string `json:"target_scope"`
+
+	// Verdict Three-state verdict returned by the permission resolver.
+	//
+	// :attr:`AUTO_EXECUTE` — the op proceeds without human review.
+	// :attr:`NEEDS_APPROVAL` — the op is parked pending an operator
+	// decision; the approval queue (G11.2-T4) handles the resume path.
+	// :attr:`DENY` — the op is refused immediately with a structured,
+	// agent-reasonable error.
+	//
+	// The vocabulary is intentionally closed: a fourth verdict would
+	// require a code + migration change, which is the cheapest way to
+	// prevent drift between the DB layer and the policy engine.
+	Verdict PermissionVerdict `json:"verdict"`
+}
+
+// AgentGrantListResponse Response envelope for “GET /api/v1/agents/grants“.
+type AgentGrantListResponse struct {
+	Grants []AgentGrantRead `json:"grants"`
+}
+
+// AgentGrantRead Row shape every accessor returns.
+//
+// “from_attributes=True“ allows direct construction from an ORM
+// row. Exposes “expires_at“ so callers can distinguish permanent
+// grants from elevations.
+type AgentGrantRead struct {
+	CreatedAt    time.Time          `json:"created_at"`
+	CreatedBySub string             `json:"created_by_sub"`
+	ExpiresAt    *time.Time         `json:"expires_at"`
+	Id           openapi_types.UUID `json:"id"`
+	OpPattern    string             `json:"op_pattern"`
+	PrincipalSub string             `json:"principal_sub"`
+	TargetScope  *string            `json:"target_scope"`
+	TenantId     openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt    time.Time          `json:"updated_at"`
+	Verdict      string             `json:"verdict"`
 }
 
 // AgentModelTier Logical model tier an agent definition runs against.
@@ -1678,6 +1774,19 @@ type OperatorIdentity struct {
 	Sub   string  `json:"sub"`
 }
 
+// PermissionVerdict Three-state verdict returned by the permission resolver.
+//
+// :attr:`AUTO_EXECUTE` — the op proceeds without human review.
+// :attr:`NEEDS_APPROVAL` — the op is parked pending an operator
+// decision; the approval queue (G11.2-T4) handles the resume path.
+// :attr:`DENY` — the op is refused immediately with a structured,
+// agent-reasonable error.
+//
+// The vocabulary is intentionally closed: a fourth verdict would
+// require a code + migration change, which is the cheapest way to
+// prevent drift between the DB layer and the policy engine.
+type PermissionVerdict string
+
 // PromoteBody POST body for “/api/v1/memory/{scope}/{slug}/promote“.
 //
 // G5.2-T4 (#626) of Initiative #374. Two required-ish fields plus a
@@ -2841,6 +2950,35 @@ type CreateAgentApiV1AgentsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListGrantsApiV1AgentsGrantsGetParams defines parameters for ListGrantsApiV1AgentsGrantsGet.
+type ListGrantsApiV1AgentsGrantsGetParams struct {
+	PrincipalSub   *string `form:"principal_sub,omitempty" json:"principal_sub,omitempty"`
+	IncludeExpired *bool   `form:"include_expired,omitempty" json:"include_expired,omitempty"`
+	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset         *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization  *string `json:"authorization,omitempty"`
+}
+
+// CreateGrantApiV1AgentsGrantsPostParams defines parameters for CreateGrantApiV1AgentsGrantsPost.
+type CreateGrantApiV1AgentsGrantsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ElevateGrantApiV1AgentsGrantsElevatePostParams defines parameters for ElevateGrantApiV1AgentsGrantsElevatePost.
+type ElevateGrantApiV1AgentsGrantsElevatePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RevokeGrantApiV1AgentsGrantsGrantIdDeleteParams defines parameters for RevokeGrantApiV1AgentsGrantsGrantIdDelete.
+type RevokeGrantApiV1AgentsGrantsGrantIdDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowGrantApiV1AgentsGrantsGrantIdGetParams defines parameters for ShowGrantApiV1AgentsGrantsGrantIdGet.
+type ShowGrantApiV1AgentsGrantsGrantIdGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // GetRunStatusApiV1AgentsRunsHandleGetParams defines parameters for GetRunStatusApiV1AgentsRunsHandleGet.
 type GetRunStatusApiV1AgentsRunsHandleGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -3348,6 +3486,12 @@ type RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody = AgentPrinci
 // CreateAgentApiV1AgentsPostJSONRequestBody defines body for CreateAgentApiV1AgentsPost for application/json ContentType.
 type CreateAgentApiV1AgentsPostJSONRequestBody = AgentDefinitionCreate
 
+// CreateGrantApiV1AgentsGrantsPostJSONRequestBody defines body for CreateGrantApiV1AgentsGrantsPost for application/json ContentType.
+type CreateGrantApiV1AgentsGrantsPostJSONRequestBody = AgentGrantCreate
+
+// ElevateGrantApiV1AgentsGrantsElevatePostJSONRequestBody defines body for ElevateGrantApiV1AgentsGrantsElevatePost for application/json ContentType.
+type ElevateGrantApiV1AgentsGrantsElevatePostJSONRequestBody = AgentElevationCreate
+
 // EditAgentApiV1AgentsNamePatchJSONRequestBody defines body for EditAgentApiV1AgentsNamePatch for application/json ContentType.
 type EditAgentApiV1AgentsNamePatchJSONRequestBody = AgentDefinitionUpdate
 
@@ -3644,6 +3788,25 @@ type ClientInterface interface {
 	CreateAgentApiV1AgentsPostWithBody(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CreateAgentApiV1AgentsPost(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListGrantsApiV1AgentsGrantsGet request
+	ListGrantsApiV1AgentsGrantsGet(ctx context.Context, params *ListGrantsApiV1AgentsGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateGrantApiV1AgentsGrantsPostWithBody request with any body
+	CreateGrantApiV1AgentsGrantsPostWithBody(ctx context.Context, params *CreateGrantApiV1AgentsGrantsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateGrantApiV1AgentsGrantsPost(ctx context.Context, params *CreateGrantApiV1AgentsGrantsPostParams, body CreateGrantApiV1AgentsGrantsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ElevateGrantApiV1AgentsGrantsElevatePostWithBody request with any body
+	ElevateGrantApiV1AgentsGrantsElevatePostWithBody(ctx context.Context, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ElevateGrantApiV1AgentsGrantsElevatePost(ctx context.Context, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, body ElevateGrantApiV1AgentsGrantsElevatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeGrantApiV1AgentsGrantsGrantIdDelete request
+	RevokeGrantApiV1AgentsGrantsGrantIdDelete(ctx context.Context, grantId openapi_types.UUID, params *RevokeGrantApiV1AgentsGrantsGrantIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowGrantApiV1AgentsGrantsGrantIdGet request
+	ShowGrantApiV1AgentsGrantsGrantIdGet(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetRunStatusApiV1AgentsRunsHandleGet request
 	GetRunStatusApiV1AgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4068,6 +4231,90 @@ func (c *Client) CreateAgentApiV1AgentsPostWithBody(ctx context.Context, params 
 
 func (c *Client) CreateAgentApiV1AgentsPost(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateAgentApiV1AgentsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListGrantsApiV1AgentsGrantsGet(ctx context.Context, params *ListGrantsApiV1AgentsGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListGrantsApiV1AgentsGrantsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateGrantApiV1AgentsGrantsPostWithBody(ctx context.Context, params *CreateGrantApiV1AgentsGrantsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateGrantApiV1AgentsGrantsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateGrantApiV1AgentsGrantsPost(ctx context.Context, params *CreateGrantApiV1AgentsGrantsPostParams, body CreateGrantApiV1AgentsGrantsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateGrantApiV1AgentsGrantsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ElevateGrantApiV1AgentsGrantsElevatePostWithBody(ctx context.Context, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewElevateGrantApiV1AgentsGrantsElevatePostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ElevateGrantApiV1AgentsGrantsElevatePost(ctx context.Context, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, body ElevateGrantApiV1AgentsGrantsElevatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewElevateGrantApiV1AgentsGrantsElevatePostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevokeGrantApiV1AgentsGrantsGrantIdDelete(ctx context.Context, grantId openapi_types.UUID, params *RevokeGrantApiV1AgentsGrantsGrantIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeGrantApiV1AgentsGrantsGrantIdDeleteRequest(c.Server, grantId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowGrantApiV1AgentsGrantsGrantIdGet(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowGrantApiV1AgentsGrantsGrantIdGetRequest(c.Server, grantId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5841,6 +6088,326 @@ func NewCreateAgentApiV1AgentsPostRequestWithBody(server string, params *CreateA
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListGrantsApiV1AgentsGrantsGetRequest generates requests for ListGrantsApiV1AgentsGrantsGet
+func NewListGrantsApiV1AgentsGrantsGetRequest(server string, params *ListGrantsApiV1AgentsGrantsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/grants")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.PrincipalSub != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal_sub", runtime.ParamLocationQuery, *params.PrincipalSub); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeExpired != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_expired", runtime.ParamLocationQuery, *params.IncludeExpired); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateGrantApiV1AgentsGrantsPostRequest calls the generic CreateGrantApiV1AgentsGrantsPost builder with application/json body
+func NewCreateGrantApiV1AgentsGrantsPostRequest(server string, params *CreateGrantApiV1AgentsGrantsPostParams, body CreateGrantApiV1AgentsGrantsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateGrantApiV1AgentsGrantsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateGrantApiV1AgentsGrantsPostRequestWithBody generates requests for CreateGrantApiV1AgentsGrantsPost with any type of body
+func NewCreateGrantApiV1AgentsGrantsPostRequestWithBody(server string, params *CreateGrantApiV1AgentsGrantsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/grants")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewElevateGrantApiV1AgentsGrantsElevatePostRequest calls the generic ElevateGrantApiV1AgentsGrantsElevatePost builder with application/json body
+func NewElevateGrantApiV1AgentsGrantsElevatePostRequest(server string, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, body ElevateGrantApiV1AgentsGrantsElevatePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewElevateGrantApiV1AgentsGrantsElevatePostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewElevateGrantApiV1AgentsGrantsElevatePostRequestWithBody generates requests for ElevateGrantApiV1AgentsGrantsElevatePost with any type of body
+func NewElevateGrantApiV1AgentsGrantsElevatePostRequestWithBody(server string, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/grants/elevate")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRevokeGrantApiV1AgentsGrantsGrantIdDeleteRequest generates requests for RevokeGrantApiV1AgentsGrantsGrantIdDelete
+func NewRevokeGrantApiV1AgentsGrantsGrantIdDeleteRequest(server string, grantId openapi_types.UUID, params *RevokeGrantApiV1AgentsGrantsGrantIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "grant_id", runtime.ParamLocationPath, grantId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/grants/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowGrantApiV1AgentsGrantsGrantIdGetRequest generates requests for ShowGrantApiV1AgentsGrantsGrantIdGet
+func NewShowGrantApiV1AgentsGrantsGrantIdGetRequest(server string, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "grant_id", runtime.ParamLocationPath, grantId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/grants/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -11702,6 +12269,25 @@ type ClientWithResponsesInterface interface {
 
 	CreateAgentApiV1AgentsPostWithResponse(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentApiV1AgentsPostResponse, error)
 
+	// ListGrantsApiV1AgentsGrantsGetWithResponse request
+	ListGrantsApiV1AgentsGrantsGetWithResponse(ctx context.Context, params *ListGrantsApiV1AgentsGrantsGetParams, reqEditors ...RequestEditorFn) (*ListGrantsApiV1AgentsGrantsGetResponse, error)
+
+	// CreateGrantApiV1AgentsGrantsPostWithBodyWithResponse request with any body
+	CreateGrantApiV1AgentsGrantsPostWithBodyWithResponse(ctx context.Context, params *CreateGrantApiV1AgentsGrantsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateGrantApiV1AgentsGrantsPostResponse, error)
+
+	CreateGrantApiV1AgentsGrantsPostWithResponse(ctx context.Context, params *CreateGrantApiV1AgentsGrantsPostParams, body CreateGrantApiV1AgentsGrantsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateGrantApiV1AgentsGrantsPostResponse, error)
+
+	// ElevateGrantApiV1AgentsGrantsElevatePostWithBodyWithResponse request with any body
+	ElevateGrantApiV1AgentsGrantsElevatePostWithBodyWithResponse(ctx context.Context, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ElevateGrantApiV1AgentsGrantsElevatePostResponse, error)
+
+	ElevateGrantApiV1AgentsGrantsElevatePostWithResponse(ctx context.Context, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, body ElevateGrantApiV1AgentsGrantsElevatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*ElevateGrantApiV1AgentsGrantsElevatePostResponse, error)
+
+	// RevokeGrantApiV1AgentsGrantsGrantIdDeleteWithResponse request
+	RevokeGrantApiV1AgentsGrantsGrantIdDeleteWithResponse(ctx context.Context, grantId openapi_types.UUID, params *RevokeGrantApiV1AgentsGrantsGrantIdDeleteParams, reqEditors ...RequestEditorFn) (*RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse, error)
+
+	// ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse request
+	ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*ShowGrantApiV1AgentsGrantsGrantIdGetResponse, error)
+
 	// GetRunStatusApiV1AgentsRunsHandleGetWithResponse request
 	GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error)
 
@@ -12191,6 +12777,120 @@ func (r CreateAgentApiV1AgentsPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateAgentApiV1AgentsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListGrantsApiV1AgentsGrantsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentGrantListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListGrantsApiV1AgentsGrantsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListGrantsApiV1AgentsGrantsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateGrantApiV1AgentsGrantsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *AgentGrantRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateGrantApiV1AgentsGrantsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateGrantApiV1AgentsGrantsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ElevateGrantApiV1AgentsGrantsElevatePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *AgentGrantRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ElevateGrantApiV1AgentsGrantsElevatePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ElevateGrantApiV1AgentsGrantsElevatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowGrantApiV1AgentsGrantsGrantIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentGrantRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowGrantApiV1AgentsGrantsGrantIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowGrantApiV1AgentsGrantsGrantIdGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -14297,6 +14997,67 @@ func (c *ClientWithResponses) CreateAgentApiV1AgentsPostWithResponse(ctx context
 	return ParseCreateAgentApiV1AgentsPostResponse(rsp)
 }
 
+// ListGrantsApiV1AgentsGrantsGetWithResponse request returning *ListGrantsApiV1AgentsGrantsGetResponse
+func (c *ClientWithResponses) ListGrantsApiV1AgentsGrantsGetWithResponse(ctx context.Context, params *ListGrantsApiV1AgentsGrantsGetParams, reqEditors ...RequestEditorFn) (*ListGrantsApiV1AgentsGrantsGetResponse, error) {
+	rsp, err := c.ListGrantsApiV1AgentsGrantsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListGrantsApiV1AgentsGrantsGetResponse(rsp)
+}
+
+// CreateGrantApiV1AgentsGrantsPostWithBodyWithResponse request with arbitrary body returning *CreateGrantApiV1AgentsGrantsPostResponse
+func (c *ClientWithResponses) CreateGrantApiV1AgentsGrantsPostWithBodyWithResponse(ctx context.Context, params *CreateGrantApiV1AgentsGrantsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateGrantApiV1AgentsGrantsPostResponse, error) {
+	rsp, err := c.CreateGrantApiV1AgentsGrantsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateGrantApiV1AgentsGrantsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateGrantApiV1AgentsGrantsPostWithResponse(ctx context.Context, params *CreateGrantApiV1AgentsGrantsPostParams, body CreateGrantApiV1AgentsGrantsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateGrantApiV1AgentsGrantsPostResponse, error) {
+	rsp, err := c.CreateGrantApiV1AgentsGrantsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateGrantApiV1AgentsGrantsPostResponse(rsp)
+}
+
+// ElevateGrantApiV1AgentsGrantsElevatePostWithBodyWithResponse request with arbitrary body returning *ElevateGrantApiV1AgentsGrantsElevatePostResponse
+func (c *ClientWithResponses) ElevateGrantApiV1AgentsGrantsElevatePostWithBodyWithResponse(ctx context.Context, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ElevateGrantApiV1AgentsGrantsElevatePostResponse, error) {
+	rsp, err := c.ElevateGrantApiV1AgentsGrantsElevatePostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseElevateGrantApiV1AgentsGrantsElevatePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ElevateGrantApiV1AgentsGrantsElevatePostWithResponse(ctx context.Context, params *ElevateGrantApiV1AgentsGrantsElevatePostParams, body ElevateGrantApiV1AgentsGrantsElevatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*ElevateGrantApiV1AgentsGrantsElevatePostResponse, error) {
+	rsp, err := c.ElevateGrantApiV1AgentsGrantsElevatePost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseElevateGrantApiV1AgentsGrantsElevatePostResponse(rsp)
+}
+
+// RevokeGrantApiV1AgentsGrantsGrantIdDeleteWithResponse request returning *RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse
+func (c *ClientWithResponses) RevokeGrantApiV1AgentsGrantsGrantIdDeleteWithResponse(ctx context.Context, grantId openapi_types.UUID, params *RevokeGrantApiV1AgentsGrantsGrantIdDeleteParams, reqEditors ...RequestEditorFn) (*RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse, error) {
+	rsp, err := c.RevokeGrantApiV1AgentsGrantsGrantIdDelete(ctx, grantId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse(rsp)
+}
+
+// ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse request returning *ShowGrantApiV1AgentsGrantsGrantIdGetResponse
+func (c *ClientWithResponses) ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse(ctx context.Context, grantId openapi_types.UUID, params *ShowGrantApiV1AgentsGrantsGrantIdGetParams, reqEditors ...RequestEditorFn) (*ShowGrantApiV1AgentsGrantsGrantIdGetResponse, error) {
+	rsp, err := c.ShowGrantApiV1AgentsGrantsGrantIdGet(ctx, grantId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowGrantApiV1AgentsGrantsGrantIdGetResponse(rsp)
+}
+
 // GetRunStatusApiV1AgentsRunsHandleGetWithResponse request returning *GetRunStatusApiV1AgentsRunsHandleGetResponse
 func (c *ClientWithResponses) GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error) {
 	rsp, err := c.GetRunStatusApiV1AgentsRunsHandleGet(ctx, handle, params, reqEditors...)
@@ -15518,6 +16279,164 @@ func ParseCreateAgentApiV1AgentsPostResponse(rsp *http.Response) (*CreateAgentAp
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListGrantsApiV1AgentsGrantsGetResponse parses an HTTP response from a ListGrantsApiV1AgentsGrantsGetWithResponse call
+func ParseListGrantsApiV1AgentsGrantsGetResponse(rsp *http.Response) (*ListGrantsApiV1AgentsGrantsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListGrantsApiV1AgentsGrantsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentGrantListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateGrantApiV1AgentsGrantsPostResponse parses an HTTP response from a CreateGrantApiV1AgentsGrantsPostWithResponse call
+func ParseCreateGrantApiV1AgentsGrantsPostResponse(rsp *http.Response) (*CreateGrantApiV1AgentsGrantsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateGrantApiV1AgentsGrantsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest AgentGrantRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseElevateGrantApiV1AgentsGrantsElevatePostResponse parses an HTTP response from a ElevateGrantApiV1AgentsGrantsElevatePostWithResponse call
+func ParseElevateGrantApiV1AgentsGrantsElevatePostResponse(rsp *http.Response) (*ElevateGrantApiV1AgentsGrantsElevatePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ElevateGrantApiV1AgentsGrantsElevatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest AgentGrantRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse parses an HTTP response from a RevokeGrantApiV1AgentsGrantsGrantIdDeleteWithResponse call
+func ParseRevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse(rsp *http.Response) (*RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeGrantApiV1AgentsGrantsGrantIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowGrantApiV1AgentsGrantsGrantIdGetResponse parses an HTTP response from a ShowGrantApiV1AgentsGrantsGrantIdGetWithResponse call
+func ParseShowGrantApiV1AgentsGrantsGrantIdGetResponse(rsp *http.Response) (*ShowGrantApiV1AgentsGrantsGrantIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowGrantApiV1AgentsGrantsGrantIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentGrantRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

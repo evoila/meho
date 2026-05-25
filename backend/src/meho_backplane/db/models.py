@@ -3091,12 +3091,28 @@ class AgentPermission(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+    # G11.2-T6 (#819) time-bounded elevation. NULL = a permanent grant;
+    # a non-null UTC timestamp makes the grant expire — the resolver
+    # ignores rows past their ``expires_at`` (reverts automatically) and
+    # the grant-expiry sweeper deletes them on its periodic tick.
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
             "agent_permission_tenant_principal_idx",
             "tenant_id",
             "principal_sub",
+            postgresql_using="btree",
+        ),
+        # Drives the elevation-expiry sweeper's "what's expired" scan
+        # (G11.2-T6 #819).
+        Index(
+            "agent_permission_expires_at_idx",
+            "expires_at",
             postgresql_using="btree",
         ),
         sa.UniqueConstraint(

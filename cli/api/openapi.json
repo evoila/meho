@@ -3972,6 +3972,298 @@
         }
       }
     },
+    "/api/v1/agents/grants": {
+      "get": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "List Grants",
+        "description": "List permission grants for the operator's tenant.\n\n``principal_sub`` filters to one agent's grants. ``include_expired``\nincludes past elevations (useful for audit inspection). Tenant-scoped\nto the operator's JWT \u2014 no cross-tenant access.",
+        "operationId": "list_grants_api_v1_agents_grants_get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Principal Sub"
+            }
+          },
+          {
+            "name": "include_expired",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Expired"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrantListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "Create Grant",
+        "description": "Create a permission grant (permanent or time-bounded).\n\nA grant with ``expires_at`` is a time-bounded elevation. The grant\nis audited automatically via :class:`~meho_backplane.audit.AuditMiddleware`.\nReturns HTTP 422 when ``expires_at`` is in the past or\n``target_scope`` is an invalid UUID.",
+        "operationId": "create_grant_api_v1_agents_grants_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentGrantCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/grants/{grant_id}": {
+      "get": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "Show Grant",
+        "description": "Return one grant by id.\n\nCross-tenant probes return 404 ``grant_not_found`` (never 403).",
+        "operationId": "show_grant_api_v1_agents_grants__grant_id__get",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "Revoke Grant",
+        "description": "Revoke (delete) a permission grant.\n\nReturns 204 on success; 404 when the grant is absent or belongs to\nanother tenant. The revocation is audited via the audit middleware.",
+        "operationId": "revoke_grant_api_v1_agents_grants__grant_id__delete",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/grants/elevate": {
+      "post": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "Elevate Grant",
+        "description": "Create a time-bounded elevation grant (``expires_at`` required).\n\nShorthand route for change windows. The grant-expiry sweeper\nremoves the row automatically after ``expires_at``, reverting the\nagent to its baseline permissions.",
+        "operationId": "elevate_grant_api_v1_agents_grants_elevate_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentElevationCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agent-principals": {
       "get": {
         "tags": [
@@ -5985,6 +6277,177 @@
         "type": "object",
         "title": "AgentDefinitionUpdate",
         "description": "PATCH body -- every field optional; only supplied fields change.\n\n``extra=\"forbid\"`` for the same reason as\n:class:`AgentDefinitionCreate`. A field left ``None`` (its default)\nis *not* applied -- the service distinguishes \"field omitted\" from\n\"field set to a value\" via :meth:`pydantic.BaseModel.model_dump`\nwith ``exclude_unset=True``, so a PATCH can change a single field\nwithout clobbering the rest.\n\n``name`` is *not* updatable here: it is the per-tenant natural key\n(the URL path segment + unique index). Renaming an agent is a\ndelete + recreate, which keeps the natural-key invariant simple and\navoids a name-collision race inside the update path.\n\n``output_schema`` cannot be cleared through this shape (``None`` is\nindistinguishable from \"omitted\" under ``exclude_unset``); clearing\na structured-output schema is a delete + recreate in v0.2. This is\nan accepted v0.2 limitation, not a silent bug -- documented so a\nfuture shape (a sentinel / ``JsonValue`` discriminator) can lift it."
+      },
+      "AgentElevationCreate": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Principal Sub",
+            "description": "JWT sub of the principal being granted the permission."
+          },
+          "op_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Op Pattern",
+            "description": "fnmatch glob matching operation IDs. '*' = all ops."
+          },
+          "target_scope": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Scope",
+            "description": "Target UUID, '*', or null (null = any target). A non-null non-wildcard value must be a valid UUID string."
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/PermissionVerdict",
+            "description": "One of auto-execute | needs-approval | deny."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At",
+            "description": "Required UTC expiry timestamp for the elevation. Must be a future datetime."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "principal_sub",
+          "op_pattern",
+          "verdict",
+          "expires_at"
+        ],
+        "title": "AgentElevationCreate",
+        "description": "Convenience alias for time-bounded elevations.\n\nIdentical to :class:`AgentGrantCreate` but ``expires_at`` is\nrequired. The REST surface accepts both; the MCP surface exposes\na dedicated ``meho.agents.grant.elevate`` tool that uses this schema\nso the field-level validation message is specific:\n\"expires_at is required for elevations\"."
+      },
+      "AgentGrantCreate": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Principal Sub",
+            "description": "JWT sub of the principal being granted the permission."
+          },
+          "op_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Op Pattern",
+            "description": "fnmatch glob matching operation IDs. '*' = all ops."
+          },
+          "target_scope": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Scope",
+            "description": "Target UUID, '*', or null (null = any target). A non-null non-wildcard value must be a valid UUID string."
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/PermissionVerdict",
+            "description": "One of auto-execute | needs-approval | deny."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At",
+            "description": "UTC expiry timestamp for time-bounded elevations. Null = permanent grant. Must be in the future."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "principal_sub",
+          "op_pattern",
+          "verdict"
+        ],
+        "title": "AgentGrantCreate",
+        "description": "Body for creating a permission grant (permanent or time-bounded).\n\n``extra=\"forbid\"`` rejects unknown fields with 422. ``expires_at``\nis optional \u2014 omit it for a permanent grant, supply a future UTC\ndatetime for a time-bounded elevation."
+      },
+      "AgentGrantListResponse": {
+        "properties": {
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/AgentGrantRead"
+            },
+            "type": "array",
+            "title": "Grants"
+          }
+        },
+        "type": "object",
+        "required": [
+          "grants"
+        ],
+        "title": "AgentGrantListResponse",
+        "description": "Response envelope for ``GET /api/v1/agents/grants``."
+      },
+      "AgentGrantRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "op_pattern": {
+            "type": "string",
+            "title": "Op Pattern"
+          },
+          "target_scope": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Scope"
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "principal_sub",
+          "op_pattern",
+          "target_scope",
+          "verdict",
+          "created_by_sub",
+          "expires_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentGrantRead",
+        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM\nrow. Exposes ``expires_at`` so callers can distinguish permanent\ngrants from elevations."
       },
       "AgentModelTier": {
         "type": "string",
@@ -8298,6 +8761,16 @@
         ],
         "title": "OperatorIdentity",
         "description": "Operator identity surface exposed to the CLI.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only."
+      },
+      "PermissionVerdict": {
+        "type": "string",
+        "enum": [
+          "auto-execute",
+          "needs-approval",
+          "deny"
+        ],
+        "title": "PermissionVerdict",
+        "description": "Three-state verdict returned by the permission resolver.\n\n:attr:`AUTO_EXECUTE` \u2014 the op proceeds without human review.\n:attr:`NEEDS_APPROVAL` \u2014 the op is parked pending an operator\ndecision; the approval queue (G11.2-T4) handles the resume path.\n:attr:`DENY` \u2014 the op is refused immediately with a structured,\nagent-reasonable error.\n\nThe vocabulary is intentionally closed: a fourth verdict would\nrequire a code + migration change, which is the cheapest way to\nprevent drift between the DB layer and the policy engine."
       },
       "PromoteBody": {
         "properties": {

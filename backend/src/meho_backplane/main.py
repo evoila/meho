@@ -50,6 +50,11 @@ from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
+from meho_backplane.agents import (
+    start_grant_expiry_sweeper,
+    stop_grant_expiry_sweeper,
+)
+from meho_backplane.api.v1.agent_grants import router as api_v1_agent_grants_router
 from meho_backplane.api.v1.agent_principals import (
     router as api_v1_agent_principals_router,
 )
@@ -296,6 +301,7 @@ class _BackgroundTasks:
     topology_scheduler: asyncio.Task[None]
     memory_expiry: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
+    grant_expiry: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -324,10 +330,16 @@ def _start_background_tasks() -> _BackgroundTasks:
     topology_history: asyncio.Task[None] | None = None
     if settings.topology_history_prune_enabled:
         topology_history = start_topology_history_retention_sweeper()
+    # G11.2-T6 #819 — gated on GRANT_EXPIRY_ENABLED so operators using
+    # an external cleanup mechanism don't double-sweep.
+    grant_expiry: asyncio.Task[None] | None = None
+    if settings.grant_expiry_enabled:
+        grant_expiry = start_grant_expiry_sweeper()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
         topology_history=topology_history,
+        grant_expiry=grant_expiry,
     )
 
 
@@ -339,6 +351,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.grant_expiry is not None:
+        await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.topology_history is not None:
         await stop_topology_history_retention_sweeper(tasks.topology_history)
     if tasks.memory_expiry is not None:
@@ -564,6 +578,11 @@ app.include_router(api_v1_broadcast_overrides_router)
 # existence is not leaked across tenant boundaries. Every mutation
 # writes an audit row and broadcasts under op_class=write.
 app.include_router(api_v1_agents_router)
+# G11.2-T6 (#819) -- agent permission grant management (grant / revoke /
+# list / elevate). All verbs gated to tenant_admin. Tenant-scoped via
+# the JWT; cross-tenant probes return 404. Every mutation writes an
+# audit row and broadcasts under op_class=write.
+app.include_router(api_v1_agent_grants_router)
 # G11.2-T1 (#815) -- agent-principal lifecycle (register / list / revoke).
 # register creates a Keycloak client tagged kind=agent + inserts a DB row.
 # revoke disables the Keycloak client (kill switch) + marks the row revoked.

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0018_add_audit_log_actor_sub``.
+"""Tests for Alembic migration ``0019_add_audit_log_actor_sub``.
 
 G11.2-T2 (#816) adds the nullable ``audit_log.actor_sub`` column and its
 b-tree index. The migration mirrors the soft-FK discipline established by
@@ -13,12 +13,12 @@ Test matrix
 * **Upgrade adds the column + index.** ``upgrade head`` from a clean DB
   leaves ``audit_log.actor_sub`` present and nullable, and the named
   ``audit_log_actor_sub_idx`` index defined.
-* **Reversibility round-trip.** ``downgrade "0017"`` drops both; a
+* **Reversibility round-trip.** ``downgrade "0018"`` drops both; a
   subsequent ``upgrade head`` re-creates them. The target is the explicit
-  revision ``"0017"`` (0018's ``down_revision``) so this test keeps
-  exercising 0018's reverse even when later migrations land at head.
+  revision ``"0018"`` (0019's ``down_revision``) so this test keeps
+  exercising 0019's reverse even when later migrations land at head.
 * **agent_session_id is untouched.** The pre-existing
-  ``agent_session_id`` column + index (added in 0014) must survive 0018
+  ``agent_session_id`` column + index (added in 0014) must survive 0019
   unchanged. Guards against accidental DDL collisions.
 * **ORM-field smoke.** :attr:`AuditLog.actor_sub` resolves on the mapped
   class and a freshly constructed ``AuditLog`` (without the field)
@@ -55,7 +55,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env vars, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0018.db"
+    db_path = tmp_path / "migration_0019.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -125,28 +125,26 @@ def test_upgrade_adds_actor_sub_column_and_index(
     command.upgrade(cfg, "head")
 
     columns = _audit_log_columns(sync_url)
-    assert "actor_sub" in columns, (
-        "migration 0018 must add audit_log.actor_sub on upgrade head"
-    )
+    assert "actor_sub" in columns, "migration 0019 must add audit_log.actor_sub on upgrade head"
     assert _audit_log_column_is_nullable(sync_url, "actor_sub"), (
         "actor_sub must be nullable — soft-FK discipline, NULL for non-delegated tokens"
     )
     assert "audit_log_actor_sub_idx" in _audit_log_indexes(sync_url), (
-        "migration 0018 must create audit_log_actor_sub_idx on upgrade head"
+        "migration 0019 must create audit_log_actor_sub_idx on upgrade head"
     )
 
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``downgrade "0017"`` drops column + index; ``upgrade head`` restores them."""
+    """``downgrade "0018"`` drops column + index; ``upgrade head`` restores them."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
 
     assert "actor_sub" in _audit_log_columns(sync_url)
     assert "audit_log_actor_sub_idx" in _audit_log_indexes(sync_url)
 
-    command.downgrade(cfg, "0017")
+    command.downgrade(cfg, "0018")
     assert "actor_sub" not in _audit_log_columns(sync_url), (
         "downgrade must drop audit_log.actor_sub"
     )
@@ -162,15 +160,15 @@ def test_downgrade_then_upgrade_round_trips(
 def test_agent_session_id_is_untouched(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """Pre-existing ``agent_session_id`` column + index survive migration 0018."""
+    """Pre-existing ``agent_session_id`` column + index survive migration 0019."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
 
     assert "agent_session_id" in _audit_log_columns(sync_url), (
-        "agent_session_id must survive 0018 unchanged"
+        "agent_session_id must survive 0019 unchanged"
     )
     assert "audit_log_agent_session_id_idx" in _audit_log_indexes(sync_url), (
-        "audit_log_agent_session_id_idx must survive 0018 unchanged"
+        "audit_log_agent_session_id_idx must survive 0019 unchanged"
     )
 
 

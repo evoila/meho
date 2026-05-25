@@ -267,9 +267,7 @@ class TestGetClientCredentialsToken:
         """Single call to the token endpoint; returns the access_token."""
         with respx.mock(assert_all_called=False) as mock:
             mock.post(_TOKEN_URL).mock(
-                return_value=httpx.Response(
-                    200, json={"access_token": _CC_TOKEN}
-                )
+                return_value=httpx.Response(200, json={"access_token": _CC_TOKEN})
             )
             result = await get_client_credentials_token(
                 issuer_url=_ISSUER,
@@ -300,9 +298,7 @@ class TestGetClientCredentialsToken:
         """Non-200 Keycloak response → TokenExchangeError."""
         with respx.mock(assert_all_called=False) as mock:
             mock.post(_TOKEN_URL).mock(
-                return_value=httpx.Response(
-                    401, json={"error": "invalid_client"}
-                )
+                return_value=httpx.Response(401, json={"error": "invalid_client"})
             )
             with pytest.raises(TokenExchangeError) as exc_info:
                 await get_client_credentials_token(
@@ -359,9 +355,7 @@ def _mock_discovery_and_jwks(
     jwks: dict[str, Any],
 ) -> None:
     mock_router.get(_DISCOVERY_URL).mock(
-        return_value=httpx.Response(
-            200, json={"issuer": _ISSUER, "jwks_uri": _JWKS_URL}
-        )
+        return_value=httpx.Response(200, json={"issuer": _ISSUER, "jwks_uri": _JWKS_URL})
     )
     mock_router.get(_JWKS_URL).mock(return_value=httpx.Response(200, json=jwks))
 
@@ -378,9 +372,7 @@ class TestActClaimExtraction:
 
         with respx.mock as mock:
             _mock_discovery_and_jwks(mock, jwks)
-            operator = await verify_jwt_for_audience(
-                f"Bearer {token}", expected_audience=_AUDIENCE
-            )
+            operator = await verify_jwt_for_audience(f"Bearer {token}", expected_audience=_AUDIENCE)
 
         assert operator.sub == "user-123"
         assert operator.actor_sub == "agent-42"
@@ -394,9 +386,7 @@ class TestActClaimExtraction:
 
         with respx.mock as mock:
             _mock_discovery_and_jwks(mock, jwks)
-            operator = await verify_jwt_for_audience(
-                f"Bearer {token}", expected_audience=_AUDIENCE
-            )
+            operator = await verify_jwt_for_audience(f"Bearer {token}", expected_audience=_AUDIENCE)
 
         assert operator.sub == "user-456"
         assert operator.actor_sub is None
@@ -411,9 +401,7 @@ class TestActClaimExtraction:
 
         with respx.mock as mock:
             _mock_discovery_and_jwks(mock, jwks)
-            operator = await verify_jwt_for_audience(
-                f"Bearer {token}", expected_audience=_AUDIENCE
-            )
+            operator = await verify_jwt_for_audience(f"Bearer {token}", expected_audience=_AUDIENCE)
 
         assert operator.actor_sub is None
 
@@ -426,8 +414,6 @@ class TestActClaimExtraction:
 
         with respx.mock as mock:
             _mock_discovery_and_jwks(mock, jwks)
-            operator = await verify_jwt_for_audience(
-                f"Bearer {token}", expected_audience=_AUDIENCE
-            )
+            operator = await verify_jwt_for_audience(f"Bearer {token}", expected_audience=_AUDIENCE)
 
         assert operator.actor_sub is None

@@ -33,6 +33,7 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminError,
@@ -55,6 +56,23 @@ _TENANT_B = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 # A fake Keycloak internal UUID returned by our mock create_client.
 _KC_INTERNAL_ID = "cc000000-0000-0000-0000-000000000001"
+
+
+@pytest.fixture(autouse=True)
+def _noop_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence the broadcast publisher so tests don't time out on Valkey.
+
+    AuditMiddleware calls ``publish_event`` after every request.  Without a
+    running Valkey the redis-py client stalls for ``socket_connect_timeout``
+    (3 s) on each call, adding ~3 s per API call to the test wall-clock.
+    Patching the name in ``meho_backplane.audit``'s module namespace skips
+    the real XADD; broadcast behaviour is covered by test_broadcast_publisher.
+    """
+
+    async def _noop(*_a: object, **_kw: object) -> None:
+        pass
+
+    monkeypatch.setattr(_audit_module, "publish_event", _noop)
 
 
 @pytest.fixture(autouse=True)

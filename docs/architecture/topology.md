@@ -221,12 +221,15 @@ A refresh that no longer sees a previously-discovered node or edge
   back to a timestamp (the row is revived in place, not re-inserted —
   the `(tenant_id, kind, name)` natural key is stable, so the tenant's
   node count does not grow on revival).
-- **G9.1 read-verb visibility caveat.** The G9.1-T4 traversal CTE does
-  **not** yet filter `last_seen IS NULL` — a soft-deleted node is still
-  reachable by `find_dependents` / `find_dependencies` / `find_path`
-  until G9.3 layers a history-aware (point-in-time) read on top. In
-  G9.1, soft-delete is purely a *retention* mechanism for the future
-  history surface, not an immediate visibility change. Operators
+- **Read-verb visibility caveat.** The G9.1-T4 traversal CTE does
+  **not** filter `last_seen IS NULL` — a soft-deleted node is still
+  reachable by `find_dependents` / `find_dependencies` / `find_path`.
+  Point-in-time ("when did this disappear?") reads are served by the
+  separate G9.3 history/diff/timeline verbs over the retained rows;
+  G9.3 ([#365](https://github.com/evoila/meho/issues/365)) did not add
+  `last_seen` filtering to the traversal CTE. Soft-delete is purely a
+  *retention* mechanism, not an immediate visibility change for the
+  traversal verbs. Operators
   reading blast radius in v0.2 should treat the graph as
   last-refresh-wins; a stale edge persists until the next successful
   refresh of its owning target re-derives the snapshot.

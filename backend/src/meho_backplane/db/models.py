@@ -430,6 +430,19 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # RFC 8693 actor (``act.sub``) — the agent that acted on behalf of
+    # ``operator_sub`` in a user-initiated agent run (G11.2-T2 #816). MEHO
+    # synthesises the delegation binding at the resource server (Keycloak has
+    # no delegation token exchange), binding the acting agent's principal into
+    # the audit context for the run's lifetime. ``NULL`` for direct-user
+    # requests and for autonomous (``client_credentials``) agent runs, where
+    # the agent is the subject and there is no separate actor. Added by
+    # migration ``0021``.
+    actor_sub: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -460,6 +473,11 @@ class AuditLog(Base):
         Index(
             "audit_log_agent_session_id_idx",
             "agent_session_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "audit_log_actor_sub_idx",
+            "actor_sub",
             postgresql_using="btree",
         ),
     )

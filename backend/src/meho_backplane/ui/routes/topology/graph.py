@@ -64,7 +64,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from meho_backplane.db.models import GraphEdge, GraphNode
+from meho_backplane.db.models import _GRAPH_NODE_KINDS, GraphEdge, GraphNode
 from meho_backplane.topology.query import TopologyNodeListEntry, list_nodes
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -237,6 +237,13 @@ def _build_template_context(
     inside the code-quality function-size budget (the docstring +
     context literal pushed it over). The shape is documented inline
     -- every key is consumed by ``topology/graph.html``.
+
+    ``node_kind_options`` mirrors the T1 (#880) ``table.py`` pattern of
+    sourcing the kind filter dropdown from the closed enum
+    (:data:`meho_backplane.db.models._GRAPH_NODE_KINDS`) rather than
+    hard-coding the vocabulary in the template. When the closed enum
+    widens (a new connector contributes a new ``kind``), both the
+    table and graph dropdowns pick up the new option for free.
     """
     return {
         "page_title": "Topology",
@@ -249,6 +256,9 @@ def _build_template_context(
         "edge_count": edge_count,
         "graph_node_cap": GRAPH_NODE_CAP,
         "truncated": truncated,
+        # Sourced from the closed enum -- single source of truth shared
+        # with the T1 tabular surface (``table.py._node_kind_options``).
+        "node_kind_options": sorted(_GRAPH_NODE_KINDS),
         # ``selected_id`` is the cross-link payload: when the operator
         # clicks a table row's "Show in graph" button (or arrived via
         # ``?view=graph&selected=<id>`` from any source), the init
@@ -280,10 +290,17 @@ async def render_graph(
     params from the caller so the validation surface stays in the one
     place FastAPI sees -- the route definition.
 
-    The 500-node cap is enforced here (``limit=GRAPH_NODE_CAP``); a
-    returned list at the cap drives the truncation banner in the
-    template via ``truncated=True``. ``selected_id`` round-trips the
-    cross-link target from the table surface's ``?selected=`` param.
+    The 500-node cap is enforced here. To detect "more nodes exist
+    than we are willing to render" without a separate ``COUNT(*)`` round
+    trip, we ask the substrate for ``GRAPH_NODE_CAP + 1`` rows: if the
+    extra row materialises the banner flips on and the surplus row is
+    sliced off before the elements bag is emitted. The previous ``>=``
+    predicate at ``limit=GRAPH_NODE_CAP`` flagged a tenant with **exactly**
+    500 nodes as truncated, a boundary-off-by-one false positive. ``>``
+    on the ``CAP + 1`` fetch is the correct predicate -- the banner
+    fires only when the inventory genuinely exceeds the cap.
+    ``selected_id`` round-trips the cross-link target from the table
+    surface's ``?selected=`` param.
     """
     nodes = await list_nodes(
         db_session,
@@ -292,9 +309,11 @@ async def render_graph(
         name_contains=name_contains,
         sort="name",
         direction="asc",
-        limit=GRAPH_NODE_CAP,
+        limit=GRAPH_NODE_CAP + 1,
     )
-    truncated = len(nodes) >= GRAPH_NODE_CAP
+    truncated = len(nodes) > GRAPH_NODE_CAP
+    if truncated:
+        nodes = nodes[:GRAPH_NODE_CAP]
     edges = await _fetch_edges_for_nodes(
         db_session,
         tenant_id=session_ctx.tenant_id,

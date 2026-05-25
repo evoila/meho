@@ -434,6 +434,38 @@ def test_graph_does_not_show_truncation_banner_under_the_cap() -> None:
     assert f"Capped at {GRAPH_NODE_CAP}" not in response.text
 
 
+def test_graph_at_exactly_cap_does_not_show_truncation_banner() -> None:
+    """A tenant with exactly ``GRAPH_NODE_CAP`` nodes is NOT truncated.
+
+    Boundary regression. The pre-fix code used
+    ``limit=GRAPH_NODE_CAP`` + ``truncated = len(nodes) >= GRAPH_NODE_CAP``,
+    which fired the banner as a false-positive on tenants sitting at
+    exactly the cap. The fix asks the substrate for ``CAP + 1`` rows
+    and flips the predicate to ``>`` so the banner only fires when
+    the inventory genuinely exceeds the cap. This test seeds exactly
+    the cap and asserts the banner stays off + all rows render.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    for index in range(GRAPH_NODE_CAP):
+        _seed_node(tenant_id=_TENANT_A, kind="vm", name=f"vm-{index:04d}")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology?view=graph")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Banner stays off at the exact cap.
+    assert f"Capped at {GRAPH_NODE_CAP}" not in body
+    # And every node renders.
+    elements = _extract_data_island(body, "topology-graph-data")
+    assert isinstance(elements, list)
+    nodes = [e for e in elements if isinstance(e, dict) and e.get("group") == "nodes"]
+    assert len(nodes) == GRAPH_NODE_CAP, (
+        f"expected all {GRAPH_NODE_CAP} nodes to render at the boundary, got {len(nodes)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Filters
 # ---------------------------------------------------------------------------
@@ -476,6 +508,32 @@ def test_graph_filter_by_name_substring_narrows_results() -> None:
         e["data"]["name"] for e in elements if isinstance(e, dict) and e.get("group") == "nodes"
     }
     assert names == {"vm-prod-01"}
+
+
+def test_graph_kind_dropdown_matches_closed_enum() -> None:
+    """The graph view's kind dropdown sources its options from ``_GRAPH_NODE_KINDS``.
+
+    Regression for the previously hardcoded vocabulary in
+    ``graph.html``. T1's tabular surface already routes through
+    ``node_kind_options`` (sourced from the closed enum); the graph
+    surface now mirrors that, so a widening of the closed enum (a new
+    connector contributing a new kind) reaches both filter dropdowns
+    without a template edit. The test asserts every ``_GRAPH_NODE_KINDS``
+    member renders as an ``<option>`` in the graph view.
+    """
+    from meho_backplane.db.models import _GRAPH_NODE_KINDS
+
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology?view=graph")
+    assert response.status_code == 200, response.text
+    body = response.text
+    for kind in _GRAPH_NODE_KINDS:
+        assert f'<option value="{kind}"' in body, (
+            f"closed-enum kind {kind!r} missing from graph view's filter dropdown"
+        )
 
 
 # ---------------------------------------------------------------------------

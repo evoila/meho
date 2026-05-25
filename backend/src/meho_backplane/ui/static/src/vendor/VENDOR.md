@@ -26,7 +26,7 @@ loaded plugin (`@plugin "./vendor/daisyui.js"` in
 | `sse.min.js` | htmx-ext-sse | 2.2.4 | `98a46496de0c3605fbffdce9167ba427bdd9553184f83f149c261891a92c0136` | https://cdn.jsdelivr.net/npm/htmx-ext-sse@2.2.4/dist/sse.min.js |
 | `alpine.min.js` | Alpine.js | 3.15.12 | `57b37d7cae9a27d965fdae4adcc844245dfdc407e655aee85dcfff3a08036a3f` | https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js |
 | `cytoscape.min.js` | Cytoscape.js | 3.33.4 | `bcd83f0e31eb175026a811db6dc1f24b4326000edffa402a10d0748c5be557b4` | https://cdn.jsdelivr.net/npm/cytoscape@3.33.4/dist/cytoscape.min.js |
-| `layout-base.js` | layout-base | 2.0.1 | `ec15ab5df9af3f20708f4faab994accf91cda71848cd5bb10a23432cc50b6745` | https://cdn.jsdelivr.net/npm/layout-base@2.0.1/layout-base.js |
+| `layout-base.js` | layout-base | 2.0.1 | `f5c66be21c9cca16c4f25a576bffbd16ed1a48181c1c2dcbb8d905ec822e76b5` | https://cdn.jsdelivr.net/npm/layout-base@2.0.1/layout-base.js |
 | `cose-base.js` | cose-base | 2.2.0 | `7cae9509bd36235a63a85e71c8d9fa2cd0bc1d0c1ecc5b5a737976f39d040ddf` | https://cdn.jsdelivr.net/npm/cose-base@2.2.0/cose-base.js |
 | `cytoscape-cose-bilkent.js` | cytoscape-cose-bilkent | 4.1.0 | `9297c5b4245efd314941c622cb045fb96ffbfde3268985463745311699cae0b2` | https://cdn.jsdelivr.net/npm/cytoscape-cose-bilkent@4.1.0/cytoscape-cose-bilkent.js |
 | `cytoscape-dagre.js` | cytoscape-dagre | 3.0.0 | `1b060e1ffec6355e208d5ec4d49aa573000e8069eafbe01b1719a3bd630da290` | https://cdn.jsdelivr.net/npm/cytoscape-dagre@3.0.0/cytoscape-dagre.js |
@@ -81,6 +81,24 @@ cd backend/src/meho_backplane/ui/static/src/vendor/
 sha256sum -c <(awk -F'`' '/^\|/ && NF >= 8 {print $4 "  " $2}' VENDOR.md \
               | grep -v '^SHA256')
 ```
+
+**Line endings.** SHA256 values above are computed against the **committed
+git-blob bytes** (LF endings), which is what a fresh CI checkout on Linux
+sees and what the supply-chain audit trail tracks. The upstream npm
+tarball for `layout-base@2.0.1` ships CRLF endings, so on a developer's
+machine with `core.autocrlf=input` the working-tree checkout may have
+CRLFs restored; in that case the local `sha256sum -c` would diff against
+the recorded value despite the committed blob being correct. To re-verify
+against the committed bytes specifically:
+
+```bash
+git cat-file -p HEAD:backend/src/meho_backplane/ui/static/src/vendor/layout-base.js \
+  | sha256sum
+```
+
+CI verifies committed blobs (which is the boundary that matters); the
+working-tree recipe above is the human-friendly path that works as-is
+for the other three layout files (they ship LF-only upstream).
 
 ## Refresh procedure
 

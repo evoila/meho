@@ -124,9 +124,15 @@
         </select>
       </label>
       {# Hidden inputs carry the current sort + direction so the next
-         HTMX swap preserves them on top of the filter change. #}
+         HTMX swap preserves them on top of the filter change. The
+         ``selected`` hidden input carries the cross-link selection
+         (the graph surface's "show in table" payload) -- without it,
+         ``hx-include="closest form"`` + ``hx-push-url="true"`` would
+         drop ``?selected=`` from the URL on the first filter keystroke,
+         clearing the row highlight that the cross-link AC requires. #}
       <input type="hidden" name="sort" value="{{ sort.value }}" />
       <input type="hidden" name="direction" value="{{ direction.value }}" />
+      {% if selected_id %}<input type="hidden" name="selected" value="{{ selected_id }}" />{% endif %}
     </div>
   </form>
 

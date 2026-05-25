@@ -48,6 +48,18 @@ names.
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
   `/api/v1/retrieve` route (G0.4-T5 #262, `source="kb"` scoped)
   for the search verb.
+- `meho conventions ...` (G7.1-T3 #315) — tenant-conventions
+  operator surface (`list`, `show`, `create`, `edit`, `delete`,
+  `history`) wrapping the six `/api/v1/conventions*` routes
+  shipped by G7.1-T2 (#314). `edit` ships in two modes: flag-driven
+  PATCH (scripting path) and `$EDITOR` interactive (operator
+  conversational-edit path; fetches current body, opens
+  $EDITOR/$VISUAL/vi on a `.md` tempfile, submits saved content as
+  a `body`-only PATCH). `history` renders unified-diff per row
+  (body_before → body_after); `--json` exposes raw history rows
+  for `jq`/`diff -u` pipelines. The dropped-slug warning the issue
+  body expected on `list` lives behind a T4 API surface that hasn't
+  shipped yet; the verb is structurally ready.
 - `meho remember / recall / forget / list` (G5.1-T4 #424) — memory
   operator surface, registered as **top-level** verbs (no `memory`
   parent — per consumer-needs.md §G5's ergonomic shape:
@@ -136,6 +148,16 @@ cli/
     │   │   ├── show_test.go      # path-escape + Markdown body to stdout + 404 slug_not_found tests.
     │   │   ├── add_test.go       # body-from-file / @- / inline + metadata parse + 422 surface tests.
     │   │   └── delete_test.go    # confirm-prompt + idempotent-204 + --json envelope tests.
+    │   ├── conventions/      # G7.1-T3 #315 — `meho conventions …` verb tree.
+    │   │   ├── conventions.go    # NewRootCmd + shared HTTP/auth helpers + body/confirm helpers + $EDITOR seam (runEditor var).
+    │   │   ├── list.go           # `meho conventions list [--kind K]` (GET /api/v1/conventions); table or --json.
+    │   │   ├── show.go           # `meho conventions show <slug>` (GET /api/v1/conventions/{slug}); Markdown body to stdout.
+    │   │   ├── create.go         # `meho conventions create --slug --kind --title --body @file [--priority]` (POST /api/v1/conventions).
+    │   │   ├── edit.go           # `meho conventions edit <slug>` (PATCH /api/v1/conventions/{slug}); flag-driven OR $EDITOR interactive.
+    │   │   ├── delete.go         # `meho conventions delete <slug> [--confirm]` (DELETE /api/v1/conventions/{slug}).
+    │   │   ├── history.go        # `meho conventions history <slug> [--limit N]` (GET /api/v1/conventions/{slug}/history); unified-diff per row.
+    │   │   ├── conventions_test.go # helpers + register-all-six-verbs + body/confirm/path-escape contract tests.
+    │   │   └── crud_test.go      # per-verb HTTP-server tests: list table + JSON, show 404, create 409/422-over-budget, edit flag/$EDITOR modes + 422 inline surface, delete confirm/decline/404, history diffs + --limit + --json.
     │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list` (no parent).
     │   │   ├── memory.go         # Scope enum + Entry/ListResponse/RetrievalHit + shared HTTP/auth helpers + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
     │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --persist --json]` (POST /api/v1/memory). `--persist` (G5.2-T2 #624) sends explicit `expires_at: null` to opt out of the backend's default-7-day TTL on `memory-user` writes.

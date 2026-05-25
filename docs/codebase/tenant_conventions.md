@@ -10,9 +10,8 @@ models, and access patterns. Layer 2 lives in
 [docs/examples/consumer-onboarding/](../examples/consumer-onboarding/)
 (landed by sibling task #318).
 
-This document is current as of T2 (#314). Sibling tasks T3-T5 will
-extend it with the CLI, preamble assembler, and seed details as
-they land.
+This document is current as of T3 (#315). Sibling tasks T4-T5 will
+extend it with the preamble assembler and seed details as they land.
 
 ## Overview
 
@@ -203,6 +202,102 @@ The pre-allocation primitive is a small, additive chassis change
 v0.1 fresh-uuid behaviour). The alternative -- having the route
 write its own audit row (the topology-nodes pattern) -- would
 double-audit because the middleware also fires per HTTP request.
+
+## CLI surface (T3)
+
+T3 (#315) ships the `meho conventions ...` cobra subcommand tree
+[`cli/internal/cmd/conventions/`](../../cli/internal/cmd/conventions/).
+Each verb wraps exactly one T2 route; the audit log row + history
+row are written server-side, so the CLI is a thin HTTP client over
+the same JWT auth + bearer-refresh path the sibling `meho kb` /
+`meho agent` trees use.
+
+Six verbs:
+
+- **`meho conventions list [--kind K] [--json]`** -- GET
+  `/api/v1/conventions`. Renders a `SLUG | KIND | PRIORITY |
+  UPDATED | TITLE` table by default; `--json` emits the raw
+  `ConventionListResponse` envelope. `--kind` narrows by
+  `operational | workflow | reference` (CLI-side validation
+  rejects typos before the round-trip).
+- **`meho conventions show <slug> [--json]`** -- GET
+  `/api/v1/conventions/{slug}`. Writes the Markdown body to stdout
+  for `glow` / `bat -l md` pipelines; `--json` wraps the full
+  `Convention` shape.
+- **`meho conventions create --slug S --kind K --title T --body @file
+  [--priority N] [--json]`** -- POST `/api/v1/conventions`. `--body`
+  accepts inline text, `@<path>` to read a file, or `@-` for stdin;
+  the realistic shape is `@<path>` with a Markdown rule file. A
+  duplicate `(tenant, slug)` returns 409 with detail
+  `convention_already_exists`; an over-budget operational body
+  returns 422 with `estimated=X, budget=Y` surfaced verbatim.
+  `--priority` is omitted from the JSON body when unset so the
+  backend's default-0 server_default applies.
+- **`meho conventions edit <slug> [--title T] [--body @file]
+  [--priority N] [--json]`** -- PATCH `/api/v1/conventions/{slug}`,
+  two modes:
+  1. **Flag-driven PATCH** (any of `--title` / `--body` /
+     `--priority` set) -- sends only the explicitly-set fields,
+     mirroring pydantic's `model_fields_set` semantics on the
+     backend.
+  2. **`$EDITOR` interactive** (no field flag set) -- fetches the
+     current body (GET `/api/v1/conventions/{slug}`), opens
+     `$EDITOR` (or `$VISUAL`, fallback `vi`) on a `.md` tempfile
+     seeded with that body, and submits the saved content as a
+     `body`-only PATCH. Editor failure, empty saved buffer, or an
+     unchanged save aborts without an API call. A 422 over-budget
+     response surfaces inline (the operator sees `estimated=X,
+     budget=Y` before the buffer is discarded -- so they can
+     re-edit and retry without losing the work).
+- **`meho conventions delete <slug> [--confirm] [--json]`** --
+  DELETE `/api/v1/conventions/{slug}`. y/N prompt on stdin by
+  default; `--confirm` skips for scripted use. The substrate's
+  `body_after=<final body>` write into history preserves the
+  deleted convention for audit forensics.
+- **`meho conventions history <slug> [--limit N] [--json]`** -- GET
+  `/api/v1/conventions/{slug}/history`. Renders unified-diff
+  rendering of `body_before` -> `body_after` per row (the diff
+  shows what changed in that single edit; the CREATE row has no
+  body_before and renders the initial body as a `+`-block).
+  `--limit N` is a client-side cap; the route returns the full
+  trail. `--json` emits the raw history rows for `jq` pipelines or
+  for piping into a real `diff -u` if the unified view's
+  presence-set diff (a simplified renderer; see code comment for
+  why we don't ship Myers) isn't precise enough.
+
+Exit codes mirror the sibling verb trees:
+
+- `0` -- ok (including zero rows on `list`, declined prompt on
+  `delete`, no history on `history`).
+- `2` -- `auth_expired` (no stored token, refresh failed, bearer
+  rejected after refresh).
+- `3` -- `unreachable` (transport error against the backplane).
+- `4` -- `unexpected_response` (4xx / 5xx -- includes 404
+  `convention_not_found`, 409 `convention_already_exists`, 422
+  invalid / over-budget).
+- `5` -- `insufficient_role` (403 on write verbs without the
+  `tenant_admin` claim; the backend's detail naming the required
+  role surfaces in the error message).
+
+The CLI does **not** generate or mutate audit_log rows itself --
+those land server-side from the T2 routes via the audit middleware.
+
+**Dropped-slug warning (deferred to T4).** The issue body's
+acceptance criterion for `list` to surface "lowest-priority slugs
+that will be dropped when the tenant's operational set exceeds the
+preamble budget" depends on T4's preamble assembler returning
+`dropped_slugs` as part of an assembly pass. The T2 list endpoint
+returns only the `ConventionListResponse` envelope (entries +
+forward-compat fields); there is no `dropped_slugs` field on the
+GET surface today, so the CLI cannot synthesise the warning from a
+list call alone. T4 will either (a) add a query param to the list
+endpoint that runs a dry-run packing pass and returns
+`dropped_slugs`, or (b) expose a separate
+`GET /api/v1/conventions/preamble?dry_run=true` endpoint the CLI
+can call after `list`. The CLI verb's structural code path is
+ready -- once T4 ships the API surface, wiring the warning is a
+small additive PR (see `printOverBudgetWarning` placeholder
+discussion in `list.go`'s docstring).
 
 ## Dependencies
 

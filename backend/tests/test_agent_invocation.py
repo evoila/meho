@@ -45,6 +45,7 @@ from meho_backplane.agent.invocation import (
     AgentInvoker,
     AgentNotFoundError,
     AgentRunNotFoundError,
+    _finalize_child_run,
     _record_child_run,
     _resolve_child_definition,
 )
@@ -58,6 +59,7 @@ from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.db.models import AgentRunStatus, AgentRunTrigger, Tenant
+from meho_backplane.operations import agent_run as run_lifecycle
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
@@ -452,13 +454,14 @@ async def test_failed_loop_records_failed_run() -> None:
 
 def _composing_invoker_with(model: FunctionModel) -> AgentInvoker:
     """An invoker whose seam carries the FunctionModel *and* the real (DB-backed)
-    child resolver + recorder — exercises the live composition wiring end to end
-    (the default invoker wires the same two callables)."""
+    child resolver + recorder + finalizer — exercises the live composition wiring
+    end to end (the default invoker wires the same three callables)."""
     return AgentInvoker(
         runtime=PydanticAgentRun(
             model_factory=lambda: model,
             child_agent_resolver=_resolve_child_definition,
             child_run_recorder=_record_child_run,
+            child_run_finalizer=_finalize_child_run,
         )
     )
 
@@ -529,6 +532,7 @@ async def test_default_invoker_wires_composition() -> None:
     assert isinstance(runtime, PydanticAgentRun)
     assert runtime.child_agent_resolver is _resolve_child_definition
     assert runtime.child_run_recorder is _record_child_run
+    assert runtime.child_run_finalizer is _finalize_child_run
 
 
 async def test_resolver_scopes_to_tenant_and_enabled() -> None:
@@ -574,6 +578,11 @@ async def test_invoker_composition_persists_child_run_with_lineage() -> None:
     assert child_row.parent_run_id == outcome.run_id
     assert child_row.trigger == AgentRunTrigger.AGENT_INVOKED.value
     assert child_row.agent_definition_id is not None
+    # The finalizer (#1087) closed the child row to its terminal state with the
+    # child loop's output — not left stuck ``running``.
+    assert child_row.status == AgentRunStatus.SUCCEEDED.value
+    assert child_row.output == {"text": "child done"}
+    assert child_row.error is None
 
 
 async def test_invoker_composition_depth_capped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -610,3 +619,109 @@ async def test_invoker_composition_budget_capped(monkeypatch: pytest.MonkeyPatch
     # The shared budget (turn_budget=1) tripped far below the depth cap of 8 —
     # budget, not depth, bounded the cascade.
     assert len(children) < 8
+
+
+# ---------------------------------------------------------------------------
+# Child-run finalization (G11.1-T8 #1087) — invoked child rows reach a terminal
+# status (succeeded / failed) through the live AgentInvoker, not stuck running.
+# ---------------------------------------------------------------------------
+
+
+def _parent_invokes_failing_child(child_name: str, *, child_marker: str) -> FunctionModel:
+    """A model where the parent invokes *child_name* once then answers; the child
+    (detected by *child_marker*) loops on an op-less tool call so it exhausts its
+    own turn budget and the child loop fails with ``AgentRunError``."""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        is_child = any(
+            getattr(part, "part_kind", "") == "system-prompt"
+            and child_marker in getattr(part, "content", "")
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if is_child:
+            # Keep emitting an op-less tool call so the child never reaches a
+            # final answer -> its own turn budget trips -> AgentRunError.
+            return ModelResponse(parts=[ToolCallPart("noop_tool", {})])
+        # The failed child surfaces to the parent as a ``retry-prompt`` (the
+        # tool's ModelRetry). The parent invokes the child exactly once, then
+        # recovers on seeing that prompt so the *parent* run still succeeds —
+        # isolating the child's terminal status from the parent's outcome.
+        already_invoked = any(
+            getattr(part, "part_kind", "") == "retry-prompt"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if not already_invoked:
+            return ModelResponse(
+                parts=[ToolCallPart("invoke_agent", {"agent_name": child_name, "inputs": "sub"})]
+            )
+        return ModelResponse(parts=[TextPart("parent recovered")])
+
+    return FunctionModel(fn)
+
+
+async def test_invoker_composition_finalizes_failed_child() -> None:
+    """An over-budget child run reaches ``status='failed'`` with the error
+    recorded — the finalizer closes a failed child, it is not stuck ``running``.
+
+    The parent's ``invoke_agent`` of the failing child surfaces as a
+    ``ModelRetry`` the parent recovers from, so the *parent* succeeds while the
+    *child* row is ``failed`` — proving the child lifecycle is finalized
+    independently of the parent's outcome.
+    """
+    await _seed_definition(
+        name="parent", toolset={"meta_tools": []}, system_prompt="You are the PARENT."
+    )
+    await _seed_definition(
+        name="child",
+        toolset={"meta_tools": []},
+        system_prompt="You are the CHILD-AGENT.",
+        turn_budget=1,
+    )
+    invoker = _composing_invoker_with(
+        _parent_invokes_failing_child("child", child_marker="CHILD-AGENT")
+    )
+
+    outcome = await invoker.run(_make_operator(), "parent", "delegate")
+
+    assert outcome.status is AgentRunStatus.SUCCEEDED  # parent recovered
+    children = await _agent_invoked_rows(_TENANT_A)
+    assert len(children) == 1
+    child_row = children[0]
+    assert child_row.status == AgentRunStatus.FAILED.value
+    assert child_row.error is not None
+    assert "turn budget exhausted" in child_row.error
+    assert child_row.output is None
+
+
+async def test_finalize_child_run_swallows_illegal_transition() -> None:
+    """A finalizer call against an already-terminal child row swallows the
+    ``IllegalTransitionError`` (mirrors ``_finalize_run``) — e.g. the row was
+    cancelled mid-flight before the finalizer ran."""
+    await _seed_definition(name="child", toolset={"meta_tools": []})
+    op = _make_operator()
+    # Record a child row (pending -> running), then drive it to a terminal
+    # state out-of-band, simulating a cancel landing before the finalizer runs.
+    child_def = await _resolve_child_definition(op, "child")
+    assert child_def is not None
+    child_run_id = await _record_child_run(operator=op, definition=child_def, parent_run_id=None)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await run_lifecycle.get_run(session, child_run_id)
+        assert row is not None
+        await run_lifecycle.cancel_run(session, child_run_id, operator=op)
+        await session.commit()
+
+    # The finalizer must not raise even though the row is already terminal.
+    await _finalize_child_run(child_run_id, output="late answer", error=None)
+
+    async with sessionmaker() as session:
+        row = await run_lifecycle.get_run(session, child_run_id)
+        assert row is not None
+        # The cancel's terminal state stands; the finalizer did not overwrite it.
+        assert row.status == AgentRunStatus.CANCELLED.value
+        assert row.output is None

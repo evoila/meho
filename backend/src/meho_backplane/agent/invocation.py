@@ -63,8 +63,9 @@ the operator's tenant owns (cross-tenant run ids surface as
 
 # code-quality-allow: file-size — this is the agent-runtime orchestration
 # module. The T7 #1067 composition wiring (_resolve_child_definition /
-# _record_child_run) reuses the invoker's _to_agent_definition + the module's
-# _split_model_id, so it belongs here; pulling it (or the pre-existing error
+# _record_child_run) and the T8 #1087 finalizer (_finalize_child_run) reuse the
+# invoker's _to_agent_definition / _finalize_run / _project_output + the module's
+# _split_model_id, so they belong here; pulling them (or the pre-existing error
 # classes / dataclasses) into a separate file fragments a cohesive unit or
 # introduces an import cycle with no readability gain.
 
@@ -241,14 +242,18 @@ class AgentInvoker:
     def __init__(self, *, runtime: AgentRun | None = None) -> None:
         # The default runtime wires agent-invokes-agent composition (G11.1-T7
         # #1067): the live surface owns the tenant-scoped child resolver + the
-        # child-run recorder, so a run started here can invoke another agent.
-        # An injected runtime (tests) controls its own wiring.
+        # child-run recorder, so a run started here can invoke another agent. The
+        # finalizer (G11.1-T8 #1087) closes each recorded child row to its
+        # terminal state, so an invoked child reaches ``succeeded`` / ``failed``
+        # rather than staying stuck ``running``. An injected runtime (tests)
+        # controls its own wiring.
         self._runtime: AgentRun = (
             runtime
             if runtime is not None
             else PydanticAgentRun(
                 child_agent_resolver=_resolve_child_definition,
                 child_run_recorder=_record_child_run,
+                child_run_finalizer=_finalize_child_run,
             )
         )
         self._store: dict[uuid.UUID, _RunState] = {}
@@ -632,6 +637,34 @@ async def _record_child_run(
         child_run_id = row.id
         await session.commit()
     return child_run_id
+
+
+async def _finalize_child_run(
+    run_id: uuid.UUID,
+    *,
+    output: object,
+    error: str | None,
+) -> None:
+    """Close a recorded child ``agent_run`` row to its terminal state.
+
+    The :class:`~meho_backplane.agent.invoke.ChildRunFinalizer` the live invoker
+    injects (G11.1-T8 #1087), the companion to :func:`_record_child_run`. After
+    the child loop returns or fails, ``invoke_agent`` calls this with the child's
+    loop ``output`` (on success) or the ``error`` (on
+    :class:`~meho_backplane.agent.run.AgentRunError`), so the child row reaches
+    ``succeeded`` / ``failed`` instead of staying stuck ``running``. Reuses
+    :meth:`AgentInvoker._finalize_run`'s shape verbatim -- load the row fresh
+    (the create transaction is long closed), project the raw output with
+    :func:`_project_output`, apply ``succeed_run`` / ``fail_run``, and swallow
+    :class:`~meho_backplane.operations.agent_run.IllegalTransitionError` when a
+    terminal state already landed (e.g. an operator cancelled the child
+    mid-flight -- the cancel already wrote the terminal row).
+    """
+    await AgentInvoker._finalize_run(
+        run_id,
+        output=None if error is not None else _project_output(output),
+        error=error,
+    )
 
 
 def _row_to_view(row: AgentRunRow) -> AgentRunStatusView:

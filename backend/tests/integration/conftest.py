@@ -385,11 +385,13 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   is a real ``REFERENCES tenant(id)`` FK; omitting it causes PG to
         #   reject the TRUNCATE with ``cannot truncate a table referenced in
         #   a foreign key constraint``.
+        # * ``scheduled_trigger`` — migration 0020 (G11.3-T1 #822) carries
+        #   real FKs to ``tenant(id)`` and ``agent_definition(id)``; same rule.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_principal, agent_run, audit_log, documents, "
-                "graph_edge, graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, agent_definition, tenant",
+                "TRUNCATE TABLE agent_principal, scheduled_trigger, agent_run, "
+                "audit_log, documents, graph_edge, graph_edge_history, graph_node, "
+                "graph_node_history, broadcast_override, agent_definition, tenant",
             ),
         )
         # Re-seed two pinned tenant rows so the integration suite
@@ -448,9 +450,9 @@ async def pg_engine_empty_tenant(
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_principal, agent_run, audit_log, documents, "
-                "graph_edge, graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, agent_definition, tenant",
+                "TRUNCATE TABLE agent_principal, scheduled_trigger, agent_run, "
+                "audit_log, documents, graph_edge, graph_edge_history, graph_node, "
+                "graph_node_history, broadcast_override, agent_definition, tenant",
             ),
         )
         await conn.commit()

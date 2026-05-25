@@ -200,6 +200,11 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "graph_node",
     "graph_node_history",
     "operation_group",
+    # ``scheduled_trigger.tenant_id`` and ``.agent_definition_id`` are real
+    # ``REFERENCES`` FKs from migration ``0020`` (G11.3-T1 #822); the table
+    # must be listed so the non-cascading multi-table TRUNCATE can drop
+    # ``tenant`` / ``agent_definition`` without a FK-constraint error.
+    "scheduled_trigger",
     "targets",
     "tenant",
 )

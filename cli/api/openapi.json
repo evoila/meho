@@ -4387,6 +4387,194 @@
         }
       }
     },
+    "/api/v1/approvals": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "List Approvals",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired``. Returns newest-first (``created_at DESC``).",
+        "operationId": "list_approvals_api_v1_approvals_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'.",
+              "default": "pending",
+              "title": "Status"
+            },
+            "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApprovalRequestView"
+                  },
+                  "title": "Response List Approvals Api V1 Approvals Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/approve": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Approve Approval Request",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully.\n* 403 \u2014 operator lacks ``operator`` role.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch.",
+        "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApproveResponseBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/reject": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Reject Approval Request",
+        "description": "Reject a pending request; the original operation is not executed.\n\nHTTP status codes:\n\n* 200 \u2014 rejected successfully.\n* 403 \u2014 operator lacks ``operator`` role.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.",
+        "operationId": "reject_approval_request_api_v1_approvals__request_id__reject_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RejectRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RejectResponseBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conventions": {
       "get": {
         "tags": [
@@ -5992,6 +6180,176 @@
         ],
         "title": "AgentRunStatusResponse",
         "description": "Poll response for ``GET /agents/runs/{handle}``."
+      },
+      "ApprovalRequestStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "approved",
+          "rejected",
+          "expired"
+        ],
+        "title": "ApprovalRequestStatus",
+        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent permission model), Task #817 (T4). The\napproval queue parks a ``requires_approval`` dispatch durably; the\nrow walks a simple four-state lifecycle enforced by the service\n(:mod:`meho_backplane.operations.approval_queue`).\n\nMembers:\n\n* :attr:`PENDING` -- the request was written but no decision has\n  been made (initial state on insert). The associated agent run (if\n  any) is in ``awaiting_approval``.\n* :attr:`APPROVED` -- an authorized operator approved the request;\n  the dispatcher has re-executed the original call. Terminal.\n* :attr:`REJECTED` -- an authorized operator rejected the request;\n  the original call was not executed. Terminal.\n* :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a\n  decision; the expiry sweep transitioned the row and wrote the\n  decision audit row. Terminal.\n\nThe enum and the ``CHECK (status IN (...))`` constraint on the DB\ntable move in lock-step (migration ``0023``); the drift guard\n:func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`\nasserts equality at unit-test time."
+      },
+      "ApprovalRequestView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Run Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "principal_act": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Act"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id"
+          },
+          "params_hash": {
+            "type": "string",
+            "title": "Params Hash"
+          },
+          "proposed_effect": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Proposed Effect"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ApprovalRequestStatus"
+          },
+          "reviewed_by": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reviewed By"
+          },
+          "decided_at": {
+            "type": "string",
+            "nullable": true,
+            "title": "Decided At"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "type": "string",
+            "nullable": true,
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "run_id",
+          "principal_sub",
+          "principal_act",
+          "op_id",
+          "connector_id",
+          "target_id",
+          "params_hash",
+          "proposed_effect",
+          "status",
+          "reviewed_by",
+          "decided_at",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "ApprovalRequestView",
+        "description": "Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."
+      },
+      "ApproveRequestBody": {
+        "properties": {
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params",
+            "description": "The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ApproveRequestBody",
+        "description": "POST body for ``\u2026/approve``."
+      },
+      "ApproveResponseBody": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          },
+          "dispatch_status": {
+            "type": "string",
+            "title": "Dispatch Status"
+          },
+          "dispatch_op_id": {
+            "type": "string",
+            "title": "Dispatch Op Id"
+          },
+          "dispatch_result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "nullable": true,
+            "title": "Dispatch Result"
+          },
+          "dispatch_error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Dispatch Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "decision",
+          "dispatch_status",
+          "dispatch_op_id",
+          "dispatch_result",
+          "dispatch_error"
+        ],
+        "title": "ApproveResponseBody",
+        "description": "Response for a successful approve + re-dispatch."
       },
       "AuditEntry": {
         "properties": {
@@ -8083,6 +8441,45 @@
         ],
         "title": "RefreshResult",
         "description": "Per-target reconcile outcome returned by :func:`refresh_target_topology`.\n\nCounts are disjoint per object class: a node is counted in exactly\none of added / updated / removed (or none, when unchanged). The same\nholds for edges. ``duration_ms`` is wall-clock for the whole\nresolve + discover + reconcile + commit cycle."
+      },
+      "RejectRequestBody": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Optional human-readable rejection reason (recorded in the audit row).",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RejectRequestBody",
+        "description": "POST body for ``\u2026/reject``."
+      },
+      "RejectResponseBody": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "decision",
+          "reason"
+        ],
+        "title": "RejectResponseBody",
+        "description": "Response for a successful rejection."
       },
       "RememberBody": {
         "properties": {

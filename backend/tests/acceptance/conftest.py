@@ -188,6 +188,11 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # errors at setup with ``cannot truncate a table referenced in a
     # foreign key constraint``.
     "agent_run",
+    # ``approval_request.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
+    # from migration ``0023`` (G11.2-T4 #817). Same rule: PG rejects
+    # truncating ``tenant`` unless every referencing table is listed in
+    # the same statement.
+    "approval_request",
     "audit_log",
     "broadcast_override",
     "documents",

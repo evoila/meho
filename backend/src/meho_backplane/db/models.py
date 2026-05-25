@@ -3464,3 +3464,200 @@ class ScheduledTrigger(Base):
             name="ck_scheduled_trigger_kind_fields",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Approval queue (G11.2-T4 / #817)
+# ---------------------------------------------------------------------------
+
+
+class ApprovalRequestStatus(StrEnum):
+    """Closed lifecycle status of an :class:`ApprovalRequest`.
+
+    Initiative #803 (G11.2 Agent permission model), Task #817 (T4). The
+    approval queue parks a ``requires_approval`` dispatch durably; the
+    row walks a simple four-state lifecycle enforced by the service
+    (:mod:`meho_backplane.operations.approval_queue`).
+
+    Members:
+
+    * :attr:`PENDING` -- the request was written but no decision has
+      been made (initial state on insert). The associated agent run (if
+      any) is in ``awaiting_approval``.
+    * :attr:`APPROVED` -- an authorized operator approved the request;
+      the dispatcher has re-executed the original call. Terminal.
+    * :attr:`REJECTED` -- an authorized operator rejected the request;
+      the original call was not executed. Terminal.
+    * :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a
+      decision; the expiry sweep transitioned the row and wrote the
+      decision audit row. Terminal.
+
+    The enum and the ``CHECK (status IN (...))`` constraint on the DB
+    table move in lock-step (migration ``0023``); the drift guard
+    :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
+    asserts equality at unit-test time.
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+#: Closed ``approval_request.status`` vocabulary derived from the enum --
+#: kept in sync with migration ``0023``'s ``_APPROVAL_REQUEST_STATUSES``
+#: literal. The drift guard asserts equality so the two never diverge.
+_APPROVAL_REQUEST_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalRequestStatus)
+
+
+class ApprovalRequest(Base):
+    """One pending (or decided) approval request for a ``requires_approval`` op.
+
+    Initiative #803 (G11.2 Agent permission model), Task #817 (T4). When
+    the policy gate returns ``requires_approval=True`` for an agent
+    principal, the dispatcher creates one of these rows instead of
+    executing the op. The row parks the dispatch durably (process
+    restarts cannot lose it), surfaces the pending request to human
+    reviewers, and provides the resume hook: approve → re-dispatch with
+    the original params; reject → abort cleanly.
+
+    Two synchronous audit rows accompany every approval request:
+
+    1. A **"request"** audit row written when the pending row is created
+       (same transaction). ``method='APPROVAL'``, ``path='approval.request'``.
+    2. A **"decision"** audit row written when the request transitions to
+       ``approved`` / ``rejected`` / ``expired`` (same transaction). The
+       decision row is **not** inserted until the row's status commits —
+       mirroring the dispatcher's synchronous-audit invariant.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key. PG-side ``gen_random_uuid()``; ORM
+      ``default=uuid.uuid4`` for SQLite.
+
+    * ``tenant_id`` -- UUID NOT NULL, real FK to ``tenant.id``. Clean-
+      slate table; hard FK enforced (no ondelete — tenant deletion must
+      clear requests first). Same discipline as ``agent_run`` (0017).
+
+    * ``run_id`` -- UUID nullable, soft-FK to ``agent_run.id``. Set when
+      the request came from an in-flight agent run; NULL otherwise. Soft
+      FK mirrors ``audit_log.agent_session_id`` (0014).
+
+    * ``principal_sub`` / ``principal_act`` -- RFC 8693 ``sub`` / ``act``
+      pair from the dispatching operator. ``sub`` NOT NULL (every request
+      has a responsible principal); ``act`` nullable (NULL for direct human
+      calls without delegation).
+
+    * ``op_id`` / ``connector_id`` -- the operation + connector the
+      dispatcher was asked to call. Stored verbatim for resume.
+
+    * ``target_id`` -- UUID nullable, soft-FK (no clause). The target the
+      dispatch was scoped to; NULL for tenant-wide ops. Same discipline as
+      ``audit_log.target_id`` (0004).
+
+    * ``params_hash`` -- SHA-256 hex hash of the canonicalised params
+      (from :func:`~meho_backplane.operations._validate.compute_params_hash`).
+      Does not persist the params themselves; the resume endpoint
+      re-hashes its params against this value to detect substitution.
+
+    * ``proposed_effect`` -- JSON (JSONB on PG). Human-readable summary of
+      what the op would do if approved; populated at queue time; JSONB for
+      GIN filtering. NOT NULL, DEFAULT ``{}``.
+
+    * ``status`` -- Closed enum, DB ``CHECK``, default ``'pending'``.
+
+    * ``reviewed_by`` -- Text nullable. ``sub`` of the approver / rejecter.
+
+    * ``decided_at`` -- ``timestamptz`` nullable. Stamped on decision.
+
+    * ``created_at`` -- ``timestamptz`` NOT NULL.
+
+    * ``expires_at`` -- ``timestamptz`` nullable. Expiry deadline; NULL
+      means no deadline.
+
+    Indexes
+    -------
+
+    * ``approval_request_tenant_created_at_idx`` -- ``(tenant_id, created_at)``.
+    * ``approval_request_status_idx`` -- ``status``.
+    * ``approval_request_run_id_idx`` -- ``run_id``.
+    """
+
+    __tablename__ = "approval_request"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK -- clean-slate substrate (see class docstring).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Soft-FK to agent_run.id -- NULL for non-agent-run requests.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    # RFC 8693 delegation pair -- mirrors agent_run.identity_sub / _act.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    principal_act: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Dispatch coordinates for resume.
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    params_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # Proposed effect -- human-readable summary for the reviewer.
+    proposed_effect: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=ApprovalRequestStatus.PENDING.value,
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "approval_request_tenant_created_at_idx",
+            "tenant_id",
+            "created_at",
+            postgresql_using="btree",
+        ),
+        Index(
+            "approval_request_status_idx",
+            "status",
+            postgresql_using="btree",
+        ),
+        Index(
+            "approval_request_run_id_idx",
+            "run_id",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _APPROVAL_REQUEST_STATUSES),
+            name="ck_approval_request_status",
+        ),
+    )

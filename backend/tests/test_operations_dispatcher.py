@@ -1178,15 +1178,19 @@ async def test_dispatch_pending_caution_op_no_permission_row(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``safety_level='caution'`` + no permission row → ``pending`` (agent).
+    """``safety_level='caution'`` + no permission row → ``awaiting_approval`` (agent).
 
     G11.2-T3: for an **agent** principal the ``caution`` default is
-    ``needs-approval``; the dispatcher writes an audit row with
-    ``result_status='pending'`` and returns :func:`result_pending`
-    (HTTP 202). The durable approval-queue mechanics (G11.2-T4, #817)
-    will act on this pending state. Humans keep auto-execute — see
+    ``needs-approval``. G11.2-T4: that verdict now routes through the
+    durable approval queue — the dispatcher writes an
+    :class:`~meho_backplane.db.models.ApprovalRequest` pending row plus a
+    synchronous ``approval.request`` audit row and returns an
+    ``awaiting_approval`` result (HTTP 202); the op itself does not
+    execute. Humans keep auto-execute — see
     ``test_dispatch_human_caution_op_auto_executes``.
     """
+    from meho_backplane.db.models import ApprovalRequest
+
     register_connector_v2(
         product="vault",
         version="",
@@ -1216,24 +1220,40 @@ async def test_dispatch_pending_caution_op_no_permission_row(
         target=target,
         params={},
     )
-    assert result.status == "pending"
+    assert result.status == "awaiting_approval"
     assert result.error is not None
-    assert result.error.startswith("pending:")
-    assert result.extras["error_code"] == "pending"
+    assert result.error.startswith("awaiting_approval:")
+    assert result.extras["error_code"] == "awaiting_approval"
+    assert "approval_request_id" in result.extras
 
+    approval_request_id = UUID(result.extras["approval_request_id"])
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
-        rows = (
+        pending_row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert pending_row is not None
+        assert pending_row.status == "pending"
+        assert pending_row.op_id == "vault.kv.caution"
+
+        # The op itself did not execute → no audit row on its own path.
+        op_rows = (
             (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.caution")))
             .scalars()
             .all()
         )
-    assert len(rows) == 1
-    assert rows[0].payload["result_status"] == "pending"
-    assert rows[0].status_code == 202
+        assert len(op_rows) == 0
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "pending"
+        # A synchronous "request" audit row landed for the approval.
+        request_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.request")))
+            .scalars()
+            .all()
+        )
+    assert len(request_rows) == 1
+    assert request_rows[0].status_code == 202
+
+    # The approval-queue path writes audit directly, not via the
+    # broadcast helper, so no broadcast event is emitted here.
+    assert len(captured_events) == 0
 
 
 @pytest.mark.asyncio
@@ -1349,13 +1369,14 @@ async def test_dispatch_agent_requires_approval_floors_safe_op_to_pending(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``requires_approval=True`` floors an agent's ``safe`` op to pending.
+    """``requires_approval=True`` floors an agent's ``safe`` op to approval.
 
     For an agent the resolver would auto-execute a ``safe`` op by default,
     but ``requires_approval`` folds the verdict up to ``needs-approval``
     so a connector-flagged op is never auto-executed by an agent
     regardless of its ``safety_level`` (Major 5: ``requires_approval``
-    stays a live enforcement signal for agents).
+    stays a live enforcement signal for agents). G11.2-T4 routes that
+    verdict to the durable approval queue → ``awaiting_approval``.
     """
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
@@ -1380,8 +1401,9 @@ async def test_dispatch_agent_requires_approval_floors_safe_op_to_pending(
         target=_FakeTarget(product="vault"),
         params={},
     )
-    assert result.status == "pending"
-    assert result.extras["error_code"] == "pending"
+    assert result.status == "awaiting_approval"
+    assert result.extras["error_code"] == "awaiting_approval"
+    assert "approval_request_id" in result.extras
 
 
 # ---------------------------------------------------------------------------

@@ -17,14 +17,18 @@ phases the parent Initiative names:
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
    Invalid -> structured ``invalid_params`` error.
-4. Policy gate (G11.2-T3;
+4. Policy gate (G11.2-T3 + T4;
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
-   principals resolve a three-state verdict (``auto-execute`` /
-   ``needs-approval`` -> ``pending`` (202) / ``deny`` -> ``denied``) via
-   the per-(principal, op, target) permission model; **human / service**
+   principals resolve a three-state
+   :class:`~meho_backplane.db.models.PermissionVerdict` via the
+   per-(principal, op, target) permission model; **human / service**
    principals keep the v0.2 contract (default-allow except
-   ``requires_approval=True`` -> ``denied``). Only ``auto-execute``
-   proceeds; any other verdict fails closed.
+   ``requires_approval=True`` -> ``deny``). Branches:
+   ``auto-execute`` proceeds; ``needs-approval`` ->
+   :func:`~meho_backplane.operations.approval_queue.create_pending_request`
+   writes a durable :class:`~meho_backplane.db.models.ApprovalRequest`
+   row and returns an ``awaiting_approval`` result (G11.2-T4 #817);
+   ``deny`` -> ``denied`` result. Any other verdict fails closed.
 5. Resolve the connector class via
    :func:`~meho_backplane.connectors.resolver.resolve_connector` and
    instantiate it (cached at module level). Resolver miss ->
@@ -56,7 +60,10 @@ Detail payloads land in ``extras``. Codes:
 * ``no_connector`` -- resolver couldn't pick a connector for the target.
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
-* ``denied`` -- the policy gate denied the call.
+* ``denied`` -- the policy gate issued an outright ``deny`` verdict.
+* ``awaiting_approval`` -- the policy gate issued a ``needs_approval``
+  verdict; a durable :class:`~meho_backplane.db.models.ApprovalRequest`
+  row was created. ``extras["approval_request_id"]`` carries the UUID.
 * ``connector_error`` -- the connector / handler raised. The raised
   exception's class name lands in ``extras["exception_class"]``;
   the (length-capped) message in ``extras["exception_message"]``.
@@ -119,12 +126,12 @@ from meho_backplane.operations._branches import (
     dispatch_typed,
 )
 from meho_backplane.operations._errors import (
+    result_awaiting_approval,
     result_connector_error,
     result_denied,
     result_handler_unreachable,
     result_invalid_params,
     result_no_connector,
-    result_pending,
     result_unknown_op,
     wrap_ok_result,
 )
@@ -475,6 +482,70 @@ async def _reduce_or_error(
         return result_connector_error(op_id, exc, duration_ms)
 
 
+async def _handle_needs_approval(
+    *,
+    op_id: str,
+    connector_id: str,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Create a durable pending approval row and return an awaiting_approval result.
+
+    G11.2-T4 (#817). Called when :func:`policy_gate` returns
+    ``"needs_approval"``. Opens its own DB session (same pattern as
+    :func:`audit_and_broadcast_safe`) so the pending row + request audit
+    row commit atomically without coupling to any outer transaction.
+
+    On success returns :func:`~meho_backplane.operations._errors.result_awaiting_approval`
+    with the pending row's id in ``extras["approval_request_id"]``.
+    On unexpected failure, logs at error level and falls back to a
+    ``denied`` result so the dispatcher never raises.
+    """
+    # Thread the current agent run id (if any) from the contextvar so the
+    # approval request links back to the paused run.
+    from meho_backplane.agent.invoke import current_agent_run_id_var
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations.approval_queue import create_pending_request
+
+    run_id = current_agent_run_id_var.get()
+
+    try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            request = await create_pending_request(
+                session,
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                run_id=run_id,
+            )
+            await session.commit()
+        return result_awaiting_approval(op_id, request.id, duration_ms)
+    except Exception:
+        import structlog as _structlog
+
+        _log = _structlog.get_logger(__name__)
+        _log.exception(
+            "approval_queue_create_failed",
+            op_id=op_id,
+            operator_sub=operator.sub,
+        )
+        # Fall back to denied so the caller gets a structured result
+        # and the dispatcher's "never raises" contract is preserved.
+        return result_denied(
+            op_id,
+            "requires_approval is True; approval queue unavailable",
+            duration_ms,
+        )
+
+
 async def dispatch(
     *,
     operator: Operator,
@@ -482,12 +553,23 @@ async def dispatch(
     op_id: str,
     target: Any,
     params: dict[str, Any],
+    _approved: bool = False,
 ) -> OperationResult:
     """Single entry point for every MEHO operation.
 
     See the module docstring for the full algorithm + error contract.
     The function never raises; every operator-visible failure mode
     returns a structured :class:`OperationResult`.
+
+    ``_approved`` is an **internal** flag set only by the approval-queue
+    resume path (:mod:`meho_backplane.api.v1.approvals`) after a human
+    operator has explicitly approved a parked ``needs-approval`` request.
+    It skips the policy gate (Step 4) because the approval decision *is*
+    the authorization — re-running the gate would re-deny (the reviewer is
+    a human, hard-denied on ``requires_approval``) or re-queue (an agent
+    re-hits ``needs-approval``), so an approved op would never execute.
+    It is not part of the public agent/MCP/CLI surface; the gate is the
+    only authorization path for an ordinary dispatch.
     """
     started = time.monotonic()
     params_hash = compute_params_hash(params)
@@ -515,58 +597,66 @@ async def dispatch(
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
 
     # --- Step 4: policy gate ---------------------------------------------
-    # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
-    # / deny). The call site signature is unchanged; the function now
-    # awaits a DB read to load the principal's AgentPermission rows.
-    verdict, gate_reason = await policy_gate(
-        operator=operator, descriptor=descriptor, target=target
-    )
-    if verdict == PermissionVerdict.DENY:
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=uuid.uuid4(),
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="denied",
-            duration_ms=duration_ms,
+    # Skipped on the approval-queue resume path (``_approved``): a human
+    # operator already approved this exact call, so re-running the gate
+    # would only re-deny or re-queue it. The approval is the authorization.
+    if not _approved:
+        # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
+        # / deny). The call site signature is unchanged; the function now
+        # awaits a DB read to load the principal's AgentPermission rows.
+        verdict, gate_reason = await policy_gate(
+            operator=operator, descriptor=descriptor, target=target
         )
-        return result_denied(op_id, gate_reason or "policy denied", duration_ms)
-    if verdict == PermissionVerdict.NEEDS_APPROVAL:
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=uuid.uuid4(),
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="pending",
-            duration_ms=duration_ms,
-        )
-        return result_pending(op_id, gate_reason or "needs approval", duration_ms)
-    if verdict is not PermissionVerdict.AUTO_EXECUTE:
-        # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds to
-        # execution. Any unexpected verdict (a future enum member, a bug
-        # in the resolver) denies rather than silently executing.
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=uuid.uuid4(),
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="denied",
-            duration_ms=duration_ms,
-        )
-        return result_denied(
-            op_id,
-            gate_reason or f"unexpected policy verdict {verdict!r}; denied",
-            duration_ms,
-        )
+        if verdict == PermissionVerdict.DENY:
+            duration_ms = _elapsed_ms(started)
+            await audit_and_broadcast_safe(
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                result_status="denied",
+                duration_ms=duration_ms,
+            )
+            return result_denied(op_id, gate_reason or "policy denied", duration_ms)
+        if verdict == PermissionVerdict.NEEDS_APPROVAL:
+            # G11.2-T4 (#817): write a durable ApprovalRequest row (+ its
+            # synchronous "request" audit row) and return an
+            # awaiting_approval result. Only agent principals reach this
+            # branch — the T3 gate hard-denies requires_approval for
+            # human/service principals.
+            duration_ms = _elapsed_ms(started)
+            return await _handle_needs_approval(
+                op_id=op_id,
+                connector_id=connector_id,
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=duration_ms,
+            )
+        if verdict is not PermissionVerdict.AUTO_EXECUTE:
+            # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds
+            # to execution. Any unexpected verdict (a future enum member, a
+            # bug in the resolver) denies rather than silently executing.
+            duration_ms = _elapsed_ms(started)
+            await audit_and_broadcast_safe(
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                result_status="denied",
+                duration_ms=duration_ms,
+            )
+            return result_denied(
+                op_id,
+                gate_reason or f"unexpected policy verdict {verdict!r}; denied",
+                duration_ms,
+            )
 
     # --- Step 5: connector resolution -------------------------------------
     connector_instance, resolution_error = await _resolve_connector_instance(descriptor, target)

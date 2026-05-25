@@ -15,7 +15,10 @@ call:
   compatible) validation. Returns a list of structured error dicts;
   empty list = valid.
 * :func:`policy_gate` -- v0.2 default-allow with the
-  ``requires_approval`` honor; G7 / G10 swap in the real engine here
+  ``requires_approval`` honor. G11.2-T4 (#817) replaces the v0.2
+  hard-deny with a ``needs_approval`` verdict so the dispatcher can
+  write a durable pending row and return an ``awaiting_approval``
+  result instead of a denial. G7 / G10 can extend the gate further
   without re-touching every dispatch call site.
 """
 
@@ -23,7 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from jsonschema import Draft202012Validator
@@ -32,12 +35,23 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
+    "PolicyVerdict",
     "compute_params_hash",
     "policy_gate",
     "validate_params",
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Three-valued verdict returned by :func:`policy_gate`. The dispatcher
+#: branches on this value:
+#:
+#: * ``"allow"`` -- proceed to connector resolution + execution.
+#: * ``"needs_approval"`` -- write a durable :class:`~meho_backplane.db.models.ApprovalRequest`
+#:   row and return an ``awaiting_approval`` result to the caller.
+#: * ``"deny"`` -- write a ``denied`` audit row and return a ``denied``
+#:   result (reserved for outright blocks; not used in v0.2).
+PolicyVerdict = Literal["allow", "needs_approval", "deny"]
 
 
 def compute_params_hash(params: dict[str, Any]) -> str:
@@ -96,27 +110,39 @@ def policy_gate(
     operator: Operator,
     descriptor: EndpointDescriptor,
     target: Any,
-) -> tuple[bool, str | None]:
+) -> tuple[PolicyVerdict, str | None]:
     """v0.2 default-allow policy gate.
 
-    Returns ``(allowed, reason_or_None)``. G7 / G10 hooks into this
-    function -- when those Goals land, the body grows the real policy
-    decision and the dispatcher's call site stays unchanged. The
-    structured-log line ``policy_gate_default_allow`` is the operator's
-    signal that no real policy is in effect (a future audit query can
-    count these events to verify the upgrade landed everywhere).
+    Returns ``(verdict, reason_or_None)`` where *verdict* is a
+    :data:`PolicyVerdict` literal:
 
-    The function is intentionally synchronous -- v0.2's only decision
-    is "did the connector author flag this op as requiring approval?".
+    * ``"allow"`` -- proceed to connector resolution + execution.
+    * ``"needs_approval"`` -- the op is flagged ``requires_approval``; the
+      dispatcher must write a durable :class:`~meho_backplane.db.models.ApprovalRequest`
+      row and return an ``awaiting_approval`` result. The *reason* string
+      carries a human-readable explanation for the audit row.
+    * ``"deny"`` -- outright block (reserved for future G7 / G10 policy
+      rules; not emitted in v0.2).
+
+    G7 / G10 extend this function -- when those Goals land, the body
+    grows real policy decisions and the dispatcher's call site stays
+    unchanged. The structured-log line ``policy_gate_default_allow`` is
+    the operator's signal that no real policy is in effect (a future
+    audit query can count these events to verify the upgrade landed
+    everywhere).
+
+    The function is intentionally synchronous -- v0.2's only decision is
+    "did the connector author flag this op as requiring approval?".
     Async I/O against a remote policy service is a G7+ concern; the
     call site already awaits the surrounding context so promoting this
     to async later is a non-breaking change.
     """
     if descriptor.requires_approval:
-        # v0.2 doesn't ship the approval workflow -- record the decision
-        # and deny rather than silently allowing. G10's approval queue
-        # will replace the deny with a "pending" path.
-        return False, "requires_approval is True; v0.2 has no approval workflow"
+        # G11.2-T4 (#817): replace the v0.2 hard-deny with a pending path.
+        # The dispatcher writes a durable ApprovalRequest row and returns
+        # an awaiting_approval result; the run parks in awaiting_approval
+        # until a reviewer approves or rejects.
+        return "needs_approval", f"op {descriptor.op_id!r} requires approval"
     _log.info(
         "policy_gate_default_allow",
         operator_sub=operator.sub,
@@ -125,4 +151,4 @@ def policy_gate(
         safety_level=descriptor.safety_level,
         target_id=str(getattr(target, "id", None)) if target is not None else None,
     )
-    return True, None
+    return "allow", None

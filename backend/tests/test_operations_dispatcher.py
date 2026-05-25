@@ -28,8 +28,10 @@ Coverage matrix (G0.6-T5 / Task #396 acceptance criteria):
 * Pass-through reducer: the dispatcher invokes the reducer; the v0.2
   default returns the response unchanged + a ``None`` handle.
 * Handler-import error -> ``handler_unreachable`` error code.
-* Policy gate -- ``requires_approval=True`` -> ``denied`` with the
-  default-allow policy in v0.2.
+* Policy gate -- ``requires_approval=True`` -> ``awaiting_approval``
+  + durable :class:`~meho_backplane.db.models.ApprovalRequest` pending
+  row (G11.2-T4 #817). The v0.2 hard-deny is replaced with the pending
+  path; a "request" audit row lands synchronously in the same commit.
 
 The audit + broadcast assertions read the actual ``audit_log`` rows
 written by the dispatcher (the conftest autouse fixture runs the
@@ -1106,11 +1108,20 @@ async def test_dispatch_returns_connector_error_when_handler_raises(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_denies_when_requires_approval_set(
+async def test_dispatch_queues_approval_when_requires_approval_set(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``requires_approval=True`` -> ``denied`` under the v0.2 default-allow policy."""
+    """``requires_approval=True`` -> ``awaiting_approval`` + durable pending row (G11.2-T4).
+
+    Replaces the v0.2 hard-deny: the dispatcher now writes an
+    :class:`~meho_backplane.db.models.ApprovalRequest` pending row and
+    returns an ``awaiting_approval`` result instead of denying outright.
+    Two audit rows land: one for the "request" (``path='approval.request'``)
+    and none for the op itself (it was not executed).
+    """
+    from meho_backplane.db.models import ApprovalRequest
+
     register_connector_v2(
         product="vault",
         version="",
@@ -1140,24 +1151,35 @@ async def test_dispatch_denies_when_requires_approval_set(
         target=target,
         params={},
     )
-    assert result.status == "denied"
+    assert result.status == "awaiting_approval"
     assert result.error is not None
-    assert result.error.startswith("denied:")
-    assert result.extras["error_code"] == "denied"
+    assert result.error.startswith("awaiting_approval:")
+    assert result.extras["error_code"] == "awaiting_approval"
+    assert "approval_request_id" in result.extras
 
+    approval_request_id = UUID(result.extras["approval_request_id"])
+
+    # The pending ApprovalRequest row must exist.
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
-        rows = (
-            (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.danger")))
+        pending_row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert pending_row is not None
+        assert pending_row.status == "pending"
+        assert pending_row.op_id == "vault.kv.danger"
+        assert pending_row.connector_id == "vault-1.x"
+
+        # A "request" audit row must have been written synchronously.
+        request_audit_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.request")))
             .scalars()
             .all()
         )
-    assert len(rows) == 1
-    assert rows[0].payload["result_status"] == "denied"
-    assert rows[0].status_code == 403
+    assert len(request_audit_rows) == 1
+    assert request_audit_rows[0].payload["approval_request_id"] == str(approval_request_id)
+    assert request_audit_rows[0].status_code == 202
 
-    assert len(captured_events) == 1
-    assert captured_events[0].result_status == "denied"
+    # The op itself was NOT executed -- no broadcast event for the op.
+    assert len(captured_events) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from meho_backplane import __version__
 from meho_backplane.api.v1.agent_runs import router as api_v1_agent_runs_router
 from meho_backplane.api.v1.agents import router as api_v1_agents_router
+from meho_backplane.api.v1.approvals import router as api_v1_approvals_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.broadcast_overrides import (
@@ -567,6 +568,12 @@ app.include_router(api_v1_agents_router)
 # / final events). Operator-level; tenant-scoped via the JWT; runs only an
 # enabled definition in the operator's tenant.
 app.include_router(api_v1_agent_runs_router)
+# G11.2-T4 (#817) -- approval queue surface: list pending requests,
+# approve (approve + re-dispatch), reject. POST routes write a decision
+# audit row in the same transaction as the status flip; the approve
+# route then re-dispatches the original call and returns the result.
+# Operator-level; tenant-scoped via the JWT's tenant_id claim.
+app.include_router(api_v1_approvals_router)
 # G7.1-T2 (#314) -- tenant-conventions CRUD + history (list / show /
 # create / update / delete / history). Reads gated to operator+;
 # writes gated to tenant_admin. Tenant-scoped via the JWT's

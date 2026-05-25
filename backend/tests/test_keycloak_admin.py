@@ -11,6 +11,8 @@ Location-header parse on ``create_client`` and the orphan-rollback
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 import respx
@@ -94,19 +96,34 @@ async def test_create_client_missing_location_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_disable_client_ok() -> None:
+    """disable_client GETs the current representation before PUTting it back.
+
+    A partial PUT (only ``{"enabled": false}``) would wipe custom attributes
+    like ``kind=agent``, breaking the principal-kind discriminator.
+    """
+    representation = {"id": _INTERNAL_ID, "enabled": True, "attributes": {"kind": "agent"}}
     with respx.mock as r:
         _mock_token(r)
-        route = r.put(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}").mock(return_value=httpx.Response(204))
+        get_route = r.get(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}").mock(
+            return_value=httpx.Response(200, json=representation)
+        )
+        put_route = r.put(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}").mock(
+            return_value=httpx.Response(204)
+        )
         async with _client() as kc:
             await kc.disable_client(_INTERNAL_ID)
-    assert route.called
+    assert get_route.called
+    assert put_route.called
+    sent_body = json.loads(put_route.calls[0].request.content)
+    assert sent_body["enabled"] is False
+    assert sent_body["attributes"] == {"kind": "agent"}
 
 
 @pytest.mark.asyncio
 async def test_disable_client_not_found_raises() -> None:
     with respx.mock as r:
         _mock_token(r)
-        r.put(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}").mock(return_value=httpx.Response(404))
+        r.get(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}").mock(return_value=httpx.Response(404))
         async with _client() as kc:
             with pytest.raises(KeycloakClientNotFoundError):
                 await kc.disable_client(_INTERNAL_ID)

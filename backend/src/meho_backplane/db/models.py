@@ -2893,20 +2893,14 @@ class ApprovalRequest(Base):
         nullable=False,
     )
     # Soft-FK to agent_run.id.
-    agent_run_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(), nullable=True, default=None
-    )
+    agent_run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
     # RFC 8693 delegation pair.
     principal_sub: Mapped[str] = mapped_column(Text(), nullable=False)
-    principal_act: Mapped[str | None] = mapped_column(
-        Text(), nullable=True, default=None
-    )
+    principal_act: Mapped[str | None] = mapped_column(Text(), nullable=True, default=None)
     # Proposed operation.
     connector_id: Mapped[str] = mapped_column(Text(), nullable=False)
     op_id: Mapped[str] = mapped_column(Text(), nullable=False)
-    target_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(), nullable=True, default=None
-    )
+    target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
     params_hash: Mapped[str] = mapped_column(Text(), nullable=False)
     proposed_effect: Mapped[dict[str, object] | None] = mapped_column(
         _PORTABLE_JSON, nullable=True, default=None
@@ -2917,9 +2911,7 @@ class ApprovalRequest(Base):
         nullable=False,
         default=ApprovalStatus.PENDING.value,
     )
-    reviewed_by: Mapped[str | None] = mapped_column(
-        Text(), nullable=True, default=None
-    )
+    reviewed_by: Mapped[str | None] = mapped_column(Text(), nullable=True, default=None)
     decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
@@ -2932,12 +2924,8 @@ class ApprovalRequest(Base):
         default=lambda: datetime.now(UTC),
     )
     # Soft-FKs to audit_log.id.
-    request_audit_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(), nullable=True, default=None
-    )
-    decision_audit_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(), nullable=True, default=None
-    )
+    request_audit_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    decision_audit_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
 
     __table_args__ = (
         Index(

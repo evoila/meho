@@ -174,6 +174,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # errors at setup with ``cannot truncate a table referenced in a
     # foreign key constraint``.
     "agent_run",
+    # ``approval_request.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
+    # from migration ``0018`` (G11.2-T5 #818). Same FK-truncate requirement
+    # as ``agent_run`` above.
+    "approval_request",
     "audit_log",
     "broadcast_override",
     "documents",

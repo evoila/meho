@@ -381,11 +381,14 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   truncated in the same statement as ``tenant`` or PG raises
         #   ``cannot truncate a table referenced in a foreign key
         #   constraint``.
+        # * ``approval_request.tenant_id`` — migration 0018 (G11.2-T5 #818)
+        #   is a real ``REFERENCES tenant(id)`` FK; same requirement as
+        #   ``agent_run`` above.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_run, audit_log, documents, graph_edge, "
-                "graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, agent_definition, tenant",
+                "TRUNCATE TABLE agent_run, approval_request, audit_log, "
+                "documents, graph_edge, graph_edge_history, graph_node, "
+                "graph_node_history, broadcast_override, agent_definition, tenant",
             ),
         )
         # Re-seed two pinned tenant rows so the integration suite
@@ -438,14 +441,15 @@ async def pg_engine_empty_tenant(
     async with eng.connect() as conn:
         # Same single non-cascading TRUNCATE as ``pg_engine`` (see that
         # fixture for why every real ``REFERENCES tenant(id)`` table —
-        # including ``agent_run`` from migration 0017 — must be listed
+        # including ``agent_run`` from migration 0017 and
+        # ``approval_request`` from migration 0018 — must be listed
         # here). Deliberately no follow-up INSERT —
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_run, audit_log, documents, graph_edge, "
-                "graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, agent_definition, tenant",
+                "TRUNCATE TABLE agent_run, approval_request, audit_log, "
+                "documents, graph_edge, graph_edge_history, graph_node, "
+                "graph_node_history, broadcast_override, agent_definition, tenant",
             ),
         )
         await conn.commit()

@@ -51,7 +51,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.operations._audit as audit_module
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.adapters import HttpConnector
@@ -135,8 +135,14 @@ def _make_operator(
     *,
     sub: str = "op-test",
     tenant_id: UUID | None = None,
+    principal_kind: PrincipalKind = PrincipalKind.USER,
 ) -> Operator:
-    """Construct an :class:`Operator` directly -- no JWT round-trip."""
+    """Construct an :class:`Operator` directly -- no JWT round-trip.
+
+    Defaults to a human (``PrincipalKind.USER``) so the v0.2 default-allow
+    contract applies; pass ``principal_kind=PrincipalKind.AGENT`` to
+    exercise the G11.2-T3 per-(principal, op, target) resolver path.
+    """
     return Operator(
         sub=sub,
         name="Test Operator",
@@ -144,6 +150,7 @@ def _make_operator(
         raw_jwt="<test-raw-jwt>",
         tenant_id=tenant_id or UUID("00000000-0000-0000-0000-00000000a0a0"),
         tenant_role=TenantRole.OPERATOR,
+        principal_kind=principal_kind,
     )
 
 
@@ -1110,10 +1117,12 @@ async def test_dispatch_denies_dangerous_op_by_safety_level(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``safety_level='dangerous'`` → ``denied`` under G11.2-T3 policy gate.
+    """``safety_level='dangerous'`` → ``denied`` for an **agent** principal.
 
-    No AgentPermission rows exist for the principal, so the resolver
-    uses the ``safety_level`` default: ``dangerous`` → ``deny``.
+    No AgentPermission rows exist for the agent, so the resolver uses the
+    ``safety_level`` default: ``dangerous`` → ``deny``. (Human/service
+    principals keep the v0.2 default-allow contract — see
+    ``test_dispatch_human_dangerous_op_auto_executes``.)
     """
     register_connector_v2(
         product="vault",
@@ -1135,7 +1144,7 @@ async def test_dispatch_denies_dangerous_op_by_safety_level(
         embedding_service=stub_embedding_service,
     )
 
-    operator = _make_operator()
+    operator = _make_operator(principal_kind=PrincipalKind.AGENT)
     target = _FakeTarget(product="vault")
     result = await dispatch(
         operator=operator,
@@ -1169,12 +1178,14 @@ async def test_dispatch_pending_caution_op_no_permission_row(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``safety_level='caution'`` + no permission row → ``pending`` result.
+    """``safety_level='caution'`` + no permission row → ``pending`` (agent).
 
-    G11.2-T3: ``caution`` default is ``needs-approval``; the dispatcher
-    writes an audit row with ``result_status='pending'`` and returns
-    :func:`result_pending` (HTTP 202). The durable approval-queue
-    mechanics (G11.2-T4, #817) will act on this pending state.
+    G11.2-T3: for an **agent** principal the ``caution`` default is
+    ``needs-approval``; the dispatcher writes an audit row with
+    ``result_status='pending'`` and returns :func:`result_pending`
+    (HTTP 202). The durable approval-queue mechanics (G11.2-T4, #817)
+    will act on this pending state. Humans keep auto-execute — see
+    ``test_dispatch_human_caution_op_auto_executes``.
     """
     register_connector_v2(
         product="vault",
@@ -1196,7 +1207,7 @@ async def test_dispatch_pending_caution_op_no_permission_row(
         embedding_service=stub_embedding_service,
     )
 
-    operator = _make_operator()
+    operator = _make_operator(principal_kind=PrincipalKind.AGENT)
     target = _FakeTarget(product="vault")
     result = await dispatch(
         operator=operator,
@@ -1223,6 +1234,154 @@ async def test_dispatch_pending_caution_op_no_permission_row(
 
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_human_dangerous_op_auto_executes(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A **human** dispatching a ``dangerous`` op keeps the v0.2 contract.
+
+    G11.2-T3 gates *agent* principals through the per-(principal, op,
+    target) resolver; human/service principals are default-allow except
+    ``requires_approval``. So a ``dangerous`` op with no
+    ``requires_approval`` flag auto-executes for a human — the resolver's
+    ``dangerous → deny`` default must not silently start denying human
+    operators (the pre-fix regression that broke vault/vmware suites).
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.human_danger",
+        handler=_module_handler_returning_dict,
+        summary="Dangerous op dispatched by a human.",
+        description="Destructive op; human path stays default-allow.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.human_danger",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_human_caution_op_auto_executes(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A **human** dispatching a ``caution`` op auto-executes (v0.2 contract)."""
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.human_caution",
+        handler=_module_handler_returning_dict,
+        summary="Caution op dispatched by a human.",
+        description="Caution op; human path stays default-allow.",
+        parameter_schema={"type": "object"},
+        safety_level="caution",
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.human_caution",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_human_requires_approval_op_denied(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``requires_approval=True`` still hard-denies a **human** (v0.2 contract).
+
+    The approval queue (G11.2-T4) routes only agent runs to the pending
+    path; human/service principals retain the v0.2 hard-deny so the
+    enforcement signal does not silently disappear.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.human_approval",
+        handler=_module_handler_returning_dict,
+        summary="Safe op flagged requires_approval.",
+        description="requires_approval stays enforced for humans.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.human_approval",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "denied"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_agent_requires_approval_floors_safe_op_to_pending(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``requires_approval=True`` floors an agent's ``safe`` op to pending.
+
+    For an agent the resolver would auto-execute a ``safe`` op by default,
+    but ``requires_approval`` folds the verdict up to ``needs-approval``
+    so a connector-flagged op is never auto-executed by an agent
+    regardless of its ``safety_level`` (Major 5: ``requires_approval``
+    stays a live enforcement signal for agents).
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.agent_approval",
+        handler=_module_handler_returning_dict,
+        summary="Safe op flagged requires_approval, dispatched by an agent.",
+        description="Agent path floors requires_approval to needs-approval.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="vault-1.x",
+        op_id="vault.kv.agent_approval",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+    assert result.status == "pending"
+    assert result.extras["error_code"] == "pending"
 
 
 # ---------------------------------------------------------------------------

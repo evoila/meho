@@ -29,12 +29,15 @@ import hashlib
 import json
 from typing import Any
 
+import structlog
 from jsonschema import Draft202012Validator
 
-from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.permissions import resolve_verdict
+from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "compute_params_hash",
@@ -123,19 +126,63 @@ async def policy_gate(
     :func:`~meho_backplane.auth.permissions.resolve_verdict`. See that
     module for the full resolution algorithm.
 
+    Principal-kind branch
+    ---------------------
+
+    The per-(principal, op, target) agent-permission model gates **agent
+    principals** (``principal_kind == agent``). Human operators and
+    service accounts keep the v0.2 contract — default-allow except an op
+    flagged ``requires_approval`` — so a caution/dangerous op a human
+    has always been able to run does not silently start pending/denying.
+    This is exactly G11.2-T4 (#817)'s stated split: replace the
+    ``requires_approval`` hard-deny with the pending path *for agents*;
+    humans keep current behaviour. The agent path additionally folds
+    ``requires_approval`` into the verdict as a ``needs-approval`` floor,
+    so an op the connector author marked as requiring approval is never
+    auto-executed by an agent regardless of its ``safety_level``.
+
     The function is **async** — it opens its own DB session to load the
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
     mirroring the same pattern :func:`audit_and_broadcast_safe` uses.
     The dispatcher's call site changes only in adding ``await``; the
     signature (operator / descriptor / target) stays identical to v0.2.
     """
+    # --- Human / service principals: preserve the v0.2 contract --------
+    if operator.principal_kind is not PrincipalKind.AGENT:
+        if descriptor.requires_approval:
+            # v0.2 hard-deny is retained for non-agent principals; the
+            # approval queue (G11.2-T4) routes only agent runs to the
+            # pending path.
+            return (
+                PermissionVerdict.DENY,
+                "requires_approval is True; only agent principals are routed "
+                "to the approval queue (G11.2-T4)",
+            )
+        _log.info(
+            "policy_gate_default_allow",
+            operator_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+            target_id=str(getattr(target, "id", None)) if target is not None else None,
+        )
+        return PermissionVerdict.AUTO_EXECUTE, None
+
+    # --- Agent principals: per-(principal, op, target) verdict ----------
     target_id = getattr(target, "id", target) if target is not None else None
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        return await resolve_verdict(
+        verdict, reason = await resolve_verdict(
             session=session,
             operator=operator,
             op_id=descriptor.op_id,
             safety_level=descriptor.safety_level,
             target_id=target_id,
         )
+    if descriptor.requires_approval:
+        floored = _more_restrictive(verdict, PermissionVerdict.NEEDS_APPROVAL)
+        if floored is not verdict:
+            reason = f"{reason}; floored to needs-approval (descriptor.requires_approval)"
+            verdict = floored
+    return verdict, reason

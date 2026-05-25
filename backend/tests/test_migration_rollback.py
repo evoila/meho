@@ -470,6 +470,163 @@ class TestForwardCompatRollback:
 
 
 # ---------------------------------------------------------------------------
+# G7.1-T5 #317 — seed migration 0018 PG-side idempotency replay
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _DOCKER_AVAILABLE, reason=_SKIP_REASON)
+class TestSeedRdcInternalConventionsPgIdempotency:
+    """Migration ``0018``'s upsert + ON CONFLICT shape is idempotent on real PG.
+
+    The always-on suite in :mod:`tests.test_alembic_seed_rdc_conventions`
+    proves the contract against SQLite (the dialect the per-test schema
+    template uses). PG has its own conflict-resolution semantics --
+    specifically the spec-conformant ``ON CONFLICT DO UPDATE`` /
+    ``DO NOTHING`` arbiter precedence -- so the same shape must replay
+    against an actual PG to lock in the cross-dialect guarantee.
+    Without this test the migration's "safe to re-run" promise rests
+    only on what SQLite tolerates.
+
+    Mirrors the testcontainers + ``alembic upgrade`` discipline
+    :class:`TestForwardCompatRollback` follows: spin up a PG container,
+    upgrade to ``head``, stamp back to ``0017``, upgrade to ``0018``
+    again, assert row counts are unchanged.
+    """
+
+    def test_seed_replay_against_pg_leaves_row_counts_unchanged(
+        self,
+        env_overrides: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stamp 0017 + upgrade 0018 twice on real PG: tenant + 8 conventions, no dupes.
+
+        Test shape:
+
+        1. Spin up ``pgvector/pgvector:pg16`` and ``alembic upgrade
+           head`` -- this is the migration's first pass.
+        2. Read the post-first-pass counts:
+           ``tenant WHERE slug = 'rdc-internal'`` (must be 1), the
+           seeded ``tenant_conventions`` (must be 8), and the seeded
+           ``tenant_convention_history`` rows (must be 8 -- one
+           CREATE-shape row per convention).
+        3. Stamp back to ``0017`` (no data change), then ``upgrade
+           0018`` again -- this is the replay.
+        4. Re-read the same counts and assert they are unchanged.
+           A failing arbiter or a forgotten ``ON CONFLICT`` clause
+           would surface here as either an :class:`IntegrityError` on
+           the re-insert or as duplicated rows.
+
+        The test is synchronous for the same reason
+        :meth:`TestForwardCompatRollback.test_n_image_runs_cleanly_against_n_plus_1_schema`
+        is sync: ``alembic.command.upgrade`` invokes ``asyncio.run``
+        internally via the env.py async cookbook, so a
+        :func:`pytest.mark.asyncio` decoration would crash on re-entry.
+        Async work (the row-count read-backs) is wrapped in its own
+        ``asyncio.run`` boundary, the same idiom Alembic itself uses.
+        """
+        from testcontainers.postgres import PostgresContainer
+
+        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        with PostgresContainer(image) as pg:
+            sync_url = pg.get_connection_url()
+            async_url = _async_url_from(sync_url)
+
+            # Step 1 -- first ``upgrade head``. The seed migration
+            # runs as part of the chain.
+            monkeypatch.setenv("DATABASE_URL", async_url)
+            get_settings.cache_clear()
+            reset_engine_for_testing()
+
+            cfg = alembic_config()
+            cfg.set_main_option("sqlalchemy.url", async_url)
+            command.upgrade(cfg, "head")
+
+            first = asyncio.run(_fetch_seed_state(async_url))
+            assert first["tenant_count"] == 1, (
+                "first upgrade must land exactly one rdc-internal tenant row; "
+                f"got {first['tenant_count']}"
+            )
+            assert first["convention_count"] == 8, (
+                f"first upgrade must land 8 seeded conventions; got {first['convention_count']}"
+            )
+            assert first["history_count"] == 8, (
+                "first upgrade must land one CREATE-shape history row per "
+                f"seeded convention (8 total); got {first['history_count']}"
+            )
+
+            # Step 2 -- stamp back to 0017 so the seed migration's
+            # data path replays (a plain ``upgrade head`` against a
+            # DB already at head would be a no-op via Alembic's
+            # revision gate; stamping rewinds the revision pointer
+            # without touching data, then ``upgrade 0018`` re-runs
+            # the migration's actual ``upgrade()`` body).
+            command.stamp(cfg, "0017")
+            command.upgrade(cfg, "0018")
+
+            second = asyncio.run(_fetch_seed_state(async_url))
+            assert second["tenant_count"] == first["tenant_count"], (
+                "re-running 0018 must not duplicate the rdc-internal tenant -- "
+                "the ON CONFLICT (slug) DO UPDATE shape filters the second "
+                f"insert. Saw {first['tenant_count']} → {second['tenant_count']}."
+            )
+            assert second["convention_count"] == first["convention_count"], (
+                "re-running 0018 must not duplicate seeded conventions -- "
+                "the ON CONFLICT (tenant_id, slug) DO NOTHING shape filters "
+                f"the second pass. Saw {first['convention_count']} → "
+                f"{second['convention_count']}."
+            )
+            assert second["history_count"] == first["history_count"], (
+                "re-running 0018 must not duplicate history rows -- the "
+                "RETURNING-id gate in upgrade() skips the history write "
+                "when the convention insert was a no-op. Saw "
+                f"{first['history_count']} → {second['history_count']}."
+            )
+
+            asyncio.run(dispose_engine())
+            reset_engine_for_testing()
+
+
+async def _fetch_seed_state(async_url: str) -> dict[str, int]:
+    """Read the seeded row counts back through a short-lived engine.
+
+    Used by :class:`TestSeedRdcInternalConventionsPgIdempotency` -- a
+    fresh engine per call so the read is independent of any pool the
+    test may have already disposed.
+    """
+    engine = create_async_engine(async_url)
+    try:
+        async with engine.connect() as conn:
+            tenant_count = (
+                await conn.execute(
+                    text("SELECT COUNT(*) FROM tenant WHERE slug = 'rdc-internal'"),
+                )
+            ).scalar_one()
+            convention_count = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM tenant_conventions "
+                        "WHERE created_by_sub = 'migration:seed-rdc-conventions'",
+                    ),
+                )
+            ).scalar_one()
+            history_count = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM tenant_convention_history "
+                        "WHERE actor_sub = 'migration:seed-rdc-conventions'",
+                    ),
+                )
+            ).scalar_one()
+    finally:
+        await engine.dispose()
+    return {
+        "tenant_count": int(tenant_count),
+        "convention_count": int(convention_count),
+        "history_count": int(history_count),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Always-on smoke — proves the synthetic-migration helper imports cleanly
 # even on no-Docker sandboxes, so a typo / syntax error surfaces fast in CI
 # without the full PG suite running.

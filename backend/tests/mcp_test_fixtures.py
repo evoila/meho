@@ -143,6 +143,9 @@ def isolated_registry() -> Iterator[None]:
     """
     from meho_backplane.mcp.resources import kb as kb_resource
     from meho_backplane.mcp.resources import memory as memory_resource
+    from meho_backplane.mcp.resources import (
+        tenant_conventions as tenant_conventions_resource,
+    )
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import (
         agent_runs,
@@ -156,6 +159,7 @@ def isolated_registry() -> Iterator[None]:
         topology,
         topology_create_node,
     )
+    from meho_backplane.mcp.tools import broadcast as broadcast_tools
     from meho_backplane.mcp.tools import memory as memory_tools
     from meho_backplane.mcp.tools import memory_promote as memory_promote_tool
 
@@ -165,6 +169,11 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(connector_admin)
     importlib.reload(audit)
     importlib.reload(broadcast_overrides)
+    # G6.4-T1 (#1091): meho.broadcast.recent (agent-facing read of recent
+    # broadcast events). T2 (announce, #1092) and T3 (watch, #1093) will
+    # land additional tools in this module; the single reload covers all
+    # three because they share one file by design.
+    importlib.reload(broadcast_tools)
     importlib.reload(knowledge)
     importlib.reload(topology)
     importlib.reload(topology_create_node)
@@ -183,6 +192,13 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(tenant_feed)
     importlib.reload(kb_resource)
     importlib.reload(memory_resource)
+    # G7.1-T4 (#316): the tenant-conventions per-slug resource
+    # (``meho://tenant/{tenant_id}/conventions/{slug}``) joins the
+    # reload list for the same reason every other resource module
+    # does -- the autouse clear_registries() above would otherwise
+    # leave it unregistered in any test file that imports this
+    # fixture after the first one runs in the process.
+    importlib.reload(tenant_conventions_resource)
     yield
     clear_registries()
 

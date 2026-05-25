@@ -36,6 +36,7 @@ Every transport reads the same per-tenant stream. Pick by use case:
 | `meho status --watch` CLI | Terminal-resident operator triage | G6.1-T5 (#311) |
 | `GET /api/v1/feed` SSE | Custom dashboards, browser-side viewers, scripts that need live push | G6.1-T4 (#310) |
 | `meho://tenant/{tenant_id}/feed` MCP resource | LLM clients (Claude, MCP-aware agents) that poll a snapshot | G6.1-T6 (this task) |
+| `meho.broadcast.recent` MCP tool | LLM clients that need filter / since / cursor pagination over the same stream | G6.4-T1 (#1091) |
 
 The Slack mirror (G6.2 #333) and any future web admin UI subscribe
 the same way — XREAD against the per-tenant stream key.
@@ -124,6 +125,89 @@ that don't speak SSE (most pure JSON-RPC LLM tooling).
 Cross-tenant reads (`meho://tenant/<someone-else>/feed`) reject
 with JSON-RPC `INVALID_PARAMS` (-32602). The bound `tenant_id` must
 match the operator's JWT-derived tenant.
+
+## MCP tool: `meho.broadcast.recent`
+
+The agent-facing read surface. Where `meho://tenant/{id}/feed`
+returns the last 50 events in chronological order with no filter or
+cursor control, `meho.broadcast.recent` is a JSON-RPC `tools/call`
+that accepts a `since` cursor, optional filters, and a tunable
+page size:
+
+```json
+{
+  "name": "meho.broadcast.recent",
+  "arguments": {
+    "since": "2026-05-25T10:00:00Z",
+    "filter": {"op_class": "write", "principal": "op-alice"},
+    "limit": 100
+  }
+}
+```
+
+Response shape:
+
+```json
+{
+  "events": [
+    {
+      "id": "1747800000000-0",
+      "event_id": "...",
+      "tenant_id": "...",
+      "op_class": "write",
+      "op_id": "vsphere.vm.create",
+      "principal_sub": "op-alice",
+      "target_name": "prod-vc-1",
+      "result_status": "ok",
+      "ts": "2026-05-25T10:00:00Z",
+      "payload": {"op_class": "write", "params": {...}, "result_status": "ok"},
+      "audit_id": "..."
+    }
+  ],
+  "next_cursor": "1747800099000-0"
+}
+```
+
+Arguments (all optional):
+
+* `since` — ISO-8601 timestamp (`2026-05-25T10:00:00Z`) OR a Valkey
+  stream cursor (`1747800000000-0`). Omit for the last 30 minutes.
+  Cursors are treated as **exclusive** lower bounds so paginating
+  forward via `next_cursor` never double-delivers the boundary event.
+* `filter.op_class` — one of `read`, `write`, `credential_read`,
+  `credential_mint`, `audit_query`, `other`.
+* `filter.principal` — JWT `sub` claim (operator identifier).
+* `filter.target` — target name (when the op operates on a specific
+  target). Events with no target attribution (`target_name: null`)
+  never satisfy a non-null `target` filter.
+* `limit` — integer in `[1, 1000]`, default 100. Values outside the
+  range return JSON-RPC `INVALID_PARAMS` (-32602).
+
+Pagination contract:
+
+```javascript
+let cursor = null;
+while (true) {
+  const args = cursor ? {since: cursor, limit: 100} : {limit: 100};
+  const {events, next_cursor} = await callTool("meho.broadcast.recent", args);
+  for (const e of events) handle(e);
+  if (next_cursor === null) break;  // reached the live tail
+  cursor = next_cursor;
+}
+```
+
+`next_cursor` is the **last fetched** stream entry id (NOT the last
+*matched* one) so a page where every entry was filtered out still
+produces a non-null cursor and the walk progresses. `null` signals
+"this page was shorter than `limit` — you've reached the live tail".
+
+Tenant scoping is **structural**: the input schema has no `tenant_id`
+argument, so the stream key is derived exclusively from the operator's
+JWT-bound tenant. A cross-tenant request is not "checked then
+rejected" but "no surface that could ask for another tenant's stream
+in the first place". RBAC: `operator` role minimum (same as the SSE
+feed); `read_only` operators do not see the tool on `tools/list`
+and a direct call rejects with `forbidden`.
 
 ## PII defaults (decision #3)
 
@@ -274,6 +358,8 @@ replay. The load-test acceptance for the chaos case ships in
   [`backend/src/meho_backplane/api/v1/feed.py`](../../backend/src/meho_backplane/api/v1/feed.py).
 * MCP resource:
   [`backend/src/meho_backplane/mcp/resources/tenant_feed.py`](../../backend/src/meho_backplane/mcp/resources/tenant_feed.py).
+* MCP tools (broadcast namespace):
+  [`backend/src/meho_backplane/mcp/tools/broadcast.py`](../../backend/src/meho_backplane/mcp/tools/broadcast.py).
 * CLI verb:
   [`cli/internal/cmd/status_watch.go`](../../cli/internal/cmd/status_watch.go).
 * Decision #3 (PII defaults): `docs/planning/v0.2-decisions.md`.

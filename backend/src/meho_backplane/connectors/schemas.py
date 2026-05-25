@@ -320,7 +320,7 @@ class OperationResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    status: str  # "ok" | "error" | "denied"
+    status: str  # "ok" | "pending" | "error" | "denied"
     op_id: str
     result: dict[str, Any] | list[Any] | None = None
     error: str | None = None

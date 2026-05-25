@@ -542,6 +542,26 @@ async def dispatch(
             duration_ms=duration_ms,
         )
         return result_pending(op_id, gate_reason or "needs approval", duration_ms)
+    if verdict is not PermissionVerdict.AUTO_EXECUTE:
+        # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds to
+        # execution. Any unexpected verdict (a future enum member, a bug
+        # in the resolver) denies rather than silently executing.
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=uuid.uuid4(),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="denied",
+            duration_ms=duration_ms,
+        )
+        return result_denied(
+            op_id,
+            gate_reason or f"unexpected policy verdict {verdict!r}; denied",
+            duration_ms,
+        )
 
     # --- Step 5: connector resolution -------------------------------------
     connector_instance, resolution_error = await _resolve_connector_instance(descriptor, target)

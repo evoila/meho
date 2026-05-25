@@ -30,16 +30,22 @@ most restrictive across all three:
    ``op_pattern`` (fnmatch glob) against the ``op_id``, and every row's
    ``target_scope`` against the ``target_id``. Among matching rows, pick
    the one with the **most specific op_pattern** (longest literal prefix
-   before the first ``*``) — more specific grants override broader
-   defaults. When no row matches, use the ``safety_level`` default.
+   before the first glob metacharacter ``*``/``?``/``[``) — more specific
+   grants override broader defaults. On a specificity tie, fold to the
+   most-restrictive verdict (fail-closed). When no row matches, use the
+   ``safety_level`` default.
 
 3. **Op-requirement gate.** The op's ``safety_level`` drives the
-   minimum default verdict; it also enforces a ceiling: a dangerous op
-   (``safety_level='dangerous'``) can never be granted
-   ``auto-execute`` by an :class:`AgentPermission` row — the op
-   requirement floor overrides the grant. Tenant/operator config can
-   tighten (make a ``caution`` op ``deny``) but not loosen (cannot
-   make a ``dangerous`` op ``auto-execute``).
+   minimum default verdict (used when no row matches) and a ceiling on
+   how permissive a grant can be. The default and the ceiling are
+   *distinct*: a ``dangerous`` op defaults to ``deny`` (no grant ⇒
+   denied), but an explicit grant *is* honoured up to the
+   ``needs-approval`` ceiling — i.e. "destructive = deny **unless
+   granted**" (#820), and even when granted a destructive op is never
+   ``auto-execute``d (it always lands on human approval). Tenant/
+   operator config can tighten (make a ``caution`` op ``deny``) but not
+   loosen past the ceiling (cannot make a ``dangerous`` op
+   ``auto-execute``).
 
    Safety-level defaults (no matching permission row):
 
@@ -47,14 +53,14 @@ most restrictive across all three:
    * ``caution`` → ``needs-approval``
    * ``dangerous`` → ``deny``
 
-   Safety-level ceilings (hard upper-bound even when a row says
-   something more permissive):
+   Safety-level ceilings (hard upper-bound on what a row can grant):
 
    * ``safe`` — no ceiling (any verdict is valid).
    * ``caution`` — ceiling is ``needs-approval``; ``auto-execute``
      from a row is tightened to ``needs-approval``.
-   * ``dangerous`` — ceiling is ``deny``; any row verdict is overridden
-     to ``deny``.
+   * ``dangerous`` — ceiling is ``needs-approval``; a grant of
+     ``auto-execute`` is tightened to ``needs-approval`` (the op stays
+     human-gated), while the *default* (no grant) remains ``deny``.
 
 Role-gate interaction
 ---------------------
@@ -130,10 +136,15 @@ _SAFETY_DEFAULT: dict[str, PermissionVerdict] = {
 #: carrying a verdict more permissive than the ceiling is tightened
 #: to the ceiling value.  ``safe`` has no ceiling (any verdict is
 #: valid -- the ``None`` sentinel is handled in ``_apply_ceiling``).
+#: ``dangerous`` is capped at ``needs-approval`` (not ``deny``) so an
+#: explicit grant *is* honoured -- "deny **unless granted**" (#820) --
+#: while a granted destructive op still lands on human approval rather
+#: than auto-executing. The *default* (no grant) for ``dangerous``
+#: stays ``deny`` via ``_SAFETY_DEFAULT``.
 _SAFETY_CEILING: dict[str, PermissionVerdict | None] = {
     "safe": None,
     "caution": PermissionVerdict.NEEDS_APPROVAL,
-    "dangerous": PermissionVerdict.DENY,
+    "dangerous": PermissionVerdict.NEEDS_APPROVAL,
 }
 
 # Verdict ordering: lower index = more permissive. Used to compare
@@ -187,18 +198,27 @@ def _role_ceiling(role: TenantRole) -> PermissionVerdict | None:
 # ---------------------------------------------------------------------------
 
 
+#: fnmatch glob metacharacters. The literal prefix that drives
+#: specificity ends at the first occurrence of any of these — not just
+#: ``*`` — so an over-matching pattern like ``"vault.k?.read"`` does not
+#: masquerade as a full-length literal and out-rank a narrower grant.
+_GLOB_METACHARS: frozenset[str] = frozenset("*?[")
+
+
 def _pattern_specificity(pattern: str) -> int:
     """Return an integer specificity score for *pattern*.
 
     Higher score = more specific = takes priority over less-specific
     patterns. The score is the length of the literal prefix before the
-    first ``*``: ``"vault.kv.read"`` (no wildcard) scores its full
-    length; ``"vault.kv.*"`` scores 9 (``"vault.kv."``); ``"*"`` scores 0.
+    first glob metacharacter (``*``, ``?`` or ``[``):
+    ``"vault.kv.read"`` (no wildcard) scores its full length;
+    ``"vault.kv.*"`` scores 9 (``"vault.kv."``); ``"vault.k?.read"``
+    scores 7 (``"vault.k"``); ``"*"`` scores 0.
     """
-    star_pos = pattern.find("*")
-    if star_pos == -1:
-        return len(pattern)
-    return star_pos
+    for i, ch in enumerate(pattern):
+        if ch in _GLOB_METACHARS:
+            return i
+    return len(pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +239,16 @@ async def _load_rows(
     expected to be small (tens of rows, not thousands).
     """
     result = await session.execute(
-        select(AgentPermission).where(
+        select(AgentPermission)
+        .where(
             AgentPermission.tenant_id == tenant_id,
             AgentPermission.principal_sub == principal_sub,
         )
+        # Stable ORDER BY so logged row ordering is deterministic across
+        # runs/DBs. Verdict selection itself does not depend on row order
+        # (ties fold to the most-restrictive verdict), but a stable order
+        # keeps the debug log reproducible.
+        .order_by(AgentPermission.op_pattern, AgentPermission.target_scope)
     )
     return list(result.scalars().all())
 
@@ -297,10 +323,25 @@ async def resolve_verdict(
 
     # --- Gate 3: pick verdict -----------------------------------------
     if matching:
-        # Pick the most specific matching row (longest literal prefix).
-        best = max(matching, key=lambda r: _pattern_specificity(r.op_pattern))
-        raw_verdict = PermissionVerdict(best.verdict)
-        source = f"permission row (pattern={best.op_pattern!r})"
+        # Among matching rows, the most specific op_pattern wins. When
+        # several rows tie on specificity (e.g. two catch-all ``"*"``
+        # grants with conflicting verdicts), fold to the **most
+        # restrictive** verdict — fail-closed, and deterministic
+        # regardless of row order. A duplicate key is prevented at the DB
+        # layer (``uq_agent_permission_grant``), but a genuine tie across
+        # *different* equally-specific patterns can still occur, so the
+        # tie-break must not depend on unordered ``select()`` order.
+        top_specificity = max(_pattern_specificity(r.op_pattern) for r in matching)
+        top_rows = [r for r in matching if _pattern_specificity(r.op_pattern) == top_specificity]
+        raw_verdict = PermissionVerdict(top_rows[0].verdict)
+        for r in top_rows[1:]:
+            raw_verdict = _more_restrictive(raw_verdict, PermissionVerdict(r.verdict))
+        patterns = ", ".join(sorted(r.op_pattern for r in top_rows))
+        source = (
+            f"permission row (pattern={top_rows[0].op_pattern!r})"
+            if len(top_rows) == 1
+            else f"most-restrictive of tied rows (patterns={patterns})"
+        )
     else:
         # No matching row — use safety_level default.
         raw_verdict = _SAFETY_DEFAULT.get(safety_level, PermissionVerdict.DENY)

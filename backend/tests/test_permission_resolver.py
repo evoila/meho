@@ -14,8 +14,13 @@ Coverage matrix (Task #820 acceptance criteria):
   row ``deny`` on a ``safe`` op → ``deny``.
 * Safety-level ceiling enforcement — a row cannot loosen beyond the
   ceiling: ``auto-execute`` row on a ``caution`` op → ``needs-approval``;
-  ``needs-approval`` row on a ``dangerous`` op → ``deny``;
-  ``auto-execute`` row on a ``dangerous`` op → ``deny``.
+  ``auto-execute`` row on a ``dangerous`` op → ``needs-approval`` (a
+  destructive op is grantable up to human approval, never auto-executed);
+  ``dangerous`` op with **no** grant → ``deny`` (default unchanged).
+* Tie-break — two equally-specific matching patterns fold to the most
+  restrictive verdict (fail-closed, order-independent).
+* Specificity honours ``?`` / ``[`` glob metachars (not just ``*``), so
+  an over-matching pattern cannot masquerade as a full-length literal.
 * Role ceiling — ``READ_ONLY`` principal with a ``needs-approval`` row
   on a ``safe`` op → ``needs-approval`` (role ceiling caps at
   ``needs-approval``); ``OPERATOR`` / ``TENANT_ADMIN`` are uncapped.
@@ -218,21 +223,73 @@ async def test_explicit_needs_approval_row_on_safe_op() -> None:
 
 
 async def test_auto_execute_row_clamped_by_dangerous_ceiling() -> None:
-    """``auto-execute`` row on a ``dangerous`` op → ``deny`` (ceiling)."""
+    """``auto-execute`` row on a ``dangerous`` op → ``needs-approval``.
+
+    A destructive op is grantable ("deny **unless granted**", #820) but
+    never auto-executed: an explicit ``auto-execute`` grant is tightened
+    to the ``dangerous`` ceiling of ``needs-approval`` (human-gated).
+    """
     await _seed_tenant(_TENANT_ID, "t-ceil-dangerous")
     await _insert_permission(op_pattern="*", verdict="auto-execute")
     verdict, reason = await _resolve(safety_level="dangerous")
-    assert verdict == PermissionVerdict.DENY
+    assert verdict == PermissionVerdict.NEEDS_APPROVAL
     assert "ceiling" in reason
 
 
-async def test_needs_approval_row_clamped_by_dangerous_ceiling() -> None:
-    """``needs-approval`` row on a ``dangerous`` op → ``deny``."""
+async def test_needs_approval_row_honoured_on_dangerous_op() -> None:
+    """``needs-approval`` row on a ``dangerous`` op → ``needs-approval``.
+
+    The grant sits exactly at the ``dangerous`` ceiling, so a destructive
+    op an operator explicitly granted lands on human approval rather than
+    a blanket deny.
+    """
     await _seed_tenant(_TENANT_ID, "t-ceil-needs-dangerous")
     await _insert_permission(op_pattern="*", verdict="needs-approval")
+    verdict, _reason = await _resolve(safety_level="dangerous")
+    assert verdict == PermissionVerdict.NEEDS_APPROVAL
+
+
+async def test_dangerous_op_with_no_grant_denies() -> None:
+    """``dangerous`` op with no matching grant → ``deny`` (default).
+
+    Only the *ceiling* moved to ``needs-approval``; the no-grant
+    *default* for a destructive op stays ``deny``.
+    """
+    await _seed_tenant(_TENANT_ID, "t-dangerous-default")
     verdict, reason = await _resolve(safety_level="dangerous")
     assert verdict == PermissionVerdict.DENY
-    assert "ceiling" in reason
+    assert "dangerous" in reason
+
+
+async def test_equal_specificity_tie_breaks_to_most_restrictive() -> None:
+    """Two equally-specific matching patterns fold to the most restrictive.
+
+    ``"vault.*"`` (auto-execute) and ``"vault.[kd]v.read"`` (deny) both
+    match ``vault.kv.read`` and both score specificity 6 (literal prefix
+    ``"vault."``). The tie must resolve to ``deny`` (fail-closed) and must
+    not depend on unordered row order.
+    """
+    await _seed_tenant(_TENANT_ID, "t-tie-break")
+    await _insert_permission(op_pattern="vault.*", verdict="auto-execute")
+    await _insert_permission(op_pattern="vault.[kd]v.read", verdict="deny")
+    verdict, reason = await _resolve(op_id="vault.kv.read", safety_level="safe")
+    assert verdict == PermissionVerdict.DENY
+    assert "most-restrictive" in reason
+
+
+async def test_question_mark_pattern_loses_to_exact_match() -> None:
+    """A ``?`` glob does not masquerade as a full-length literal.
+
+    ``"vault.k?.read"`` over-matches (``?`` is a wildcard) so it scores
+    only its literal prefix ``"vault.k"`` (7); the exact
+    ``"vault.kv.read"`` scores its full length (13) and wins. The exact
+    grant's ``deny`` therefore beats the ``?``-pattern ``auto-execute``.
+    """
+    await _seed_tenant(_TENANT_ID, "t-qmark-specificity")
+    await _insert_permission(op_pattern="vault.k?.read", verdict="auto-execute")
+    await _insert_permission(op_pattern="vault.kv.read", verdict="deny")
+    verdict, _reason = await _resolve(op_id="vault.kv.read", safety_level="safe")
+    assert verdict == PermissionVerdict.DENY
 
 
 async def test_auto_execute_row_clamped_by_caution_ceiling() -> None:

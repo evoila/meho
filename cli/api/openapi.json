@@ -3972,6 +3972,243 @@
         }
       }
     },
+    "/api/v1/agent-principals": {
+      "get": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "List Agent Principals",
+        "description": "List agent principals for the operator's tenant.",
+        "operationId": "list_agent_principals_api_v1_agent_principals_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Revoked"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "Register Agent Principal",
+        "description": "Register a new agent principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.\nReturns 503 when Keycloak admin is not configured.",
+        "operationId": "register_agent_principal_api_v1_agent_principals_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentPrincipalCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-principals/{name}": {
+      "get": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "Show Agent Principal",
+        "description": "Return one agent principal by name.",
+        "operationId": "show_agent_principal_api_v1_agent_principals__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-principals/{name}/revoke": {
+      "delete": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "Revoke Agent Principal",
+        "description": "Revoke an agent principal (kill switch).\n\nDisables the Keycloak client (blocks new token grants) and marks\nthe DB row ``revoked=true``. Returns the updated row.\n``tenant_admin`` only. Returns 404 when absent or already revoked.",
+        "operationId": "revoke_agent_principal_api_v1_agent_principals__name__revoke_delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{name}/run": {
       "post": {
         "tags": [
@@ -5015,7 +5252,7 @@
           "ui-topology"
         ],
         "summary": "Ui Topology Table",
-        "description": "``GET /ui/topology[?view=table&sort=...&direction=...&kind=...&q=...]``.\n\n``view`` is accepted but unused in T1 (the only mode is the\ntable); T2 (#881) will branch on ``view`` to render the\nCytoscape graph instead. Documenting the param in the\nsignature now keeps the URL contract forward-compatible.",
+        "description": "Serve the topology UI, branching on ``?view=``. See module\ndocstring for the URL contract + dual-purpose ``direction``\nsemantics (table sort vs graph overlay).",
         "operationId": "ui_topology_table_ui_topology_get",
         "parameters": [
           {
@@ -5032,9 +5269,14 @@
             "in": "query",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/_SortDirection",
-              "default": "asc"
-            }
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^(asc|desc|dependents|dependencies)$",
+              "description": "Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``).",
+              "default": "asc",
+              "title": "Direction"
+            },
+            "description": "Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``)."
           },
           {
             "name": "kind",
@@ -5075,10 +5317,87 @@
             "in": "query",
             "required": false,
             "schema": {
+              "$ref": "#/components/schemas/_ViewMode",
+              "default": "table"
+            }
+          },
+          {
+            "name": "selected",
+            "in": "query",
+            "required": false,
+            "schema": {
               "type": "string",
-              "maxLength": 16,
+              "format": "uuid",
               "nullable": true,
-              "title": "View"
+              "title": "Selected"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "From"
+            }
+          },
+          {
+            "name": "from_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "From Kind"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "To"
+            }
+          },
+          {
+            "name": "to_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "To Kind"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 16,
+              "minimum": 1,
+              "nullable": true,
+              "title": "Depth"
+            }
+          },
+          {
+            "name": "max_hops",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 16,
+              "minimum": 1,
+              "nullable": true,
+              "title": "Max Hops"
             }
           }
         ],
@@ -5091,6 +5410,18 @@
                   "type": "string"
                 }
               }
+            }
+          },
+          "404": {
+            "description": "Overlay anchor (``?from=<name>``) or path endpoint (``?from=&to=``) does not resolve in the caller's tenant. Returns the overlay-error fragment.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Overlay anchor or path endpoint is a bare name that resolves to multiple kinds in the caller's tenant (``kind=`` disambiguation required). Returns the overlay-error fragment with the candidate kinds.",
+            "content": {
+              "text/html": {}
             }
           },
           "422": {
@@ -5476,6 +5807,106 @@
         ],
         "title": "AgentModelTier",
         "description": "Logical model tier an agent definition runs against.\n\nThe tier is *logical* -- G11.5's multi-provider resolver maps it to\na concrete model backend at run time. T2 stores the tier verbatim;\nit does not resolve it. ``StrEnum`` (PEP 663, stdlib 3.11+) gives\nthe members ``str`` semantics so ``f\"tier={AgentModelTier.STANDARD}\"``\nrenders as ``\"tier=standard\"``, matching the\n:class:`~meho_backplane.auth.operator.TenantRole` /\n:class:`~meho_backplane.memory.schemas.MemoryScope` convention.\n\nThree tiers in v0.2:\n\n* ``standard`` -- the default general-purpose tier.\n* ``fast`` -- a cheaper / lower-latency tier for simple loops.\n* ``deep`` -- a more capable tier for harder reasoning."
+      },
+      "AgentPrincipalCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "owner_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Owner Sub"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "AgentPrincipalCreate",
+        "description": "Input shape for :meth:`AgentPrincipalService.register`."
+      },
+      "AgentPrincipalListResponse": {
+        "properties": {
+          "principals": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPrincipalRead"
+            },
+            "type": "array",
+            "title": "Principals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "principals"
+        ],
+        "title": "AgentPrincipalListResponse",
+        "description": "Response envelope for ``GET /api/v1/agent-principals``."
+      },
+      "AgentPrincipalRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "keycloak_client_id": {
+            "type": "string",
+            "title": "Keycloak Client Id"
+          },
+          "keycloak_internal_id": {
+            "type": "string",
+            "title": "Keycloak Internal Id"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "keycloak_client_id",
+          "keycloak_internal_id",
+          "owner_sub",
+          "revoked",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentPrincipalRead",
+        "description": "Row representation returned by every accessor."
       },
       "AgentRunRequest": {
         "properties": {
@@ -9319,14 +9750,14 @@
         "title": "_SortColumn",
         "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
       },
-      "_SortDirection": {
+      "_ViewMode": {
         "type": "string",
         "enum": [
-          "asc",
-          "desc"
+          "table",
+          "graph"
         ],
-        "title": "_SortDirection",
-        "description": "Sort direction enum -- ``asc`` (default) or ``desc``."
+        "title": "_ViewMode",
+        "description": "Closed enum of view modes exposed on ``GET /ui/topology``.\n\n``table`` is the default (T1 / #880); ``graph`` switches to the\nCytoscape.js surface (T2 / #881). The enum's ``str`` mixin keeps\ntemplate URL building stable -- ``str(_ViewMode.GRAPH)`` is\n``\"graph\"`` (not ``\"_ViewMode.GRAPH\"``). An out-of-range value\nfails Pydantic validation (422) at the HTTP boundary so the route\nbody never sees an unknown mode."
       }
     }
   }

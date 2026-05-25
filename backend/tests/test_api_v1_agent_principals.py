@@ -37,6 +37,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminError,
     KeycloakAdminNotConfiguredError,
+    KeycloakClientNotFoundError,
 )
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -458,3 +459,117 @@ async def test_keycloak_admin_error_returns_502(client: TestClient) -> None:
         )
     assert resp.status_code == 502, resp.text
     assert resp.json()["detail"] == "keycloak_admin_error"
+
+
+# ---------------------------------------------------------------------------
+# Kill switch + orphan rollback (AC: revoke disables the backing client)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_revoke_fires_keycloak_kill_switch(client: TestClient) -> None:
+    """Revoke disables the backing Keycloak client — the kill switch fires."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-kill")
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value=_KC_INTERNAL_ID)
+    mock_client.disable_client = AsyncMock(return_value=None)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        client.post("/api/v1/agent-principals", json={"name": "kill-bot"}, headers=headers)
+        resp = client.delete("/api/v1/agent-principals/kill-bot/revoke", headers=headers)
+        assert resp.status_code == 200, resp.text
+
+    mock_client.disable_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_revoke_swallows_keycloak_not_found(client: TestClient) -> None:
+    """A Keycloak 404 on disable is swallowed — revoke stays idempotent (200)."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-rev-gone")
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value=_KC_INTERNAL_ID)
+    mock_client.disable_client = AsyncMock(
+        side_effect=KeycloakClientNotFoundError("client already gone")
+    )
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        client.post("/api/v1/agent-principals", json={"name": "gone-bot"}, headers=headers)
+        resp = client.delete("/api/v1/agent-principals/gone-bot/revoke", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["revoked"] is True
+
+    mock_client.disable_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_register_rolls_back_orphan_client_on_db_failure(client: TestClient) -> None:
+    """When the DB row can't be written after the Keycloak client is created,
+    register deletes the orphaned client so no unrevocable identity is left."""
+    await _seed_tenants()
+    # Pre-seed a principal so the second insert violates the unique constraint
+    # after the (mocked) Keycloak client has already been created.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            AgentPrincipal(
+                tenant_id=_TENANT_A,
+                name="orphan-bot",
+                keycloak_client_id="agent:orphan-bot",
+                keycloak_internal_id="existing-internal-id",
+                owner_sub="op-admin",
+                revoked=False,
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+
+    new_internal_id = "cc000000-0000-0000-0000-00000000ffff"
+    key = make_rsa_keypair("kid-orphan")
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value=new_internal_id)
+    mock_client.delete_client = AsyncMock(return_value=None)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": "orphan-bot"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    assert resp.status_code == 409, resp.text
+    # The just-created (now orphaned) Keycloak client must be deleted.
+    mock_client.delete_client.assert_awaited_once_with(new_internal_id)

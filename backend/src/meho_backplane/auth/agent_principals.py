@@ -190,7 +190,11 @@ class AgentPrincipalService:
         except KeycloakClientConflictError as exc:
             raise AgentPrincipalExistsError(payload.name) from exc
 
-        # Phase 2: insert the DB row.
+        # Phase 2: insert the DB row. If anything fails after the Keycloak
+        # client was created, delete that client before surfacing the error:
+        # a created client with no MEHO row is an orphaned, token-issuing
+        # identity that can never be listed or revoked through MEHO — exactly
+        # the unreachable-kill-switch failure this lifecycle exists to prevent.
         row = AgentPrincipal(
             tenant_id=tenant_id,
             name=payload.name,
@@ -201,18 +205,24 @@ class AgentPrincipalService:
             created_by_sub=created_by_sub,
         )
         sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            session.add(row)
-            try:
-                await session.flush()
-            except IntegrityError as exc:
-                await session.rollback()
-                if _is_unique_violation(exc):
-                    raise AgentPrincipalExistsError(payload.name) from exc
-                raise
-            await session.refresh(row)
-            entry = AgentPrincipalRead.model_validate(row)
-            await session.commit()
+        try:
+            async with sessionmaker() as session:
+                session.add(row)
+                try:
+                    await session.flush()
+                except IntegrityError as exc:
+                    await session.rollback()
+                    if _is_unique_violation(exc):
+                        raise AgentPrincipalExistsError(payload.name) from exc
+                    raise
+                await session.refresh(row)
+                entry = AgentPrincipalRead.model_validate(row)
+                await session.commit()
+        except BaseException as exc:
+            await self._rollback_orphan_client(
+                internal_id, tenant_id=tenant_id, name=payload.name, cause=exc
+            )
+            raise
         self._log.info(
             "agent_principal_register",
             tenant_id=str(tenant_id),
@@ -221,6 +231,45 @@ class AgentPrincipalService:
             created_by_sub=created_by_sub,
         )
         return entry
+
+    async def _rollback_orphan_client(
+        self,
+        internal_id: str,
+        *,
+        tenant_id: uuid.UUID,
+        name: str,
+        cause: BaseException,
+    ) -> None:
+        """Best-effort delete of a Keycloak client whose DB row failed to write.
+
+        Called only after :meth:`create_client` succeeded but the Phase-2 DB
+        write raised. A cleanup failure is logged (the orphan needs manual
+        removal) but never masks the original *cause*, which the caller
+        re-raises.
+        """
+        try:
+            kc_client = KeycloakAdminClient.from_settings()
+            async with kc_client:
+                await kc_client.delete_client(internal_id)
+        except KeycloakClientNotFoundError:
+            return  # Already gone — nothing to roll back.
+        except Exception as cleanup_exc:
+            self._log.error(
+                "agent_principal_register_orphan_cleanup_failed",
+                tenant_id=str(tenant_id),
+                name=name,
+                keycloak_internal_id=internal_id,
+                cause=type(cause).__name__,
+                error=type(cleanup_exc).__name__,
+            )
+            return
+        self._log.warning(
+            "agent_principal_register_rolled_back_keycloak_client",
+            tenant_id=str(tenant_id),
+            name=name,
+            keycloak_internal_id=internal_id,
+            cause=type(cause).__name__,
+        )
 
     async def list_(
         self,

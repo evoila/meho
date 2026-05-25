@@ -16,6 +16,9 @@ principal lifecycle service needs:
 * :meth:`disable_client` — PATCH the client's ``enabled=false``
   (kill switch). Tokens already issued remain valid until their ``exp``;
   ``enabled=false`` blocks *new* token grants immediately.
+* :meth:`delete_client` — DELETE the client outright. Used to roll back
+  a created client when the DB row that records it cannot be written, so
+  register never leaves an orphaned, unrevocable token-issuing identity.
 
 Design decisions
 ----------------
@@ -356,3 +359,39 @@ class KeycloakAdminClient:
                 status=resp.status_code,
             )
             raise KeycloakAdminError(f"Keycloak disable_client failed: HTTP {resp.status_code}")
+
+    async def delete_client(self, keycloak_internal_id: str) -> None:
+        """Delete the Keycloak client identified by *keycloak_internal_id*.
+
+        Used to roll back a half-completed :meth:`create_client` when the
+        agent-principal DB row cannot be written: a created client that is
+        never recorded in MEHO is an orphaned, token-issuing identity with
+        no kill switch, so register deletes it before surfacing the error.
+        Unlike :meth:`disable_client`, this fully removes the client so a
+        subsequent register with the same name is not permanently blocked
+        by a Keycloak 409.
+
+        Raises :class:`KeycloakClientNotFoundError` when the internal id
+        is unknown (Keycloak 404) — already gone is success for cleanup.
+        """
+        assert self._http is not None
+        assert self._token
+        log = structlog.get_logger(__name__)
+        try:
+            resp = await self._http.delete(
+                f"{self._admin_url}/clients/{keycloak_internal_id}",
+                headers=self._auth_headers(),
+            )
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak delete_client network error: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code == 404:
+            raise KeycloakClientNotFoundError(f"Keycloak client {keycloak_internal_id!r} not found")
+        if resp.status_code not in (200, 204):
+            log.warning(
+                "keycloak_delete_client_failed",
+                keycloak_internal_id=keycloak_internal_id,
+                status=resp.status_code,
+            )
+            raise KeycloakAdminError(f"Keycloak delete_client failed: HTTP {resp.status_code}")

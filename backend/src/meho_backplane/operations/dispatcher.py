@@ -17,9 +17,14 @@ phases the parent Initiative names:
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
    Invalid -> structured ``invalid_params`` error.
-4. Policy gate (v0.2 default-allow;
-   :func:`~meho_backplane.operations._validate.policy_gate`) --
-   ``requires_approval=True`` -> ``denied``.
+4. Policy gate (G11.2-T3;
+   :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
+   principals resolve a three-state verdict (``auto-execute`` /
+   ``needs-approval`` -> ``pending`` (202) / ``deny`` -> ``denied``) via
+   the per-(principal, op, target) permission model; **human / service**
+   principals keep the v0.2 contract (default-allow except
+   ``requires_approval=True`` -> ``denied``). Only ``auto-execute``
+   proceeds; any other verdict fails closed.
 5. Resolve the connector class via
    :func:`~meho_backplane.connectors.resolver.resolve_connector` and
    instantiate it (cached at module level). Resolver miss ->

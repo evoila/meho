@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -182,7 +181,7 @@ type detailEnvelope struct {
 	Detail string `json:"detail"`
 }
 
-// decodeDetailString pulls the ``detail`` field out of a FastAPI error
+// decodeDetailString pulls the “detail“ field out of a FastAPI error
 // body. Returns the raw body string if the body is not valid JSON.
 func decodeDetailString(body string) string {
 	var env detailEnvelope
@@ -281,36 +280,4 @@ func printEntrySummary(w io.Writer, e *Entry) {
 	fmt.Fprintf(w, "  owner_sub:           %s\n", e.OwnerSub)
 	fmt.Fprintf(w, "  revoked:             %v\n", e.Revoked)
 	fmt.Fprintf(w, "  created_at:          %s\n", e.CreatedAt)
-}
-
-// loadJSONObjectArg parses a raw string as a JSON object (no @file support
-// needed for this surface).
-func loadJSONObjectArg(raw string) (map[string]any, error) {
-	if raw == "" {
-		return nil, nil
-	}
-	if strings.HasPrefix(raw, "@") {
-		path := raw[1:]
-		var r io.Reader
-		if path == "-" {
-			r = os.Stdin
-		} else {
-			f, err := os.Open(path)
-			if err != nil {
-				return nil, fmt.Errorf("open %s: %w", path, err)
-			}
-			defer f.Close() //nolint:errcheck
-			r = f
-		}
-		data, err := io.ReadAll(r)
-		if err != nil {
-			return nil, fmt.Errorf("read @-file: %w", err)
-		}
-		raw = string(data)
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		return nil, fmt.Errorf("parse JSON: %w", err)
-	}
-	return m, nil
 }

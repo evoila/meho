@@ -4,7 +4,7 @@
 """Create the ``approval_request`` table for the G11.2 approval gate.
 
 Revision ID: 0021
-Revises: 0017
+Revises: 0018
 Create Date: 2026-05-25
 
 This migration is the schema substrate of Initiative #803 (G11.2 Agent
@@ -16,11 +16,12 @@ T4 (#817) approval queue mechanics write and the T5 surfacing layer
 Note on down_revision
 ---------------------
 
-``0017`` is the highest revision on ``main`` at merge time for this PR.
-PRs #1050 / #1051 (0018 / 0019) and the parallel T4 PR (0020) each
-revise against their predecessor; this migration uses ``0017`` as
-``down_revision`` so it can be squash-merged after T4 lands with a
-single rebase that updates the ``down_revision`` to ``0020``.
+``0018`` is the highest revision on ``main`` at the time of writing this
+PR (``0018_seed_rdc_internal_conventions.py`` landed in main before this
+PR was opened). PRs #1050 / #1051 (0019 / 0020) and the parallel T4 PR
+(0020) each revise against their predecessor; this migration uses
+``0018`` as ``down_revision`` and will be updated to chain from ``0020``
+once the T4 approval-queue PR lands ahead of this one.
 
 Schema
 ------
@@ -145,7 +146,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "0021"
-down_revision: str | None = "0017"
+down_revision: str | None = "0018"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

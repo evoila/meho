@@ -102,6 +102,7 @@ References
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import UTC, datetime
 from typing import Any, Final, cast
@@ -110,7 +111,13 @@ import structlog
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent, get_broadcast_client
+from meho_backplane.broadcast import (
+    ACTIVITY_MAX_CHARS,
+    AgentAnnouncementEvent,
+    BroadcastEvent,
+    get_broadcast_client,
+    publish_agent_announcement,
+)
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
@@ -246,7 +253,7 @@ def _iso8601_to_min_cursor(raw: str) -> str:
 
 
 def _event_matches(
-    event: BroadcastEvent,
+    event: BroadcastEvent | AgentAnnouncementEvent,
     *,
     op_class: str | None,
     principal: str | None,
@@ -255,17 +262,42 @@ def _event_matches(
     """Return ``True`` iff *event* matches every non-``None`` filter.
 
     Exact-match semantics on each non-``None`` field; mirrors
-    :func:`meho_backplane.api.v1.feed._passes_filter`. ``target_name`` is
-    nullable on :class:`BroadcastEvent`; an event with no target
-    attribution never passes a non-``None`` *target* filter (the
-    caller explicitly asked for a target -- an untagged event doesn't
-    qualify).
+    :func:`meho_backplane.api.v1.feed._passes_filter`.
+
+    Two event classes share the broadcast stream: the audit-driven
+    :class:`BroadcastEvent` (one event per audited operation, written
+    by :func:`meho_backplane.broadcast.publisher.publish_event`) and
+    the agent-authored :class:`AgentAnnouncementEvent` (one event per
+    ``meho.broadcast.announce`` call, written by
+    :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`).
+    They share ``principal_sub`` but diverge on ``op_class`` and
+    target attribution:
+
+    * **op_class filter:** Only audit-driven events carry an
+      ``op_class``. Announcements have no operation classification, so
+      a caller asking ``filter.op_class=write`` is asking for a
+      specific *operation* class -- an announcement doesn't qualify
+      regardless of its content. (Mirrors the "untagged event doesn't
+      satisfy a target filter" rule below.)
+    * **target filter:** :class:`BroadcastEvent` carries ``target_name``;
+      :class:`AgentAnnouncementEvent` carries ``target``. Both behave
+      identically under a non-``None`` filter -- events with no target
+      attribution (either field ``None``) never qualify.
     """
-    if op_class is not None and event.op_class != op_class:
-        return False
+    if op_class is not None:
+        # AgentAnnouncementEvent has no ``op_class``; the caller asked
+        # for an operation classification, an announcement isn't one.
+        if isinstance(event, AgentAnnouncementEvent):
+            return False
+        if event.op_class != op_class:
+            return False
     if principal is not None and event.principal_sub != principal:
         return False
-    return not (target is not None and event.target_name != target)
+    if target is not None:
+        event_target = event.target_name if isinstance(event, BroadcastEvent) else event.target
+        if event_target != target:
+            return False
+    return True
 
 
 def _parse_entry(
@@ -273,7 +305,7 @@ def _parse_entry(
     fields: dict[str, str],
     *,
     stream_key: str,
-) -> BroadcastEvent | None:
+) -> BroadcastEvent | AgentAnnouncementEvent | None:
     """Deserialise one ``XRANGE`` entry; log + skip on shape failure.
 
     Mirrors the safety net in
@@ -281,6 +313,25 @@ def _parse_entry(
     publisher always emits ``{"event": <json>}`` today; this branch
     is the forward-compat guard against a future Slack-mirror or
     third-party writer XADD'ing a different shape onto the same key.
+
+    Two event kinds live on the per-tenant stream (G6.4-T2 #1092):
+
+    * Audit-driven :class:`BroadcastEvent` -- written by
+      :func:`~meho_backplane.broadcast.publisher.publish_event` per
+      audited operation. JSON has no ``event_kind`` field (pre-T2
+      schema).
+    * Agent-authored :class:`AgentAnnouncementEvent` -- written by
+      :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
+      per ``meho.broadcast.announce`` call. JSON carries
+      ``"event_kind": "agent_announcement"``.
+
+    Dispatch is on the ``event_kind`` field: present and matching
+    ``"agent_announcement"`` → :class:`AgentAnnouncementEvent`,
+    everything else → :class:`BroadcastEvent` (the default). A
+    one-off pre-parse via :func:`json.loads` reads only the
+    discriminator; the chosen model class re-parses the same JSON
+    via :meth:`pydantic.BaseModel.model_validate_json` so validation
+    stays full-fidelity.
     """
     raw_event_json = fields.get("event")
     if not isinstance(raw_event_json, str):
@@ -292,7 +343,24 @@ def _parse_entry(
         )
         return None
     try:
-        return BroadcastEvent.model_validate_json(raw_event_json)
+        # Cheap discriminator peek -- json.loads on a short string is
+        # microseconds; an XRANGE page of ``limit <= 1000`` events
+        # incurs at most one extra parse pass per entry. The full
+        # pydantic validation runs on the chosen model class below.
+        peek = json.loads(raw_event_json)
+    except json.JSONDecodeError:
+        _log.warning(
+            "broadcast_recent_skipped_malformed_event",
+            stream_key=stream_key,
+            entry_id=entry_id,
+        )
+        return None
+    event_kind = peek.get("event_kind") if isinstance(peek, dict) else None
+    model_cls: type[BroadcastEvent] | type[AgentAnnouncementEvent] = (
+        AgentAnnouncementEvent if event_kind == "agent_announcement" else BroadcastEvent
+    )
+    try:
+        return model_cls.model_validate_json(raw_event_json)
     except ValidationError:
         _log.warning(
             "broadcast_recent_skipped_malformed_event",
@@ -513,4 +581,207 @@ register_mcp_tool(
 
 # ===========================================================================
 # === end meho.broadcast.recent ===
+# ===========================================================================
+
+
+# ===========================================================================
+# === meho.broadcast.announce ===
+# ===========================================================================
+
+
+async def _publish_agent_announcement_impl(
+    operator: Operator,
+    *,
+    activity: str,
+    target: str | None,
+    scope: str | None,
+    phase: str,
+) -> dict[str, Any]:
+    """Build + publish one :class:`AgentAnnouncementEvent`, return ``{event_id}``.
+
+    Internal helper for ``meho.broadcast.announce``. Kept separate from
+    :func:`_handler_announce` so the construction-and-publish seam is
+    importable by tests that want to bypass the wire-side argument
+    plumbing (e.g. cross-tenant isolation assertions that operate on
+    a directly-constructed :class:`Operator`).
+
+    ``phase`` arrives pre-validated by the caller (either by the
+    JSON-Schema enum on ``inputSchema`` or by a unit-test passing one
+    of the three accepted literals). The function casts it to the
+    :class:`AgentAnnouncementEvent` ``phase`` field's
+    :class:`typing.Literal` union via pydantic validation -- a bad
+    value would raise :class:`ValidationError` at the model
+    constructor, which the handler maps to ``-32602`` upstream.
+
+    Tenant scoping is structural: the ``tenant_id`` on the constructed
+    event is sourced exclusively from ``operator.tenant_id`` (the
+    JWT-bound claim). The handler's input schema has no ``tenant_id``
+    field; a cross-tenant announce is impossible by construction, not
+    by check-then-reject.
+    """
+    event = AgentAnnouncementEvent(
+        tenant_id=operator.tenant_id,
+        principal_sub=operator.sub,
+        activity=activity,
+        target=target,
+        scope=scope,
+        phase=phase,  # type: ignore[arg-type]  # pydantic validates the Literal at construction
+        ts=datetime.now(UTC),
+    )
+    entry_id = await publish_agent_announcement(event)
+    return {"event_id": entry_id}
+
+
+async def _handler_announce(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """``meho.broadcast.announce`` handler.
+
+    Validates the wire arguments belt-and-suspenders (the dispatcher's
+    JSON-Schema validator runs first, but the per-field re-checks here
+    preserve the typed contract a direct ``_handler_announce`` call
+    site -- e.g. a unit test -- would otherwise miss). Surfaces every
+    validation failure as :class:`McpInvalidParamsError` (``-32602``).
+
+    On a clean parse, delegates to
+    :func:`_publish_agent_announcement_impl` for the construct +
+    publish step. The publisher is **fail-loud** -- a Valkey teardown
+    propagates as :class:`Exception` and the MCP dispatcher's generic
+    handler maps it to ``-32603`` Internal Error. This is distinct
+    from :func:`~meho_backplane.broadcast.publisher.publish_event`'s
+    fail-open semantics by design (see the publisher module's
+    docstring); the agent explicitly emitted the announcement and
+    needs to know whether it landed.
+
+    Trust boundary
+    --------------
+
+    ``activity`` and ``scope`` are agent-authored free text. The
+    handler does NOT sanitise or rewrite them -- consumers MUST treat
+    the strings as UNTRUSTED. This mirrors the
+    :mod:`~meho_backplane.conventions.preamble` precedent for
+    operator-authored convention bodies wrapped in
+    ``<<TENANT_CONVENTIONS ... END_TENANT_CONVENTIONS>>`` delimiters.
+    See :class:`AgentAnnouncementEvent`'s docstring for the per-surface
+    contract (frontend escapes, Slack plain-text, downstream agents
+    must not interpret as policy).
+    """
+    activity = arguments.get("activity")
+    if not isinstance(activity, str):
+        raise McpInvalidParamsError("activity: must be a string")
+    if len(activity) < 1:
+        raise McpInvalidParamsError("activity: must be non-empty")
+    if len(activity) > ACTIVITY_MAX_CHARS:
+        raise McpInvalidParamsError(
+            f"activity: too long ({len(activity)} chars); cap is {ACTIVITY_MAX_CHARS}",
+        )
+    target = arguments.get("target")
+    if target is not None and not isinstance(target, str):
+        raise McpInvalidParamsError("target: must be a string when provided")
+    scope = arguments.get("scope")
+    if scope is not None and not isinstance(scope, str):
+        raise McpInvalidParamsError("scope: must be a string when provided")
+    phase_arg = arguments.get("phase", "update")
+    if phase_arg not in ("start", "update", "completion"):
+        raise McpInvalidParamsError(
+            "phase: must be one of 'start', 'update', 'completion'",
+        )
+    return await _publish_agent_announcement_impl(
+        operator,
+        activity=activity,
+        target=target,
+        scope=scope,
+        phase=phase_arg,
+    )
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="meho.broadcast.announce",
+        description=(
+            "Publish an agent-authored announcement to the operator's "
+            "tenant broadcast stream (Initiative #1090, Task #1092). "
+            "Use this to surface intent ('about to investigate cluster "
+            "X latency'), progress updates ('halfway through the "
+            "vCenter migration'), or completion summaries ('finished -- "
+            "rolled back to snapshot S'). The announcement lands on "
+            "the same meho:feed:{tenant_id} stream that audit-driven "
+            "events use, distinguished by event_kind='agent_announcement'; "
+            "other operators read it back via meho.broadcast.recent. "
+            "'activity' is mandatory (1..500 chars), 'target' and "
+            "'scope' are optional free-form attribution, 'phase' is "
+            "one of 'start' / 'update' / 'completion' (default "
+            "'update'). The publish is fail-loud -- a Valkey teardown "
+            "surfaces as JSON-RPC -32603 Internal Error so the agent "
+            "knows the announcement did not land (distinct from the "
+            "audit-driven publisher which fail-opens). Tenant scoping "
+            "is structural -- the input schema has no tenant_id "
+            "argument; the event always writes to the operator's own "
+            "tenant stream. Returns {event_id} -- the Valkey stream "
+            "entry id, round-trip-able through meho.broadcast.recent's "
+            "'since' cursor for verification."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "activity": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": ACTIVITY_MAX_CHARS,
+                    "description": (
+                        "Free-text description of the planned, "
+                        "in-progress, or completed activity. UNTRUSTED "
+                        "agent-authored content; consumers MUST escape "
+                        "on render (HTML, Slack, downstream LLM)."
+                    ),
+                },
+                "target": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": (
+                        "Optional target_name attribution -- the "
+                        "managed target the activity scopes to "
+                        "(e.g. 'prod-vc-1', 'kube-prod'). Omit when "
+                        "the activity is target-less."
+                    ),
+                },
+                "scope": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": (
+                        "Optional free-form scope hint (e.g. "
+                        "'investigating cluster X latency'). UNTRUSTED "
+                        "agent-authored content; same render rules as "
+                        "'activity'."
+                    ),
+                },
+                "phase": {
+                    "type": "string",
+                    "enum": ["start", "update", "completion"],
+                    "default": "update",
+                    "description": (
+                        "Lifecycle phase. 'start' marks intent at "
+                        "task entry; 'update' is the default for "
+                        "in-flight progress; 'completion' marks the "
+                        "wrap-up summary. The Prometheus counter "
+                        "broadcast_agent_announcements_total partitions "
+                        "by this label."
+                    ),
+                },
+            },
+            "required": ["activity"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.OPERATOR,
+        op_class="write",
+    ),
+    handler=_handler_announce,
+)
+
+
+# ===========================================================================
+# === end meho.broadcast.announce ===
 # ===========================================================================

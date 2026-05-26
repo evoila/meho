@@ -49,6 +49,20 @@ Dialect portability
 The conditional aggregation uses portable ``CASE WHEN ... THEN 1
 ELSE 0 END`` SUM expressions rather than dialect-specific ``FILTER``
 clauses (PG-only) so the same query runs against SQLite in tests.
+
+next_step hint (G0.13-T3 / #1133)
+---------------------------------
+
+``state="registered"`` rows carry a :class:`NextStep` object pointing
+at the verb that closes the workflow gap surfaced by the v0.6.0 RDC
+dogfood (consumer's signal 11: half-registered connectors fail
+lookup with no in-product hint). ``state="ingested"`` rows omit it
+(``next_step=None``) because the dispatcher already resolves them.
+
+The catalog lookup uses the v2-registry's ``(product, version)``,
+not the parser-derived shortening, because the catalog stores SDDC
+under ``product="sddc-manager"`` while the listing emits
+``product="sddc"``. See :func:`_next_step_for_registered`.
 """
 
 from __future__ import annotations
@@ -69,11 +83,72 @@ from meho_backplane.operations.ingest._llm_grouping_internals import build_conne
 from meho_backplane.operations.ingest.api_schemas import (
     ConnectorListItem,
     ConnectorStatusFilter,
+    NextStep,
+)
+from meho_backplane.operations.ingest.catalog import (
+    CatalogError,
+    ConnectorSpecCatalog,
+    load_catalog,
 )
 
 __all__ = ["list_ingested_connectors"]
 
 _log = structlog.get_logger(__name__)
+
+
+def _next_step_for_registered(
+    *,
+    catalog: ConnectorSpecCatalog | None,
+    registry_product: str,
+    registry_version: str,
+    registry_impl_id: str,
+) -> NextStep:
+    """Build the ``next_step`` hint for a ``state="registered"`` row.
+
+    Looks up the registry's ``(product, version)`` in the connector-spec
+    catalog (#743). The registry product is the right lookup key (not the
+    parser-derived one): the catalog stores ``product="sddc-manager"`` but
+    the listing emits ``product="sddc"`` per
+    :func:`parse_connector_id`'s deterministic shortening, and looking up
+    ``("sddc", "9.0")`` would always miss for SDDC.
+
+    Two branches:
+
+    * **Catalog hit** — verb points at ``meho connector ingest --catalog
+      <product>/<version>``; rationale says the spec is available in the
+      catalog. The CLI form is the same one the curated-on-ramp ships
+      (#915 / G0.7-T5); copying the verb verbatim closes the workflow.
+    * **Catalog miss** — verb points at the manual-mode ``meho connector
+      ingest --product <p> --version <v> --impl <i> --spec <uri>``;
+      rationale calls out the missing catalog entry so the operator
+      knows they need to source the OpenAPI spec themselves. Manual
+      mode is the same path G0.7-T5 already supports for one-off /
+      not-yet-curated specs (see ``ingest.go``'s mode dispatch).
+
+    *catalog* is ``None`` when the package-data load failed (a malformed
+    catalog at startup would have crashed the lifespan, so this branch
+    only fires in tests where the loader was monkeypatched or the
+    process is mid-catalog-reload); the helper degrades to the
+    manual-mode rationale rather than raising, because the operator's
+    workflow doesn't depend on the catalog being live.
+    """
+    entry = catalog.get(registry_product, registry_version) if catalog is not None else None
+    if entry is not None:
+        return NextStep(
+            verb=f"meho connector ingest --catalog {entry.product}/{entry.version}",
+            rationale="spec available in catalog; run ingest to populate operations",
+        )
+    return NextStep(
+        verb=(
+            f"meho connector ingest --product {registry_product} "
+            f"--version {registry_version} --impl {registry_impl_id} "
+            f"--spec <upstream-openapi-uri>"
+        ),
+        rationale=(
+            "not in catalog; run manual ingest with --spec pointing at the "
+            "vendor OpenAPI spec (file:// / https:// / docs:<...>)"
+        ),
+    )
 
 
 def _matches_status_filter(
@@ -284,6 +359,44 @@ async def list_ingested_connectors(
             operator_tenant_id=operator.tenant_id,
         )
 
+    items = await _emit_db_backed_rows(
+        operator=operator,
+        groups_by_connector=groups_by_connector,
+        op_counts_by_connector=op_counts_by_connector,
+        status=status,
+    )
+    items.extend(
+        _class_side_only_items(
+            groups_by_connector.keys(),
+            status=status,
+            catalog=_load_catalog_or_none(),
+        ),
+    )
+    return items
+
+
+async def _emit_db_backed_rows(
+    *,
+    operator: Operator,
+    groups_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
+    op_counts_by_connector: dict[tuple[UUID | None, str, str, str], int],
+    status: ConnectorStatusFilter | None,
+) -> list[ConnectorListItem]:
+    """Emit one ``state="ingested"`` :class:`ConnectorListItem` per DB-backed connector.
+
+    Walks the aggregated ``operation_group`` rows in stable sort order,
+    applies the :attr:`~ConnectorListItem.status` filter, drops rows
+    whose ``connector_id`` would not round-trip through the
+    dispatcher's resolve path (per the G0.9.1-T1 / #773 listing-
+    integrity contract — see :func:`_resolves_through_dispatcher`), and
+    projects each survivor into the wire shape with ``state="ingested"``
+    and ``next_step=None`` (the catalog-completion hint only applies
+    to the class-side-only path; ingested rows already dispatch).
+
+    Extracted from :func:`list_ingested_connectors` so the DB-side
+    emission and the class-side-only emission stay each below the
+    code-quality function-size limit.
+    """
     items: list[ConnectorListItem] = []
     for key, row in sorted(groups_by_connector.items(), key=_connector_sort_key):
         tenant_uuid, product, version, impl_id = key
@@ -315,14 +428,40 @@ async def list_ingested_connectors(
                 state="ingested",
             ),
         )
-    items.extend(_class_side_only_items(groups_by_connector.keys(), status=status))
     return items
+
+
+def _load_catalog_or_none() -> ConnectorSpecCatalog | None:
+    """Return the cached catalog, or ``None`` if the load failed.
+
+    Startup parses the catalog inside the lifespan -- a malformed catalog
+    would already have crashed the app before any request reached this
+    code. The defensive ``except`` here covers two edge cases that
+    appear only in test contexts:
+
+    * a unit test that monkeypatches the resource loader to inject a
+      malformed YAML and then asserts the listing degrades gracefully;
+    * a process mid-reload where :func:`load_catalog`'s lru_cache was
+      explicitly cleared.
+
+    Both cases prefer a degraded ``next_step`` hint (manual-mode rationale)
+    over a 500 from a route the operator depends on for diagnosability.
+    """
+    try:
+        return load_catalog()
+    except CatalogError:
+        _log.warning(
+            "next_step_catalog_load_failed",
+            reason="catalog_error_at_listing_time_fallback_to_manual_hint",
+        )
+        return None
 
 
 def _class_side_only_items(
     db_keys: Iterable[tuple[UUID | None, str, str, str]],
     *,
     status: ConnectorStatusFilter | None,
+    catalog: ConnectorSpecCatalog | None,
 ) -> list[ConnectorListItem]:
     """Return rows for v2-registered connectors with no DB-side state.
 
@@ -370,67 +509,143 @@ def _class_side_only_items(
     db_triples = {(product, version, impl_id) for (_, product, version, impl_id) in db_keys}
     rows: list[ConnectorListItem] = []
     for product, version, impl_id in sorted(all_connectors_v2().keys()):
-        if not version or not impl_id:
-            # v1-compat shim — see docstring.
-            continue
-        connector_id = build_connector_id(product, version, impl_id)
-        try:
-            parsed_product, parsed_version, parsed_impl_id = parse_connector_id(connector_id)
-        except ValueError:
-            _log.warning(
-                "dropped_unresolvable_connector_id",
-                source="v2_registry",
-                connector_id=connector_id,
-                registry_product=product,
-                registry_version=version,
-                registry_impl_id=impl_id,
-                reason="parse_connector_id_raised",
-            )
-            continue
-        if (parsed_version, parsed_impl_id) != (version, impl_id):
-            # The parser cannot recover the (version, impl_id) the
-            # registry advertises; even if a DB row eventually lands
-            # under the registry's natural key, the dispatcher will
-            # parse this connector_id to a different triple and fail
-            # to resolve. Drop and log — there is no clean
-            # remediation from inside the listing.
-            _log.warning(
-                "dropped_unresolvable_connector_id",
-                source="v2_registry",
-                connector_id=connector_id,
-                registry_product=product,
-                registry_version=version,
-                registry_impl_id=impl_id,
-                parsed_product=parsed_product,
-                parsed_version=parsed_version,
-                parsed_impl_id=parsed_impl_id,
-                reason="impl_id_or_version_not_recoverable_from_connector_id",
-            )
-            continue
-        if (parsed_product, parsed_version, parsed_impl_id) in db_triples:
-            # DB rows already represent this connector under the
-            # parser-derived natural key; the DB-loop emitted the
-            # ingested row, so skip the class-only ``registered`` row
-            # to avoid duplication. Covers both the trivial case
-            # (registry product == parsed product) and the SDDC case
-            # (registry product "sddc-manager" vs parsed "sddc").
-            continue
-        rows.append(
-            ConnectorListItem(
-                connector_id=connector_id,
-                product=parsed_product,
-                version=parsed_version,
-                impl_id=parsed_impl_id,
-                tenant_id=None,
-                group_count=0,
-                staged_group_count=0,
-                enabled_group_count=0,
-                disabled_group_count=0,
-                operation_count=0,
-                state="registered",
-            ),
+        item = _maybe_build_class_only_item(
+            registry_product=product,
+            registry_version=version,
+            registry_impl_id=impl_id,
+            db_triples=db_triples,
+            catalog=catalog,
         )
+        if item is not None:
+            rows.append(item)
     return rows
+
+
+def _maybe_build_class_only_item(
+    *,
+    registry_product: str,
+    registry_version: str,
+    registry_impl_id: str,
+    db_triples: set[tuple[str, str, str]],
+    catalog: ConnectorSpecCatalog | None,
+) -> ConnectorListItem | None:
+    """Project one v2-registry entry into a ``state="registered"`` row or skip it.
+
+    Returns ``None`` for any of four drop conditions (v1-compat shim,
+    parser failure, lossy parse, DB-dedupe); each drop emits a
+    structured ``dropped_unresolvable_connector_id`` log via
+    :func:`_resolve_class_only_natural_key`. Otherwise builds the
+    :class:`ConnectorListItem` with ``state="registered"`` and the
+    catalog-driven ``next_step`` hint.
+
+    Extracted from :func:`_class_side_only_items` so the per-entry
+    branching stays under the code-quality function-size limit.
+    Keyword-only to avoid positional-arg confusion (``product`` and
+    ``impl_id`` can both look like an identifier at the call site).
+    """
+    parsed = _resolve_class_only_natural_key(
+        registry_product=registry_product,
+        registry_version=registry_version,
+        registry_impl_id=registry_impl_id,
+    )
+    if parsed is None:
+        return None
+    connector_id, parsed_product, parsed_version, parsed_impl_id = parsed
+    if (parsed_product, parsed_version, parsed_impl_id) in db_triples:
+        # DB rows already represent this connector under the parser-
+        # derived natural key; the DB-loop emitted the ingested row,
+        # so skip the class-only ``registered`` row to avoid
+        # duplication. Covers both the trivial case (registry product
+        # == parsed product) and the SDDC case (registry product
+        # "sddc-manager" vs parsed "sddc").
+        return None
+    return ConnectorListItem(
+        connector_id=connector_id,
+        product=parsed_product,
+        version=parsed_version,
+        impl_id=parsed_impl_id,
+        tenant_id=None,
+        group_count=0,
+        staged_group_count=0,
+        enabled_group_count=0,
+        disabled_group_count=0,
+        operation_count=0,
+        state="registered",
+        next_step=_next_step_for_registered(
+            catalog=catalog,
+            # Lookup against the registry triple (the catalog's native
+            # key) rather than the parsed one — for SDDC the registry
+            # holds ``product="sddc-manager"`` while the listing emits
+            # ``product="sddc"``. The catalog is keyed on the registry
+            # side; this is the lookup the operator-facing verb
+            # resolves against.
+            registry_product=registry_product,
+            registry_version=registry_version,
+            registry_impl_id=registry_impl_id,
+        ),
+    )
+
+
+def _resolve_class_only_natural_key(
+    *,
+    registry_product: str,
+    registry_version: str,
+    registry_impl_id: str,
+) -> tuple[str, str, str, str] | None:
+    """Validate + parse a v2-registry entry's natural key.
+
+    Returns ``(connector_id, parsed_product, parsed_version,
+    parsed_impl_id)`` for a survivor, or ``None`` for any of three
+    drop reasons (with a structured log per drop):
+
+    * **v1-compat shim** — ``version`` or ``impl_id`` empty
+      (``(product, "", "")``); registry-internal shim, not a
+      separately registered connector.
+    * **Parser failure** — :func:`parse_connector_id` raises on the
+      emitted ``connector_id`` (impossible-to-parse ``impl_id`` shape).
+    * **Lossy parse** — the parser recovers a different
+      ``(version, impl_id)`` than the registry advertised; the
+      dispatcher would fail to resolve any DB row eventually written
+      under the registry's natural key.
+
+    The SDDC case (registry ``product="sddc-manager"``, parsed
+    ``product="sddc"``) survives because the ``(version, impl_id)``
+    pair round-trips losslessly even though ``product`` doesn't —
+    that's the documented exception the dispatcher's parsed product
+    matches what ``SDDC_PRODUCT="sddc"`` already writes into
+    ``endpoint_descriptor`` rows.
+    """
+    if not registry_version or not registry_impl_id:
+        return None
+    connector_id = build_connector_id(registry_product, registry_version, registry_impl_id)
+    try:
+        parsed_product, parsed_version, parsed_impl_id = parse_connector_id(connector_id)
+    except ValueError:
+        _log.warning(
+            "dropped_unresolvable_connector_id",
+            source="v2_registry",
+            connector_id=connector_id,
+            registry_product=registry_product,
+            registry_version=registry_version,
+            registry_impl_id=registry_impl_id,
+            reason="parse_connector_id_raised",
+        )
+        return None
+    if (parsed_version, parsed_impl_id) != (registry_version, registry_impl_id):
+        _log.warning(
+            "dropped_unresolvable_connector_id",
+            source="v2_registry",
+            connector_id=connector_id,
+            registry_product=registry_product,
+            registry_version=registry_version,
+            registry_impl_id=registry_impl_id,
+            parsed_product=parsed_product,
+            parsed_version=parsed_version,
+            parsed_impl_id=parsed_impl_id,
+            reason="impl_id_or_version_not_recoverable_from_connector_id",
+        )
+        return None
+    return connector_id, parsed_product, parsed_version, parsed_impl_id
 
 
 async def _resolves_through_dispatcher(

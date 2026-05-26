@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- Dispatcher resolver error surfacing — the typed/composite branch
+  now mirrors the ingested branch's explicit `no_connector` label
+  on `NoMatchingConnector`, and both branches catch
+  `AmbiguousConnectorResolution` and surface it as a structured
+  `ambiguous_connector` error with the resolver's diagnostic
+  message (candidate set + remediation step) in
+  `extras.exception_message`. The `/api/v1/targets/{name}/probe`
+  route now consults the same shared resolver helper as the
+  dispatcher so the two surfaces always agree on whether a
+  target's connector resolves; ambiguous probes return 409 with
+  the resolver's message. Closes G0.14-T1 signals 7, 8, 19 from
+  `claude-rdc-hetzner-dc#697`. (#1142)
+
 ## [0.6.0] - 2026-05-26
 
 **MVP5 — tier-3 standalone connector wave, agent runtime + identity +

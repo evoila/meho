@@ -558,3 +558,63 @@ def test_resolve_emits_connector_resolved_log_with_tie_break_reason(
     assert "connector_resolved" in out
     # structlog renders JSON in test/CI; check the key-value pair on the JSON shape.
     assert '"tie_break": "specificity"' in out
+
+
+# ---------------------------------------------------------------------------
+# resolve_connector_or_label — shared dispatcher / probe helper (G0.14-T1)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_or_label_returns_class_on_success() -> None:
+    """Successful resolution returns ``(cls, None, None)``."""
+    from meho_backplane.connectors import resolve_connector_or_label
+
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareRest9,
+    )
+    target = _FakeTarget(product="vmware", fingerprint=_fingerprint("9.0.2"))
+    cls, label, exc_message = resolve_connector_or_label(target)
+    assert cls is _VmwareRest9
+    assert label is None
+    assert exc_message is None
+
+
+def test_resolve_or_label_returns_no_connector_label() -> None:
+    """``NoMatchingConnector`` → ``(None, 'no_connector', message)``."""
+    from meho_backplane.connectors import resolve_connector_or_label
+
+    target = _FakeTarget(product="ghost-product", fingerprint=None)
+    cls, label, exc_message = resolve_connector_or_label(target)
+    assert cls is None
+    assert label == "no_connector"
+    assert exc_message is not None
+    assert "ghost-product" in exc_message
+
+
+def test_resolve_or_label_returns_ambiguous_connector_label() -> None:
+    """``AmbiguousConnectorResolution`` → ``(None, 'ambiguous_connector', message)``."""
+    from meho_backplane.connectors import resolve_connector_or_label
+
+    register_connector_v2(
+        product="vmware",
+        version="a",
+        impl_id="vmware-a",
+        cls=_VmwareWide,
+    )
+    register_connector_v2(
+        product="vmware",
+        version="b",
+        impl_id="vmware-b",
+        cls=_VmwarePyvmomi,
+    )
+    target = _FakeTarget(product="vmware", fingerprint=_fingerprint("9.0.2"))
+    cls, label, exc_message = resolve_connector_or_label(target)
+    assert cls is None
+    assert label == "ambiguous_connector"
+    assert exc_message is not None
+    # Resolver names the remediation step + the candidate set verbatim.
+    assert "preferred_impl_id" in exc_message
+    assert "vmware-a" in exc_message and "vmware-b" in exc_message

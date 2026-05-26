@@ -92,8 +92,17 @@ from meho_backplane.connectors.registry import all_connectors_v2
 __all__ = [
     "AmbiguousConnectorResolution",
     "NoMatchingConnector",
+    "ResolutionLabel",
     "resolve_connector",
+    "resolve_connector_or_label",
 ]
+
+#: Labels surfaced by :func:`resolve_connector_or_label` so callers
+#: (dispatcher, ``/probe`` route, and any future "did this target wire?"
+#: surface) can branch on the resolver outcome without re-catching the
+#: exception class. Mirrors the structured ``error_code`` taxonomy the
+#: dispatcher writes onto ``OperationResult.extras``.
+ResolutionLabel = str  # one of "no_connector" / "ambiguous_connector"
 
 _log = structlog.get_logger(__name__)
 
@@ -431,3 +440,61 @@ def _select(
         tie_break=reason,
     )
     return candidate.cls
+
+
+def resolve_connector_or_label(
+    target: Any,
+) -> tuple[type[Connector] | None, ResolutionLabel | None, str | None]:
+    """Run :func:`resolve_connector` and translate exceptions to labels.
+
+    Returns a 3-tuple ``(cls, label, exc_message)``:
+
+    * ``(cls, None, None)`` — resolver picked a class.
+    * ``(None, "no_connector", message)`` — :exc:`NoMatchingConnector`
+      was raised; ``message`` is the exception's diagnostic text (which
+      already names the target's ``(product, version)`` per the
+      resolver's exception construction site).
+    * ``(None, "ambiguous_connector", message)`` —
+      :exc:`AmbiguousConnectorResolution` was raised; ``message`` is the
+      diagnostic text (which already names the candidate set and the
+      remediation step — set ``target.preferred_impl_id`` to one of
+      them).
+
+    Why this helper exists
+    ----------------------
+
+    The dispatcher's connector-resolution step and the ``/api/v1/targets/
+    {name}/probe`` route both ask the same question — "does this target
+    resolve to a registered connector?" — but they need to answer in
+    different framings: the dispatcher returns a structured
+    :class:`~meho_backplane.connectors.OperationResult` carrying the
+    error code, while ``/probe`` raises a :class:`fastapi.HTTPException`
+    carrying an HTTP status code. Both branches need the same yes/no/
+    ambiguous classification before they format the response.
+
+    The pre-G0.14 ``/probe`` route used the v1 :func:`get_connector`
+    lookup and the dispatcher used the v2 :func:`resolve_connector` —
+    same target, two different yes/no answers (consumer feedback signal
+    19, `claude-rdc-hetzner-dc#697`). This helper is the shared code
+    path that closes that asymmetry: both callers now ask
+    :func:`resolve_connector` the same way, and the labels above are the
+    only output shape they can branch on.
+
+    Note on the typed/composite dispatcher branch
+    ---------------------------------------------
+
+    The dispatcher only invokes the resolver for descriptors that have a
+    target (``source_kind='ingested'`` always, ``source_kind in
+    {'typed','composite'}`` when ``target is not None``). Module-level
+    typed handlers with ``target is None`` never reach this helper —
+    they don't need a connector instance. Callers that should skip
+    resolution entirely (no target supplied for a typed handler that
+    doesn't need one) make that decision *before* calling this helper.
+    """
+    try:
+        cls = resolve_connector(target)
+    except NoMatchingConnector as exc:
+        return None, "no_connector", str(exc)
+    except AmbiguousConnectorResolution as exc:
+        return None, "ambiguous_connector", str(exc)
+    return cls, None, None

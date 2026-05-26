@@ -363,6 +363,19 @@ jobs:
       # exact tag the testcontainers fixture asks for, without a docker.io
       # round-trip.
       MEHO_TEST_K3S_IMAGE: harbor.evba.lab/dockerhub-proxy/rancher/k3s:v1.32.5-k3s1
+      # G11.2-T7 (#1098) — Keycloak 26.x container fixture for the
+      # live-IdP integration test
+      # (backend/tests/integration/test_auth_keycloak_client_credentials.py).
+      # Unlike the rows above this one has **no docker.io short-name
+      # default** in the fixture: the Keycloak image is ~600 MB and an
+      # unauthenticated docker.io pull would reliably exhaust the
+      # cluster's shared NAT egress bucket, so the fixture skips when
+      # MEHO_TEST_KEYCLOAK_IMAGE is unset rather than falling back. The
+      # Harbor-proxied tag is the only path that runs the suite to
+      # pass; everywhere else (local dev sandboxes, agent sandboxes,
+      # any future fork PR job that doesn't see this env) the test
+      # skips cleanly with a clear remediation message.
+      MEHO_TEST_KEYCLOAK_IMAGE: harbor.evba.lab/dockerhub-proxy/keycloak/keycloak:26.0
     defaults:
       run:
         working-directory: backend

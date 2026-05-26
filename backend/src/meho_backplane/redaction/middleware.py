@@ -58,10 +58,16 @@ from typing import Any
 from pydantic import BaseModel
 
 from meho_backplane.redaction.engine import RedactionManifestEntry, redact
+from meho_backplane.redaction.presidio import (
+    Tier2NotAvailableError,
+    apply_tier2,
+    policy_uses_tier2,
+)
 from meho_backplane.redaction.resolver import resolve_policy
 
 __all__ = [
     "RedactionMiddlewareResult",
+    "Tier2NotAvailableError",
     "apply_connector_boundary_redaction",
     "manifest_to_audit_payload",
     "normalize_for_audit",
@@ -126,20 +132,42 @@ def apply_connector_boundary_redaction(
     which is idempotent and lock-protected. A second call with the
     same labels returns the same policy reference, so the audit row's
     ``policy_id`` is stable across dispatches.
+
+    G11.4-T3 (#1072) extension: when the resolved policy carries a
+    ``tier2`` block, the middleware runs a second pass with the
+    Microsoft Presidio NER adapter (:mod:`.presidio`) on the
+    Tier-1-redacted payload. The Tier-2 manifest entries are appended
+    to the Tier-1 manifest before the result is returned, so audit
+    consumers see one unified list. Policies without a ``tier2``
+    block never trigger a Presidio import -- the call to
+    :func:`policy_uses_tier2` is the cheap predicate that gates the
+    expensive code path.
     """
     policy = resolve_policy(connector_id=connector_id, tenant=tenant, op=op)
     normalized = normalize_for_audit(raw)
-    result = redact(
+    tier1 = redact(
         normalized,
         policy,
         connector_id=connector_id,
         tenant=tenant,
         op=op,
     )
+    merged_manifest = tier1.manifest
+    current_redacted: Any = tier1.redacted
+    if policy_uses_tier2(policy):
+        tier2 = apply_tier2(
+            current_redacted,
+            policy,
+            connector_id=connector_id,
+            tenant=tenant,
+            op=op,
+        )
+        current_redacted = tier2.redacted
+        merged_manifest = tier1.manifest + tier2.manifest
     return RedactionMiddlewareResult(
         raw=normalized,
-        redacted=result.redacted,
-        manifest=result.manifest,
+        redacted=current_redacted,
+        manifest=merged_manifest,
         policy_id=policy.id,
     )
 

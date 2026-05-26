@@ -72,12 +72,15 @@ from pydantic import (
 from meho_backplane.redaction.patterns import PATTERN_NAMES
 
 __all__ = [
+    "PRESIDIO_DEFAULT_ENTITIES",
+    "PRESIDIO_SUPPORTED_ENTITIES",
     "RedactionAction",
     "RedactionMode",
     "RedactionPolicy",
     "RedactionPolicyError",
     "RedactionRule",
     "RedactionScope",
+    "Tier2Rule",
     "load_policy_yaml",
     "parse_policy",
 ]
@@ -114,6 +117,71 @@ _NAME_MAX_LENGTH: Final[int] = 96
 #: carries this verbatim into the C1-b audit row; capping prevents an
 #: adversarial / pasted-novel policy from bloating audit storage.
 _REASON_MAX_LENGTH: Final[int] = 512
+
+#: Max length of a Tier-2 field path glob -- enough room for a deep
+#: nested selector (``items.*.error.details.message``) while bounding
+#: the schema-validation cost on a malformed policy.
+_PATH_MAX_LENGTH: Final[int] = 256
+
+#: Max length of a Tier-2 entity-type label (e.g. ``"IP_ADDRESS"``).
+#: Presidio's built-in entity labels are short SCREAMING_SNAKE_CASE
+#: strings; capping protects the audit manifest from a malformed
+#: policy listing a novel-sized identifier.
+_ENTITY_MAX_LENGTH: Final[int] = 64
+
+#: Lower bound on a Tier-2 rule's ``threshold`` -- Presidio's
+#: confidence scores live in ``[0.0, 1.0]``. A policy author who
+#: writes ``threshold: 0`` opts into every recogniser hit (including
+#: low-confidence ones); ``threshold: 1`` opts into nothing. The
+#: pydantic ``ge=0.0`` / ``le=1.0`` constraint surfaces a typo'd
+#: value (``threshold: 100``) at parse time, not at runtime when a
+#: Presidio call yields zero matches.
+_THRESHOLD_MIN: Final[float] = 0.0
+_THRESHOLD_MAX: Final[float] = 1.0
+
+#: Tier-2 entity catalogue. Mirrors the Presidio 2.2.362 built-in
+#: recogniser set documented at
+#: https://microsoft.github.io/presidio/supported_entities/ -- the
+#: subset operators are most likely to opt into for free-text fields
+#: in connector responses. Each label is what
+#: ``AnalyzerEngine.analyze(entities=[...])`` accepts and what the
+#: emitted ``RecognizerResult.entity_type`` carries.
+#:
+#: Adding a label here also makes the policy schema accept it; the
+#: schema rejects unknown labels at parse time so a typo'd
+#: ``PERSON_NAME`` fails policy load with the known set in the error
+#: rather than silently neutering a rule.
+PRESIDIO_SUPPORTED_ENTITIES: Final[tuple[str, ...]] = (
+    "CREDIT_CARD",
+    "CRYPTO",
+    "DATE_TIME",
+    "EMAIL_ADDRESS",
+    "IBAN_CODE",
+    "IP_ADDRESS",
+    "LOCATION",
+    "MEDICAL_LICENSE",
+    "NRP",
+    "PERSON",
+    "PHONE_NUMBER",
+    "URL",
+    "US_BANK_NUMBER",
+    "US_DRIVER_LICENSE",
+    "US_ITIN",
+    "US_PASSPORT",
+    "US_SSN",
+)
+
+#: Default entity list when a Tier-2 rule omits ``entities``. Mirrors
+#: the operational lean of the parent initiative (#805): free-text
+#: fields in connector error strings and descriptions most often leak
+#: hostnames (URL), addresses (IP_ADDRESS), and incident-reporter
+#: names (PERSON). Operators who want a wider sweep list entities
+#: explicitly; the default keeps unconfigured Tier-2 rules tight.
+PRESIDIO_DEFAULT_ENTITIES: Final[tuple[str, ...]] = (
+    "PERSON",
+    "IP_ADDRESS",
+    "URL",
+)
 
 
 class RedactionPolicyError(RuntimeError):
@@ -232,6 +300,134 @@ class RedactionRule(BaseModel):
         return normalized
 
 
+class Tier2Rule(BaseModel):
+    """One free-text NER rule -- Initiative #805 (G11.4-T3, #1072).
+
+    Tier-2 rules are the **capability-flagged opt-in** half of the
+    redaction policy. Presidio is a heavyweight dependency (spaCy
+    model load, NER inference on every flagged leaf); a Tier-1-only
+    policy never loads it. A policy carrying one or more
+    :class:`Tier2Rule` entries on its ``tier2`` field opts in for the
+    matching dispatches only.
+
+    Field-path selection
+    --------------------
+    ``fields`` is a tuple of dotted glob patterns matched against the
+    engine's manifest ``path`` (e.g. ``"items.3.error.message"``):
+
+    * ``"description"`` -- the top-level ``description`` leaf.
+    * ``"items.*.message"`` -- ``message`` on any one-level-deep
+      ``items`` child.
+    * ``"**.error.message"`` -- ``error.message`` at any depth.
+
+    Glob shape mirrors gitignore / bash extglob, but limited to the
+    two metacharacters Presidio's opt-in surface actually needs.
+    Empty ``fields`` is rejected; an opt-in rule with no fields would
+    silently skip every leaf, which is almost certainly a policy bug.
+
+    Entity selection
+    ----------------
+    ``entities`` is the set of Presidio recogniser labels to look for.
+    Validated against :data:`PRESIDIO_SUPPORTED_ENTITIES` so a typo
+    (``PERSON_NAME``) fails policy load instead of being silently
+    ignored at runtime (Presidio's ``analyze(entities=[...])`` is
+    tolerant of unknown labels -- it just returns nothing). Default
+    is :data:`PRESIDIO_DEFAULT_ENTITIES` (PERSON / IP_ADDRESS / URL),
+    the leak surface the parent initiative (#805) calls out for
+    free-text fields.
+
+    Threshold
+    ---------
+    ``threshold`` is the Presidio confidence floor in ``[0.0, 1.0]``;
+    matches with ``score < threshold`` are discarded before the
+    anonymiser runs. Default ``0.5`` matches Presidio's documented
+    "balanced" posture (precision ~= recall on the default recogniser
+    set); operators with high-stakes payloads can lower to ``0.0``,
+    operators with chatty payloads can raise toward ``0.85``.
+
+    Action / reason
+    ---------------
+    Shares the same :data:`RedactionAction` union as Tier-1: ``redact``
+    swaps the entity span for a fixed marker; ``mask`` and ``hash`` do
+    the same length-preserving / stable-correlator transforms Tier-1
+    uses. Audit-manifest entries emitted by the Tier-2 pass carry the
+    same ``rule`` / ``pattern`` / ``action`` / ``count`` / ``span`` /
+    ``reason`` / ``path`` shape as Tier-1 (the engine's
+    :class:`~meho_backplane.redaction.engine.RedactionManifestEntry`),
+    with ``pattern`` set to ``f"presidio:{entity_type}"`` so audit
+    consumers can bin Tier-1 vs Tier-2 firings by prefix.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: Annotated[str, Field(min_length=1, max_length=_NAME_MAX_LENGTH)]
+    fields: Annotated[tuple[str, ...], Field(min_length=1)]
+    entities: Annotated[
+        tuple[str, ...],
+        Field(default_factory=lambda: PRESIDIO_DEFAULT_ENTITIES, min_length=1),
+    ]
+    action: RedactionAction = "redact"
+    threshold: Annotated[float, Field(ge=_THRESHOLD_MIN, le=_THRESHOLD_MAX)] = 0.5
+    scope: RedactionScope = Field(default_factory=RedactionScope)
+    reason: Annotated[str, Field(min_length=1, max_length=_REASON_MAX_LENGTH)]
+    language: Annotated[str, Field(min_length=2, max_length=8)] = "en"
+
+    @field_validator("name")
+    @classmethod
+    def _name_is_slug(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("tier2 rule name must not be blank or whitespace-only")
+        return normalized
+
+    @field_validator("fields")
+    @classmethod
+    def _fields_non_blank(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        for value in values:
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("tier2 field path must not be blank or whitespace-only")
+            if len(stripped) > _PATH_MAX_LENGTH:
+                raise ValueError(
+                    f"tier2 field path exceeds max length {_PATH_MAX_LENGTH}: {stripped!r}",
+                )
+            normalized.append(stripped)
+        return tuple(normalized)
+
+    @field_validator("entities")
+    @classmethod
+    def _entities_known(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("tier2 entity must not be blank or whitespace-only")
+            if len(stripped) > _ENTITY_MAX_LENGTH:
+                raise ValueError(
+                    f"tier2 entity exceeds max length {_ENTITY_MAX_LENGTH}: {stripped!r}",
+                )
+            if stripped not in PRESIDIO_SUPPORTED_ENTITIES:
+                raise ValueError(
+                    f"unknown presidio entity {stripped!r}; "
+                    f"known entities: {', '.join(PRESIDIO_SUPPORTED_ENTITIES)}",
+                )
+            if stripped in seen:
+                raise ValueError(f"duplicate entity {stripped!r} within tier2 rule")
+            seen.add(stripped)
+            normalized.append(stripped)
+        return tuple(normalized)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_non_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("tier2 rule reason must not be blank or whitespace-only")
+        return normalized
+
+
 class RedactionPolicy(BaseModel):
     """A named, versioned bundle of redaction rules.
 
@@ -241,6 +437,14 @@ class RedactionPolicy(BaseModel):
     almost certainly a mistake and would silently let raw payloads
     through; the explicit error forces the author to either delete the
     file or write at least one rule.
+
+    ``tier2`` is the capability-flagged opt-in for Microsoft Presidio
+    NER (G11.4-T3 #1072). A policy that omits ``tier2`` -- or sets it
+    to the empty tuple -- never loads Presidio at runtime; the Tier-1
+    pass alone runs on every dispatch. A policy with at least one
+    :class:`Tier2Rule` triggers a lazy import + NER pass over the
+    flagged free-text fields, merging into the same manifest shape as
+    Tier-1.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -250,6 +454,7 @@ class RedactionPolicy(BaseModel):
     description: Annotated[str, Field(default="", max_length=2048)]
     rules: Annotated[tuple[RedactionRule, ...], Field(min_length=1)]
     mode: RedactionMode = "enforce"
+    tier2: tuple[Tier2Rule, ...] = ()
 
     @field_validator("id")
     @classmethod
@@ -273,6 +478,28 @@ class RedactionPolicy(BaseModel):
         for rule in rules:
             if rule.name in seen:
                 raise ValueError(f"duplicate rule name {rule.name!r} within policy")
+            seen.add(rule.name)
+        return rules
+
+    @field_validator("tier2")
+    @classmethod
+    def _tier2_names_unique(cls, rules: tuple[Tier2Rule, ...]) -> tuple[Tier2Rule, ...]:
+        """Reject duplicate ``Tier2Rule.name`` within one policy.
+
+        Same rationale as :meth:`_rule_names_unique`: the audit
+        manifest emits one entry per rule firing per leaf, and an
+        operator reading the row needs the rule name to map back to
+        exactly one YAML entry. Tier-1 and Tier-2 names live in
+        disjoint namespaces here (the manifest distinguishes them by
+        the ``pattern`` field's ``presidio:`` prefix) so a Tier-1
+        rule named ``strip-bearer`` and a Tier-2 rule also named
+        ``strip-bearer`` would not collide -- but we cross-check
+        below anyway so the YAML diff stays self-explanatory.
+        """
+        seen: set[str] = set()
+        for rule in rules:
+            if rule.name in seen:
+                raise ValueError(f"duplicate tier2 rule name {rule.name!r} within policy")
             seen.add(rule.name)
         return rules
 

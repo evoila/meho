@@ -38,6 +38,14 @@ dependencies = [
     "markdown-it-py[linkify]>=3.0",
     "pygments>=2.18",
     "python-multipart>=0.0.12",
+    # G11.4-T3 (#1072) -- Tier-2 free-text NER redaction. Both pins are
+    # the 2026-03-15 release (the most recent at task-file time); the
+    # version is also called out in the issue body. Loaded **lazily**
+    # by :mod:`meho_backplane.redaction.presidio` so a Tier-1-only
+    # policy never imports them at runtime (the dep is still installed
+    # but stays untouched until a policy with a ``tier2`` block fires).
+    "presidio-analyzer==2.2.362",
+    "presidio-anonymizer==2.2.362",
 ]
 
 [dependency-groups]
@@ -327,6 +335,27 @@ disable_error_code = ["type-arg", "attr-defined"]
 [[tool.mypy.overrides]]
 module = ["croniter.*"]
 ignore_missing_imports = true
+
+# Microsoft Presidio (G11.4-T3 #1072) ships ``py.typed`` markers in
+# recent releases, but the ``presidio_analyzer.nlp_engine`` and
+# ``presidio_anonymizer.entities`` submodules expose APIs whose
+# parameter types resolve to ``Any`` under strict mode (the
+# ``NlpEngineProvider`` config dict and the ``OperatorConfig`` params
+# are deliberately untyped on the upstream surface). The Tier-2
+# adapter module (:mod:`meho_backplane.redaction.presidio`) localises
+# every Presidio call into one place, so the override scope stays
+# narrow. Drop this override if upstream ships stricter stubs.
+[[tool.mypy.overrides]]
+module = ["presidio_analyzer.*", "presidio_anonymizer.*"]
+ignore_missing_imports = true
+# ``AnonymizerEngine.__init__`` is documented but typed only as
+# ``def __init__(self)`` with no annotations -- strict mode flags
+# the construction call as ``no-untyped-call``. Disable that one
+# error code for the Tier-2 adapter; every other strict check
+# (return-any, untyped-def, arg-type on our own code) stays in force.
+[[tool.mypy.overrides]]
+module = ["meho_backplane.redaction.presidio"]
+disable_error_code = ["no-untyped-call", "arg-type"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

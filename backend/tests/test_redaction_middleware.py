@@ -204,3 +204,107 @@ def test_none_payload_passes_through_unchanged() -> None:
     assert result.raw is None
     assert result.redacted is None
     assert result.manifest == ()
+
+
+# ---------------------------------------------------------------------------
+# Tier-2 wiring (Task #1072)
+# ---------------------------------------------------------------------------
+
+
+def test_tier1_only_policy_keeps_presidio_unloaded() -> None:
+    """Acceptance gate (#1072): a Tier-1-only policy running through
+    the middleware never imports the Presidio modules.
+
+    The guarantee is the load-bearing reason Tier-2 is *capability-
+    flagged*: deployments that never opt in pay zero NER cost. We
+    snapshot ``sys.modules`` before and after, asserting the
+    Presidio surface stays untouched.
+    """
+    import sys as _sys
+
+    # Drop any previously-loaded presidio modules (another test in
+    # the session may have loaded them); the assertion below is only
+    # meaningful if we start from a clean slate.
+    for mod in [k for k in _sys.modules if k.startswith("presidio_")]:
+        del _sys.modules[mod]
+
+    raw = {"token": "Bearer eyJabcdefghijklmnop1234"}
+    result = apply_connector_boundary_redaction(
+        raw,
+        connector_id="some-connector",
+        tenant=None,
+        op="some.op",
+    )
+
+    assert isinstance(result, RedactionMiddlewareResult)
+    # Tier-1 still fires.
+    assert "[REDACTED:bearer_token]" in str(result.redacted["token"])
+    # Presidio modules were NOT imported.
+    assert not [k for k in _sys.modules if k.startswith("presidio_")]
+
+
+def test_tier2_block_merges_into_unified_manifest() -> None:
+    """A policy with a tier2 block adds Tier-2 manifest entries on
+    top of Tier-1; the redacted payload reflects both passes.
+
+    Skipped when no spaCy model is provisioned -- CI provisions
+    en_core_web_lg via ci.yml; locally run
+    ``uv run python -m spacy download en_core_web_sm`` first.
+    """
+
+    import spacy.util
+
+    if not any(spacy.util.is_package(m) for m in ("en_core_web_lg", "en_core_web_sm")):
+        pytest.skip(
+            "skipped-in-sandbox: no spaCy model installed (set up via "
+            "`uv run python -m spacy download en_core_web_sm` for local runs; "
+            "CI provisions en_core_web_lg).",
+        )
+
+    from meho_backplane.redaction import clear_engine_cache
+
+    clear_engine_cache()
+    policy = parse_policy(
+        textwrap.dedent(
+            """
+            id: tier2-merge-test
+            version: 1
+            rules:
+              - name: strip-bearer
+                pattern: bearer_token
+                action: redact
+                reason: tier1
+            tier2:
+              - name: scrub-error
+                fields:
+                  - error.message
+                entities:
+                  - IP_ADDRESS
+                action: redact
+                threshold: 0.3
+                reason: free-text ner
+            """,
+        ).strip(),
+    )
+    register_policy(policy, connector_id="c1")
+
+    raw = {
+        "token": "Bearer eyJabcdefghijklmnop1234",
+        "error": {"message": "Connection refused from 10.0.0.42"},
+    }
+    result = apply_connector_boundary_redaction(
+        raw,
+        connector_id="c1",
+        tenant=None,
+        op="op",
+    )
+
+    assert result.policy_id == "tier2-merge-test"
+    # Tier-1 fired on the bearer token.
+    assert "[REDACTED:bearer_token]" in str(result.redacted["token"])
+    # Tier-2 fired on the IP in the free-text message.
+    assert "10.0.0.42" not in str(result.redacted["error"]["message"])
+    # The manifest carries entries from BOTH tiers.
+    patterns = {entry.pattern for entry in result.manifest}
+    assert "bearer_token" in patterns
+    assert "presidio:IP_ADDRESS" in patterns

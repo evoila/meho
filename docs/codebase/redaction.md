@@ -1,8 +1,8 @@
-# Redaction (connector-boundary, Tier-1)
+# Redaction (connector-boundary, tiered)
 
 Initiative [#805](https://github.com/evoila/meho/issues/805) (G11.4 Safety,
 C1) ships a sanitization middleware that redacts every connector response
-before it reaches a caller or LLM. This document covers three landed
+before it reaches a caller or LLM. This document covers four landed
 slices:
 
 * The foundation
@@ -17,10 +17,12 @@ slices:
   ([#1073](https://github.com/evoila/meho/issues/1073)): fixture-pair
   enforcement of policy correctness in CI, plus a policy-level
   `mode: shadow` flag for safe new-rule rollout.
+* The Tier-2 Microsoft Presidio NER adapter
+  ([#1072](https://github.com/evoila/meho/issues/1072)):
+  capability-flagged free-text NER over policy-flagged fields,
+  merging into the same manifest shape as Tier-1.
 
-Pending sibling tickets: the Tier-2 Microsoft Presidio NER adapter
-(C1-c, [#1072](https://github.com/evoila/meho/issues/1072)) and the
-agent-invocation audit row (C2-b,
+Pending sibling ticket: the agent-invocation audit row (C2-b,
 [#1074](https://github.com/evoila/meho/issues/1074)).
 
 ## Overview
@@ -348,14 +350,160 @@ auto-discovers them.
 layout and the dummy-secret-shape convention (replace real
 secrets with regex-equivalent fakes).
 
+## Tier-2: Microsoft Presidio free-text NER (#1072)
+
+Tier-1 catches structured leaks (credentials, kubeconfig, IP-shaped
+identifiers) but cannot reach prose: a connector's `error.message`
+or `result.description` field is a free-text leaf that hides PII the
+regex catalogue does not target. Tier-2 is the **opt-in NER pass**
+that closes that gap.
+
+### Capability-flagged contract
+
+A `RedactionPolicy` with no `tier2` block (or `tier2: []`) **never
+loads Presidio at runtime**. The middleware's predicate
+`policy_uses_tier2(policy)` is the cheap boolean check on the hot
+path; only policies that opt in pay the spaCy model load + per-leaf
+NER inference cost.
+
+This is the load-bearing guarantee tested by
+`tests/test_redaction_presidio.py::test_tier1_only_policy_never_imports_presidio`
+(meta-path-blocked presidio import + Tier-1 policy run → middleware
+returns the redacted payload without raising and `sys.modules`
+contains no `presidio_*` entries).
+
+### Policy shape
+
+```yaml
+id: my-policy
+version: 1
+rules:
+  - name: strip-bearer
+    pattern: bearer_token
+    action: redact
+    reason: tier1
+tier2:
+  - name: scrub-error-messages
+    fields:
+      - error.message            # one specific path
+      - items.*.description      # any items[*].description leaf
+      - "**.notes"               # ``notes`` at any depth
+    entities:                    # default: [PERSON, IP_ADDRESS, URL]
+      - PERSON
+      - IP_ADDRESS
+      - URL
+    action: redact               # ``mask`` and ``hash`` also supported
+    threshold: 0.5               # Presidio confidence floor in [0, 1]
+    language: en                 # spaCy / Presidio language code
+    scope:                       # same predicate shape as Tier-1
+      connector_id: github
+    reason: "free-text NER over user-facing error / description"
+```
+
+`fields` is the load-bearing operator decision: which payload paths
+are free-text. `entities` is the Presidio recogniser set; the schema
+validates against the catalogue (`PRESIDIO_SUPPORTED_ENTITIES` in
+`policy.py`) so a typo like `PERSON_NAME` fails policy load with the
+known-set in the error.
+
+### Path-glob matcher
+
+The matcher (`_glob_to_regex` in `presidio.py`) supports two
+metacharacters:
+
+| Glob | Meaning |
+| --- | --- |
+| `*` | Exactly one path segment. `items.*.message` matches `items.0.message` but not `items.0.nested.message`. |
+| `**` | Any depth, including zero segments. `**.error.message` matches `error.message` and `a.b.error.message`. |
+
+Everything else (literal segment text, dots) is matched verbatim.
+The compiled regex is cached per-glob (`functools.lru_cache(256)`) so
+the same glob amortises across calls.
+
+### Engine lifecycle
+
+`presidio.py` exposes `get_engines(language="en")` which returns a
+frozen `Tier2EnginePair(analyzer, anonymizer)`. The first call per
+language:
+
+1. Imports `presidio_analyzer`, `presidio_analyzer.nlp_engine`, and
+   `presidio_anonymizer`. The imports are inside the function body
+   so a Tier-1-only policy never triggers them.
+2. Constructs an `NlpEngineProvider` configured with the resolved
+   spaCy model (default `en_core_web_lg`; `MEHO_REDACTION_SPACY_MODEL`
+   env var overrides — typically set to `en_core_web_sm` in CI's
+   unit lane and dev sandboxes).
+3. Constructs `AnalyzerEngine(nlp_engine=..., supported_languages=[language])`
+   and `AnonymizerEngine()`. Both are cached behind a lock; the
+   `_engines` dict survives the process lifetime.
+
+Failures during step 1–3 raise `Tier2NotAvailableError` (with the
+chained cause), which the middleware catches and converts to a
+structured `connector_error` `OperationResult` — the dispatcher's
+never-raises contract holds even when Presidio is misconfigured.
+
+### Manifest contract
+
+Tier-2 emits the same `RedactionManifestEntry` shape as Tier-1, with
+two distinguishing fields:
+
+| Field | Tier-1 example | Tier-2 example |
+| --- | --- | --- |
+| `rule` | `strip-bearer-token` | `scrub-error-messages` |
+| `pattern` | `bearer_token` | `presidio:PERSON` |
+| `action` | `redact` | `redact` |
+| `count` | 1 | 1 |
+| `span` | (12, 48) | (8, 22) |
+| `reason` | RFC 7235 secret | free-text NER |
+| `path` | `headers.authorization` | `error.message` |
+
+The `presidio:` prefix on `pattern` lets audit consumers bin Tier-1
+vs Tier-2 firings without re-reading rule definitions. Multiple
+Presidio matches in the same leaf collapse into one manifest entry
+per `(rule, entity_type)` pair (matching Tier-1's per-leaf-per-rule
+collapsing rule); `count` tracks how many matches the rule resolved.
+
+### spaCy model provisioning
+
+Presidio's English `AnalyzerEngine` is backed by a spaCy NER model.
+The Presidio documentation recommends `en_core_web_lg` (~560 MB) for
+production NER quality.
+
+| Lane | Model | Footprint | Provisioned by |
+| --- | --- | --- | --- |
+| Production Docker image | `en_core_web_lg` | ~560 MB | Dockerfile bake (follow-on; today the image build inherits whatever the deploy pipeline installs) |
+| CI unit lane | `en_core_web_sm` | ~12 MB | `python -m spacy download en_core_web_sm` step in `ci.yml` |
+| Local dev | either | varies | `uv run python -m spacy download <model>` |
+
+The model name is a **deployment concern, not a policy concern** —
+operator-authored YAML stays portable across lanes. The
+`MEHO_REDACTION_SPACY_MODEL` env var (read by `_resolved_spacy_model`)
+pins the engine; CI sets it to `en_core_web_sm` for the unit lane and
+the production image leaves it unset so the adapter picks the
+documented default.
+
+The tests in `test_redaction_presidio.py` and the Tier-2 path in
+`test_redaction_middleware.py` are gated by
+`spacy.util.is_package(...)` checks that accept either model — so
+the suite stays green on every lane that has at least one model
+provisioned.
+
 ## Dependencies
 
 - **PyYAML** (`yaml.safe_load`) — already a transitive dep; matches
   the precedent set by `operations/ingest/catalog.py`.
 - **Pydantic v2** — already pinned in `backend/pyproject.toml`.
 - **Python stdlib** — `re`, `hashlib`, `importlib.resources`,
-  `collections.abc`, `threading` (resolver lock). No third-party
-  regex / NER libraries here; Tier-2 (#1072) adds Microsoft Presidio.
+  `collections.abc`, `threading` (resolver lock).
+- **presidio-analyzer 2.2.362** + **presidio-anonymizer 2.2.362**
+  (#1072) — the Tier-2 NER adapter. Imports are lazy so Tier-1-only
+  deployments incur zero NER cost at runtime. The transitive
+  dependency closure includes spaCy 3.x and supporting libraries;
+  the installed wheel set lands at ~80 MB.
+- **spaCy NER model** — `en_core_web_lg` (Presidio default) or
+  `en_core_web_sm` (CI / sandbox lane). Not a Python dependency in
+  `pyproject.toml`; provisioned out-of-band via
+  `python -m spacy download <model>`.
 
 No new runtime dependencies were added by Task #1070, #1071, or #1073.
 

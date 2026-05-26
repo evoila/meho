@@ -309,6 +309,60 @@ class SchedulerAdminService:
                 return None
             return _row_to_read(row)
 
+    async def _read_status(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        trigger_id: uuid.UUID,
+    ) -> str | None:
+        """Return the trigger's current ``status`` column value or ``None``.
+
+        Tenant-scoped: a probe for another tenant's id returns
+        ``None`` (same 404-vs-existence-leak collapse the boundary
+        relies on).
+        """
+        result = await session.execute(
+            select(ScheduledTrigger.status).where(
+                ScheduledTrigger.tenant_id == tenant_id,
+                ScheduledTrigger.id == trigger_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def _conditional_cancel_update(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        trigger_id: uuid.UUID,
+    ) -> int:
+        """Conditional ``status=cancelled`` UPDATE; return rowcount.
+
+        Matches the active / paused set so a concurrent fire (status
+        advanced to ``fired``) or a concurrent cancel (status already
+        ``cancelled``) safely surfaces as rowcount==0. The caller
+        re-reads and disambiguates.
+        """
+        stmt = (
+            update(ScheduledTrigger)
+            .where(
+                ScheduledTrigger.id == trigger_id,
+                ScheduledTrigger.tenant_id == tenant_id,
+                ScheduledTrigger.status.in_(
+                    [
+                        ScheduledTriggerStatus.ACTIVE.value,
+                        ScheduledTriggerStatus.PAUSED.value,
+                    ]
+                ),
+            )
+            .values(
+                status=ScheduledTriggerStatus.CANCELLED.value,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        result = await session.execute(stmt)
+        await session.commit()
+        return int(result.rowcount)  # type: ignore[attr-defined]
+
     async def cancel(
         self,
         tenant_id: uuid.UUID,
@@ -321,66 +375,54 @@ class SchedulerAdminService:
         retained for audit.
 
         Idempotent shape: cancelling an already-cancelled trigger
-        returns ``True`` (the row exists in this tenant and is in a
-        cancelled-acceptable state). A trigger that hit terminal
-        ``fired`` is **not** cancellable -- the lifecycle is
-        ``fired`` -> end, not ``fired`` -> ``cancelled``. Returns
-        ``False`` in that case and the boundary maps it to a 409
-        ``trigger_already_fired``.
+        returns ``True``. A trigger that hit terminal ``fired`` is
+        **not** cancellable; returns ``False`` and the boundary maps
+        it to 409 ``trigger_already_fired``. Cross-tenant or absent
+        trigger -> ``False`` (404 at boundary).
 
-        Cross-tenant or absent trigger -> ``False`` (the 404 the
-        boundary renders); the conflation prevents enumerating
-        another tenant's triggers via a status-code differential.
+        Concurrency contract (TOCTOU-safe)
+        ----------------------------------
 
-        The conditional UPDATE shape (``WHERE id = :id AND
-        tenant_id = :t AND status IN (...)``) lets concurrent admin
-        actions race safely: the second caller's UPDATE matches zero
-        rows and gets back ``False`` (already-terminal), the first
-        wins.
+        The conditional UPDATE (``WHERE status IN (active, paused)``)
+        lets two concurrent cancel callers race safely. The first wins
+        (rowcount==1). The loser's UPDATE returns rowcount==0, and a
+        naive read of the pre-flight SELECT (which saw ``active``)
+        would mis-classify the loser's outcome as
+        ``trigger_already_fired`` (the phantom 409 in review B1 on
+        PR #1128).
+
+        The fix is a **read-after-update**: when rowcount==0, re-read
+        the row's *current* status and disambiguate:
+
+        * ``CANCELLED`` -> other caller won the cancel race. Return
+          ``True`` (idempotent success).
+        * ``FIRED`` -> terminal one-off; ``False`` (409).
+        * Row gone -> ``False`` (404).
+        * Any other status -> conservative ``False``.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            # Pre-flight: does the row exist in this tenant at all?
-            # The UPDATE alone returns 0 for both "doesn't exist in
-            # this tenant" and "exists but already in a non-active
-            # state"; distinguishing them needs a SELECT first.
-            existing = await session.execute(
-                select(ScheduledTrigger.status).where(
-                    ScheduledTrigger.tenant_id == tenant_id,
-                    ScheduledTrigger.id == trigger_id,
-                )
-            )
-            current_status = existing.scalar_one_or_none()
+            # Pre-flight: classify obviously-already-terminal states
+            # before the conditional UPDATE so we don't waste a write
+            # on the cancelled / fired / absent rows.
+            current_status = await self._read_status(session, tenant_id, trigger_id)
             if current_status is None:
                 return False
             if current_status == ScheduledTriggerStatus.CANCELLED.value:
-                # Idempotent: already cancelled.
                 return True
             if current_status == ScheduledTriggerStatus.FIRED.value:
-                # Terminal one-off shape; cannot be re-cancelled.
                 return False
-            # active / paused -> cancelled. The UPDATE is conditional
-            # on the same status set so a concurrent fire (the
-            # scheduler tick advancing to ``fired``) does not race
-            # the cancel into an invalid state.
-            stmt = (
-                update(ScheduledTrigger)
-                .where(
-                    ScheduledTrigger.id == trigger_id,
-                    ScheduledTrigger.tenant_id == tenant_id,
-                    ScheduledTrigger.status.in_(
-                        [
-                            ScheduledTriggerStatus.ACTIVE.value,
-                            ScheduledTriggerStatus.PAUSED.value,
-                        ]
-                    ),
-                )
-                .values(
-                    status=ScheduledTriggerStatus.CANCELLED.value,
-                    updated_at=datetime.now(UTC),
-                )
+            # active / paused -> cancelled (conditional).
+            rowcount = await self._conditional_cancel_update(
+                session, tenant_id, trigger_id
             )
-            result = await session.execute(stmt)
-            await session.commit()
-            rowcount: int = result.rowcount  # type: ignore[attr-defined]
-            return rowcount > 0
+            if rowcount > 0:
+                return True
+            # Read-after-update: rowcount==0 means another writer
+            # transitioned the row between our pre-flight SELECT and
+            # our UPDATE. Re-read to disambiguate idempotent success
+            # (CANCELLED) from real failure (FIRED / gone / etc).
+            post_race_status = await self._read_status(
+                session, tenant_id, trigger_id
+            )
+            return post_race_status == ScheduledTriggerStatus.CANCELLED.value

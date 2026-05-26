@@ -430,6 +430,132 @@ async def test_service_cancel_rejects_terminal_fired_one_off() -> None:
 
 
 @pytest.mark.asyncio
+async def test_service_cancel_idempotent_under_concurrent_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for review B1 on PR #1128: cancel returns True, not phantom 409.
+
+    The race shape: caller B's pre-flight SELECT sees ``status='active'``.
+    Between B's SELECT and B's conditional UPDATE, caller A commits a
+    cancel (the row is now ``cancelled``). B's UPDATE matches zero
+    rows (the WHERE clause restricts to ``status IN (active, paused)``)
+    and the naive code path then incorrectly raised 409
+    ``trigger_already_fired``. The fix is a read-after-update: when
+    rowcount==0, re-read the row's current status and treat
+    ``CANCELLED`` as success (the other caller won the race, and the
+    cancel is idempotent by contract).
+
+    The test injects the race deterministically by wrapping
+    :meth:`AsyncSession.execute` to commit an out-of-band cancel
+    after the service's pre-flight SELECT returns but before the
+    conditional UPDATE fires. Without the fix the assertion would
+    fail with ``cancelled is False`` (mapping to 409 at the REST
+    boundary).
+    """
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="race-bot")
+    service = SchedulerAdminService()
+    entry = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.CRON,
+            agent_definition_id=def_id,
+            cron_expr="*/5 * * * *",
+        ),
+    )
+
+    # Inject the race: between the service's pre-flight SELECT and its
+    # conditional UPDATE, commit a parallel cancel out of band so the
+    # UPDATE's WHERE clause matches zero rows.
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.dml import Update as _UpdateStmt
+
+    orig_execute = AsyncSession.execute
+    raced = {"done": False}
+
+    async def _racing_execute(self: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        # Only race the very first UPDATE the service emits. The
+        # service's pre-flight SELECT runs first and is left
+        # untouched.
+        if isinstance(statement, _UpdateStmt) and not raced["done"]:
+            raced["done"] = True
+            # Caller A wins the race: commit a CANCELLED transition
+            # out of band in a fresh session so the test's call is
+            # caller B (the one that sees stale ACTIVE).
+            sessionmaker = get_sessionmaker()
+            async with sessionmaker() as side_session:
+                row = await side_session.get(ScheduledTrigger, entry.id)
+                assert row is not None
+                row.status = ScheduledTriggerStatus.CANCELLED.value
+                await side_session.commit()
+        return await orig_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", _racing_execute)
+
+    # Caller B's cancel: pre-flight sees ACTIVE, then the side write
+    # commits CANCELLED, then the UPDATE matches zero rows. Without
+    # the fix this returned False (phantom 409); with the fix the
+    # read-after-update sees CANCELLED and returns True.
+    cancelled = await service.cancel(_TENANT_A, entry.id)
+    assert cancelled is True, "cancel must be idempotent under a lost race, not phantom-409"
+    assert raced["done"], "the test fixture must actually have injected the race"
+
+    # The row is still CANCELLED -- the lost-race cancel must not
+    # mutate the already-cancelled row a second time.
+    fetched = await service.get(_TENANT_A, entry.id)
+    assert fetched is not None
+    assert fetched.status == ScheduledTriggerStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_service_cancel_rowcount_zero_with_fired_status_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Variant of the TOCTOU regression: terminal-FIRED won the race -> False.
+
+    Same race shape as the idempotency test, but the side write
+    transitions the row to ``FIRED`` (the scheduler dispatcher won the
+    race instead of another cancel caller). The read-after-update sees
+    FIRED and returns ``False`` so the boundary surfaces 409
+    ``trigger_already_fired`` -- the *real* 409, not the phantom one.
+    """
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="race-fire-bot")
+    service = SchedulerAdminService()
+    entry = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.ONE_OFF,
+            agent_definition_id=def_id,
+            fire_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+    )
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.dml import Update as _UpdateStmt
+
+    orig_execute = AsyncSession.execute
+    raced = {"done": False}
+
+    async def _racing_execute(self: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(statement, _UpdateStmt) and not raced["done"]:
+            raced["done"] = True
+            sessionmaker = get_sessionmaker()
+            async with sessionmaker() as side_session:
+                row = await side_session.get(ScheduledTrigger, entry.id)
+                assert row is not None
+                row.status = ScheduledTriggerStatus.FIRED.value
+                await side_session.commit()
+        return await orig_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", _racing_execute)
+
+    cancelled = await service.cancel(_TENANT_A, entry.id)
+    assert cancelled is False, "FIRED-after-pre-flight must surface as False (real 409)"
+    assert raced["done"], "the test fixture must actually have injected the race"
+
+
+@pytest.mark.asyncio
 async def test_service_returns_none_across_tenant_boundary() -> None:
     """Tenant A cannot see / cancel tenant B's trigger by id."""
     def_id_b = await _seed_agent_definition(tenant_id=_TENANT_B, name="b-bot")
@@ -840,10 +966,19 @@ async def test_durability_trigger_survives_scheduler_restart(
     from meho_backplane.scheduler.loop import run_one_tick
 
     fires = await run_one_tick()
-    assert fires >= 1
-    assert entry.id in fire_calls
+    # Exactly-once: the no-double-fire half of the Initiative #804 DoD
+    # is meaningful only when this assertion is strict. `>= 1` would
+    # silently pass a regression that double-dispatched the trigger.
+    # Review m1 on PR #1128.
+    assert fires == 1
+    assert fire_calls.count(entry.id) == 1
 
     # After fire, the one-off row transitions to 'fired'.
     after = await service.get(_TENANT_A, entry.id)
     assert after is not None
     assert after.status == ScheduledTriggerStatus.FIRED
+
+    # A second tick must not re-fire the now-FIRED trigger.
+    second_tick_fires = await run_one_tick()
+    assert second_tick_fires == 0
+    assert fire_calls.count(entry.id) == 1

@@ -31,15 +31,41 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentDefinition
+from meho_backplane.db.models import AgentDefinition, AgentPrincipal
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
+    OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
     seeded_operator_tenant,  # noqa: F401 — pytest-discovered fixture
 )
+
+
+async def _seed_principal(name: str, *, revoked: bool = False) -> None:
+    """Seed an ``agent_principal`` for the operator's tenant.
+
+    G11.2-T8 (#1099): the create / edit handlers now reject an
+    ``identity_ref`` that doesn't resolve to a registered, non-revoked
+    principal in the operator's tenant. Every MCP test that exercises
+    create / edit needs the matching principal seeded first.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(
+            AgentPrincipal(
+                id=uuid.uuid4(),
+                tenant_id=OPERATOR_TENANT_ID,
+                name=name,
+                keycloak_client_id=f"agent:{name}",
+                keycloak_internal_id=f"kc-internal-{name}",
+                owner_sub="op-admin",
+                revoked=revoked,
+                created_by_sub="op-admin",
+            )
+        )
+
 
 _CREATE_ARGS: dict[str, Any] = {
     "name": "incident-triage",
@@ -138,6 +164,9 @@ async def test_full_crud_round_trip(
     seeded_operator_tenant: None,  # noqa: F811
 ) -> None:
     client, _op = client_with_operator
+    # G11.2-T8 (#1099) seed the agent_principal so the create's
+    # identity_ref validation passes.
+    await _seed_principal("incident-triage")
 
     # Create.
     created = _result_dict(_call(client, "meho.agents.create", _CREATE_ARGS))
@@ -172,11 +201,13 @@ async def test_full_crud_round_trip(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_duplicate_create_maps_to_invalid_params(
+@pytest.mark.asyncio
+async def test_duplicate_create_maps_to_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     seeded_operator_tenant: None,  # noqa: F811
 ) -> None:
     client, _op = client_with_operator
+    await _seed_principal("incident-triage")
     first = _call(client, "meho.agents.create", _CREATE_ARGS)
     assert "error" not in first.json()
     dup = _call(client, "meho.agents.create", _CREATE_ARGS, rpc_id=2)
@@ -207,3 +238,55 @@ def test_create_validation_maps_to_invalid_params(
     resp = _call(client, "meho.agents.create", {**_CREATE_ARGS, "turn_budget": 99999})
     body = resp.json()
     assert body["error"]["code"] == INVALID_PARAMS
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T8 (#1099) -- identity_ref validation at the MCP boundary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.asyncio
+async def test_create_unknown_identity_ref_maps_to_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    seeded_operator_tenant: None,  # noqa: F811
+) -> None:
+    """create with an unknown identity_ref → INVALID_PARAMS 'identity_ref_unknown'."""
+    client, _op = client_with_operator
+    # Deliberately no _seed_principal call -- the identity_ref below has
+    # no match in the registry.
+    resp = _call(
+        client,
+        "meho.agents.create",
+        {**_CREATE_ARGS, "name": "orphan", "identity_ref": "agent:does-not-exist"},
+    )
+    body = resp.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "identity_ref_unknown" in body["error"]["message"]
+    # The reject must not have left a row.
+    assert await _agent_rows() == []
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.asyncio
+async def test_edit_unknown_identity_ref_maps_to_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    seeded_operator_tenant: None,  # noqa: F811
+) -> None:
+    """edit that swaps identity_ref to an unknown value → INVALID_PARAMS."""
+    client, _op = client_with_operator
+    await _seed_principal("incident-triage")
+    created = _call(client, "meho.agents.create", _CREATE_ARGS)
+    assert "error" not in created.json()
+    resp = _call(
+        client,
+        "meho.agents.edit",
+        {"name": "incident-triage", "identity_ref": "agent:nonexistent"},
+    )
+    body = resp.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "identity_ref_unknown" in body["error"]["message"]
+    # The persisted row's identity_ref must still be the original.
+    rows = await _agent_rows()
+    assert len(rows) == 1
+    assert rows[0].identity_ref == "agent:incident-triage"

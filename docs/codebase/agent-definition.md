@@ -34,7 +34,9 @@ this surface copies.
 
 The ORM table `agent_definition`. Columns: `id` (UUID PK), `tenant_id`
 (UUID, real FK to `tenant.id`), `name` (per-tenant slug), `identity_ref`
-(soft reference to the G11.2 principal — no FK), `model_tier`,
+(soft reference to the G11.2 agent principal — no FK at the schema
+level; the service validates against `agent_principal.keycloak_client_id`
+at write boundaries, see G11.2-T8 #1099 below), `model_tier`,
 `system_prompt`, `toolset` (portable JSON → JSONB, default `{}`),
 `turn_budget` (int), `output_schema` (nullable JSON), `enabled` (bool,
 default true), `created_by_sub`, `created_at`, `updated_at`. A single
@@ -73,6 +75,27 @@ cross-tenant rows are structurally invisible: `get` / `update` /
 (the 404 the boundary renders). A duplicate `create` raises
 `AgentDefinitionExistsError` (narrowed from the unique-index
 `IntegrityError`).
+
+**`identity_ref` validation (G11.2-T8 #1099)**: `create` and any
+`update` that touches `identity_ref` validate the value against
+`agent_principal.keycloak_client_id` scoped to the operator's tenant
+and require `revoked=False` — raising `AgentIdentityRefInvalidError`
+otherwise (REST: 422 `identity_ref_unknown`; MCP: Invalid Params
+`identity_ref_unknown`). The validator runs inside the same session
+as the write so a concurrent revoke can't make the check stale
+within the same transaction's snapshot. The reason (`unknown` /
+`revoked`) is collapsed into one boundary code so cross-tenant
+existence isn't leaked; operators see the structured reason in the
+structlog event. A PATCH that doesn't include `identity_ref` skips
+the validation — the runtime-time check that the principal is still
+live at invocation time is G11.3's responsibility (the scheduler's
+`run_scheduled` enforces `identity_ref == agent_client_id` under the
+`client_credentials` grant). Validating at the write boundary makes
+the G11.2-T2 (#816) contracts — `actor_sub = identity_ref` on
+user-initiated runs, `identity_ref == agent_client_id` enforcement on
+`run_scheduled` — well-formed by construction: a typo'd
+`identity_ref` can never produce a meaningless `actor_sub` or a
+confusing scheduled-run rejection later.
 
 ## Control flow
 

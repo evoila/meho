@@ -58,8 +58,8 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AgentPrincipal, AgentRunStatus, AgentRunTrigger, Tenant
 from meho_backplane.db.models import AgentRun as AgentRunRow
-from meho_backplane.db.models import AgentRunStatus, AgentRunTrigger, Tenant
 from meho_backplane.operations import agent_run as run_lifecycle
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
@@ -137,8 +137,36 @@ async def _seed_definition(
     system_prompt: str = "You read secrets via MEHO operations.",
     turn_budget: int = 5,
 ) -> None:
-    """Insert an agent definition for *tenant_id* via the CRUD service."""
+    """Insert an agent definition for *tenant_id* via the CRUD service.
+
+    G11.2-T8 (#1099): the service now rejects an ``identity_ref`` that
+    doesn't resolve to a registered principal, so seed the matching
+    ``agent_principal`` first. Idempotent under multiple calls with the
+    same (tenant_id, name).
+    """
     await _seed_tenants()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        existing = await session.execute(
+            select(AgentPrincipal).where(
+                AgentPrincipal.tenant_id == tenant_id,
+                AgentPrincipal.keycloak_client_id == f"agent:{name}",
+            )
+        )
+        if existing.scalar_one_or_none() is None:
+            session.add(
+                AgentPrincipal(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    name=name,
+                    keycloak_client_id=f"agent:{name}",
+                    keycloak_internal_id=f"kc-internal-{tenant_id}-{name}",
+                    owner_sub="seed-admin",
+                    revoked=False,
+                    created_by_sub="seed-admin",
+                )
+            )
+            await session.commit()
     service = AgentDefinitionService()
     await service.create(
         tenant_id=tenant_id,

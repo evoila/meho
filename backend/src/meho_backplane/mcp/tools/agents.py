@@ -63,6 +63,7 @@ from meho_backplane.agents.schemas import (
 from meho_backplane.agents.service import (
     AgentDefinitionExistsError,
     AgentDefinitionService,
+    AgentIdentityRefInvalidError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
@@ -216,6 +217,8 @@ async def _create_handler(
         )
     except AgentDefinitionExistsError as exc:
         raise McpInvalidParamsError("agent_already_exists") from exc
+    except AgentIdentityRefInvalidError as exc:
+        raise McpInvalidParamsError("identity_ref_unknown") from exc
     return {"name": entry.name, "agent": _row_to_dict(entry)}
 
 
@@ -225,11 +228,15 @@ register_mcp_tool(
         description=(
             "Create an agent definition for the operator's tenant "
             "(Initiative #802). Tenant-admin only. Args: name (slug), "
-            "identity_ref, model_tier (standard|fast|deep), "
+            "identity_ref (must name a registered, non-revoked agent "
+            "principal in the operator's tenant -- typically "
+            "'agent:<principal-name>'), model_tier (standard|fast|deep), "
             "system_prompt, turn_budget (1-1000), optional toolset and "
             "output_schema objects, optional enabled (default true). A "
             "duplicate name returns an error with detail "
-            "'agent_already_exists'. Response: {name, agent: {...}}."
+            "'agent_already_exists'; an unknown / cross-tenant / revoked "
+            "identity_ref returns 'identity_ref_unknown' (G11.2-T8 #1099). "
+            "Response: {name, agent: {...}}."
         ),
         inputSchema={
             "type": "object",
@@ -316,7 +323,10 @@ async def _edit_handler(
         audit_agent_name=name,
     )
     service = AgentDefinitionService()
-    entry = await service.update(operator.tenant_id, name, payload)
+    try:
+        entry = await service.update(operator.tenant_id, name, payload)
+    except AgentIdentityRefInvalidError as exc:
+        raise McpInvalidParamsError("identity_ref_unknown") from exc
     if entry is None:
         raise McpInvalidParamsError("agent_not_found")
     return {"name": entry.name, "agent": _row_to_dict(entry)}
@@ -331,8 +341,10 @@ register_mcp_tool(
             "of identity_ref, model_tier, system_prompt, toolset, "
             "turn_budget, output_schema, enabled -- only supplied "
             "fields change. name itself is not renamable. A missing / "
-            "cross-tenant name returns 'agent_not_found'. Response: "
-            "{name, agent: {...}}."
+            "cross-tenant name returns 'agent_not_found'; an "
+            "identity_ref update that doesn't resolve to a registered, "
+            "non-revoked tenant principal returns 'identity_ref_unknown' "
+            "(G11.2-T8 #1099). Response: {name, agent: {...}}."
         ),
         inputSchema={
             "type": "object",

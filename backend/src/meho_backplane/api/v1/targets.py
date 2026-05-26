@@ -556,6 +556,32 @@ async def update_target(
     """
     t = await resolve_target(session, operator.tenant_id, name)
     updates = body.model_dump(exclude_unset=True)
+    # Reject ``{"product": null}`` explicitly. ``Field(default=None)`` on
+    # ``TargetUpdate.product`` is the absent-marker for "client did not
+    # send this field" -- the only legal way to keep the field optional
+    # while supporting PATCH semantics in v1. Without this guard the
+    # ``setattr`` loop below assigns ``None`` to ``Target.product`` (NOT
+    # NULL) and SQLAlchemy / the database raises an IntegrityError that
+    # FastAPI maps to a 500 -- bypassing the T11 error-message-shape
+    # contract callers branch on. Mirror the ``unknown_product`` 422
+    # shape so the diagnostic stays uniform: a snake_case ``kind``, a
+    # human ``message`` naming the offending value + the remediation,
+    # and a pointer to the convention doc.
+    if "product" in updates and updates["product"] is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "kind": "invalid_null",
+                "field": "product",
+                "message": (
+                    "product cannot be null; targets.product is NOT NULL. "
+                    "Omit the field to leave it unchanged, or pass a "
+                    "valid product token instead. "
+                    "See docs/codebase/error-message-shape.md for the "
+                    "convention."
+                ),
+            },
+        )
     new_product = updates.get("product")
     if new_product is not None and new_product != t.product:
         # Mirror the probe / dispatch resolver's notion of "valid
@@ -601,6 +627,60 @@ async def update_target(
     "/{name}",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
+    responses={
+        # 409 ``target_has_references`` -- declared explicitly so
+        # FastAPI's autogen OpenAPI surfaces the cascade-conflict shape
+        # to SDK clients. The route handler below raises ``HTTPException(
+        # 409, detail={"kind": "target_has_references", ...})`` when the
+        # target is wired into the topology graph and ``?force=true`` is
+        # not set. Without this declaration the spec only lists 204 + 422
+        # and clients have no schema-driven signal for the recoverable
+        # cascade-conflict (the operator's first-line "retry with
+        # ?force=true" remediation). Mirrors the
+        # ``GET /api/v1/topology/history/{name}`` convention from
+        # ``api/v1/topology.py`` -- structured ``detail`` shape with a
+        # snake_case ``kind`` discriminator and an inline content schema
+        # so the regen'd Go client lands a typed JSON409 wrapper.
+        409: {
+            "description": (
+                "Target is referenced by ``graph_node`` rows; "
+                "retry with ``?force=true`` to soft-delete anyway "
+                "(``graph_node.target_id`` is ``ON DELETE SET NULL`` so "
+                "the topology rows survive). See "
+                "``docs/codebase/error-message-shape.md`` for the "
+                "convention."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["target_has_references"],
+                                    },
+                                    "graph_node_refs": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                    },
+                                    "message": {"type": "string"},
+                                },
+                                "required": [
+                                    "kind",
+                                    "graph_node_refs",
+                                    "message",
+                                ],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+    },
 )
 async def delete_target(
     name: str,

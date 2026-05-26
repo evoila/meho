@@ -718,10 +718,17 @@ async def test_delete_target_soft_deletes_and_returns_204(client: TestClient) ->
     Subsequent GET on the same name resolves to 404 because the
     resolver filters ``deleted_at IS NULL``; the row stays in the
     DB so the ``audit_log.target_id`` soft-FK keeps pointing at it.
+
+    Also asserts the ``AuditMiddleware`` wrote an audit row with
+    ``payload['op_id'] == 'targets.delete'`` -- the
+    ``audit_op_id`` contextvar bound inside the route handler is the
+    only signal cross-tenant audit queries (``meho audit query
+    --op-id=targets.delete``) have to find the delete events.
     """
     from sqlalchemy import select as _select
 
     from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import AuditLog
     from meho_backplane.db.models import Target as TargetORM
 
     tenant_id = DEFAULT_TENANT_ID
@@ -745,6 +752,30 @@ async def test_delete_target_soft_deletes_and_returns_204(client: TestClient) ->
     async with sm() as session:
         row = (await session.execute(_select(TargetORM).where(TargetORM.id == t.id))).scalar_one()
     assert row.deleted_at is not None
+
+    # The DELETE produced an audit row with op_id=targets.delete,
+    # the correct target_id soft-FK, and the operator's sub from the
+    # JWT. The contextvar binding inside the route handler is what
+    # surfaces the canonical op_id (otherwise the middleware would
+    # write http.delete:/api/v1/targets/{name} as a fallback).
+    async with sm() as session:
+        audit_rows = (
+            (
+                await session.execute(
+                    _select(AuditLog)
+                    .where(AuditLog.method == "DELETE")
+                    .where(AuditLog.target_id == t.id),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(audit_rows) == 1
+    audit = audit_rows[0]
+    assert audit.payload["op_id"] == "targets.delete"
+    assert audit.payload["op_class"] == "write"
+    assert audit.status_code == 204
+    assert audit.operator_sub == "admin-1"
 
     # A follow-up GET resolves to 404 because the resolver filters
     # deleted_at IS NULL.
@@ -857,8 +888,17 @@ async def test_delete_target_with_graph_node_refs_returns_409(client: TestClient
     async with sm() as session:
         existing_tenant = await session.get(Tenant, tenant_uuid)
         if existing_tenant is None:
+            # Migration ``0028_supersede_rdc_internal_seed`` seeds a
+            # tenant with ``slug='default'`` (a different random UUID).
+            # Use a per-tenant_uuid slug so the test's tenant row does
+            # not collide with the migration seed's UNIQUE(slug)
+            # constraint.
             session.add(
-                Tenant(id=tenant_uuid, slug="default", name="default"),
+                Tenant(
+                    id=tenant_uuid,
+                    slug=f"tenant-{tenant_uuid}",
+                    name=f"tenant-{tenant_uuid}",
+                ),
             )
             await session.commit()
     t = await _insert_target(
@@ -900,14 +940,20 @@ async def test_delete_target_with_graph_node_refs_returns_409(client: TestClient
 async def test_delete_target_with_graph_node_refs_force_true_succeeds(
     client: TestClient,
 ) -> None:
-    """``?force=true`` proceeds with the soft-delete despite graph_node refs."""
+    """``?force=true`` proceeds with the soft-delete despite graph_node refs.
+
+    Also asserts the audit row carries ``op_id='targets.delete'`` --
+    the forced-delete path is the same code path as the unforced
+    happy path (the ``force`` branch only skips the 409), so the
+    audit-row contract must hold both ways.
+    """
     from datetime import UTC as _UTC
     from datetime import datetime as _datetime
 
     from sqlalchemy import select as _select
 
     from meho_backplane.db.engine import get_sessionmaker
-    from meho_backplane.db.models import GraphNode, Tenant
+    from meho_backplane.db.models import AuditLog, GraphNode, Tenant
     from meho_backplane.db.models import Target as TargetORM
 
     tenant_id = DEFAULT_TENANT_ID
@@ -916,8 +962,17 @@ async def test_delete_target_with_graph_node_refs_force_true_succeeds(
     async with sm() as session:
         existing_tenant = await session.get(Tenant, tenant_uuid)
         if existing_tenant is None:
+            # Migration ``0028_supersede_rdc_internal_seed`` seeds a
+            # tenant with ``slug='default'`` (a different random UUID).
+            # Use a per-tenant_uuid slug so the test's tenant row does
+            # not collide with the migration seed's UNIQUE(slug)
+            # constraint.
             session.add(
-                Tenant(id=tenant_uuid, slug="default", name="default"),
+                Tenant(
+                    id=tenant_uuid,
+                    slug=f"tenant-{tenant_uuid}",
+                    name=f"tenant-{tenant_uuid}",
+                ),
             )
             await session.commit()
     t = await _insert_target(
@@ -953,6 +1008,26 @@ async def test_delete_target_with_graph_node_refs_force_true_succeeds(
     async with sm() as session:
         row = (await session.execute(_select(TargetORM).where(TargetORM.id == t.id))).scalar_one()
     assert row.deleted_at is not None
+
+    # Forced delete writes the same op_id=targets.delete audit row.
+    async with sm() as session:
+        audit_rows = (
+            (
+                await session.execute(
+                    _select(AuditLog)
+                    .where(AuditLog.method == "DELETE")
+                    .where(AuditLog.target_id == t.id),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(audit_rows) == 1
+    audit = audit_rows[0]
+    assert audit.payload["op_id"] == "targets.delete"
+    assert audit.payload["op_class"] == "write"
+    assert audit.status_code == 204
+    assert audit.operator_sub == "admin-1"
 
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1139,45 @@ def test_patch_product_valid_succeeds(client: TestClient) -> None:
         )
     assert response.status_code == 200
     assert response.json()["product"] == "k8s"
+
+
+def test_patch_product_null_returns_422_not_500(client: TestClient) -> None:
+    """PATCH with ``{"product": null}`` yields a structured 422, not a 500.
+
+    ``TargetUpdate.product`` is typed ``str | None`` with
+    ``default=None`` because the absent-marker for "client did not
+    send this field" is the only way Pydantic can distinguish
+    "client said null" from "client said nothing" in v1
+    (``model_dump(exclude_unset=True)`` keys on field presence, not
+    value). Without an explicit null guard in the route handler, a
+    client that sends ``{"product": null}`` reaches the ``setattr``
+    loop, assigns ``None`` to ``Target.product`` (NOT NULL), and the
+    flush trips an IntegrityError that surfaces to the operator as
+    a 500. That violates T11's error-message-shape contract --
+    callers cannot branch on ``500 Internal Server Error`` the same
+    way they branch on a snake_case ``kind``. This test pins the
+    handler-level null guard so a future refactor that drops it
+    fails closed.
+    """
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.post(
+            "/api/v1/targets",
+            json={"name": "null-target", "product": "ssh", "host": "10.0.0.1"},
+            headers=headers,
+        )
+        response = client.patch(
+            "/api/v1/targets/null-target",
+            json={"product": None},
+            headers=headers,
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "invalid_null"
+    assert detail["field"] == "product"
+    assert "null" in detail["message"].lower()
 
 
 def test_patch_product_same_value_passes_without_validator(client: TestClient) -> None:

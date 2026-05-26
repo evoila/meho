@@ -753,6 +753,44 @@
           "204": {
             "description": "Successful Response"
           },
+          "409": {
+            "description": "Target is referenced by ``graph_node`` rows; retry with ``?force=true`` to soft-delete anyway (``graph_node.target_id`` is ``ON DELETE SET NULL`` so the topology rows survive). See ``docs/codebase/error-message-shape.md`` for the convention.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "target_has_references"
+                          ]
+                        },
+                        "graph_node_refs": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "graph_node_refs",
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {

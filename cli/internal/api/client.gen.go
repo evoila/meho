@@ -15897,8 +15897,16 @@ func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) StatusCode() int {
 type DeleteTargetApiV1TargetsNameDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON422      *HTTPValidationError
+	JSON409      *struct {
+		Detail struct {
+			GraphNodeRefs int                                             `json:"graph_node_refs"`
+			Kind          DeleteTargetApiV1TargetsNameDelete409DetailKind `json:"kind"`
+			Message       string                                          `json:"message"`
+		} `json:"detail"`
+	}
+	JSON422 *HTTPValidationError
 }
+type DeleteTargetApiV1TargetsNameDelete409DetailKind string
 
 // Status returns HTTPResponse.Status
 func (r DeleteTargetApiV1TargetsNameDeleteResponse) Status() string {
@@ -20380,6 +20388,19 @@ func ParseDeleteTargetApiV1TargetsNameDeleteResponse(rsp *http.Response) (*Delet
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest struct {
+			Detail struct {
+				GraphNodeRefs int                                             `json:"graph_node_refs"`
+				Kind          DeleteTargetApiV1TargetsNameDelete409DetailKind `json:"kind"`
+				Message       string                                          `json:"message"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

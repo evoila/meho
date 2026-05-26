@@ -236,14 +236,17 @@ async def test_initialize_logs_warning_on_dropped_slugs(
 #: :mod:`tests.test_alembic_seed_0028_supersede`; this scan exercises
 #: the same contract end-to-end through the MCP wire surface so a
 #: regression in either the seed or the preamble assembler surfaces
-#: here.
+#: here. The bare ``rdc-`` prefix subsumes ``rdc-internal`` and
+#: ``rdc-hetzner``; ``meho-internal`` and ``claude-rdc-`` are added per
+#: the #1137 acceptance criterion to cover the full set of internal-repo
+#: and consumer-identity tokens.
 _FORBIDDEN_TOKENS: tuple[str, ...] = (
     "evoila/meho",
     "evoila-bosnia",
-    "rdc-internal",
-    "rdc-hetzner",
+    "meho-internal",
+    "claude-rdc-",
+    "rdc-",
     "Holodeck",
-    "holodeck",
 )
 
 

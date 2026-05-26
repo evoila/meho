@@ -29,6 +29,7 @@ from meho_backplane.health import (
     run_probes,
 )
 from meho_backplane.main import app
+from meho_backplane.settings import get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +44,30 @@ def _isolated_registry() -> Iterator[None]:
     clear_probes()
     yield
     clear_probes()
+
+
+@pytest.fixture(autouse=True)
+def _default_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the env vars :class:`Settings` requires for the ``/ready`` features block.
+
+    G0.14-T7 (#1148) added a ``features`` block on ``/ready`` built from
+    :func:`~meho_backplane.settings.get_settings`. The settings ctor
+    requires :attr:`Settings.keycloak_issuer_url`,
+    :attr:`Settings.keycloak_audience`, and :attr:`Settings.vault_addr`
+    to be non-empty; the chassis-level health tests don't otherwise
+    care about these values, so pin them here at sentinel defaults
+    and bracket the cache.
+
+    Tests that need different values (e.g. the features-block
+    behavioural tests below) re-setenv inside their own body — the
+    last-write semantics of ``monkeypatch.setenv`` keep that working.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -165,11 +190,28 @@ def test_version_chart_version_unset_is_null(
 
 
 def test_ready_with_empty_registry_returns_503(client: TestClient) -> None:
-    """The chassis fails closed until a downstream Initiative wires probes."""
+    """The chassis fails closed until a downstream Initiative wires probes.
+
+    The 503 still carries the ``features`` block (G0.14-T7 #1148) —
+    feature-gate visibility is independent of the probe verdict so
+    an operator's "what's wired?" question is answerable even when
+    the chassis is otherwise un-ready.
+    """
     response = client.get("/ready")
 
     assert response.status_code == 503
-    assert response.json() == {"status": "not_ready", "checks": []}
+    body = response.json()
+    assert body["status"] == "not_ready"
+    assert body["checks"] == []
+    # Features block is always present; the per-feature shape is
+    # covered exhaustively in tests/test_features.py — this assertion
+    # only pins the wire-presence + key set.
+    assert set(body["features"].keys()) == {
+        "agent_runtime",
+        "ui_surface",
+        "audit_replay",
+        "approval_queue",
+    }
 
 
 def test_ready_with_all_passing_probes_returns_200(client: TestClient) -> None:
@@ -188,6 +230,13 @@ def test_ready_with_all_passing_probes_returns_200(client: TestClient) -> None:
         {"name": "vault", "ok": True, "detail": "auth ok"},
         {"name": "db", "ok": True, "detail": None},
     ]
+    # 200 branch also carries the features block.
+    assert set(body["features"].keys()) == {
+        "agent_runtime",
+        "ui_surface",
+        "audit_replay",
+        "approval_queue",
+    }
 
 
 def test_ready_with_one_failing_probe_returns_503_with_detail(
@@ -208,3 +257,64 @@ def test_ready_with_one_failing_probe_returns_503_with_detail(
         {"name": "vault", "ok": True, "detail": None},
         {"name": "db", "ok": False, "detail": "migration pending"},
     ]
+    # Features block survives a probe failure — the probe verdict is
+    # orthogonal to the feature-gate visibility.
+    assert "features" in body
+
+
+def test_ready_features_block_reflects_unwired_keycloak_admin(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``features`` block reads from the live :class:`Settings`.
+
+    When the admin env vars are unset, ``agent_runtime.configured`` is
+    ``False`` and ``missing_env`` lists the three KEYCLOAK_ADMIN_*
+    keys. This is the load-bearing operator-facing answer to
+    signals 16 + 17: hitting one GET tells you whether the
+    agent-principal surface will work before you trip the 503.
+    """
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.delenv("KEYCLOAK_ADMIN_URL", raising=False)
+    monkeypatch.delenv("KEYCLOAK_ADMIN_CLIENT_ID", raising=False)
+    monkeypatch.delenv("KEYCLOAK_ADMIN_CLIENT_SECRET", raising=False)
+    get_settings.cache_clear()
+    try:
+        response = client.get("/ready")
+    finally:
+        get_settings.cache_clear()
+
+    body = response.json()
+    agent_runtime = body["features"]["agent_runtime"]
+    assert agent_runtime["configured"] is False
+    assert agent_runtime["missing_env"] == [
+        "KEYCLOAK_ADMIN_URL",
+        "KEYCLOAK_ADMIN_CLIENT_ID",
+        "KEYCLOAK_ADMIN_CLIENT_SECRET",
+    ]
+    assert agent_runtime["docs"] == "docs/cross-repo/keycloak-agent-client.md"
+
+
+def test_ready_features_block_reflects_wired_keycloak_admin(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the admin env vars are wired, the gate flips to configured."""
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("KEYCLOAK_ADMIN_URL", "https://keycloak.test/admin/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_ID", "meho-admin")
+    monkeypatch.setenv("KEYCLOAK_ADMIN_CLIENT_SECRET", "s3cret")
+    get_settings.cache_clear()
+    try:
+        response = client.get("/ready")
+    finally:
+        get_settings.cache_clear()
+
+    body = response.json()
+    agent_runtime = body["features"]["agent_runtime"]
+    assert agent_runtime["configured"] is True
+    assert agent_runtime["missing_env"] == []
+    # When agent_runtime is wired, approval_queue follows.
+    approval_queue = body["features"]["approval_queue"]
+    assert approval_queue["configured"] is True
+    assert approval_queue["depends_on"] == "agent_runtime"

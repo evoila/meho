@@ -110,6 +110,23 @@ connector-related release-notes line.
   (the aggregate budget signal lives on the list response's
   `budget_status`) and `null` for writes against `workflow` /
   `reference` kinds. (#1149)
+- **`/ready` features block + agent-runtime 503 symmetry +
+  `docs/RELEASING.md` post-deploy enablement** (G0.14-T7 #1148).
+  `GET /ready` now carries a structured `features` block enumerating
+  the four v0.6.0 gated surfaces (`agent_runtime`, `ui_surface`,
+  `audit_replay`, `approval_queue`) with `configured: bool`,
+  `missing_env: [...]`, and a `docs` reference per feature — one
+  GET answers "which features will work out of the box on my
+  deploy?". The 503 from `POST /api/v1/agent-principals` when the
+  Keycloak admin client is unwired now carries the symmetric
+  `/ui/auth/login` shape (three-clause: domain code +
+  `KEYCLOAK_ADMIN_URL / KEYCLOAK_ADMIN_CLIENT_ID /
+  KEYCLOAK_ADMIN_CLIENT_SECRET` + `docs/cross-repo/keycloak-agent-client.md`),
+  exposed as the new `KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL` constant.
+  `docs/RELEASING.md` gains §6a "Post-deploy enablement" walking
+  operators through each gate. T11-convention-compliant per
+  `docs/codebase/error-message-shape.md` (audit table updated).
+  Closes `claude-rdc-hetzner-dc#697` signals 16 + 17.
 
 ### Changed
 
@@ -185,6 +202,23 @@ connector-related release-notes line.
   `{detail: invalid_token}` for non-JWT bearers now see
   `{detail: malformed_jws}`
   ([#1131](https://github.com/evoila/meho/issues/1131) / #1152).
+- **G0.14-T6 audit-replay session-id capture decoupled from
+  `MCP_REQUIRE_SESSION_ID`.** `_bind_mcp_session_id` in
+  `mcp/server.py` now captures any `Mcp-Session-Id` header the
+  client sends into `audit_log.agent_session_id` unconditionally —
+  the env var strictly gates enforcement (the missing-header reject)
+  and no longer also gates capture. G8.2 audit-replay therefore
+  lights up automatically on any default deploy whose MCP clients
+  include the header (Claude Code does by default), with no operator
+  intervention. A request with no header (or a malformed one) leaves
+  `agent_session_id` as NULL — the recursive-CTE replay walks NULLs
+  out naturally — replacing the prior fresh-uuid4-per-call fallback
+  that polluted the session search surface with one-row "sessions".
+  `GET /api/v1/health` gains a new `mcp_session_id_capture` field
+  (`"always"` / `"enforced"`) so operators can confirm the deploy's
+  capture mode at a glance; `docs/RELEASING.md` documents the
+  post-deploy auto-enablement story. Closes G0.14-T6 signal 11 from
+  `claude-rdc-hetzner-dc#697`. (#1147)
 
 ## [0.6.0] - 2026-05-26
 

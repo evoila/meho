@@ -38,7 +38,7 @@
           "health"
         ],
         "summary": "Ready",
-        "description": "Readiness probe.\n\nReturns 200 with ``{\"status\": \"ready\", \"checks\": [...]}`` when at\nleast one probe is registered and every probe reports ``ok``.\nReturns 503 with ``{\"status\": \"not_ready\", \"checks\": [...]}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.",
+        "description": "Readiness probe with deploy-time feature-gate visibility.\n\nReturns 200 with\n``{\"status\": \"ready\", \"checks\": [...], \"features\": {...}}`` when\nat least one probe is registered and every probe reports ``ok``.\nReturns 503 with\n``{\"status\": \"not_ready\", \"checks\": [...], \"features\": {...}}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.\n\nThe ``features`` block (G0.14-T7 #1148) enumerates the four gated\nfeatures and their configured-vs-missing-env state. It is emitted\non **both** branches \u2014 the operator's \"is this deploy correctly\nwired?\" question is independent of the probe-registry verdict.\nSee :func:`meho_backplane.features.build_features_block` for the\nblock's shape and the audit table in\n``docs/codebase/error-message-shape.md`` for why this surface\nexists (signals 16, 17).",
         "operationId": "ready_ready_get",
         "responses": {
           "200": {
@@ -3784,286 +3784,6 @@
         }
       }
     },
-    "/api/v1/agents": {
-      "get": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "List Agents",
-        "description": "List agent definitions for the operator's tenant, name-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``operator`` and ``tenant_admin``\nboth pass; ``read_only`` is rejected by :func:`require_role`.",
-        "operationId": "list_agents_api_v1_agents_get",
-        "parameters": [
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 500,
-              "minimum": 1,
-              "default": 100,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "offset",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 0,
-              "title": "Offset"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionListResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Create Agent",
-        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
-        "operationId": "create_agent_api_v1_agents_post",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentDefinitionCreate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agents/{name}": {
-      "get": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Show Agent",
-        "description": "Return one agent definition by name.\n\nCross-tenant name probes surface as 404 ``agent_not_found`` (not\n403) -- the conflation prevents enumerating another tenant's agents\nvia a status-code differential.",
-        "operationId": "show_agent_api_v1_agents__name__get",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Edit Agent",
-        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``.",
-        "operationId": "edit_agent_api_v1_agents__name__patch",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentDefinitionUpdate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Delete Agent",
-        "description": "Delete one agent definition by name.\n\n``tenant_admin`` only. A cross-tenant / absent name returns 404\n``agent_not_found`` -- never 403, so the existence of a definition\nis not leaked across the tenant boundary.",
-        "operationId": "delete_agent_api_v1_agents__name__delete",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/agents/grants": {
       "get": {
         "tags": [
@@ -4342,6 +4062,286 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Agents",
+        "description": "List agent definitions for the operator's tenant, name-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``operator`` and ``tenant_admin``\nboth pass; ``read_only`` is rejected by :func:`require_role`.",
+        "operationId": "list_agents_api_v1_agents_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Create Agent",
+        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
+        "operationId": "create_agent_api_v1_agents_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDefinitionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Show Agent",
+        "description": "Return one agent definition by name.\n\nCross-tenant name probes surface as 404 ``agent_not_found`` (not\n403) -- the conflation prevents enumerating another tenant's agents\nvia a status-code differential.",
+        "operationId": "show_agent_api_v1_agents__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Edit Agent",
+        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``.",
+        "operationId": "edit_agent_api_v1_agents__name__patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDefinitionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Delete Agent",
+        "description": "Delete one agent definition by name.\n\n``tenant_admin`` only. A cross-tenant / absent name returns 404\n``agent_not_found`` -- never 403, so the existence of a definition\nis not leaked across the tenant boundary.",
+        "operationId": "delete_agent_api_v1_agents__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -6169,7 +6169,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/_SortColumn",
+              "$ref": "#/components/schemas/meho_backplane__ui__routes__topology__table___SortColumn",
               "default": "name"
             }
           },
@@ -6993,13 +6993,56 @@
         }
       }
     },
-    "/ui/knowledge": {
+    "/ui/connectors": {
       "get": {
         "tags": [
-          "ui-stubs"
+          "ui-connectors"
         ],
-        "summary": "Ui Stub Knowledge",
-        "operationId": "ui_stub_knowledge_ui_knowledge_get",
+        "summary": "Ui Connectors List",
+        "description": "Serve ``GET /ui/connectors``. See module docstring for the\nURL contract.\n\n``dir`` (not ``direction``) is the spelling on the URL the\nissue body pinned -- the alias above keeps the Python kwarg\nreadable (``direction``) without breaking the URL contract\nthe operator sees in the address bar.",
+        "operationId": "ui_connectors_list_ui_connectors_get",
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/meho_backplane__ui__routes__connectors__list_view___SortColumn",
+              "default": "name"
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/_SortDirection",
+              "default": "asc"
+            }
+          },
+          {
+            "name": "product",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "nullable": true,
+              "title": "Product"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -7010,17 +7053,357 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
     },
-    "/ui/connectors": {
+    "/ui/connectors/create": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Create Modal",
+        "description": "``GET /ui/connectors/create`` -- HTMX-loaded create modal fragment.",
+        "operationId": "ui_connectors_create_modal_ui_connectors_create_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Create Submit",
+        "description": "``POST /ui/connectors/create`` -- create one target via the REST handler.\n\nAn unchecked ``vpn_required`` checkbox is omitted from the form\nbody entirely (HTML checkbox semantics), so FastAPI's\n``Form(default=False)`` lands the correct ``False``; a checked box\nposts the literal value the template sets and coerces to ``True``.",
+        "operationId": "ui_connectors_create_submit_ui_connectors_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_create_submit_ui_connectors_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}/edit": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Edit Modal",
+        "description": "``GET /ui/connectors/{name}/edit`` -- pre-populated edit modal fragment.",
+        "operationId": "ui_connectors_edit_modal_ui_connectors__name__edit_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}": {
+      "patch": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Edit Submit",
+        "description": "``PATCH /ui/connectors/{name}`` -- update one target via the REST handler.",
+        "operationId": "ui_connectors_edit_submit_ui_connectors__name__patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_edit_submit_ui_connectors__name__patch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Detail",
+        "description": "``GET /ui/connectors/{name}``.",
+        "operationId": "ui_connectors_detail_ui_connectors__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target name does not resolve in the caller's tenant. Returns the 404 from the shared :func:`~meho_backplane.targets.resolver.resolve_target` helper -- alias-aware, with near-miss suggestions when the substring search lands hits.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Target name resolves to multiple targets in the caller's tenant (ambiguous alias match). Returns the 409 from :func:`resolve_target`.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}/probe": {
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Reprobe",
+        "description": "``POST /ui/connectors/{name}/probe``.",
+        "operationId": "ui_connectors_reprobe_ui_connectors__name__probe_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operator is not a tenant_admin. The re-probe verb is tenant_admin-only, mirroring the ``/api/v1/targets/{name}/probe`` REST route's posture.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "404": {
+            "description": "Target name does not resolve in the caller's tenant.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Resolver reported ambiguous connector resolution. The alert fragment names the candidate set.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "501": {
+            "description": "Resolver found no matching connector for the target's (product, fingerprint.version) pair.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/knowledge": {
       "get": {
         "tags": [
           "ui-stubs"
         ],
-        "summary": "Ui Stub Connectors",
-        "operationId": "ui_stub_connectors_ui_connectors_get",
+        "summary": "Ui Stub Knowledge",
+        "operationId": "ui_stub_knowledge_ui_knowledge_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -8151,6 +8534,124 @@
         ],
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
+      },
+      "Body_ui_connectors_create_submit_ui_connectors_create_post": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "title": "Name",
+            "default": ""
+          },
+          "product": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Product",
+            "default": ""
+          },
+          "host": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Host",
+            "default": ""
+          },
+          "port": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Port"
+          },
+          "auth_model": {
+            "type": "string",
+            "title": "Auth Model",
+            "default": "shared_service_account"
+          },
+          "secret_ref": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "vpn_required": {
+            "type": "boolean",
+            "title": "Vpn Required",
+            "default": false
+          },
+          "aliases": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Aliases"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 8192,
+            "nullable": true,
+            "title": "Notes"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_create_submit_ui_connectors_create_post"
+      },
+      "Body_ui_connectors_edit_submit_ui_connectors__name__patch": {
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Product",
+            "default": ""
+          },
+          "host": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Host",
+            "default": ""
+          },
+          "port": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Port"
+          },
+          "auth_model": {
+            "type": "string",
+            "title": "Auth Model",
+            "default": "shared_service_account"
+          },
+          "secret_ref": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "vpn_required": {
+            "type": "boolean",
+            "title": "Vpn Required",
+            "default": false
+          },
+          "aliases": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Aliases"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 8192,
+            "nullable": true,
+            "title": "Notes"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_edit_submit_ui_connectors__name__patch"
       },
       "Body_ui_memory_bulk_ui_memory_bulk_post": {
         "properties": {
@@ -9419,16 +9920,21 @@
           },
           "db": {
             "$ref": "#/components/schemas/DbStatus"
+          },
+          "mcp_session_id_capture": {
+            "type": "string",
+            "title": "Mcp Session Id Capture"
           }
         },
         "type": "object",
         "required": [
           "operator",
           "vault",
-          "db"
+          "db",
+          "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"always\"`` \u2014 any ``Mcp-Session-Id`` header the client sends is\n  captured into ``audit_log.agent_session_id``; a missing header is\n  accepted (the row's session id lands as NULL). This is the\n  default and what G8.2 audit-replay needs to light up on a stock\n  deploy.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in\n  compliance deploys that forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent)."
       },
       "IngestKbRequest": {
         "properties": {
@@ -12162,16 +12668,14 @@
         "title": "_EdgeEndpoint",
         "description": "Inbound JSON shape for one annotation endpoint.\n\nMirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:\n``name`` is required, ``kind`` is the optional disambiguator for a\nbare name that resolves to multiple :class:`GraphNode` rows in the\ntenant. Frozen so the route handler cannot accidentally rebind the\nfield; ``extra=\"forbid\"`` rejects typo'd keys at the boundary\n(``{from: {nme: ...}}`` is a 422, not a silently-ignored body)."
       },
-      "_SortColumn": {
+      "_SortDirection": {
         "type": "string",
         "enum": [
-          "name",
-          "kind",
-          "last_seen",
-          "first_seen"
+          "asc",
+          "desc"
         ],
-        "title": "_SortColumn",
-        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
+        "title": "_SortDirection",
+        "description": "Sort direction -- ``asc`` (default) or ``desc``."
       },
       "_ViewMode": {
         "type": "string",
@@ -12181,6 +12685,29 @@
         ],
         "title": "_ViewMode",
         "description": "Closed enum of view modes exposed on ``GET /ui/topology``.\n\n``table`` is the default (T1 / #880); ``graph`` switches to the\nCytoscape.js surface (T2 / #881). The enum's ``str`` mixin keeps\ntemplate URL building stable -- ``str(_ViewMode.GRAPH)`` is\n``\"graph\"`` (not ``\"_ViewMode.GRAPH\"``). An out-of-range value\nfails Pydantic validation (422) at the HTTP boundary so the route\nbody never sees an unknown mode."
+      },
+      "meho_backplane__ui__routes__connectors__list_view___SortColumn": {
+        "type": "string",
+        "enum": [
+          "name",
+          "product",
+          "host",
+          "last_probed_at",
+          "status"
+        ],
+        "title": "_SortColumn",
+        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors the human-meaningful columns in the rendered table. An\nout-of-enum value fails Pydantic validation at the HTTP boundary\nwith a 422 carrying the candidate list in the error context. The\nenum's ``str`` mixin keeps the template's ``{{ sort }}`` rendering\n+ ``href`` building stable -- ``str(_SortColumn.NAME)`` is\n``\"name\"`` (not ``\"_SortColumn.NAME\"``)."
+      },
+      "meho_backplane__ui__routes__topology__table___SortColumn": {
+        "type": "string",
+        "enum": [
+          "name",
+          "kind",
+          "last_seen",
+          "first_seen"
+        ],
+        "title": "_SortColumn",
+        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
       }
     }
   }

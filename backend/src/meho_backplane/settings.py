@@ -550,18 +550,44 @@ class Settings(BaseModel):
         the surface holds an HTTP connection open for a short interactive
         run before degrading to the pollable shape. Set via
         ``AGENT_SYNC_TIMEOUT_SECONDS``.
+    agent_approval_wait_timeout_seconds:
+        Overall wall-clock cap on the agent runtime's wait for a
+        ``requires_approval`` operation's decision broadcast event
+        (G11.1-T9 #1117). When an in-loop ``call_operation`` returns
+        ``awaiting_approval``, the wrapped tool subscribes to
+        ``approval.{approved,rejected}`` on the per-tenant Valkey stream
+        and blocks until the decision arrives, this cap elapses, or the
+        run is cancelled. Default 1800s = 30 minutes: long enough for
+        human review across timezone-distant teams without tying up an
+        agent loop indefinitely on a forgotten request. Set via
+        ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
-        ``Mcp-Session-Id`` header (G8.2-T2 #1010). Default ``False``:
-        the MCP 2025-06-18 Streamable HTTP transport explicitly permits
-        servers to not require sessions, and MEHO only needs the id for
-        audit correlation, so a missing header falls back to a fresh
-        single-call ``uuid4()``. Flip ``MCP_REQUIRE_SESSION_ID=true``
-        in deployments that mandate every agent call carry a stable
-        session id (compliance environments that forbid synthetic
-        single-call ids); a missing/empty header then returns a
-        JSON-RPC ``-32600`` Invalid Request before dispatch, so no
-        audit row is written for the rejected call.
+        ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
+        **Strictly gates enforcement, not capture.** Capture is
+        unconditional: any request that includes a parseable
+        ``Mcp-Session-Id`` header has the value bound to the structlog
+        contextvar and lands on
+        ``audit_log.agent_session_id`` regardless of this knob (so
+        G8.2 audit-replay lights up automatically on default deploys
+        for any client that sends the header — Claude Code does, by
+        default). Default ``False``: a missing or malformed header is
+        accepted, the audit row's ``agent_session_id`` lands as NULL,
+        and the call proceeds. Flip ``MCP_REQUIRE_SESSION_ID=true`` in
+        deployments that mandate every agent call carry a session id
+        (compliance environments); a missing/empty header then returns
+        a JSON-RPC ``-32600`` Invalid Request before dispatch, so no
+        audit row is written for the rejected call. A
+        present-but-malformed header is **not** a rejection — the
+        client did send a session id (just an unparseable one), so the
+        require contract is satisfied at the transport layer; the row
+        gets a NULL ``agent_session_id`` and structlog logs the
+        malformation as a warning so the misbehaving client is
+        observable. The current value is reported as
+        ``"enforced"`` / ``"always"`` on ``GET /api/v1/health`` via
+        :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
+        so operators can confirm the deploy's audit-replay capture
+        state without diffing env vars.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -693,6 +719,16 @@ class Settings(BaseModel):
     # polls). Bounds how long the surface holds an HTTP connection open
     # for a short interactive run before degrading to the pollable shape.
     agent_sync_timeout_seconds: float = Field(default=30.0, gt=0)
+    # G11.1-T9 #1117 — overall wall-clock cap on the agent runtime's wait
+    # for a ``requires_approval`` operation's decision broadcast event.
+    # When an in-loop ``call_operation`` returns ``awaiting_approval``, the
+    # wrapped tool subscribes to ``approval.{approved,rejected}`` on the
+    # per-tenant Valkey stream and blocks until the decision arrives, this
+    # cap elapses, or the run is cancelled. Default 1800s = 30 minutes:
+    # long enough for human review across timezone-distant teams without
+    # tying up an agent loop indefinitely on a forgotten request. Set via
+    # ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
+    agent_approval_wait_timeout_seconds: float = Field(default=1800.0, gt=0)
     # G11.3-T2 #823 — cron + one-off trigger scheduler. ``tick_interval``
     # bounds how often the loop scans for due triggers; the default
     # (30 s) is the consumer-doc-accepted granularity for cron triggers
@@ -972,6 +1008,9 @@ def get_settings() -> Settings:
         ),
         agent_sync_timeout_seconds=float(
             os.environ.get("AGENT_SYNC_TIMEOUT_SECONDS", "30.0"),
+        ),
+        agent_approval_wait_timeout_seconds=float(
+            os.environ.get("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "1800.0"),
         ),
         scheduler_tick_interval_seconds=int(
             os.environ.get("SCHEDULER_TICK_INTERVAL_SECONDS", "30"),

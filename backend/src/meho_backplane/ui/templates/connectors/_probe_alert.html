@@ -1,0 +1,27 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Re-probe failure alert fragment (Task #873 work item #6). Returned
+  in place of the fingerprint card when the resolver reports
+  ``no_connector`` (501) or ``ambiguous_connector`` (409). The HTMX
+  swap drops this fragment into ``#fingerprint-card`` so the rest of
+  the detail page stays intact.
+
+  The wrapper keeps the same ``id="fingerprint-card"`` so a follow-up
+  successful re-probe (after the operator fixes the underlying state)
+  can swap the real card back into the same slot via the same
+  ``hx-target="#fingerprint-card"`` selector.
+-#}
+<article
+  id="fingerprint-card"
+  class="card border-warning border bg-warning/10 shadow-sm"
+  aria-label="Re-probe failure"
+>
+  <div class="card-body space-y-1">
+    <div role="alert" class="space-y-1">
+      <h2 class="card-title text-sm text-warning">{{ title }}</h2>
+      <p class="text-xs whitespace-pre-line">{{ message }}</p>
+    </div>
+  </div>
+</article>

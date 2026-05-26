@@ -50,6 +50,7 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.migrations import db_migration_probe
+from meho_backplane.mcp.server import mcp_session_id_capture_mode
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import dispatch
 
@@ -117,13 +118,35 @@ class DbStatus(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """``GET /api/v1/health`` response body."""
+    """``GET /api/v1/health`` response body.
+
+    ``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's
+    audit-replay capture mode in a single field:
+
+    * ``"always"`` — any ``Mcp-Session-Id`` header the client sends is
+      captured into ``audit_log.agent_session_id``; a missing header is
+      accepted (the row's session id lands as NULL). This is the
+      default and what G8.2 audit-replay needs to light up on a stock
+      deploy.
+    * ``"enforced"`` — capture works the same way **plus** a missing
+      header is a JSON-RPC ``-32600`` reject before any audit row is
+      written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in
+      compliance deploys that forbid header-less calls.
+
+    The field is the canonical operator-facing surface for the
+    capture state until T7 #1148's ``/ready`` features block ships
+    the richer enumeration (T7's ``audit_replay`` block pulls from
+    the same
+    :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
+    helper so both surfaces stay consistent).
+    """
 
     model_config = ConfigDict(frozen=True)
 
     operator: OperatorIdentity
     vault: VaultStatus
     db: DbStatus
+    mcp_session_id_capture: str
 
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
@@ -258,6 +281,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         ),
         vault=vault_status,
         db=DbStatus(migrated=db_probe_result.ok),
+        mcp_session_id_capture=mcp_session_id_capture_mode(),
     )
 
 

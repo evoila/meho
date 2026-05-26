@@ -239,9 +239,11 @@ specifically referenced).
 | `GET /api/v1/health` 401 (residual bare `invalid_token`) | `{"detail":"invalid_token"}` | partial (post-#797 the common cases are classified; the residual case is intentionally bare per the *intentionally bare* section above, pending G0.13-T1 follow-up) | G0.13-T1 #1131 (reproduce + extend OR document residual) |
 | `GET /api/v1/feed` 500 (Redis xread failure) | `500 Internal Server Error` with no JSON body | non-compliant (no code, no message, no remediation) | T5 #1146 (catch `RedisError`, emit sentinel SSE or structured 503) |
 | Dispatcher composite-handler failures (resolver exceptions in typed/composite branch) | bare 500 envelope (signal 8); `NoMatchingConnector` / `AmbiguousConnectorResolution` propagate uncaught | non-compliant (no code, no remediation) | T1 #1142 (catch + label `no_connector`; surface `extras.exception_message`) |
-| `POST /api/v1/agent-principals` 503 (Keycloak admin not configured) | `{"detail":"keycloak_admin_not_configured"}` | partial — names the domain but not the env vars or the doc | T7 #1148 (symmetrize with the `/ui/auth/login` shape) |
+| `POST /api/v1/agent-principals` 503 (Keycloak admin not configured) | `keycloak_admin_not_configured: KEYCLOAK_ADMIN_URL / KEYCLOAK_ADMIN_CLIENT_ID / KEYCLOAK_ADMIN_CLIENT_SECRET are unset. Provision the confidential admin client per docs/cross-repo/keycloak-agent-client.md before defining agent principals.` (constant `KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL` in `auth/keycloak_admin.py`) | compliant — landed in T7 #1148 with the symmetric `/ui/auth/login` shape | — |
 | `POST /api/v1/agent-principals` 502 (Keycloak admin runtime error) | `{"detail":"keycloak_admin_error"}` | intentionally bare (upstream failure; remediation is identical regardless of upstream code; structured log carries detail) | — |
-| `/api/v1/auth-config` features visibility (whether agent-runtime is configured) | implicit — the agent-runtime configuration state is not surfaced anywhere on `/ready` or `/api/v1/auth-config` (signal 17) | non-compliant *as a discoverability gap* — when the surface emits `keycloak_admin_not_configured` the operator has no way to discover the feature was supposed to be configured | T7 #1148 (`/ready` features block with `configured: bool` + `missing_env`) |
+| `/api/v1/auth-config` features visibility (whether agent-runtime is configured) | implicit — the agent-runtime configuration state was not surfaced anywhere on `/ready` or `/api/v1/auth-config` (signal 17) | landed compliant via T7 #1148's `/ready` features block (see the next row) — kept here as the historical "before" record | T7 #1148 |
+| `/ready` features visibility (whether each gated feature is configured) | structured `features` block enumerating `agent_runtime`, `ui_surface`, `audit_replay`, `approval_queue` with `configured: bool`, `missing_env: [...]`, `docs: "..."` (transitive features carry `depends_on` instead of `docs`); built by `meho_backplane.features.build_features_block` | compliant *as a discoverability surface* — landed in T7 #1148. The `features` block sits on `/ready` (both 200 and 503 branches) so an operator's single GET answers "which features will work out of the box on my deploy?" before they trip a downstream `*_not_configured` error | — |
+| `GET /api/v1/health` audit-replay capture state (signal 11) | `mcp_session_id_capture: "always" \| "enforced"` field on `HealthResponse` — `"always"` is the default (capture-if-present, no rejection); `"enforced"` lights up when `MCP_REQUIRE_SESSION_ID=true` (additionally rejects header-less calls). Sourced from `mcp_session_id_capture_mode()` in `mcp/server.py`. | compliant *as a discoverability surface* — landed in T6 #1147 alongside the capture-vs-enforcement decouple. T7 #1148's `/ready` features block reads from the same helper for the richer `audit_replay` block. | T6 #1147 |
 | `POST /api/v1/targets` 422 (`unknown_product` — typo at create time) | structured `detail` with `kind="unknown_product"`, `product`, `valid_products[]`, `message` (`_build_unknown_product_detail` in `api/v1/targets.py`); also exposed proactively as a JSON Schema enum on `TargetCreate.product` via `build_openapi_schema` in `main.py` | compliant (structured + discoverable) — sibling **Option A** (enum in OpenAPI) and **Option C** (recovery-time 422) from the task body; T4 #1145 ships the same shape at PATCH time | T3 #1144 |
 | `PATCH /api/v1/targets/{name}` 422 (unknown_product) | structured `detail` with `kind='unknown_product'`, `product`, `valid_products[]`, `message` (`api/v1/targets.py` `update_target`) | compliant (structured) — landed in T4 #1145 | — |
 | `DELETE /api/v1/targets/{name}` 409 (target_has_references) | structured `detail` with `kind='target_has_references'`, `graph_node_refs`, `message` naming the `?force=true` remediation (`api/v1/targets.py` `delete_target`) | compliant (structured) — landed in T4 #1145 | — |
@@ -351,16 +353,21 @@ set).
   `xread`; an unavailable broadcast stream yields a bare 500 with
   no JSON body. T5 #1146 catches and emits either an empty SSE
   stream with a sentinel event or a structured 503.
-- **Signal 16** — `POST /api/v1/agent-principals` 503 surfaces the
-  domain code `keycloak_admin_not_configured` but not the env vars
-  or the doc reference. T7 #1148 symmetrizes with the
-  `/ui/auth/login` 503 shape.
-- **Signal 17** — `/ready` and `/api/v1/auth-config` do not enumerate
-  the gated features (`agent_runtime`, `ui_surface`, `audit_replay`,
-  `approval_queue`) with `configured: bool` and `missing_env`, so
-  the operator cannot discover *what* needs to be configured to
-  satisfy a `*_not_configured` error. T7 #1148 adds the features
-  block.
+- **Signal 16** — `POST /api/v1/agent-principals` 503 used to
+  surface the bare domain code `keycloak_admin_not_configured`
+  without the env vars or doc reference. T7 #1148 landed the
+  symmetric `/ui/auth/login` shape: the response detail now names
+  `KEYCLOAK_ADMIN_URL` / `KEYCLOAK_ADMIN_CLIENT_ID` /
+  `KEYCLOAK_ADMIN_CLIENT_SECRET` and points at
+  `docs/cross-repo/keycloak-agent-client.md`. Audit row updated.
+- **Signal 17** — `/ready` did not enumerate the gated features
+  (`agent_runtime`, `ui_surface`, `audit_replay`, `approval_queue`)
+  with `configured: bool` and `missing_env`, so the operator could
+  not discover *what* needed to be configured to satisfy a
+  `*_not_configured` error. T7 #1148 landed the `features` block
+  on `/ready`; `meho_backplane.features.build_features_block` is
+  the canonical builder. `docs/RELEASING.md` §6a walks operators
+  through each gate post-deploy.
 - **Signal 5** — `POST /api/v1/targets` accepts any `product`
   string but the resolver matches on exact connector-class tokens,
   so a single typo (`'kubernetes'` instead of `'k8s'`) silently

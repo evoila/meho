@@ -1,0 +1,10 @@
+{
+  "status": "ok",
+  "headers": {
+    "authorization": "[REDACTED:bearer_token]"
+  },
+  "items": [
+    {"id": 1, "trace": "fetched with [REDACTED:bearer_token] via curl"},
+    {"id": 2, "trace": "no token here"}
+  ]
+}

@@ -73,6 +73,7 @@ from meho_backplane.redaction.patterns import PATTERN_NAMES
 
 __all__ = [
     "RedactionAction",
+    "RedactionMode",
     "RedactionPolicy",
     "RedactionPolicyError",
     "RedactionRule",
@@ -87,6 +88,21 @@ __all__ = [
 #: ValidationError, and downstream pattern-matches over the union
 #: stay exhaustive under ``mypy --strict``.
 RedactionAction = Literal["redact", "mask", "hash"]
+
+#: Whole-policy execution mode (G11.4-T4 #1073). ``enforce`` is the
+#: default and the only mode that mutates the payload; ``shadow``
+#: still runs the engine's detection walk and emits the manifest but
+#: returns the original payload unmodified. Shadow / detection-only
+#: mode exists so a new rule can be deployed and exercised against
+#: real traffic (manifest counts visible in audit + dashboards)
+#: before flipping it to ``enforce`` and risking an
+#: over-redaction-driven incident. Implemented as a policy-level
+#: flag rather than a per-call runtime argument so the choice
+#: travels with the policy YAML: the C1-d round-trip fixture suite
+#: picks the mode up from the policy under test, the resolver
+#: returns a policy carrying its mode, and the middleware does not
+#: need new threading.
+RedactionMode = Literal["enforce", "shadow"]
 
 #: Max length of a rule / policy identifier. Long enough for
 #: human-readable slugs (``strip-authorization-headers``) plus a
@@ -233,6 +249,7 @@ class RedactionPolicy(BaseModel):
     version: Annotated[int, Field(ge=1)]
     description: Annotated[str, Field(default="", max_length=2048)]
     rules: Annotated[tuple[RedactionRule, ...], Field(min_length=1)]
+    mode: RedactionMode = "enforce"
 
     @field_validator("id")
     @classmethod

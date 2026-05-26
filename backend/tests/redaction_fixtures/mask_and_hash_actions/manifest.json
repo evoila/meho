@@ -1,0 +1,4 @@
+[
+  {"rule": "mask-uuid", "pattern": "uuid", "action": "mask", "count": 1, "path": "run_id"},
+  {"rule": "hash-fqdn", "pattern": "fqdn", "action": "hash", "count": 1, "path": "target"}
+]

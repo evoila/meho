@@ -285,3 +285,76 @@ def test_policy_is_frozen() -> None:
     # an accidental regression to a mutable model).
     with pytest.raises(ValidationError):
         policy.rules[0].name = "rebound"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Mode field (G11.4-T4 #1073) -- shadow / detection-only support
+# ---------------------------------------------------------------------------
+
+
+def test_mode_defaults_to_enforce_when_omitted() -> None:
+    """A policy YAML without a ``mode:`` key parses as ``enforce``.
+
+    Backward-compatibility contract for pre-#1073 policies; the
+    full behavioural coverage lives in ``test_redaction_shadow_mode.py``.
+    Captured here too because the policy schema is the canonical
+    source of truth for default values.
+    """
+    raw = textwrap.dedent(
+        """
+        id: default-mode
+        version: 1
+        rules:
+          - name: only
+            pattern: bearer_token
+            action: redact
+            reason: "default"
+        """,
+    )
+    policy = parse_policy(raw)
+    assert policy.mode == "enforce"
+
+
+def test_mode_shadow_round_trips() -> None:
+    """``mode: shadow`` parses and survives the Pydantic round trip."""
+    raw = textwrap.dedent(
+        """
+        id: shadow-mode
+        version: 1
+        mode: shadow
+        rules:
+          - name: only
+            pattern: bearer_token
+            action: redact
+            reason: "shadow"
+        """,
+    )
+    policy = parse_policy(raw)
+    assert policy.mode == "shadow"
+
+
+def test_unknown_mode_value_rejected() -> None:
+    """An unsupported ``mode:`` value is rejected at parse time.
+
+    The Literal union on :data:`RedactionMode` is the schema-layer
+    enforcement -- a typo or stale value (e.g. ``mode: monitor``)
+    must fail policy load rather than slipping through as ambient
+    behaviour. The wrapping :class:`RedactionPolicyError` carries
+    the field path so an operator pasting a malformed YAML sees
+    which key needs fixing.
+    """
+    raw = textwrap.dedent(
+        """
+        id: bad-mode
+        version: 1
+        mode: monitor
+        rules:
+          - name: only
+            pattern: bearer_token
+            action: redact
+            reason: "bad mode"
+        """,
+    )
+    with pytest.raises(RedactionPolicyError) as excinfo:
+        parse_policy(raw)
+    assert "mode" in str(excinfo.value)

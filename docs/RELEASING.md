@@ -110,6 +110,42 @@ This is the step that keeps getting skipped. Do it in the
 Open the PR (CHANGELOG roll + any release-only edits), get it reviewed,
 merge to `main`.
 
+Before merging, run the **release-body path-freshness gate**. The same
+recurring class of defect that motivated #928 at PR time (snapshot
+drifts from the route table) shows up at release time as paths cited
+in the release body that don't exist as written. Three consecutive
+releases shipped with this drift (v0.5.0 missing notes entirely,
+v0.5.1 catalog-vs-dispatch mismatch, v0.6.0 audit/replay +
+tenant_conventions mismatch — see
+[`docs/codebase/release-body-freshness.md`](codebase/release-body-freshness.md)).
+
+```bash
+# Extract the candidate release body to a file (the
+# cli-release.yml workflow uses the same awk shape).
+PREV=$(git describe --tags --abbrev=0 HEAD)
+VERSION=X.Y.Z   # the version you picked in step 1
+awk -v pat="${VERSION//./\\.}" '
+  BEGIN { in_section = 0 }
+  $0 ~ "^## \\[" pat "\\]" { in_section = 1; next }
+  in_section && /^## / { exit }
+  in_section { print }
+' CHANGELOG.md > /tmp/release-body.md
+
+# Assert every cited path resolves in the published OpenAPI snapshot.
+cd backend
+uv run python ../scripts/release/check_release_body_paths.py \
+  --release-body /tmp/release-body.md \
+  --openapi-snapshot ../cli/api/openapi.json
+```
+
+Exit 0 → proceed. Exit 1 → the script lists each unresolved citation
+plus the closest matching snapshot path; amend the release body to
+cite the shipped path (or pass `--allow-path` if the citation is
+intentionally outside the snapshot's surface). The script tolerates
+concrete IDs in citations (UUIDs / digits resolve against the
+matching templated form) so example URLs in prose don't trip the
+gate.
+
 ### 4. Tag + push
 
 ```bash
@@ -148,7 +184,9 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
        re-run + wait for success); version picked
 [ ] 2. CHANGELOG: completeness audited, missing bullets backfilled,
        [Unreleased] rolled to [X.Y.Z] (post-tag work left behind)
-[ ] 3. Release-cutting PR merged to main
+[ ] 3. Release-body path-freshness gate green
+       (scripts/release/check_release_body_paths.py — sister to #928);
+       release-cutting PR merged to main
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published

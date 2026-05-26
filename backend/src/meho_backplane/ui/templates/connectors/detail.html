@@ -1,0 +1,124 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Per-target detail page (Task #873 work items #2/#6/#7). Extends
+  ``base.html`` so the chrome (navbar, sidebar, footer) matches the
+  rest of the console.
+
+  Layout (top-down):
+    * Header -- breadcrumb back to ``/ui/connectors`` + target name +
+      product/host summary line.
+    * Two-column grid (stacks on mobile):
+        Column 1: Properties card + Fingerprint card + Recent ops card.
+        Column 2: Available operations matrix.
+    * The fingerprint card hosts the re-probe button (tenant_admin
+      gated). The recent-ops card hosts the SSE-live wiring via the
+      HTMX 2 ``sse`` extension; the broadcast bridge (G10.1) carries
+      the ``target=<name>`` filter.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ target.name }} &middot; Connectors &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  {# ---------- Breadcrumb + header ---------- #}
+  <nav aria-label="Breadcrumb" class="text-xs opacity-70">
+    <a href="/ui/connectors" class="link link-hover">Connectors</a>
+    <span aria-hidden="true">/</span>
+    <span class="font-mono">{{ target.name }}</span>
+  </nav>
+
+  <header class="flex flex-wrap items-baseline justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold font-mono">{{ target.name }}</h1>
+      <p class="text-sm opacity-70">
+        <span class="badge badge-outline badge-sm">{{ target.product }}</span>
+        <span class="font-mono">{{ target.host }}</span>
+        {% if target.vpn_required %}<span aria-label="VPN required" title="VPN required">&#x1F512;</span>{% endif %}
+      </p>
+    </div>
+  </header>
+
+  <div class="grid gap-4 lg:grid-cols-2">
+    {# ---------- Column 1 -- Properties + Fingerprint + Recent ops ---------- #}
+    <div class="space-y-4">
+      {# ---------- Properties card ---------- #}
+      <article
+        id="properties-card"
+        class="card bg-base-100 border-base-300 border shadow-sm"
+        aria-label="Target properties"
+      >
+        <div class="card-body space-y-2">
+          <h2 class="card-title text-base">Properties</h2>
+          <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+            <dt class="opacity-60">id</dt>
+            <dd class="font-mono text-xs">{{ target.id }}</dd>
+            <dt class="opacity-60">name</dt>
+            <dd class="font-mono">{{ target.name }}</dd>
+            <dt class="opacity-60">aliases</dt>
+            <dd>
+              {% if target.aliases %}
+                {{ target.aliases | join(", ") }}
+              {% else %}
+                <span class="opacity-50">—</span>
+              {% endif %}
+            </dd>
+            <dt class="opacity-60">product</dt>
+            <dd>{{ target.product }}</dd>
+            <dt class="opacity-60">host</dt>
+            <dd class="font-mono">{{ target.host }}</dd>
+            <dt class="opacity-60">port</dt>
+            <dd>{{ target.port if target.port is not none else "—" }}</dd>
+            <dt class="opacity-60">fqdn</dt>
+            <dd>{{ target.fqdn or "—" }}</dd>
+            <dt class="opacity-60">auth_model</dt>
+            <dd><span class="badge badge-ghost badge-xs">{{ target.auth_model }}</span></dd>
+            <dt class="opacity-60">vpn_required</dt>
+            <dd>{{ "yes" if target.vpn_required else "no" }}</dd>
+            <dt class="opacity-60">secret_ref</dt>
+            <dd class="font-mono text-xs">{{ target.secret_ref or "—" }}</dd>
+            <dt class="opacity-60">preferred_impl_id</dt>
+            <dd class="font-mono text-xs">{{ target.preferred_impl_id or "—" }}</dd>
+            <dt class="opacity-60">created_at</dt>
+            <dd class="text-xs">{{ target.created_at.isoformat() }}</dd>
+            <dt class="opacity-60">updated_at</dt>
+            <dd class="text-xs">{{ target.updated_at.isoformat() }}</dd>
+          </dl>
+          {% if target.extras %}
+            <details class="mt-2">
+              <summary class="cursor-pointer text-xs opacity-70">Raw extras JSON</summary>
+              <pre class="mt-2 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ target.extras | tojson(indent=2) }}</pre>
+            </details>
+          {% endif %}
+          {% if target.notes %}
+            <div class="mt-2">
+              <h3 class="text-xs font-semibold uppercase opacity-60">Notes</h3>
+              <p class="text-sm whitespace-pre-line">{{ target.notes }}</p>
+            </div>
+          {% endif %}
+        </div>
+      </article>
+
+      {# ---------- Fingerprint card ---------- #}
+      {% include "connectors/_fingerprint_card.html" %}
+
+      {# ---------- Recent ops card ---------- #}
+      {% include "connectors/_recent_ops.html" %}
+    </div>
+
+    {# ---------- Column 2 -- Available operations matrix ---------- #}
+    <div>
+      {% include "connectors/_ops_matrix.html" %}
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/ui/static/src/app/connectors-feed.js" defer></script>
+{% endblock %}

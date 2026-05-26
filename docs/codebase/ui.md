@@ -1461,3 +1461,68 @@ to this operator.
   formatting, partition split, parser guards, badge + recently-
   expired rendering, bulk delete + extend, RBAC denial path,
   cross-tenant safety, CSRF gate.
+
+## Connectors surface (Task #873)
+
+Initiative #340 (G10.3 Connectors + Targets UI). Task #873 (T1)
+ships the **read** surface — the targets list + per-target detail
+page. T2 (#874) layers create / edit forms; T3 (#875) layers bulk
+import. The connectors stub registered in T5 #866 is retired by
+this task — the real router is included ahead of the chassis stubs
+the same way broadcast / topology / memory retired theirs.
+
+### Routes
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/ui/connectors` | Sortable + filterable targets list. URL: `?sort=name|product|host|last_probed_at|status&dir=asc|desc&product=<slug>`. Full-page render or `_table_rows.html` fragment (HX-Request branch). |
+| `GET` | `/ui/connectors/{name}` | Per-target detail. Renders properties + fingerprint card + recent-ops card (SSE-live) + available-operations matrix. Alias-aware target resolution via `resolve_target`. |
+| `POST` | `/ui/connectors/{name}/probe` | Re-probe action. Tenant_admin RBAC gated server-side (the template hides the button optimistically; the handler is the authority). Persists the new fingerprint and swaps the refreshed `_fingerprint_card.html` fragment. |
+
+### Module layout
+
+* `backend/src/meho_backplane/ui/routes/connectors/__init__.py` — the umbrella `build_router()` aggregating the list / detail / probe routers in registration order.
+* `backend/src/meho_backplane/ui/routes/connectors/list_view.py` — the list handler. Sort enum, direction enum, status freshness classifier (24 h threshold), distinct-products query for the filter dropdown, Python-side re-sort layered on top of the SQL `ORDER BY` so status sorts honour the `never < stale < ok` ladder.
+* `backend/src/meho_backplane/ui/routes/connectors/detail.py` — the detail handler. Resolves the target via `targets.resolver.resolve_target`, projects it via `_project_target` (shared with probe), resolves the connector via `resolve_connector_or_label` (the same helper `/api/v1/targets/{name}/probe` uses), loads the operations matrix grouped by `operation_group` with the same tenant scoping shape `list_operation_groups` uses, loads the last 10 audit rows for the target. SSE bridge URL is the existing `/ui/broadcast/stream?target=<name>` (G10.1 already supports the `target` filter; piggy-backing keeps the SSE plumbing single-sourced).
+* `backend/src/meho_backplane/ui/routes/connectors/operator.py` — `resolve_role_probe` (fails soft to `is_tenant_admin=False` on any JWT hiccup so a transient JWKS outage doesn't 5xx the read surface) + `resolve_operator_or_403` (the rigorous write-gate dep used by the probe handler).
+* `backend/src/meho_backplane/ui/routes/connectors/probe.py` — the re-probe POST handler. Uses the same `resolve_connector_or_label` path the REST `/api/v1/targets/{name}/probe` route uses so the two surfaces stay byte-compatible. Maps `no_connector` → 501 + alert fragment, `ambiguous_connector` → 409 + alert fragment.
+
+### Connector resolution
+
+The detail page's available-operations matrix and the re-probe action both consume `resolve_connector_or_label(target)` — the same helper the `/api/v1/targets/{name}/probe` REST route uses (G0.14-T1 #1142). The detail page then resolves the matching v2-registry entry to produce the canonical `"<impl_id>-<version>"` `connector_id` the operations meta-tool query reads (`list_operation_groups`'s shape). When the registry has the chosen class under multiple keys (the K8s pattern, both a v1 wildcard and a v2 versioned key), the detail page picks the versioned key — same precedence the G0.6 dispatcher's lookup uses.
+
+### SSE wiring for recent ops
+
+The recent-ops card on the detail page is live-driven by the existing G10.1 broadcast SSE bridge: the card embeds `sse-connect="/ui/broadcast/stream?target=<urlencoded-name>"` plus `sse-swap="broadcast"`. An Alpine controller (`connectorsRecentOps`, `backend/src/meho_backplane/ui/static/src/app/connectors-feed.js`) hooks `htmx:sse-before-message`, parses each `event: broadcast` frame's JSON, and prepends a row to its bounded `events` array (cap 50; older rows trim). The card is initially seeded by the server-rendered last-10 audit rows so the page is useful even before any new event streams in.
+
+### RBAC posture for re-probe
+
+The re-probe button is rendered only when the page-load role probe returned `is_tenant_admin=True`. The button hides for operators who can't use it. The server-side authority is `resolve_operator_or_403` on the POST handler — a crafted POST hitting the endpoint with a stolen / forged form still hits the 403 gate. The probe handler also re-validates the target tenant-scoped via `resolve_target` so a cross-tenant target name never resolves on the write surface.
+
+### Cross-tenant isolation
+
+Every list / detail / probe path filters on `session_ctx.tenant_id`:
+
+* List: `WHERE targets.tenant_id = :tenant_id` is the first clause in the substrate query.
+* Detail: `resolve_target` raises 404 on a cross-tenant name.
+* Probe: same `resolve_target` gate before the write.
+* Recent ops: `WHERE audit_log.tenant_id = :tenant_id AND audit_log.target_id = :target_id` — defense in depth even though the soft-FK on `audit_log.target_id` makes a cross-tenant target_id structurally impossible.
+* Ops matrix: `(operation_group.tenant_id IS NULL OR operation_group.tenant_id = :tenant_id)` — same shape `list_operation_groups` uses for the agent surface.
+* Recent-ops SSE: the underlying `/ui/broadcast/stream` bridge takes the tenant from the session row, never from a query parameter, so the per-target filter cannot leak across tenants.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/connectors/__init__.py` — umbrella router factory.
+* `backend/src/meho_backplane/ui/routes/connectors/list_view.py` — list view handler + freshness classifier.
+* `backend/src/meho_backplane/ui/routes/connectors/detail.py` — detail handler + connector_id resolution + ops matrix query + recent-ops query.
+* `backend/src/meho_backplane/ui/routes/connectors/operator.py` — role-probe (read) + operator-403 (write).
+* `backend/src/meho_backplane/ui/routes/connectors/probe.py` — re-probe POST handler.
+* `backend/src/meho_backplane/ui/templates/connectors/list.html` — full-page list template.
+* `backend/src/meho_backplane/ui/templates/connectors/_table_rows.html` — list rows fragment (HTMX swap target).
+* `backend/src/meho_backplane/ui/templates/connectors/detail.html` — full-page detail template.
+* `backend/src/meho_backplane/ui/templates/connectors/_fingerprint_card.html` — fingerprint card (also returned by the re-probe POST).
+* `backend/src/meho_backplane/ui/templates/connectors/_recent_ops.html` — SSE-live recent-ops card.
+* `backend/src/meho_backplane/ui/templates/connectors/_ops_matrix.html` — grouped operations matrix.
+* `backend/src/meho_backplane/ui/templates/connectors/_probe_alert.html` — failure alert fragment (no_connector / ambiguous).
+* `backend/src/meho_backplane/ui/static/src/app/connectors-feed.js` — `connectorsRecentOps` Alpine controller.
+* `backend/tests/test_ui_connectors_view.py` — auth boundary, list (full + fragment + sort + filter + cross-tenant), detail (properties + alias + 404 + cross-tenant + recent ops + ops matrix + ambiguous / no-connector branches), fingerprint card (present / never), re-probe button visibility (operator vs tenant_admin), SSE wiring + URL-encoding, re-probe (success + 403 operator + 501 no-connector + 404 unknown).

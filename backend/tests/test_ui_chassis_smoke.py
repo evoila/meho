@@ -109,14 +109,16 @@ _SURFACE_ROUTES = ("/ui/broadcast", "/ui/knowledge", "/ui/topology", "/ui/connec
 #: "Coming soon" stub. ``/ui/topology`` is omitted because Initiative
 #: #342 Task #880 (G10.5-T1) replaced the stub with the real table
 #: view; ``/ui/broadcast`` is omitted because Initiative #338 Task #867
-#: (G10.1-T1) replaced the stub with the real live-feed view; and
+#: (G10.1-T1) replaced the stub with the real live-feed view;
 #: ``/ui/memory`` is omitted because Initiative #341 Task #877
 #: (G10.4-T1) replaced the stub with the real list / detail / edit
-#: surface. G10.2 (kb) + G10.3 (connectors) will trim this tuple
-#: further as their surface Initiatives land. The chassis smoke test
-#: still pins the sidebar links via :data:`_SURFACE_ROUTES` so a
+#: surface; and ``/ui/connectors`` is omitted because Initiative #340
+#: Task #873 (G10.3-T1) replaced the stub with the real targets list
+#: + per-target detail + re-probe surface. G10.2 (kb) will trim this
+#: tuple further once its surface Initiative lands. The chassis smoke
+#: test still pins the sidebar links via :data:`_SURFACE_ROUTES` so a
 #: sidebar-vs-route divergence surfaces explicitly.
-_STUB_SURFACE_ROUTES = ("/ui/knowledge", "/ui/connectors")
+_STUB_SURFACE_ROUTES = ("/ui/knowledge",)
 
 
 @pytest.fixture(autouse=True)

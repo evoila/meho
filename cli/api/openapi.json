@@ -9916,16 +9916,21 @@
           },
           "db": {
             "$ref": "#/components/schemas/DbStatus"
+          },
+          "mcp_session_id_capture": {
+            "type": "string",
+            "title": "Mcp Session Id Capture"
           }
         },
         "type": "object",
         "required": [
           "operator",
           "vault",
-          "db"
+          "db",
+          "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"always\"`` \u2014 any ``Mcp-Session-Id`` header the client sends is\n  captured into ``audit_log.agent_session_id``; a missing header is\n  accepted (the row's session id lands as NULL). This is the\n  default and what G8.2 audit-replay needs to light up on a stock\n  deploy.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in\n  compliance deploys that forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent)."
       },
       "IngestKbRequest": {
         "properties": {

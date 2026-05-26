@@ -164,6 +164,23 @@ connector-related release-notes line.
   `{detail: invalid_token}` for non-JWT bearers now see
   `{detail: malformed_jws}`
   ([#1131](https://github.com/evoila/meho/issues/1131) / #1152).
+- **G0.14-T6 audit-replay session-id capture decoupled from
+  `MCP_REQUIRE_SESSION_ID`.** `_bind_mcp_session_id` in
+  `mcp/server.py` now captures any `Mcp-Session-Id` header the
+  client sends into `audit_log.agent_session_id` unconditionally —
+  the env var strictly gates enforcement (the missing-header reject)
+  and no longer also gates capture. G8.2 audit-replay therefore
+  lights up automatically on any default deploy whose MCP clients
+  include the header (Claude Code does by default), with no operator
+  intervention. A request with no header (or a malformed one) leaves
+  `agent_session_id` as NULL — the recursive-CTE replay walks NULLs
+  out naturally — replacing the prior fresh-uuid4-per-call fallback
+  that polluted the session search surface with one-row "sessions".
+  `GET /api/v1/health` gains a new `mcp_session_id_capture` field
+  (`"always"` / `"enforced"`) so operators can confirm the deploy's
+  capture mode at a glance; `docs/RELEASING.md` documents the
+  post-deploy auto-enablement story. Closes G0.14-T6 signal 11 from
+  `claude-rdc-hetzner-dc#697`. (#1147)
 
 ## [0.6.0] - 2026-05-26
 

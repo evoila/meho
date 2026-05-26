@@ -31,6 +31,7 @@ from collections.abc import Iterator
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
@@ -367,3 +368,108 @@ async def test_update_other_fields_skips_identity_ref_revalidation() -> None:
     )
     assert updated is not None
     assert updated.turn_budget == 99
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T9 (#1112) -- identity_ref_invalid structured log breadcrumb
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_identity_ref_invalid_unknown_emits_structured_warning() -> None:
+    """``unknown`` rejection emits ``identity_ref_invalid`` with structured fields.
+
+    Operators tail logs against the structured ``reason`` to spot a typo'd
+    or never-registered ``identity_ref``. The breadcrumb mirrors the
+    ``agent_definition_create`` / ``agent_definition_update`` info events
+    the service emits on the happy path: same event-name shape, same
+    ``tenant_id`` field.
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "t9-warn-unknown")
+        # No principal seeded -- the create below resolves to "unknown".
+    service = AgentDefinitionService()
+    with capture_logs() as captured, pytest.raises(AgentIdentityRefInvalidError):
+        await service.create(tenant_id, "op-1", _create_body("ghost"))
+
+    events = [line for line in captured if line.get("event") == "identity_ref_invalid"]
+    assert len(events) == 1
+    line = events[0]
+    assert line["identity_ref"] == "agent:ghost"
+    assert line["reason"] == "unknown"
+    assert line["tenant_id"] == str(tenant_id)
+    assert line["log_level"] == "warning"
+
+
+@pytest.mark.asyncio
+async def test_identity_ref_invalid_revoked_emits_structured_warning() -> None:
+    """``revoked`` rejection emits ``identity_ref_invalid`` with ``reason='revoked'``.
+
+    The boundary collapses ``revoked`` into ``identity_ref_unknown`` to
+    avoid leaking whether a specific clientId ever existed, but the
+    structured event must keep the precise reason so on-call can
+    distinguish a stale ``identity_ref`` referencing a revoked principal
+    from a typo.
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "t9-warn-revoked")
+        await _seed_principal(session, tenant_id, "killed-bot", revoked=True)
+    service = AgentDefinitionService()
+    with capture_logs() as captured, pytest.raises(AgentIdentityRefInvalidError):
+        await service.create(tenant_id, "op-1", _create_body("killed-bot"))
+
+    events = [line for line in captured if line.get("event") == "identity_ref_invalid"]
+    assert len(events) == 1
+    line = events[0]
+    assert line["identity_ref"] == "agent:killed-bot"
+    assert line["reason"] == "revoked"
+    assert line["tenant_id"] == str(tenant_id)
+    assert line["log_level"] == "warning"
+
+
+@pytest.mark.asyncio
+async def test_identity_ref_invalid_on_update_emits_structured_warning() -> None:
+    """An update that points at an unknown principal emits the same warning.
+
+    Covers the second call site of the validator: ``update`` re-runs it
+    only when the PATCH body sets ``identity_ref``. The structured event
+    is identical to the create path.
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "t9-warn-update")
+        await _seed_principal(session, tenant_id, "agent-a")
+    service = AgentDefinitionService()
+    await service.create(tenant_id, "op-1", _create_body("agent-a"))
+
+    with capture_logs() as captured, pytest.raises(AgentIdentityRefInvalidError):
+        await service.update(
+            tenant_id,
+            "agent-a",
+            AgentDefinitionUpdate(identity_ref="agent:does-not-exist"),
+        )
+
+    events = [line for line in captured if line.get("event") == "identity_ref_invalid"]
+    assert len(events) == 1
+    line = events[0]
+    assert line["identity_ref"] == "agent:does-not-exist"
+    assert line["reason"] == "unknown"
+    assert line["tenant_id"] == str(tenant_id)
+    assert line["log_level"] == "warning"
+
+
+def test_identity_ref_module_re_exports_match_service_module() -> None:
+    """``service`` re-exports ``AgentIdentityRefInvalidError`` from ``identity_ref``.
+
+    Boundary code (REST routes, MCP tools) imports the exception from
+    ``meho_backplane.agents.service``; the T9 extraction moved its
+    definition to ``meho_backplane.agents.identity_ref`` but kept the
+    re-export so no boundary import had to change. This pins that
+    contract so a future cleanup pass can't silently break it.
+    """
+    from meho_backplane.agents import identity_ref as identity_ref_module
+    from meho_backplane.agents import service as service_module
+
+    assert (
+        service_module.AgentIdentityRefInvalidError
+        is identity_ref_module.AgentIdentityRefInvalidError
+    )

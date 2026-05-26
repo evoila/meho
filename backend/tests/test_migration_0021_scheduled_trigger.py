@@ -300,3 +300,59 @@ def test_downgrade_then_upgrade_round_trips(
     columns_after_up = _table_columns(sync_url, "scheduled_trigger")
     for new_col in _NEW_COLUMNS_0021:
         assert new_col in columns_after_up
+
+
+def test_downgrade_refuses_when_fired_rows_exist(
+    alembic_cfg: tuple[Config, str],
+) -> None:
+    """``downgrade "0020"`` raises ``RuntimeError`` when ``status='fired'`` rows exist.
+
+    The v1 ``ck_scheduled_trigger_status`` admits only
+    ``{active, paused, cancelled}``; a row written by the dispatcher's
+    one-off finalisation path (``status='fired'``) would orphan the
+    narrowed constraint either at the PG ``ADD CONSTRAINT`` validation
+    pass or at the SQLite ``batch_alter_table`` recreate-table
+    integrity check. The migration refuses the downgrade before
+    touching any DDL so the schema stays at 0021 rather than getting
+    half-applied. Mirrors the precedent in
+    :mod:`alembic.versions.0010_widen_graph_edge_kind`.
+    """
+    cfg, sync_url = alembic_cfg
+    command.upgrade(cfg, "0021")
+
+    tenant_id, definition_id = _seed_tenant_and_definition(sync_url)
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        with sync_eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO scheduled_trigger "
+                    "(id, tenant_id, agent_definition_id, kind, fire_at, "
+                    " timezone, status, in_flight_policy, identity_sub, "
+                    " created_by_sub, created_at, updated_at) "
+                    "VALUES (:id, :tenant_id, :definition_id, 'one_off', "
+                    " :fire_at, 'UTC', 'fired', 'fail_into_audit', "
+                    " '__scheduler__', 'seed-admin', :now, :now)"
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "tenant_id": str(tenant_id),
+                    "definition_id": str(definition_id),
+                    "fire_at": "2026-05-26T00:00:00",
+                    "now": "2026-05-25T00:00:00",
+                },
+            )
+    finally:
+        sync_eng.dispose()
+
+    with pytest.raises(RuntimeError, match=r"status='fired'.*orphaned"):
+        command.downgrade(cfg, "0020")
+
+    # The refusal is pre-DDL: the table is still at 0021 (columns
+    # intact, v2 CHECK still in place), not half-downgraded.
+    columns_after_refused = _table_columns(sync_url, "scheduled_trigger")
+    for new_col in _NEW_COLUMNS_0021:
+        assert new_col in columns_after_refused, (
+            f"refused downgrade must leave {new_col!r} intact; "
+            f"observed columns: {sorted(columns_after_refused)}"
+        )

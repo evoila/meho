@@ -31,16 +31,22 @@ DBOS rebase swaps only the loop module.
 
 - `ScheduledTrigger` ([db/models.py](../../backend/src/meho_backplane/db/models.py))
   — the durable row. One per trigger. Columns:
-  - `id`, `tenant_id` (real FK), `agent_definition_id` (soft-FK to
-    G11.1-T2 #809), `identity_sub`, `created_by_sub`.
+  - `id`, `tenant_id` (real FK), `agent_definition_id` (real FK to
+    `agent_definition` — `ondelete` is the default NO ACTION, so a
+    definition cannot be removed while triggers reference it),
+    `identity_sub`, `created_by_sub`.
   - `kind` (closed enum: `cron`/`one_off`), `cron_expr` (NULL for
-    one-off), `timezone` (IANA name, default `UTC`).
-  - `next_fire_at` (the hot column the loop scans), `last_fired_at`,
-    `status` (closed enum: `active`/`paused`/`fired`/`cancelled`).
-  - `inputs` (JSON-shaped, passed to the agent as the run's input string).
+    one-off), `fire_at` (one-off scheduled instant, NULL for cron),
+    `timezone` (IANA name, default `UTC`).
+  - `next_fire_at` (the hot column the loop scans, populated for
+    both cron and one-off), `last_fired_at`, `status` (closed enum:
+    `active`/`paused`/`cancelled`/`fired`).
+  - `inputs` (JSON-shaped, nullable, passed to the agent as the run's
+    input string).
 - `ScheduledTriggerKind`, `ScheduledTriggerStatus` — closed StrEnums
   kept in lock-step with the DB-layer `CHECK (... IN (...))` constraints
-  via migration `0018`.
+  via migrations `0020` (T1 substrate) and `0021` (T2 dispatcher
+  columns + widened `status` CHECK).
 - Scheduler package
   ([scheduler/](../../backend/src/meho_backplane/scheduler)):
   - `scheduler.cron` — `next_fire_after()` (croniter wrapper),
@@ -102,8 +108,10 @@ DBOS rebase swaps only the loop module.
    - Returns `None` when zero rows match (another claimer beat this
      replica to it) — skip the fire.
 2. Commit the advance.
-3. `_invoke_agent()` resolves the agent definition (soft-FK lookup), kicks
-   off the agent run in async mode, returns.
+3. `_invoke_agent()` resolves the agent definition (FK lookup —
+   `agent_definition_id` is a real FK, so this `SELECT` is by primary
+   key under the definition-NOT-NULL invariant), kicks off the agent
+   run in async mode, returns.
 
 ### One-off fire path (`_fire_one_off`)
 
@@ -205,6 +213,15 @@ scheduled instant by the time the agent run starts.
 - Precedent loops:
   [topology/scheduler.py](../../backend/src/meho_backplane/topology/scheduler.py),
   [memory/expiry.py](../../backend/src/meho_backplane/memory/expiry.py)
-- Migration: `alembic/versions/0018_create_scheduled_trigger.py`
+- Migrations:
+  - `alembic/versions/0020_create_scheduled_trigger.py` — T1 #1064
+    storage substrate (table, indexes, kind / status / in_flight_policy
+    CHECKs, discriminated-union kind-fields CHECK).
+  - `alembic/versions/0021_scheduled_trigger_dispatcher_columns.py` —
+    T2 this PR (`identity_sub`, `inputs`, `timezone` columns;
+    `status` CHECK widened to admit `fired`).
 - Tests:
-  [tests/test_scheduler.py](../../backend/tests/test_scheduler.py)
+  [tests/test_scheduler.py](../../backend/tests/test_scheduler.py),
+  [tests/test_migration_0020_scheduled_trigger.py](../../backend/tests/test_migration_0020_scheduled_trigger.py),
+  [tests/test_migration_0021_scheduled_trigger.py](../../backend/tests/test_migration_0021_scheduled_trigger.py),
+  [tests/test_db_scheduled_trigger.py](../../backend/tests/test_db_scheduled_trigger.py)

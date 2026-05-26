@@ -170,7 +170,44 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Restore the 0020 status CHECK and drop the three columns."""
+    """Restore the 0020 status CHECK and drop the three columns.
+
+    Refuses to land if rows with ``status='fired'`` exist -- they would
+    be orphaned by the narrowed v1 CHECK and either fail the
+    ``ADD CONSTRAINT`` validation (PG) or trip the table-recreate
+    integrity check (SQLite batch_alter_table). The refusal raises a
+    :class:`RuntimeError` with operator-actionable instructions rather
+    than silently corrupting; the same shape migration 0010
+    (``ck_graph_edge_kind`` narrowing) follows. Failing fast before
+    touching any DDL is intentional -- a refused downgrade leaves the
+    schema unchanged at 0021 rather than half-applied.
+    """
+    # Block before touching DDL: count one-off rows that the v1 CHECK
+    # would orphan. The narrow IN-predicate keeps the count cheap even
+    # on a large table; the operator response is a deliberate cancel /
+    # re-classify pass before retrying the downgrade.
+    scheduled_trigger = sa.table(
+        "scheduled_trigger",
+        sa.column("status", sa.Text()),
+    )
+    blocking_stmt = (
+        sa.select(sa.func.count().label("n"))
+        .select_from(scheduled_trigger)
+        .where(scheduled_trigger.c.status == "fired")
+    )
+    bind = op.get_bind()
+    blocking_count: int = bind.execute(blocking_stmt).scalar_one()
+    if blocking_count:
+        raise RuntimeError(
+            f"Cannot downgrade migration 0021: scheduled_trigger contains "
+            f"{blocking_count} row(s) with status='fired' that would be "
+            "orphaned by the narrowed v1 CHECK constraint. Cancel or "
+            "re-classify them ("
+            "UPDATE scheduled_trigger SET status='cancelled' "
+            "WHERE status='fired'"
+            ") before running `alembic downgrade`."
+        )
+
     with op.batch_alter_table("scheduled_trigger") as batch_op:
         batch_op.drop_constraint(
             "ck_scheduled_trigger_status",

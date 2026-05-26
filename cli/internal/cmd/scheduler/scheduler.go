@@ -54,17 +54,37 @@ import (
 const jsonObjectCap int64 = 256 << 10
 
 // readJSONFile is the file-read seam — a var so the unit tests can stub
-// it deterministically without touching the filesystem.
+// it deterministically without touching the filesystem. The
+// implementation enforces jsonObjectCap so a multi-GiB JSON file
+// passed via `@<path>` cannot OOM the CLI (review M4 on PR #1128).
+// It mirrors the stdin branch's io.LimitReader discipline.
 var readJSONFile = func(path string) ([]byte, error) {
-	return os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	read, err := io.ReadAll(io.LimitReader(f, jsonObjectCap+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(read)) > jsonObjectCap {
+		return nil, fmt.Errorf("file %q exceeds %d-byte cap", path, jsonObjectCap)
+	}
+	return read, nil
 }
 
 // loadJSONObjectFlag reads a flag value that carries a JSON object,
 // supporting inline JSON, `@<path>` for a file, and `@-` for stdin. It
 // returns nil for an empty value so the caller can omit the field from
 // the request body entirely. The decoded value must be a JSON object;
-// a non-object (array, scalar) is rejected at the CLI rather than after
-// a remote 422. Mirrors the agent package's helper of the same name.
+// a non-object (array, scalar, or JSON `null`) is rejected at the CLI
+// rather than after a remote 422. Mirrors the agent package's helper
+// of the same name. JSON `null` is rejected explicitly because
+// json.Unmarshal of `null` into map[string]any sets the map to nil
+// without returning an error -- a silent accept would forward an
+// empty body field that the backend cannot disambiguate from
+// "omitted" (review M3 on PR #1128).
 func loadJSONObjectFlag(cmd *cobra.Command, raw, flagName string) (map[string]any, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -94,6 +114,9 @@ func loadJSONObjectFlag(cmd *cobra.Command, raw, flagName string) (map[string]an
 	var out map[string]any
 	if err := json.Unmarshal(blob, &out); err != nil {
 		return nil, fmt.Errorf("%s must be a JSON object: %w", flagName, err)
+	}
+	if out == nil {
+		return nil, fmt.Errorf("%s must be a JSON object (got null)", flagName)
 	}
 	return out, nil
 }

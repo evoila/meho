@@ -609,19 +609,25 @@ incidents #634 / #697).
 
 | Job | Surface | Steps |
 | --- | --- | --- |
-| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -n 3 --dist loadscope` (excludes `tests/integration/`; `--cov=meho_backplane --cov-report=xml` only on push-to-main via `COVERAGE_CORE=sysmon`, PEP 669 backend; PRs skip `--cov` to stay fast — #726, #739) -> upload `python-coverage` artefact |
+| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -n 6 --dist loadscope` (excludes `tests/integration/`; `COVERAGE_CORE=sysmon --cov=meho_backplane --cov-report=xml` on **both push and PR** — the per-test re-embedding cost that made `--cov` prohibitive on PRs was eliminated in #799; sysmon PEP 669 backend — #739) -> upload `python-coverage` artefact |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-Each job runs on its own `meho-runners-ci` runner. `python-lint-test`,
-`go-lint-test`, and `helm-lint-template` carry a 10-minute
-`timeout-minutes`; `python-integration` carries 60 minutes for the
-container-pull + DinD spin-up + testcontainers sweep (xdist
-loadgroup parallelisation to bring it well under cap tracked in #564).
-Wall-clock for a green PR is the slowest job's elapsed time because
-the four jobs never block each other — `python-integration` typically
-dominates and is the dispatch surface for the Goal #11 budget
+`python-lint-test` runs on `meho-runners-ci-heavy` (dedicated ARC scale
+set, 6000m requests=limits, max 5 pods — #761 / rdc-gitops#55). The
+other three jobs (`python-integration`, `go-lint-test`,
+`helm-lint-template`) run on the dense `meho-runners-ci` pool (4-core).
+`python-lint-test` carries a 20-minute `timeout-minutes` (retuned from
+the legacy 50-min cap after #799 dropped the unit-job wall to ~9 min;
+the hard cap stays well above the observed wall for hang detection while
+the perf-budget-guard step enforces the 10-min Goal #11 budget at the
+PR level). `go-lint-test` and `helm-lint-template` carry 10 minutes;
+`python-integration` carries 60 minutes for the container-pull + DinD
+spin-up + testcontainers sweep (xdist loadgroup parallelisation tracked
+in #564). Wall-clock for a green PR is the slowest job's elapsed time
+because the four jobs never block each other — `python-integration`
+typically dominates and is the dispatch surface for the Goal #11 budget
 conversation.
 
 ### Fail-loud posture
@@ -669,17 +675,23 @@ SonarCloud scan. The workflow name (`CI`) and the artefact name
 workflows — changing either side without the other would silently lose
 coverage reporting in SonarCloud.
 
-`--cov` is gated to push events only (#726): on PRs, the merge gate
-stays fast and SonarCloud's new-code coverage widget shows "no data"
-until the branch lands on `main`. The Clean-as-You-Code model tolerates
-the one-merge delay because `main` always carries fresh data and
-`quality-gate.yml` is whole-job `continue-on-error`. `COVERAGE_CORE=sysmon`
-(#739) swaps coverage.py's default C tracer for the PEP 669
-`sys.monitoring` backend (Python 3.12+, supported by coverage.py 7.4+;
-the lockfile pins 7.14). Sysmon's event-driven model removes most of
-the per-line tracing tax; line/branch counts are identical to the
-ctrace baseline within ±1% by construction, so the SonarCloud signal
-is unaffected.
+`--cov` runs on **both push and PR** as of the post-#799 state. #726
+originally gated `--cov` to push-only on the belief that pytest-cov
+was the unit job's dominant cost; the #771 diagnostic (#793) disproved
+that — the real cost was per-test descriptor re-embedding (fixed in
+#799), not coverage instrumentation. With the embedding re-fetch
+eliminated and sysmon's overhead, `--cov` adds only ~1 min (pytest
+~8m33s with cov vs ~7m35s without; run 26245676016), so the unit job
+stays ~9.3 min — under the Goal #11 10-min budget — while PRs gain
+SonarCloud Clean-as-You-Code new-code-coverage decoration on every PR
+instead of updating one merge late. The `quality-gate.yml` whole-job
+`continue-on-error` means a missing or late artefact never blocks a
+merge. `COVERAGE_CORE=sysmon` (#739) swaps coverage.py's default C
+tracer for the PEP 669 `sys.monitoring` backend (Python 3.12+,
+supported by coverage.py 7.4+; the lockfile pins 7.14). Sysmon's
+event-driven model removes most of the per-line tracing tax; line
+counts matched the C tracer exactly (2913/11832 in both), so the
+SonarCloud signal is unaffected.
 
 ### Fork-PR guard
 
@@ -711,8 +723,8 @@ in the correct subdir on its own.
 (cd backend && uv run ruff format --check src/ tests/)
 (cd backend && uv run mypy src/)
 (cd backend && uv run pytest -x --cov=meho_backplane --cov-report=term tests/)
-# To mirror the push-mode CI coverage run (Python 3.12+):
-# (cd backend && COVERAGE_CORE=sysmon uv run pytest -n 3 --dist loadscope --maxfail=1 \
+# To mirror the CI coverage run (both push and PR, Python 3.12+):
+# (cd backend && COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 \
 #     --ignore=tests/integration --cov=meho_backplane --cov-report=xml tests/)
 
 # Go

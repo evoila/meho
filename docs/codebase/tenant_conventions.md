@@ -10,8 +10,9 @@ models, and access patterns. Layer 2 lives in
 [docs/examples/consumer-onboarding/](../examples/consumer-onboarding/)
 (landed by sibling task #318).
 
-This document is current as of T4 (#316) and T3 (#315). Sibling task
-T5 (#317) will extend it with the seed details as it lands.
+This document is current as of T7 (#1094), T6 (#318), T5 (#317),
+T4 (#316), T3 (#315), T2 (#314), and T1 (#313) -- all execution
+tasks under Initiative #229 have landed.
 
 ## Overview
 
@@ -326,7 +327,13 @@ Six verbs:
   UPDATED | TITLE` table by default; `--json` emits the raw
   `ConventionListResponse` envelope. `--kind` narrows by
   `operational | workflow | reference` (CLI-side validation
-  rejects typos before the round-trip).
+  rejects typos before the round-trip). The response also carries
+  `budget_status` (T7 #1094): on an over-budget tenant the table
+  still goes to stdout, a stderr warning names the dropped slugs
+  (the conventions that will NOT reach an agent session), and the
+  verb exits with code 5 (`insufficient_budget`). `--json` mode
+  emits the full envelope and exits 0 regardless -- JSON consumers
+  parse `budget_status` themselves.
 - **`meho conventions show <slug> [--json]`** -- GET
   `/api/v1/conventions/{slug}`. Writes the Markdown body to stdout
   for `glow` / `bat -l md` pipelines; `--json` wraps the full
@@ -384,27 +391,41 @@ Exit codes mirror the sibling verb trees:
   invalid / over-budget).
 - `5` -- `insufficient_role` (403 on write verbs without the
   `tenant_admin` claim; the backend's detail naming the required
-  role surfaces in the error message).
+  role surfaces in the error message) **OR** `insufficient_budget`
+  (table mode of `meho conventions list` on a tenant whose
+  operational set overflows the preamble budget -- see
+  "Dropped-slug warning" below). The two codes share exit `5`
+  because both states are "authenticated, but the action couldn't
+  complete because a configured limit needs a tenant_admin to
+  act"; the JSON error envelope's `error` field distinguishes
+  them (`insufficient_role` vs `insufficient_budget`).
 
 The CLI does **not** generate or mutate audit_log rows itself --
 those land server-side from the T2 routes via the audit middleware.
 
-**Dropped-slug warning (deferred to T4).** The issue body's
-acceptance criterion for `list` to surface "lowest-priority slugs
-that will be dropped when the tenant's operational set exceeds the
-preamble budget" depends on T4's preamble assembler returning
-`dropped_slugs` as part of an assembly pass. The T2 list endpoint
-returns only the `ConventionListResponse` envelope (entries +
-forward-compat fields); there is no `dropped_slugs` field on the
-GET surface today, so the CLI cannot synthesise the warning from a
-list call alone. T4 will either (a) add a query param to the list
-endpoint that runs a dry-run packing pass and returns
-`dropped_slugs`, or (b) expose a separate
-`GET /api/v1/conventions/preamble?dry_run=true` endpoint the CLI
-can call after `list`. The CLI verb's structural code path is
-ready -- once T4 ships the API surface, wiring the warning is a
-small additive PR (see `printOverBudgetWarning` placeholder
-discussion in `list.go`'s docstring).
+**Dropped-slug warning (T7 #1094).** `meho conventions list`
+honours the over-budget warning AC. The
+`GET /api/v1/conventions` response carries a `budget_status`
+sub-document (`max_tokens`, `estimated_tokens`, `over_budget`,
+`dropped_slugs`) computed by a call to
+`assemble_preamble(operator.tenant_id)` on every list call.
+When the tenant is over budget:
+
+- **Table mode** (default): the table still prints to stdout (the
+  operator wants to see what's there), a prose warning prints to
+  stderr naming the dropped slugs in lowest-priority-first drop
+  order, and the verb exits with code `5`
+  (`insufficient_budget`). The remediation hint points at the
+  natural next action (`meho conventions edit <slug>` to bump a
+  priority or shorten the body).
+- **`--json` mode**: the full `ConventionListResponse` envelope
+  (entries + budget_status) goes to stdout and the verb exits 0
+  regardless of over-budget state. JSON / agent consumers branch
+  on `budget_status.over_budget` themselves.
+
+The `--kind` query filter narrows `entries` only;
+`budget_status` always reflects the full operational set so an
+operator cannot mask an over-budget tenant by scoping the list.
 
 ## Dependencies
 
@@ -417,13 +438,17 @@ Downstream consumers:
 
 - **T2 (#314)** -- Pydantic schemas + 6 API routes. **Landed.**
 - **T3 (#315)** -- CLI verbs (`meho conventions list / show / edit /
-  history`).
+  history`). **Landed.**
 - **T4 (#316)** -- session-preamble assembler + MCP `initialize`
   integration + `meho://tenant/{tenant_id}/conventions/{slug}`
-  resource. **Landed** (this task).
+  resource. **Landed.**
 - **T5 (#317)** -- seed migration for `rdc-internal` tenant.
+  **Landed.**
 - **T6 (#318)** -- Layer 2 starter doc
   (`docs/examples/consumer-onboarding/CLAUDE.md`). **Landed.**
+- **T7 (#1094)** -- `BudgetStatus` surfacing on
+  `GET /api/v1/conventions` + `meho conventions list` exit-code-5
+  warning. **Landed** (this task).
 
 ## Migration
 

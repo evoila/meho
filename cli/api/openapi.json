@@ -4873,7 +4873,7 @@
           "conventions"
         ],
         "summary": "List Conventions",
-        "description": "List the operator's tenant's conventions, optionally filtered by kind.\n\nReturns the lighter :class:`ConventionSummary` shape (no full\n``body``). Ordering is ``priority DESC, created_at ASC`` --\nthe same key T4's preamble assembler uses for packing, so the\nlist view surfaces conventions in T4's consideration order.",
+        "description": "List the operator's tenant's conventions, optionally filtered by kind.\n\nReturns the lighter :class:`ConventionSummary` shape (no full\n``body``). Ordering is ``priority DESC, created_at ASC`` --\nthe same key T4's preamble assembler uses for packing, so the\nlist view surfaces conventions in T4's consideration order.\n\nThe response also carries ``budget_status`` (T7 #1094): the\npreamble budget arithmetic for the operator's tenant, computed\nby a call to :func:`~meho_backplane.conventions.preamble.assemble_preamble`.\nThe ``--kind`` query filter narrows the ``entries`` list only;\n``budget_status`` always reflects the full ``operational``\nset (a ``--kind=workflow`` list call still wants the truthful\nbudget signal). The assembler runs an indexed SELECT + an\nin-memory pack -- O(N) per call where N is the tenant's\noperational-convention count (~10-20 in practice), so the\ncost is negligible against the list round-trip.",
         "operationId": "list_conventions_api_v1_conventions_get",
         "parameters": [
           {
@@ -7248,6 +7248,40 @@
         "title": "BroadcastOverrideRead",
         "description": "Outgoing row representation.\n\n``model_config = ConfigDict(from_attributes=True)`` lets the\nhandler return the SQLAlchemy ORM object directly; FastAPI\nserialises via this model rather than the ORM's ``__dict__``."
       },
+      "BudgetStatus": {
+        "properties": {
+          "max_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Max Tokens"
+          },
+          "estimated_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Estimated Tokens"
+          },
+          "over_budget": {
+            "type": "boolean",
+            "title": "Over Budget"
+          },
+          "dropped_slugs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Dropped Slugs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "max_tokens",
+          "estimated_tokens",
+          "over_budget",
+          "dropped_slugs"
+        ],
+        "title": "BudgetStatus",
+        "description": "Preamble budget status for the operator's tenant.\n\nSurfaced as a sub-document on every ``GET /api/v1/conventions``\ncall so the CLI's ``meho conventions list`` (T7 #1094) can warn\nwhen the tenant's ``kind='operational'`` set overflows the\npreamble budget and name the slugs that will be dropped from the\nagent session preamble. Without this surface, T3 #315's\n\"lowest-priority slugs that will be dropped\" acceptance\ncriterion is unsatisfiable from a single list call -- the\ndeferred AC the issue body folds back in.\n\nAll four fields are populated by a single call to\n:func:`~meho_backplane.conventions.preamble.assemble_preamble`\nagainst the operator's tenant, so the budget arithmetic is\nend-to-end consistent with T4's preamble assembler (the same\nhelper that produces the MCP ``initialize`` ``instructions``\nfield). A divergence between the list surface's\n``estimated_tokens`` and the preamble actually delivered to\nagent sessions would be a silent contract drift; sharing the\nprimitive eliminates it by construction.\n\nFields:\n\n* ``max_tokens`` -- the budget the preamble assembler enforces.\n  Currently :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (a module-level\n  constant; configurable via the assembler's ``max_tokens``\n  parameter in tests). Exposed on the list response so\n  operators can do the budget math without grepping the source.\n* ``estimated_tokens`` -- :func:`estimate_tokens` over the\n  assembled preamble text (header + guard + delimited kept\n  blocks). Empty tenant: 0. Fitting tenant: positive integer\n  below ``max_tokens``. Over-budget tenant: positive integer\n  below ``max_tokens`` (the packer dropped slugs whole until it\n  fit), but ``over_budget=True`` and ``dropped_slugs`` is\n  non-empty.\n* ``over_budget`` -- convenience flag derived from\n  ``len(dropped_slugs) > 0``. Cheap derived value but worth\n  surfacing as a boolean so CLI / dashboard consumers branch on\n  one bit rather than a length-of-list check.\n* ``dropped_slugs`` -- slugs that did not fit, in the packer's\n  drop order (lowest-priority-first, ties broken by oldest-\n  first). The CLI prints these on stderr with an\n  \"insufficient_budget\" exit-code-5 warning so the operator\n  knows exactly which conventions never reach an agent\n  session."
+      },
       "CallOperationBody": {
         "properties": {
           "connector_id": {
@@ -7723,14 +7757,18 @@
             },
             "type": "array",
             "title": "Entries"
+          },
+          "budget_status": {
+            "$ref": "#/components/schemas/BudgetStatus"
           }
         },
         "type": "object",
         "required": [
-          "entries"
+          "entries",
+          "budget_status"
         ],
         "title": "ConventionListResponse",
-        "description": "Response envelope for ``GET /api/v1/conventions``.\n\nWrapped in ``{\"entries\": [...]}`` so a future cursor / total\nfield can land non-breakingly. Same shape the kb + memory list\nsurfaces adopted; consistency across the v0.2 read APIs keeps\nthe CLI's list renderer one switch statement, not three."
+        "description": "Response envelope for ``GET /api/v1/conventions``.\n\nWrapped in ``{\"entries\": [...]}`` so a future cursor / total\nfield can land non-breakingly. Same shape the kb + memory list\nsurfaces adopted; consistency across the v0.2 read APIs keeps\nthe CLI's list renderer one switch statement, not three.\n\n``budget_status`` (T7 #1094) carries the preamble budget\narithmetic for the operator's tenant. Always populated; the\nunderlying :func:`~meho_backplane.conventions.preamble.assemble_preamble`\ncall is one indexed SELECT + an in-memory pack -- cheap enough\nto run on every list request. Exposing it on the list\nresponse (rather than on a separate\n``/api/v1/conventions/budget-status`` route the issue body\nexplicitly rejects) keeps the CLI / dashboard consumer paths\nto one HTTP round-trip."
       },
       "ConventionSummary": {
         "properties": {

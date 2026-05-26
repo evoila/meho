@@ -38,6 +38,7 @@ from meho_backplane.conventions.preamble import (
 )
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
+    BudgetStatus,
     Convention,
     ConventionCreate,
     ConventionHistoryEntry,
@@ -53,6 +54,7 @@ __all__ = [
     "BLOCK_START",
     "DEFAULT_MAX_PREAMBLE_TOKENS",
     "GUARD_PREFIX",
+    "BudgetStatus",
     "Convention",
     "ConventionCreate",
     "ConventionHistoryEntry",

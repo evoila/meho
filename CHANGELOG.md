@@ -205,7 +205,8 @@ breaking changes.
   [#1026](https://github.com/evoila/meho/issues/1026)). A recursive-CTE
   `replay_session` substrate + `ReplayNode` shape powers the replay
   ([#1024](https://github.com/evoila/meho/issues/1024)), surfaced as
-  `GET /api/v1/audit/replay` with a 10k count-first 413 cap
+  `GET /api/v1/audit/sessions/{session_id}/replay` with a 10k
+  count-first 413 cap
   ([#1033](https://github.com/evoila/meho/issues/1033)), an MCP
   `meho.audit.replay` admin tool + `meho.audit.*` classifier +
   `query_audit(shape:tree)` shape
@@ -217,8 +218,10 @@ breaking changes.
   `tenant_conventions` + `tenant_convention_history` tables (Alembic
   migration 0013) with unique `(tenant_id, slug)` and full history
   capture ([#313](https://github.com/evoila/meho/issues/313) / #1029),
-  Pydantic schemas + 6 tenant-scoped + RBAC-gated API routes
-  (list / show / create / update / delete / history;
+  Pydantic schemas + 3 tenant-scoped + RBAC-gated API routes mounted
+  at `/api/v1/conventions` (list/create at the collection,
+  show/update/delete at `/api/v1/conventions/{slug}`, history at
+  `/api/v1/conventions/{slug}/history`;
   [#314](https://github.com/evoila/meho/issues/314) / #1039), `meho
   conventions list / show / create / edit / delete / history` CLI
   verbs with editor integration for `edit`
@@ -302,8 +305,9 @@ breaking changes.
   `per_user` / `impersonation` remain out of scope for k8s.
 
 - **Topology history + diff verbs (G9.3-T3/T4) — companion to v0.5.1
-  timeline.** New `meho topology history` + `GET /api/v1/topology/history`
-  + `query_topology(kind=history)` expose per-node/edge mutation history
+  timeline.** New `meho topology history <name>` +
+  `GET /api/v1/topology/history/{name}` + `query_topology(kind=history)`
+  expose per-node/edge mutation history
   ([#936](https://github.com/evoila/meho/issues/936)); `meho topology
   diff <ts1> <ts2>` + `GET /api/v1/topology/diff` +
   `query_topology(kind="diff", ts1=..., ts2=...)` returns the net change
@@ -312,6 +316,18 @@ breaking changes.
   ([#931](https://github.com/evoila/meho/issues/931), follow-up SQL
   bound #987 / #1000). Cross-Initiative integration suite covers the
   full history surface ([#1027](https://github.com/evoila/meho/issues/1027)).
+
+  > **Groundwork — connector populators land in v0.7.** The topology
+  > substrate (graph_node/edge tables, history table, refresh service,
+  > diff endpoint, annotate endpoint, UI surfaces) is shipped at v0.6.0,
+  > but no shipped connector overrides the base-class no-op
+  > `Connector.discover_topology` hook yet, so
+  > `POST /api/v1/topology/refresh/{target_name}` returns zero-row deltas
+  > for k8s and vmware-rest targets out of the box. Operators populate
+  > nodes/edges via `meho topology nodes create` /
+  > `topology_create_node` + `meho topology annotate` until per-product
+  > populators land. Sister callout to the G10-UI "groundwork — no
+  > operator surface enabled yet" framing.
 
 - **Operator web UI — BFF auth flow + first two surfaces (G10.0 / G10.1
   / G10.5).** G10.0 completes the chassis with `/ui/auth/{login,
@@ -348,6 +364,15 @@ breaking changes.
   the shared helper extraction is in flight
   ([#1103](https://github.com/evoila/meho/issues/1103), tracked under
   off-roadmap Initiative G6.4 #1090).
+
+  > **MCP protocol-version negotiation.** The MCP server speaks
+  > revision `2025-06-18` and returns it as `protocolVersion` on every
+  > `initialize` response, regardless of the version the client sent
+  > in the request. Older clients pinned to `2024-11-05` see the
+  > server's `2025-06-18` capabilities in subsequent responses (silent
+  > upgrade rather than fail-close — MCP spec leaves negotiation to the
+  > server). Clients that need a specific protocol revision must check
+  > the `initialize.result.protocolVersion` field and adapt.
 
 ### Changed
 

@@ -408,10 +408,14 @@ def _classify_decode_error(
     * ``detail_code`` — value put into the 401 body. Machine-readable
       and low info-leak: ``invalid_audience`` / ``invalid_issuer`` /
       ``missing_sub`` / ``token_expired`` /
-      ``signature_verification_failed`` / ``token_not_yet_valid``, with
-      a residual ``invalid_token`` for genuinely-unclassifiable
-      structural failures (truncated JWS, ``alg: none`` rejection,
-      post-refresh kid miss).
+      ``signature_verification_failed`` / ``token_not_yet_valid`` /
+      ``malformed_jws`` (structural break: non-JWT bearer prefix,
+      wrong segment count, base64 garbage — caught by authlib's
+      :class:`~authlib.jose.errors.DecodeError`), with a residual
+      ``invalid_token`` for the small set of failures that aren't
+      :class:`DecodeError` and still don't admit a specific code
+      (``alg: none`` rejection via :class:`UnsupportedAlgorithmError`,
+      future :class:`JoseError` subclasses, post-refresh kid miss).
     * ``log_fields`` — diagnostic value(s) for the structlog event
       (expected audience / issuer, missing-claim name, exception class).
       **Never** echoed in the response body. Mirrors the
@@ -451,13 +455,30 @@ def _classify_decode_error(
         # remediation from any other failure mode.
         return "token_not_yet_valid", {"reason": "nbf_or_iat_in_future_beyond_leeway"}
     if isinstance(exc, DecodeError):
-        # Structural break (malformed compact JWS, base64 garbage). No
-        # claim semantics — body and log both name ``invalid_token``.
-        return "invalid_token", {"reason": "jws_decode_error"}
-    # Catch-all for ``JoseError`` (unknown algorithm header, alg=none
-    # rejection, future authlib subclasses). Exception class name lands
-    # in the log so an operator can grep the specific authlib failure
-    # even though the public code collapses to ``invalid_token``.
+        # Structural break (truncated compact JWS, non-JWT bearer prefix
+        # like ``Bearer not-a-real-jwt``, wrong segment count, base64
+        # garbage). No claim semantics, but the remediation is distinct
+        # from the claim-failure codes: the operator's CLI / MCP client
+        # is sending something that isn't a JWT at all. Promoting from
+        # the residual ``invalid_token`` to the specific ``malformed_jws``
+        # closes the wall #2 gap the v0.6.0 dogfood signal flagged
+        # (G0.13-T1 #1131): the consumer's ``Bearer not-a-real-jwt``
+        # probe still surfaced as bare ``invalid_token`` at v0.6.0
+        # because G0.9.1-T12's classifier only covered the claim-stage
+        # failures. The log line preserves the authlib description so
+        # an operator can tell ``"Invalid input segments length"``
+        # (wrong number of dots) from a base64 decode failure.
+        return "malformed_jws", {
+            "reason": "jws_decode_error",
+            "detail": getattr(exc, "description", None) or getattr(exc, "error", None) or str(exc),
+        }
+    # Catch-all for ``JoseError`` (``alg: none`` rejection via
+    # :class:`~authlib.jose.errors.UnsupportedAlgorithmError`, future
+    # authlib subclasses). Exception class name lands in the log so an
+    # operator can grep the specific authlib failure even though the
+    # public code collapses to ``invalid_token``. Genuinely structural
+    # JWS failures (``DecodeError``) are handled above with the more
+    # specific ``malformed_jws`` code.
     return "invalid_token", {"reason": "jose_error", "exception": type(exc).__name__}
 
 
@@ -742,9 +763,11 @@ async def verify_jwt_for_audience(
     :func:`_classify_decode_error` for the full mapping):
     ``invalid_audience`` / ``invalid_issuer`` / ``missing_sub`` /
     ``token_expired`` / ``signature_verification_failed`` /
-    ``token_not_yet_valid``, with the residual ``invalid_token`` kept
-    only for structural failures that don't admit a more specific code
-    (truncated JWS, ``alg: none`` rejection, post-refresh kid miss).
+    ``token_not_yet_valid`` / ``malformed_jws``, with the residual
+    ``invalid_token`` kept only for the small set of structural
+    failures that aren't authlib :class:`DecodeError` (``alg: none``
+    rejection, future :class:`JoseError` subclasses, post-refresh kid
+    miss).
     The expected-vs-received diagnostic values land in the structlog
     event only — never in the unauthenticated 401 body — mirroring the
     existing ``malformed_tenant_claim`` precedent (G0.9.1-T12).
@@ -785,12 +808,13 @@ async def verify_jwt(authorization: str | None = Header(default=None)) -> Operat
     Each decode-stage failure surfaces a *specific* ``detail`` code
     (``invalid_audience`` / ``invalid_issuer`` / ``missing_sub`` /
     ``token_expired`` / ``signature_verification_failed`` /
-    ``token_not_yet_valid``) so an operator chasing the 401 can name
-    the failed check; the expected-vs-received diagnostic values land
-    in the structlog event only — never in the response body. The
-    error body is intentionally terse (``{"detail": "<reason>"}``)
-    and never echoes claim values; that prevents an unauthenticated
-    caller from probing the backplane for token shape.
+    ``token_not_yet_valid`` / ``malformed_jws``) so an operator
+    chasing the 401 can name the failed check; the expected-vs-received
+    diagnostic values land in the structlog event only — never in the
+    response body. The error body is intentionally terse
+    (``{"detail": "<reason>"}``) and never echoes claim values; that
+    prevents an unauthenticated caller from probing the backplane for
+    token shape.
 
     Kid-rotation handling lives in :func:`_decode_with_kid_rotation`:
     on the canonical "Key not found" ValueError from authlib, the JWKS

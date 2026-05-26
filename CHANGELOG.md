@@ -104,6 +104,19 @@ connector-related release-notes line.
   target's connector resolves; ambiguous probes return 409 with
   the resolver's message. Closes G0.14-T1 signals 7, 8, 19 from
   `claude-rdc-hetzner-dc#697`. (#1142)
+- **G0.13-T1 auth-invalid-token classifier extended to authlib
+  `DecodeError`.** Promotes the decode-stage failure for a non-JWT
+  bearer (e.g. `Bearer not-a-real-jwt`) at `/api/v1/health` from the
+  residual `invalid_token` to the specific `malformed_jws` 401 detail
+  code in `_classify_decode_error`, closing the v0.6.0 dogfood gap
+  where the G0.9.1-T12 (#797) classifier only covered claim-stage
+  failures. The residual `invalid_token` now applies only to
+  non-`DecodeError` failures (`alg: none` via
+  `UnsupportedAlgorithmError`, future `JoseError` subclasses,
+  post-refresh kid miss). Operators / tooling matching
+  `{detail: invalid_token}` for non-JWT bearers now see
+  `{detail: malformed_jws}`
+  ([#1131](https://github.com/evoila/meho/issues/1131) / #1152).
 
 ## [0.6.0] - 2026-05-26
 

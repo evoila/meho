@@ -1,0 +1,143 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded scope-promotion modal for the Memory detail surface
+  (Initiative #341 Task #878). Loaded into ``#memory-modal-container``
+  on the detail page by the "Promote to broader scope" button's
+  ``hx-get`` to ``/ui/memory/<scope>/<slug>/promote``. The inserted
+  dialog opens immediately because ``class="modal modal-open"`` is
+  set on the ``<dialog>`` element (DaisyUI v5 convention).
+
+  Form posts to ``POST /ui/memory/<scope>/<slug>/promote`` which on
+  success returns 204 with ``HX-Redirect: /ui/memory/<target-scope>/<slug>``
+  -- HTMX then loads the new detail page for the broader-scope row.
+
+  Idempotency: G5.2's promote service is idempotent
+  (:meth:`MemoryService.promote` returns the existing target row
+  when the operator re-runs the same promotion). A double-click on
+  Confirm therefore redirects to the same URL twice; no duplicate
+  audit row is written by the chassis ``AuditMiddleware`` because the
+  second submit is a fresh request (one row per request), but the
+  service-level effect is a no-op (no duplicate insert, no
+  ``promote_target_conflict`` 409).
+
+  RBAC posture: the legal-targets list is server-filtered by
+  :data:`PROMOTE_TARGETS_BY_SOURCE` (the ladder constant lives in
+  ``create_promote.py``). G5.2's :func:`assert_can_promote` re-checks
+  the role + ladder at submit time; an operator whose role doesn't
+  qualify for the chosen target lands a 403 with detail
+  ``insufficient_promotion_authority``.
+-#}
+<dialog id="memory-promote-modal" class="modal modal-open">
+  <div class="modal-box">
+    <h3 class="font-semibold text-lg" id="memory-promote-modal-title">
+      Promote memory to broader scope
+    </h3>
+    <p class="text-sm opacity-80 py-2">
+      Promoting widens the visibility of
+      <span class="font-mono">{{ entry.scope }}/{{ entry.slug }}</span>.
+      Promotion clears the row's TTL (broader memories are intentional
+      and long-lived). The operation is idempotent -- re-promoting to
+      the same scope is a no-op.
+    </p>
+
+    <form
+      id="memory-promote-form"
+      hx-post="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}/promote"
+      hx-target="this"
+      hx-swap="none"
+      hx-disabled-elt="find button[type=submit]"
+      data-target-scoped-values="{{ target_scoped_values | join(',') }}"
+      class="space-y-3"
+      aria-labelledby="memory-promote-modal-title"
+    >
+      <label class="form-control">
+        <span class="label-text">Promote to</span>
+        <select
+          name="to"
+          class="select select-bordered select-sm"
+          required
+          data-action="promote-target-select"
+        >
+          {% for target in legal_targets %}
+            <option value="{{ target.value }}">{{ target.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label
+        class="form-control"
+        data-target-name-row
+        style="display: none;"
+      >
+        <span class="label-text">Target name</span>
+        <input
+          type="text"
+          name="target_name"
+          value="{{ entry.target_name or '' }}"
+          maxlength="{{ target_name_max_length }}"
+          class="input input-bordered input-sm"
+          placeholder="Required for user-target and target promotions"
+          aria-describedby="memory-promote-target-name-hint"
+        />
+        <span id="memory-promote-target-name-hint" class="text-xs opacity-60 mt-1">
+          The connector / target the broadened memory should bind to.
+          Inherited from the source row when promoting along the target
+          ladder; editable here for the user-to-user-target step.
+        </span>
+      </label>
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-promote"
+          onclick="document.getElementById('memory-promote-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="promote-submit">
+          Promote
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>
+
+{# Tiny inline script: toggle target_name row visibility based on
+   the selected target scope. Same pattern as the create modal --
+   scope set is rendered into a data-attribute so the script reads
+   the enum from the DOM rather than re-encoding it on the client. #}
+<script>
+  (function () {
+    var modal = document.getElementById('memory-promote-modal');
+    if (!modal) return;
+    var form = modal.querySelector('#memory-promote-form');
+    if (!form) return;
+    var scopedRaw = form.getAttribute('data-target-scoped-values') || '';
+    var scopedSet = new Set(scopedRaw.split(',').filter(Boolean));
+    var select = form.querySelector('[data-action="promote-target-select"]');
+    var row = form.querySelector('[data-target-name-row]');
+    var targetInput = row ? row.querySelector('input[name="target_name"]') : null;
+    function toggle() {
+      if (!select || !row) return;
+      var requiresTarget = scopedSet.has(select.value);
+      row.style.display = requiresTarget ? '' : 'none';
+      if (targetInput) {
+        if (requiresTarget) {
+          targetInput.setAttribute('required', 'required');
+        } else {
+          targetInput.removeAttribute('required');
+        }
+      }
+    }
+    if (select) {
+      select.addEventListener('change', toggle);
+      toggle();
+    }
+  }());
+</script>

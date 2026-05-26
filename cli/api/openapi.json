@@ -5765,7 +5765,7 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast History",
-        "description": "``GET /ui/broadcast/history`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via a finite\n``XRANGE``, passes them as a list the template serialises with\nJinja ``| tojson`` into a ``<script type=\"application/json\">``\ndata island the shared ``broadcastFeed`` controller seeds from,\nand returns the ``broadcast/_history.html`` fragment (no\n``base.html`` chrome -- the tab swaps it into the page's history\ncontainer). The tenant comes from the validated session, never a\nquery parameter.",
+        "description": "``GET /ui/broadcast/history`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via the shared\nfail-soft read helper, passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.",
         "operationId": "ui_broadcast_history_ui_broadcast_history_get",
         "responses": {
           "200": {

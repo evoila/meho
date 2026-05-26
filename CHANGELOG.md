@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- Generalise the `tenant_conventions` seed migration: the previously
+  shipped `rdc-internal` tenant + 8 consumer-specific operational
+  conventions (extracted from one consumer's `CLAUDE.md`) are
+  superseded on `upgrade head` by a generic `default` tenant + 2
+  illustrative conventions that demonstrate the feature without
+  baking in a specific consumer's identity. Operator deploys that
+  had already migrated to head with the old seed will see the
+  `rdc-internal` seeded rows removed on the next `upgrade head`
+  (the `rdc-internal` tenant row itself is preserved; only the
+  rows the seed migration authored are removed -- operator-curated
+  edits under seeded slugs survive). The consumer-side migration
+  template for re-applying the rdc-internal-specific content lives
+  in [`docs/architecture/conventions-seed.md`](docs/architecture/conventions-seed.md).
+  Closes the operational impact from signal-12 of the v0.6.0
+  consumer dogfood: previously, every adopting customer's MCP
+  `initialize.instructions` flowed the original consumer's
+  operational discipline + repo references into their agent session
+  start. (#1137)
+
 ### Fixed
 
 - Dispatcher resolver error surfacing — the typed/composite branch

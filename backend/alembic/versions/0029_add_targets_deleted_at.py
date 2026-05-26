@@ -3,8 +3,8 @@
 
 """Add ``targets.deleted_at`` column for soft-delete (G0.14-T4).
 
-Revision ID: 0028
-Revises: 0027
+Revision ID: 0029
+Revises: 0028
 Create Date: 2026-05-26
 
 G0.14-T4 (#1145) ships ``DELETE /api/v1/targets/{name}`` so an
@@ -78,8 +78,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0028"
-down_revision: str | None = "0027"
+revision: str = "0029"
+down_revision: str | None = "0028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

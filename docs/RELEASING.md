@@ -210,3 +210,20 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
   inconclusive, not a pass. Step 1 now makes both gates explicit:
   confirm the tagged commit's `main` run is a real `success`, and
   re-run any `cancelled` run before trusting it.
+
+## v0.7 follow-ups (deprecation removals)
+
+When cutting v0.7, drop these v0.6.x compatibility shims:
+
+- **MCP `add_to_memory.content` -> `body` alias shim** (G0.13-T4,
+  #1134). Remove the `content` field from
+  `backend/src/meho_backplane/mcp/tools/memory.py`'s `inputSchema`
+  `properties`; drop the `anyOf` clause; restore
+  `required: ["body", "scope"]`. Drop the body/content resolution
+  branch + the `add_to_memory_field_deprecated` log emission from
+  `_add_to_memory_handler`. Update
+  `backend/tests/test_mcp_tools_memory.py` to assert `content` is
+  rejected by the JSON-Schema gate (re-introduce a variant of the
+  deleted `test_tools_call_add_to_memory_rejects_legacy_content_field`
+  test). CHANGELOG `[0.7.0]` entry under **Removed** naming the shim
+  and pointing at this paragraph.

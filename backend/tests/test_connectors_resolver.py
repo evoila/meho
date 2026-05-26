@@ -390,6 +390,237 @@ def test_resolve_priority_breaks_remaining_tie() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 1 — versioned beats wildcard (G0.14-T2 #1143)
+# ---------------------------------------------------------------------------
+#
+# Some products self-register under both the v1 wildcard
+# ``(product, "", "")`` (so ``get_connector(product)`` keeps working for
+# the ``/probe`` route) AND a v2 versioned entry
+# ``(product, "<ver>", "<impl>")`` (so ``connector_id="<product>-<ver>"``
+# resolves through v2). The shipped case is K8s (signal 9 in the
+# consumer's signal directory). Without the demotion step, an
+# unfingerprinted target (target.fingerprint = None → target_version =
+# None) leaves both entries in play, both score
+# ``(_SPECIFICITY_UNBOUNDED, 0.0)`` on supported_version_range
+# (KubernetesConnector doesn't advertise a range), operator_preference is
+# absent, priorities tie → bare-500 via ``AmbiguousConnectorResolution``.
+
+
+def test_resolve_versioned_beats_wildcard_for_unfingerprinted_target() -> None:
+    """The k8s ambiguity case: unfingerprinted target, both wildcard + versioned entries.
+
+    Acceptance criterion: target with ``product=k8s``, no ``version``,
+    no ``preferred_impl_id`` resolves cleanly (the consumer's exact
+    case from signal 9). The wildcard ``("k8s", "", "")`` is demoted
+    when the versioned ``("k8s", "1.x", "k8s")`` is also a candidate.
+    """
+
+    class _K8sConnector(Connector):
+        product = "k8s"
+        # No supported_version_range — mirrors KubernetesConnector.
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    # Mirror the K8s self-registration shape: v1 hop (writes both
+    # tables) + explicit v2 versioned entry.
+    register_connector("k8s", _K8sConnector)
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        cls=_K8sConnector,
+    )
+    target = _FakeTarget(product="k8s", fingerprint=None)
+    assert resolve_connector(target) is _K8sConnector
+
+
+def test_resolve_versioned_beats_wildcard_for_fingerprinted_target() -> None:
+    """Regression guard: a fingerprinted k8s target still resolves cleanly.
+
+    Mirrors the post-fingerprint case where the probe has populated a
+    version. Both candidate entries (wildcard + versioned) score
+    ``(_SPECIFICITY_UNBOUNDED, 0.0)`` because the K8s class doesn't
+    advertise a ``supported_version_range``; the demotion step is what
+    keeps the resolution clean.
+    """
+
+    class _K8sConnector(Connector):
+        product = "k8s"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector("k8s", _K8sConnector)
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        cls=_K8sConnector,
+    )
+    target = _FakeTarget(product="k8s", fingerprint=_fingerprint("1.30.0"))
+    assert resolve_connector(target) is _K8sConnector
+
+
+def test_resolve_preferred_impl_id_still_works_with_wildcard_demotion() -> None:
+    """The consumer's existing workaround stays valid.
+
+    Operators who already pinned ``preferred_impl_id="k8s"`` on their
+    Target row (per ``claude-rdc-hetzner-dc#697``) keep resolving the
+    same versioned class. The demotion step happens before operator
+    preference, so the explicit pick still threads cleanly.
+    """
+
+    class _K8sConnector(Connector):
+        product = "k8s"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector("k8s", _K8sConnector)
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        cls=_K8sConnector,
+    )
+    target = _FakeTarget(
+        product="k8s",
+        fingerprint=None,
+        preferred_impl_id="k8s",
+    )
+    assert resolve_connector(target) is _K8sConnector
+
+
+def test_resolve_wildcard_only_still_resolves_when_no_versioned_entry() -> None:
+    """The demotion rule is a no-op when no versioned entry exists.
+
+    A pure v1-only registration (no companion ``register_connector_v2``)
+    keeps resolving through the wildcard entry. The demotion step only
+    fires when both shapes are registered for the same product;
+    wildcard-only is the v1-backward-compat path that must not break.
+    """
+
+    class _V1OnlyConnector(Connector):
+        product = "legacy-v1"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector("legacy-v1", _V1OnlyConnector)
+    target = _FakeTarget(product="legacy-v1", fingerprint=None)
+    assert resolve_connector(target) is _V1OnlyConnector
+
+
+def test_resolve_multiple_versioned_with_wildcard_still_disambiguates() -> None:
+    """Wildcard demotion does not collapse a real multi-impl ambiguity.
+
+    The future EKS-sibling case (per the ``KubernetesConnector`` class
+    docstring: ``("k8s", "1.x", "<eks-impl-id>")`` lands beside
+    ``("k8s", "1.x", "k8s")``). When ≥2 versioned candidates remain
+    after demoting the wildcard, the ladder runs to completion and
+    raises ``AmbiguousConnectorResolution`` as before — the operator
+    must still set ``preferred_impl_id`` to pick a real sibling.
+    """
+
+    class _K8sConnector(Connector):
+        product = "k8s"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    class _K8sEksConnector(_K8sConnector):
+        pass
+
+    register_connector("k8s", _K8sConnector)
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        cls=_K8sConnector,
+    )
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="eks",
+        cls=_K8sEksConnector,
+    )
+    target = _FakeTarget(product="k8s", fingerprint=None)
+    with pytest.raises(AmbiguousConnectorResolution) as exc_info:
+        resolve_connector(target)
+    # The wildcard ('k8s', '', '') is demoted; the operator-facing
+    # candidates list names the two real impl_ids.
+    assert exc_info.value.candidates == [
+        ("k8s", "1.x", "eks"),
+        ("k8s", "1.x", "k8s"),
+    ]
+
+
+def test_resolve_versioned_beats_wildcard_emits_log_with_reason(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """The resolution log line names the new tie-break reason."""
+    from meho_backplane.logging import configure_logging
+
+    configure_logging()
+
+    class _K8sConnector(Connector):
+        product = "k8s"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector("k8s", _K8sConnector)
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        cls=_K8sConnector,
+    )
+    target = _FakeTarget(product="k8s", fingerprint=None)
+    resolve_connector(target)
+    out, _ = capfd.readouterr()
+    assert "connector_resolved" in out
+    assert '"tie_break": "versioned_over_wildcard"' in out
+
+
+# ---------------------------------------------------------------------------
 # Ambiguous after full ladder
 # ---------------------------------------------------------------------------
 

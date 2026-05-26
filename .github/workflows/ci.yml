@@ -91,11 +91,12 @@ concurrency:
   # author force-push cancels its own prior CI run cleanly. Mirrors
   # the pattern used by image.yml, chart.yml, and cli-release.yml.
   #
-  # IMPORTANT: merge_group runs must NEVER be cancelled. A cancelled
-  # queue check causes the merge attempt to fail and the PR falls out
-  # of the queue — defeating the whole point of the merge queue. The
-  # conditional below restricts cancel-in-progress to pull_request /
-  # push contexts only.
+  # IMPORTANT: already-running merge_group jobs must NEVER be cancelled.
+  # A cancelled queue check causes the merge attempt to fail and the PR
+  # falls out of the queue — defeating the whole point of the merge queue.
+  # The conditional below restricts cancel-in-progress to pull_request /
+  # push contexts only. Queued (not-yet-started) merge_group runs can
+  # still be displaced by newer queue entries; that is expected behaviour.
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 

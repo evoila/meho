@@ -1,0 +1,29 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Server-rendered Markdown preview fragment for the Memory create
+  modal (Initiative #341 Task #878). Returned by the
+  ``POST /ui/memory/preview`` route on every debounced keystroke
+  from the body textarea.
+
+  The element id ``#memory-create-preview`` matches the HTMX swap
+  target the textarea declares; per the HTMX docs
+  (https://htmx.org/attributes/hx-swap/), ``outerHTML`` replaces the
+  element including its ID so subsequent swaps land on the same
+  target. The empty-state version of the preview (no body typed yet)
+  is rendered inline by ``_create_modal.html`` and shares the id.
+
+  ``body_html`` is wrapped in :class:`markupsafe.Markup` by
+  :func:`render_markdown`, so Jinja's autoescape leaves it as-is.
+  The renderer is constructed with ``html=False`` so raw HTML in the
+  body renders as escaped text (the same posture the detail body
+  view holds).
+-#}
+<article
+  id="memory-create-preview"
+  class="prose prose-sm max-w-none bg-base-100 border-base-300 border rounded-box p-4"
+  aria-label="Memory body preview"
+>
+  {{ body_html }}
+</article>

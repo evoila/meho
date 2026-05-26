@@ -27,7 +27,7 @@ from meho_backplane.connectors import (
     register_connector,
     register_connector_v2,
 )
-from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.connectors.registry import clear_registry, registered_product_tokens
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -443,3 +443,101 @@ def test_holodeck_connector_registered_under_v2_triple() -> None:
     key = ("holodeck", "9.0", "holodeck-ssh")
     assert key in snapshot
     assert snapshot[key] is HolodeckConnector
+
+
+# ---------------------------------------------------------------------------
+# registered_product_tokens — G0.14-T3 #1144
+# ---------------------------------------------------------------------------
+
+
+def test_registered_product_tokens_returns_empty_set_for_empty_registry() -> None:
+    """An empty registry → an empty product-tokens set.
+
+    Pins the source-of-truth invariant: callers (the
+    :func:`create_target` validator, the OpenAPI enum hook) can
+    distinguish "registry is empty" from "registry is populated but
+    no products advertised" via the empty set return. The empty
+    state is what tests with isolated registries see; production
+    sees a full set after the lifespan's eager-import call.
+    """
+    assert registered_product_tokens() == set()
+
+
+def test_registered_product_tokens_returns_product_axis_of_v2_registry() -> None:
+    """The token set is the union of v2 ``product`` fields.
+
+    Registering connectors under distinct ``(product, version, impl_id)``
+    triples produces one entry per *product* (the version and impl_id
+    axes are collapsed). Mirrors the resolver's "valid product"
+    judgement at probe / dispatch time.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_FakeConnector,
+    )
+    register_connector_v2(
+        product="vmware",
+        version="7.0",
+        impl_id="vmware-pyvmomi",
+        cls=_AnotherFakeConnector,
+    )
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        cls=_FakeConnector,
+    )
+    # Two ``vmware`` triples collapse to one entry; ``k8s`` adds a
+    # second.
+    assert registered_product_tokens() == {"vmware", "k8s"}
+
+
+def test_registered_product_tokens_includes_v1_compat_entries() -> None:
+    """v1 ``register_connector`` registrations show up under their product token.
+
+    The v1 entry point writes a ``(product, "", "")`` row into the v2
+    registry; the helper must surface the product token from that
+    padded triple just like any v2-native entry. Without this
+    contract a deploy that mixes v1- and v2-registered connectors
+    would only see the v2 set, and the v1 products would silently
+    miss the discoverability enum.
+    """
+    register_connector(product="vault", cls=_FakeConnector)
+    assert registered_product_tokens() == {"vault"}
+
+
+def test_registered_product_tokens_filters_empty_product_defensively() -> None:
+    """An empty ``product`` slug is filtered (defensive).
+
+    Direct ``_REGISTRY_V2`` mutation simulates a hypothetical bug-
+    state (the public registrars don't reject empty ``product``
+    today but no real connector ships with one). The helper drops
+    the empty entry rather than surfacing a meaningless token to
+    the operator's discoverability layer.
+    """
+    from meho_backplane.connectors.registry import _REGISTRY_V2
+
+    _REGISTRY_V2[("", "1.x", "ghost")] = _FakeConnector
+    _REGISTRY_V2[("k8s", "1.x", "k8s")] = _FakeConnector
+    assert registered_product_tokens() == {"k8s"}
+
+
+def test_registered_product_tokens_returns_fresh_set_each_call() -> None:
+    """Callers can mutate the returned set without affecting the registry.
+
+    The helper returns a fresh ``set`` so a caller that sorts /
+    extends / filters the result cannot accidentally corrupt the
+    canonical registry. Defensive return-by-value invariant for any
+    snapshot accessor over a mutable internal collection.
+    """
+    register_connector_v2(
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        cls=_FakeConnector,
+    )
+    snapshot = registered_product_tokens()
+    snapshot.add("phantom")
+    assert "phantom" not in registered_product_tokens()

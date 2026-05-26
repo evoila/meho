@@ -166,7 +166,7 @@ def _stream_url(*, op_class: str | None, principal: str | None, target: str | No
 
 
 async def _target_names(db_session: AsyncSession, tenant_id: object) -> list[str]:
-    """Return the tenant's target names for the filter dropdown.
+    """Return the tenant's live target names for the filter dropdown.
 
     Scoped to ``tenant_id`` at the SQL ``WHERE`` clause (never a query
     parameter), ordered by name for stable rendering, capped at
@@ -174,10 +174,20 @@ async def _target_names(db_session: AsyncSession, tenant_id: object) -> list[str
     against :attr:`BroadcastEvent.target_name` by the stream filter, so
     the option set is the target *names* -- the same string the
     publisher stamps onto each event.
+
+    Soft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)
+    are excluded so the dropdown stays in parity with
+    ``GET /api/v1/targets`` and the MCP ``list_targets`` tool. Without
+    this, a tombstoned target name would surface in the dropdown and
+    selecting it would produce an empty filtered feed with no UI
+    explanation.
     """
     stmt = (
         select(TargetORM.name)
-        .where(TargetORM.tenant_id == tenant_id)
+        .where(
+            TargetORM.tenant_id == tenant_id,
+            TargetORM.deleted_at.is_(None),
+        )
         .order_by(TargetORM.name)
         .limit(_TARGET_OPTIONS_LIMIT)
     )

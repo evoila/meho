@@ -409,7 +409,7 @@
           "targets"
         ],
         "summary": "List Targets",
-        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.",
+        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.\n\nSoft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)\nare excluded from the list \u2014 the same filter the resolver applies\nso list and dispatch never disagree about which targets are\nvisible to the tenant.",
         "operationId": "list_targets_api_v1_targets_get",
         "parameters": [
           {
@@ -487,7 +487,7 @@
           "targets"
         ],
         "summary": "Create Target",
-        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.",
+        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.\n\nG0.14-T3 (#1144). The ``product`` field is validated at request time\nagainst :func:`~meho_backplane.connectors.registry.registered_product_tokens`.\nAn unknown product yields a structured 422 (see\n:func:`_build_unknown_product_detail`); the OpenAPI schema also\nexposes the enum (see :func:`meho_backplane.main.build_openapi_schema`)\nso Swagger / generator tooling surfaces the valid set before the\nrequest leaves the editor. Both layers share the same source-of-\ntruth helper so they cannot drift.\n\nValidation is skipped when the registry is empty \u2014 that state means\n\"no connectors imported\" (test isolation, or a deploy booted before\n:func:`_eager_import_connectors` ran). In production the lifespan\npopulates the registry before the first request arrives, so the\nskip branch never fires; a misregistered deploy that *did* hit it\nis recoverable via T4 #1145's PATCH-product or DELETE path.",
         "operationId": "create_target_api_v1_targets_post",
         "parameters": [
           {
@@ -655,7 +655,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` and ``product`` are not patchable \u2014\nrename a target by deleting and re-creating it (v0.2 decision).\n``updated_at`` is always refreshed on a successful write.",
+        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {
@@ -695,6 +695,98 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "targets"
+        ],
+        "summary": "Delete Target",
+        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho.connector.edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nRe-deletes collapse to 404 \u2014 the second DELETE goes through\n:func:`~meho_backplane.targets.resolver.resolve_target`\nwhich filters ``deleted_at IS NULL``, so the row no longer\nresolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE returns\nthe standard 404 conflation that :func:`resolve_target`\nenforces).",
+        "operationId": "delete_target_api_v1_targets__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "Target is referenced by ``graph_node`` rows; retry with ``?force=true`` to soft-delete anyway (``graph_node.target_id`` is ``ON DELETE SET NULL`` so the topology rows survive). See ``docs/codebase/error-message-shape.md`` for the convention.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "target_has_references"
+                          ]
+                        },
+                        "graph_node_refs": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "graph_node_refs",
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
                 }
               }
             }
@@ -3692,286 +3784,6 @@
         }
       }
     },
-    "/api/v1/agents": {
-      "get": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "List Agents",
-        "description": "List agent definitions for the operator's tenant, name-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``operator`` and ``tenant_admin``\nboth pass; ``read_only`` is rejected by :func:`require_role`.",
-        "operationId": "list_agents_api_v1_agents_get",
-        "parameters": [
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 500,
-              "minimum": 1,
-              "default": 100,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "offset",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 0,
-              "title": "Offset"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionListResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Create Agent",
-        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
-        "operationId": "create_agent_api_v1_agents_post",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentDefinitionCreate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agents/{name}": {
-      "get": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Show Agent",
-        "description": "Return one agent definition by name.\n\nCross-tenant name probes surface as 404 ``agent_not_found`` (not\n403) -- the conflation prevents enumerating another tenant's agents\nvia a status-code differential.",
-        "operationId": "show_agent_api_v1_agents__name__get",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Edit Agent",
-        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``.",
-        "operationId": "edit_agent_api_v1_agents__name__patch",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentDefinitionUpdate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Delete Agent",
-        "description": "Delete one agent definition by name.\n\n``tenant_admin`` only. A cross-tenant / absent name returns 404\n``agent_not_found`` -- never 403, so the existence of a definition\nis not leaked across the tenant boundary.",
-        "operationId": "delete_agent_api_v1_agents__name__delete",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/agents/grants": {
       "get": {
         "tags": [
@@ -4250,6 +4062,286 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Agents",
+        "description": "List agent definitions for the operator's tenant, name-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``operator`` and ``tenant_admin``\nboth pass; ``read_only`` is rejected by :func:`require_role`.",
+        "operationId": "list_agents_api_v1_agents_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Create Agent",
+        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
+        "operationId": "create_agent_api_v1_agents_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDefinitionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Show Agent",
+        "description": "Return one agent definition by name.\n\nCross-tenant name probes surface as 404 ``agent_not_found`` (not\n403) -- the conflation prevents enumerating another tenant's agents\nvia a status-code differential.",
+        "operationId": "show_agent_api_v1_agents__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Edit Agent",
+        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``.",
+        "operationId": "edit_agent_api_v1_agents__name__patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDefinitionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Delete Agent",
+        "description": "Delete one agent definition by name.\n\n``tenant_admin`` only. A cross-tenant / absent name returns 404\n``agent_not_found`` -- never 403, so the existence of a definition\nis not leaked across the tenant boundary.",
+        "operationId": "delete_agent_api_v1_agents__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -6304,6 +6396,603 @@
         }
       }
     },
+    "/ui/memory/tags": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Tags",
+        "description": "``GET /ui/memory/tags`` -- HTMX datalist autocomplete fragment.",
+        "operationId": "ui_memory_tags_ui_memory_tags_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/create": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Create Modal",
+        "description": "``GET /ui/memory/create`` -- HTMX-loaded create modal fragment.",
+        "operationId": "ui_memory_create_modal_ui_memory_create_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Create Submit",
+        "description": "``POST /ui/memory/create`` -- create one memory via the service.\n\nReturns 204 + ``HX-Redirect: /ui/memory`` so HTMX navigates back\nto the list. The form-encoded body shape mirrors the\n``RememberBody`` Pydantic model on ``/api/v1/memory``: scope is\na ``MemoryScope`` enum value, body is required, slug + tags +\nexpires_at + target_name are optional. CSRF is enforced by the\nchassis :class:`CSRFMiddleware` before this handler runs.\n\n``tags`` is a comma-separated string parsed server-side into a\nlist; the form input is one ``<input>`` rather than five (the\ntypical UX shape for the v0.2 surface). ``expires_at`` is\nparsed by FastAPI's :class:`datetime` form coercion from the\nISO-8601 string a ``<input type=\"datetime-local\">`` produces.",
+        "operationId": "ui_memory_create_submit_ui_memory_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_create_submit_ui_memory_create_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/preview": {
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Preview",
+        "description": "``POST /ui/memory/preview`` -- debounced server-side Markdown preview.\n\nTriggered by ``hx-trigger=\"keyup changed delay:300ms\"`` on the\ncreate-modal body textarea. Returns the rendered Markdown\nwrapped in the same ``<article>`` shape :file:`_body_view.html`\nuses so the preview pane and the detail view render identically.\n\nSession is required (the chassis CSRF middleware would already\nhave rejected an anonymous POST, but the session dep adds the\naudit-trail anchor; ``_require_session_dep`` runs the standard\nredirect-to-login on a missing cookie).",
+        "operationId": "ui_memory_preview_ui_memory_preview_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_preview_ui_memory_preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory List",
+        "description": "``GET /ui/memory`` -- list page or HTMX card-list fragment.",
+        "operationId": "ui_memory_list_ui_memory_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "default": "all",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Tag"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/{scope}/{slug}": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Detail",
+        "description": "``GET /ui/memory/<scope>/<slug>`` -- detail page or HTMX body fragment.",
+        "operationId": "ui_memory_detail_ui_memory__scope___slug__get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Patch",
+        "description": "``PATCH /ui/memory/<scope>/<slug>`` -- save the edited body.",
+        "operationId": "ui_memory_patch_ui_memory__scope___slug__patch",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_patch_ui_memory__scope___slug__patch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Delete",
+        "description": "``DELETE /ui/memory/<scope>/<slug>`` -- delete + re-render the list.",
+        "operationId": "ui_memory_delete_ui_memory__scope___slug__delete",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/{scope}/{slug}/edit": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Edit Form",
+        "description": "``GET /ui/memory/<scope>/<slug>/edit`` -- HTMX edit-form fragment.",
+        "operationId": "ui_memory_edit_form_ui_memory__scope___slug__edit_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/{scope}/{slug}/promote": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Promote Modal",
+        "description": "``GET /ui/memory/<scope>/<slug>/promote`` -- HTMX-loaded promote modal.",
+        "operationId": "ui_memory_promote_modal_ui_memory__scope___slug__promote_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Promote Submit",
+        "description": "``POST /ui/memory/<scope>/<slug>/promote`` -- promote and HX-Redirect.\n\nDelegates ladder + authority checks to G5.2's\n:func:`assert_can_promote` via :meth:`MemoryService.promote`.\nIdempotent re-run returns the same target row -- the redirect\nURL is the same on first promote and on a re-promote, matching\nthe G5.2 contract.",
+        "operationId": "ui_memory_promote_submit_ui_memory__scope___slug__promote_post",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/bulk": {
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Bulk",
+        "description": "``POST /ui/memory/bulk`` -- T3 (#879) bulk delete / bulk extend-expiry.",
+        "operationId": "ui_memory_bulk_ui_memory_bulk_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_bulk_ui_memory_bulk_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/knowledge": {
       "get": {
         "tags": [
@@ -6332,27 +7021,6 @@
         ],
         "summary": "Ui Stub Connectors",
         "operationId": "ui_stub_connectors_ui_connectors_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/memory": {
-      "get": {
-        "tags": [
-          "ui-stubs"
-        ],
-        "summary": "Ui Stub Memory",
-        "operationId": "ui_stub_memory_ui_memory_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -7484,6 +8152,147 @@
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
       },
+      "Body_ui_memory_bulk_ui_memory_bulk_post": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Action"
+          },
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ids"
+          },
+          "extend_duration": {
+            "type": "string",
+            "maxLength": 8,
+            "nullable": true,
+            "title": "Extend Duration"
+          },
+          "scope": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Scope",
+            "default": "all"
+          },
+          "tag": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Tag"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "title": "Body_ui_memory_bulk_ui_memory_bulk_post"
+      },
+      "Body_ui_memory_create_submit_ui_memory_create_post": {
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body"
+          },
+          "slug": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Slug"
+          },
+          "tags": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Tags"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "target_name": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "body"
+        ],
+        "title": "Body_ui_memory_create_submit_ui_memory_create_post"
+      },
+      "Body_ui_memory_patch_ui_memory__scope___slug__patch": {
+        "properties": {
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "title": "Body_ui_memory_patch_ui_memory__scope___slug__patch"
+      },
+      "Body_ui_memory_preview_ui_memory_preview_post": {
+        "properties": {
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_memory_preview_ui_memory_preview_post"
+      },
+      "Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post": {
+        "properties": {
+          "to": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "target_name": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "to"
+        ],
+        "title": "Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post"
+      },
       "BroadcastOverrideCreate": {
         "properties": {
           "op_id_pattern": {
@@ -7632,8 +8441,15 @@
             "title": "Op Id"
           },
           "target": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
             "nullable": true,
             "title": "Target"
           },
@@ -7650,7 +8466,7 @@
           "op_id"
         ],
         "title": "CallOperationBody",
-        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` is a partial\ndescriptor (``{\"name\": \"rdc-vcenter\"}``) the handler resolves via\n:func:`~meho_backplane.targets.resolver.resolve_target`; ``None``\nmeans the operation does not need a target (typed handlers that\ndon't read it; composite handlers that do their own resolution).\n\nRecognised keys on the ``target`` dict:\n\n* ``name`` (required when ``target`` is supplied) -- the slug or\n  alias the resolver looks up in the targets registry.\n* ``fqdn`` (optional) -- per-call override for the resolved\n  target's ``fqdn`` column. Honoured by connectors that read\n  ``target.fqdn`` for vhost routing (G3.6 VCF Automation:\n  the appliance enforces strict ``Host:`` matching and returns\n  404 with empty body when reached by IP without the correct\n  vhost set). The override mutates the resolved Target in\n  memory only; the database row is not modified. Any other key\n  in the dict is silently ignored, mirroring the documented\n  forward-compatibility posture in the MCP tool schema.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` -- a v0.2.1 client still sending ``target:\nstr`` (the pre-rename single-name shape) or a typo in\n``connector_id`` now fails loud at the framework boundary instead\nof silently dispatching with the defaults. ``params`` itself is a\nfree-form ``dict`` because per-op parameter shape is enforced by\nthe descriptor's ``parameter_schema`` further down the dispatch\npath; only the meta-tool body's own fields are constrained here."
+        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` accepts either\nshape and ``None``:\n\n* **Bare string** -- ``target: \"rdc-vcenter\"``. The forward-preferred\n  shape; matches ``query_topology`` / ``query_audit`` so an agent\n  can carry a target name across the read and the write surfaces\n  without reshape. G0.13-T2 (#1132) widening of #780.\n* **Dict** -- ``target: {\"name\": \"rdc-vcenter\"}``. The original\n  shape; the handler resolves the ``name`` field and (optionally)\n  reads ``fqdn`` for vhost routing. Still accepted unchanged.\n* **None** -- the operation does not need a target (typed handlers\n  that don't read it; composite handlers that do their own\n  resolution).\n\nBoth shapes normalise to the same dict before dispatch, so the\nresolver and the connectors see one canonical form. A bare-string\n``target`` is equivalent to ``{\"name\": <string>}`` -- no ``fqdn``\noverride can be passed via the string shape; callers that need\nthe override stay on the dict.\n\nRecognised keys on the ``target`` dict:\n\n* ``name`` (required when ``target`` is supplied as a dict) -- the\n  slug or alias the resolver looks up in the targets registry.\n* ``fqdn`` (optional) -- per-call override for the resolved\n  target's ``fqdn`` column. Honoured by connectors that read\n  ``target.fqdn`` for vhost routing (G3.6 VCF Automation:\n  the appliance enforces strict ``Host:`` matching and returns\n  404 with empty body when reached by IP without the correct\n  vhost set). The override mutates the resolved Target in\n  memory only; the database row is not modified. Any other key\n  in the dict is silently ignored, mirroring the documented\n  forward-compatibility posture in the MCP tool schema.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown *body* fields\nwith 422 ``extra_forbidden`` -- a typo in ``connector_id`` or an\nunknown sibling field still fails loud. The ``target`` field's\nown union widening is orthogonal: bare-string is now a first-class\nvalid value, not an unknown field. ``params`` itself is a\nfree-form ``dict`` because per-op parameter shape is enforced by\nthe descriptor's ``parameter_schema`` further down the dispatch\npath; only the meta-tool body's own fields are constrained here."
       },
       "CandidateHint": {
         "properties": {
@@ -10280,6 +11096,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Deleted At"
           }
         },
         "type": "object",
@@ -10324,7 +11146,25 @@
             "type": "string",
             "maxLength": 100,
             "minLength": 1,
-            "title": "Product"
+            "title": "Product",
+            "enum": [
+              "bind9",
+              "gcloud",
+              "harbor",
+              "hetzner-robot",
+              "holodeck",
+              "k8s",
+              "nsx",
+              "pfsense",
+              "sddc-manager",
+              "vault",
+              "vcf-automation",
+              "vcf-fleet",
+              "vcf-logs",
+              "vcf-operations",
+              "vmware"
+            ],
+            "description": "Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss."
           },
           "host": {
             "type": "string",
@@ -10433,6 +11273,13 @@
             "nullable": true,
             "title": "Aliases"
           },
+          "product": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Product"
+          },
           "host": {
             "type": "string",
             "maxLength": 512,
@@ -10486,7 +11333,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "TargetUpdate",
-        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` and ``product`` are absent \u2014 rename = delete\n+ create.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable."
+        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` is absent \u2014 rename = delete + create.\n\n``product`` is patchable as of G0.14-T4 (#1145). The original\nG0.3 contract treated ``product`` as immutable after creation\non the theory that the operator should delete + re-create on a\ntypo, but the v0.6.0 dogfood pass (signal 6) showed the\ncombination of \"no DELETE route\" + \"no PATCH on product\" left a\nmisregistered target permanently broken \u2014 name and alias slots\noccupied, ``secret_ref`` pointing at a stranded Vault path. T4\ncloses the gap by adding DELETE *and* allowing PATCH on\n``product``. The route handler validates the new value against\nthe set of registered connector products and rejects unknown\nvalues with a structured 422 mirroring the ``/probe`` 501\nshape \u2014 so a typo at PATCH time produces the same actionable\ndiagnostic as the typo would at probe time, instead of\nsilently breaking the working target.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable."
       },
       "TargetsDiscoverResult": {
         "properties": {
@@ -10905,6 +11752,32 @@
         ],
         "title": "TopologyTimelineResult",
         "description": "Page of timeline rows plus the forward-only continuation cursor.\n\n``next_cursor`` is :data:`None` when fewer than ``limit`` rows\nwere available (the query reached the end of the matching set).\nConsumers iterate by re-issuing the same filter with\n``cursor = next_cursor`` until ``next_cursor`` is None.\n\nThe cursor is opaque (base64-encoded JSON over ``(valid_from,\nhistory_id, source)``) -- consumers treat it as a token. Stability\nunder concurrent inserts: a new history row landing in the window\nbetween page N and page N+1 is naturally placed by the keyset\ncompare (``(valid_from, history_id) < (cursor.ts, cursor.id)``)\nand either appears on a later page (if it falls below the cursor)\nor never (if it lands above the cursor). No row is duplicated or\nskipped by the act of paging."
+      },
+      "UISessionContext": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Session Id"
+          },
+          "operator_sub": {
+            "type": "string",
+            "title": "Operator Sub"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "operator_sub",
+          "tenant_id"
+        ],
+        "title": "UISessionContext",
+        "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims)."
       },
       "UsageReport": {
         "properties": {

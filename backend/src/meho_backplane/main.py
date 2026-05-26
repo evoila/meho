@@ -47,6 +47,7 @@ from typing import Final
 
 import structlog
 from fastapi import FastAPI, Response
+from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
@@ -98,7 +99,7 @@ from meho_backplane.broadcast import (
     dispose_broadcast_client,
     get_broadcast_client,
 )
-from meho_backplane.connectors.registry import _eager_import_connectors
+from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
@@ -609,6 +610,20 @@ app.include_router(api_v1_audit_router)
 # boundaries. Every mutation writes an audit row and broadcasts
 # under op_class=write.
 app.include_router(api_v1_broadcast_overrides_router)
+# G11.2-T6 (#819) -- agent permission grant management (grant / revoke /
+# list / elevate). All verbs gated to tenant_admin. Tenant-scoped via
+# the JWT; cross-tenant probes return 404. Every mutation writes an
+# audit row and broadcasts under op_class=write.
+#
+# Registered BEFORE ``api_v1_agents_router`` (G11.2 follow-up #1168):
+# FastAPI dispatches routes in include order, so the agents-router's
+# ``GET /{name}`` would otherwise shadow ``GET /api/v1/agents/grants``
+# (matching ``name="grants"``). Specific prefix first → grants-list
+# route resolves correctly; ``GET /api/v1/agents/incident-triage``
+# (and every other non-``grants`` name) still falls through to
+# ``show_agent`` because the grants router only matches paths under
+# its own ``/api/v1/agents/grants`` prefix.
+app.include_router(api_v1_agent_grants_router)
 # G11.1-T2 (#809) -- agent-definition CRUD verbs (list / show / create
 # / edit / delete) over the AgentDefinition ORM model. Reads gated to
 # operator-level, writes to tenant_admin. Tenant-scoped via the JWT's
@@ -616,11 +631,6 @@ app.include_router(api_v1_broadcast_overrides_router)
 # existence is not leaked across tenant boundaries. Every mutation
 # writes an audit row and broadcasts under op_class=write.
 app.include_router(api_v1_agents_router)
-# G11.2-T6 (#819) -- agent permission grant management (grant / revoke /
-# list / elevate). All verbs gated to tenant_admin. Tenant-scoped via
-# the JWT; cross-tenant probes return 404. Every mutation writes an
-# audit row and broadcasts under op_class=write.
-app.include_router(api_v1_agent_grants_router)
 # G11.2-T1 (#815) -- agent-principal lifecycle (register / list / revoke).
 # register creates a Keycloak client tagged kind=agent + inserts a DB row.
 # revoke disables the Keycloak client (kill switch) + marks the row revoked.
@@ -731,6 +741,97 @@ if parse_bool_env(os.environ.get("MEHO_ENABLE_RBAC_TEST_ROUTE")):
     )
 
     app.include_router(api_v1_rbac_test_router)
+
+
+def _inject_target_product_enum(schema: dict[str, object]) -> None:
+    """Mutate ``TargetCreate.product`` in ``schema`` with the live product enum.
+
+    G0.14-T3 (#1144). Reads :func:`registered_product_tokens` and sets
+    the ``enum`` + ``description`` on the ``TargetCreate.product``
+    JSON Schema property in place. Defensive ``isinstance`` walks let
+    the override survive future schema-shape rearrangements without
+    raising on a missing key (the worst case becomes "the enum is not
+    injected" rather than "the OpenAPI doc fails to serve").
+    """
+    valid_products = sorted(registered_product_tokens())
+    if not valid_products:
+        return
+    components = schema.get("components")
+    if not isinstance(components, dict):
+        return
+    schemas = components.get("schemas")
+    if not isinstance(schemas, dict):
+        return
+    target_create = schemas.get("TargetCreate")
+    if not isinstance(target_create, dict):
+        return
+    properties = target_create.get("properties")
+    if not isinstance(properties, dict):
+        return
+    product_field = properties.get("product")
+    if not isinstance(product_field, dict):
+        return
+    product_field["enum"] = list(valid_products)
+    product_field["description"] = (
+        "Connector product slug. Must match the ``product`` "
+        "field of a registered connector class; see "
+        "``GET /api/v1/connectors`` for the live list and "
+        "``docs/codebase/error-message-shape.md`` for the "
+        "422 shape returned on miss."
+    )
+
+
+def build_openapi_schema() -> dict[str, object]:
+    """Generate the OpenAPI schema with the ``TargetCreate.product`` enum injected.
+
+    G0.14-T3 (#1144). Overrides the default :meth:`FastAPI.openapi` so
+    the ``product`` property on the ``TargetCreate`` request schema
+    renders as a JSON Schema enum populated from the live connector
+    registry. Without this hook the schema would surface ``product`` as
+    a free-form string — the dogfood signal 5 UX miss in
+    ``claude-rdc-hetzner-dc#697`` (operator typed ``'kubernetes'``,
+    resolver matched on ``'k8s'``, no early signal). Paired with the
+    runtime 422 in :func:`~meho_backplane.api.v1.targets.create_target`
+    (Options A + C from the task body, sharing one source-of-truth
+    helper so they cannot drift).
+
+    Calls :func:`_eager_import_connectors` when the registry is empty
+    so the schema is correct even when the override fires before the
+    FastAPI lifespan (the OpenAPI snapshot script under
+    ``cli/api/snapshot-openapi.py`` calls :meth:`app.openapi` directly
+    without running the lifespan). Idempotent — modules already in
+    ``sys.modules`` are a no-op on the second call.
+
+    Caches the result on ``app.openapi_schema`` to match FastAPI's
+    own caching behaviour.
+    """
+    if app.openapi_schema is not None:
+        return app.openapi_schema
+
+    if not registered_product_tokens():
+        _eager_import_connectors()
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        summary=app.summary,
+        description=app.description,
+        routes=app.routes,
+        webhooks=app.webhooks.routes,
+        tags=app.openapi_tags,
+        servers=app.servers,
+        terms_of_service=app.terms_of_service,
+        contact=app.contact,
+        license_info=app.license_info,
+        separate_input_output_schemas=app.separate_input_output_schemas,
+    )
+    _inject_target_product_enum(schema)
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = build_openapi_schema  # type: ignore[method-assign]
 
 
 @app.get("/")

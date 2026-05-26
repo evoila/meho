@@ -113,6 +113,7 @@ References
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections.abc import AsyncIterator, Iterator
@@ -122,6 +123,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
@@ -179,6 +181,29 @@ _LIVE_TAIL_CURSOR: Final[str] = "$"
 #: reach XREAD and trigger an SSE reconnect loop.
 _VALKEY_STREAM_ID_RE: Final[re.Pattern[str]] = re.compile(r"^\d+(?:-\d+)?$")
 
+#: T11-compliant error envelope emitted as an SSE ``event: feed_error``
+#: frame when ``XREAD`` raises a :class:`redis.exceptions.RedisError`
+#: (connection refused, transport timeout, unexpected response). The
+#: shape follows the convention codified in
+#: ``docs/codebase/error-message-shape.md`` — stable ``snake_case``
+#: code, human-readable message naming the affected component
+#: (``meho:feed:<tenant_id>``) at frame-build time, and a doc reference
+#: the operator can resolve from their clone. ``data`` is JSON inside
+#: the SSE frame so a subscriber can ``JSON.parse`` it without
+#: special-casing the error path against the regular ``event: broadcast``
+#: data shape.
+#:
+#: An HTTP 5xx is **not** an option once :func:`_feed_generator` is
+#: streaming — ``http.response.start`` was sent on the first outbound
+#: yield, so FastAPI cannot retroactively swap to a 503 body. The
+#: SSE error event is the only shape the client can observe at that
+#: point; closing the stream cleanly afterwards lets the
+#: ``EventSource`` reconnect machinery decide whether to retry against
+#: the now-known-failing broadcast subsystem rather than tight-looping
+#: on the bare-500 it used to see.
+_FEED_ERROR_CODE: Final[str] = "broadcast_subsystem_unavailable"
+_FEED_ERROR_DOC: Final[str] = "docs/codebase/error-message-shape.md"
+
 
 def _validate_cursor_or_400(cursor: str) -> str:
     """Validate the SSE replay cursor; raise HTTP 400 on bad input.
@@ -223,6 +248,134 @@ def _stream_key(operator: Operator) -> str:
     helper in :mod:`meho_backplane.broadcast.publisher`.
     """
     return f"meho:feed:{operator.tenant_id}"
+
+
+def _format_feed_error(stream_key: str, exception_type: str) -> str:
+    """Format a ``redis.RedisError`` as a T11-compliant SSE error frame.
+
+    Emitted in two situations: (a) the very first ``XREAD`` call on a
+    fresh subscriber connection where Valkey is unreachable (matches
+    signal 10's ``claude-rdc-hetzner-dc#697`` shape — broadcast pod
+    down on a fresh deploy), and (b) a mid-stream transport failure
+    where an already-open SSE connection loses its Valkey backend
+    after one or more events have already shipped. The frame shape is
+    identical in both cases — the client side cannot distinguish
+    "broadcast never came up" from "broadcast went away" once the SSE
+    headers are out, and the operator's remediation
+    (``docs/codebase/error-message-shape.md``) is the same.
+
+    The frame complies with the three-clause convention from
+    ``docs/codebase/error-message-shape.md``:
+
+    * ``code`` — stable ``snake_case`` classifier
+      (``broadcast_subsystem_unavailable``) callers pattern-match
+      without re-parsing prose.
+    * ``message`` — names the affected component
+      (``meho:feed:<tenant_id>``) and the underlying redis-py exception
+      class, then points at the remediation doc. The exception class
+      name is structured-log material that the operator's checked-out
+      clone can resolve back to the redis-py docs page; the actual
+      transport-level message string is **not** echoed here because
+      it can name infrastructure topology (broker hostnames, internal
+      IPs) per the info-leak boundary the convention doc codifies.
+    * ``doc`` — relative path the operator can ``cat`` from their
+      checked-out clone or render in the docs site.
+
+    No ``id:`` line — error events are not part of the replay cursor
+    sequence; reconnecting subscribers should not re-fetch them.
+    """
+    detail = {
+        "code": _FEED_ERROR_CODE,
+        "message": (
+            f"broadcast stream '{stream_key}' is unavailable "
+            f"(redis-py exception: {exception_type}); see "
+            f"{_FEED_ERROR_DOC} for the error-shape convention "
+            f"and broadcast-subsystem remediation"
+        ),
+        "doc": _FEED_ERROR_DOC,
+    }
+    return f"event: feed_error\ndata: {json.dumps(detail)}\n\n"
+
+
+def _consume_xread_batch(
+    entries: object,
+    *,
+    cursor: str,
+    op_class: str | None,
+    principal: str | None,
+    target: str | None,
+    stream_key: str,
+) -> tuple[str, list[str]]:
+    """Unwrap an ``XREAD`` response into ``(new_cursor, [frames_to_yield])``.
+
+    Collapses the ``if entries:`` branch out of :func:`_feed_generator`'s
+    main loop. The two responsibilities — advancing the cursor past the
+    consumed batch and producing the post-filter list of SSE frames —
+    share enough state (the ``items`` list, the per-entry processing)
+    that a tuple return is cleaner than two separate helpers.
+
+    *entries* shape: redis-py returns ``[[stream_key, [(entry_id,
+    fields), ...]], ...]`` (one outer tuple per stream queried; we
+    always query exactly one). ``None`` (BLOCK timeout) or empty outer
+    list → the caller sees the cursor unchanged and an empty frame
+    list, which is the heartbeat-or-keepalive path.
+
+    The cursor advances to ``items[-1][0]`` BEFORE the post-filter
+    frames are yielded so a tenant where every entry filters out
+    (busy-but-filtered) still moves past the consumed batch — without
+    this, an explicit-cursor replay (``since=<id>`` / ``Last-Event-Id``)
+    would re-read the same batch on every iteration.
+    """
+    if not entries:
+        return cursor, []
+    # redis-py guarantees the outer shape; cast statically here.
+    typed_entries: list[tuple[str, list[tuple[str, dict[str, str]]]]] = entries  # type: ignore[assignment]
+    _key, items = typed_entries[0]
+    if not items:
+        return cursor, []
+    new_cursor = items[-1][0]
+    frames = [
+        frame
+        for _entry_id, frame in _process_entries(
+            items,
+            op_class=op_class,
+            principal=principal,
+            target=target,
+            stream_key=stream_key,
+        )
+    ]
+    return new_cursor, frames
+
+
+def _log_and_format_broadcast_unavailable(
+    operator: Operator,
+    stream_key: str,
+    exc: RedisError,
+) -> str:
+    """Log the structured broadcast-down event and return the SSE error frame.
+
+    Extracted out of :func:`_feed_generator`'s ``except RedisError``
+    arm so the main loop stays under the code-quality function-size
+    ceiling. The two responsibilities collapse into one helper because
+    they're always paired — every RedisError catch site logs and
+    yields the same shape; splitting them would require the caller to
+    carry both pieces of state across two helper calls for no
+    readability benefit.
+
+    The log line records the exception class name verbatim plus
+    ``exc_info=True`` for the structlog renderer to attach the
+    traceback; the response frame carries only the class name (no
+    transport-level message string) per the info-leak boundary
+    codified in ``docs/codebase/error-message-shape.md``.
+    """
+    _log.warning(
+        "feed_broadcast_unavailable",
+        stream_key=stream_key,
+        operator_sub=operator.sub,
+        exception_type=type(exc).__name__,
+        exc_info=True,
+    )
+    return _format_feed_error(stream_key, type(exc).__name__)
 
 
 def _format_event(entry_id: str, raw_event_json: str) -> str:
@@ -370,6 +523,16 @@ async def _feed_generator(
     ``http.response.start`` was sent on the first yield (before any
     cancellation point), so AuditMiddleware's buffered status_code
     is already locked at 200.
+
+    On :class:`redis.exceptions.RedisError` (connection refused,
+    transport timeout, unexpected response) the generator emits one
+    T11-compliant ``event: feed_error`` frame and breaks. The
+    empty-stream case (Valkey reachable, no entries yet) is NOT a
+    failure: redis-py returns ``None`` from XREAD and the
+    :func:`_consume_xread_batch` helper falls through to the heartbeat
+    path. The failure handled here is the genuinely-broken case
+    (broadcast pod down, network partition) — signal 10 of
+    ``claude-rdc-hetzner-dc#697``.
     """
     client = get_broadcast_client()
     stream_key = _stream_key(operator)
@@ -377,49 +540,45 @@ async def _feed_generator(
 
     try:
         while True:
-            entries = await client.xread(
-                {stream_key: cursor},
-                block=_XREAD_BLOCK_MS,
-                count=_XREAD_COUNT,
-            )
+            try:
+                entries = await client.xread(
+                    {stream_key: cursor},
+                    block=_XREAD_BLOCK_MS,
+                    count=_XREAD_COUNT,
+                )
+            except RedisError as exc:
+                # Catch the full ``RedisError`` family — its concrete
+                # subclasses (``ConnectionError``, ``TimeoutError``,
+                # ``ResponseError``) all share the same operator-side
+                # remediation: "the broadcast subsystem is not
+                # reachable; check the broadcast pod / network /
+                # ``BROADCAST_REDIS_URL`` and read the doc". A single
+                # ``feed_error`` frame is the right granularity at the
+                # SSE boundary; the helper handles structured logging
+                # and frame formatting in one paired call.
+                #
+                # Re-raising would propagate to FastAPI's default
+                # handler — but ``http.response.start`` was already
+                # sent on the first iteration (or on a prior yielded
+                # frame on subsequent iterations), so FastAPI cannot
+                # swap to a 5xx body; the consumer sees a bare drop.
+                # Yielding a structured frame + breaking the loop
+                # gives the client a recoverable signal and lets the
+                # underlying transport close cleanly.
+                yield _log_and_format_broadcast_unavailable(operator, stream_key, exc)
+                break
             now = time.monotonic()
-            emitted_any = False
-            if entries:
-                # redis-py returns ``[[stream_key, [(entry_id, fields), ...]], ...]``
-                # — one outer tuple per stream queried. We always
-                # query exactly one stream (the operator's tenant
-                # feed), so ``entries[0][1]`` is the list of
-                # ``(entry_id, fields_dict)`` tuples.
-                _key, items = entries[0]
-                if items:
-                    # Advance the cursor past EVERY consumed entry,
-                    # not only the ones that survive the filter. The
-                    # M2 refactor moved skip-paths (filter mismatch,
-                    # malformed JSON, unknown field shape) inside
-                    # ``_process_entries``; the helper consumes those
-                    # entries without yielding, so a ``cursor =
-                    # entry_id`` placed inside the post-helper
-                    # ``for ... yield`` loop never advances past them.
-                    # Under explicit-cursor replay (``since=<id>`` or
-                    # ``Last-Event-Id``) a tenant where every entry is
-                    # filtered out would otherwise re-read the same
-                    # batch forever: XREAD with cursor=id_N returns
-                    # IDs > id_N, helper drops them, cursor stays at
-                    # id_N, next XREAD returns the same set. Set the
-                    # cursor here, BEFORE the yield loop, so the next
-                    # XREAD reads strictly past this batch regardless
-                    # of whether anything yielded out the other side.
-                    cursor = items[-1][0]
-                for _entry_id, frame in _process_entries(
-                    items,
-                    op_class=op_class,
-                    principal=principal,
-                    target=target,
-                    stream_key=stream_key,
-                ):
-                    yield frame
-                    emitted_any = True
-            if emitted_any:
+            cursor, frames = _consume_xread_batch(
+                entries,
+                cursor=cursor,
+                op_class=op_class,
+                principal=principal,
+                target=target,
+                stream_key=stream_key,
+            )
+            for frame in frames:
+                yield frame
+            if frames:
                 last_heartbeat = now
             elif now - last_heartbeat >= _HEARTBEAT_INTERVAL_SECONDS:
                 yield ": heartbeat\n\n"

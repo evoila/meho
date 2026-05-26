@@ -1,0 +1,267 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-swappable card grid for the Memory list (Initiative #341).
+
+  T1 (#877) shipped the read surface: scope-filtered DaisyUI cards with
+  slug, scope badge, expiry timestamp, tag chips, 200-char preview.
+
+  T3 (#879) layers:
+
+  * **Countdown badges** -- the ``entry.countdown`` projection renders
+    "expires in 3d 4h" server-side; the cards block re-renders every 60
+    seconds via ``hx-trigger="every 60s"`` so the cue stays fresh
+    without a client-side timer.
+  * **Recently expired section** -- ``expired_entries`` are rendered in
+    a separate greyed list below the active cards. The bucket is
+    naturally bounded by the G5.2 sweeper window (#623) -- between
+    expiry and the next sweeper tick, expired rows are still in the
+    documents table and visible to the read path.
+  * **Bulk select + actions** -- writable cards carry a checkbox;
+    Active + Recently-expired cards both participate in the same form.
+    The bulk-action toolbar (delete / extend-by-Xd) posts the selected
+    IDs to ``/ui/memory/bulk`` via HTMX; the response replaces this
+    fragment in place. RBAC is re-checked server-side per row -- the
+    checkbox visibility is a UX hint, not a security boundary.
+
+  HTMX wiring:
+
+    * ``hx-trigger="every 60s"`` on the wrapper fires a GET against
+      ``refresh_url`` (the active scope+tag preserved) and swaps the
+      ``outerHTML`` so the wrapper's ``hx-trigger`` re-installs on the
+      new element. This is the same shape as the topology graph's
+      30-second poll (G10.5-T3 #882).
+    * The bulk form's ``hx-post`` targets the same wrapper so the
+      post-bulk render swaps in place.
+    * The ``form="memory-bulk-form"`` attribute on each checkbox
+      means the checkbox participates in the bulk form regardless of
+      DOM nesting -- HTML5 standard form-association
+      (https://developer.mozilla.org/en-US/docs/Web/HTML/Element/input#form).
+-#}
+<section
+  id="memory-cards"
+  aria-label="Memory card grid"
+  class="space-y-3"
+  hx-get="{{ refresh_url | default('/ui/memory') }}"
+  hx-trigger="every 60s"
+  hx-swap="outerHTML"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  {% if flash %}
+    <div class="alert alert-info" role="status">
+      <span>{{ flash }}</span>
+    </div>
+  {% endif %}
+
+  {# ----------- Bulk-action toolbar (form posts to /ui/memory/bulk) ----------- #}
+  {#
+    The form lives outside the cards <ul> so the cards can keep their
+    semantic <li> shape. Checkboxes inside the cards use the ``form=``
+    attribute to participate in this form.
+  #}
+  <form
+    id="memory-bulk-form"
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    hx-post="/ui/memory/bulk"
+    hx-target="#memory-cards"
+    hx-swap="outerHTML"
+    hx-include="this"
+    aria-label="Bulk actions on selected memories"
+  >
+    <div class="card-body p-3 flex flex-wrap items-center gap-3">
+      <input type="hidden" name="scope" value="{{ active_scope }}" />
+      {% if active_tag %}
+        <input type="hidden" name="tag" value="{{ active_tag }}" />
+      {% endif %}
+      <span class="text-xs opacity-70" data-bulk-summary>
+        Select rows below, then choose an action.
+      </span>
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        <label class="form-control">
+          <span class="sr-only">Extend duration</span>
+          <select
+            name="extend_duration"
+            class="select select-bordered select-sm"
+            aria-label="Extend duration"
+          >
+            {% for d in bulk_extend_durations %}
+              <option value="{{ d }}"{% if d == '7d' %} selected{% endif %}>+{{ d }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button
+          type="submit"
+          name="action"
+          value="extend"
+          class="btn btn-sm btn-primary"
+          data-action="bulk-extend"
+        >
+          Extend selected
+        </button>
+        <button
+          type="submit"
+          name="action"
+          value="delete"
+          class="btn btn-sm btn-error"
+          data-action="bulk-delete"
+        >
+          Delete selected
+        </button>
+      </div>
+    </div>
+  </form>
+
+  {# ----------- Active cards ----------- #}
+  {% if not entries %}
+    <div class="card bg-base-100 border-base-300 border">
+      <div class="card-body text-sm opacity-70">
+        No memories match the current scope / tag filter.
+      </div>
+    </div>
+  {% else %}
+    <ul class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" aria-label="Active memories">
+      {% for entry in entries %}
+        <li
+          class="card bg-base-100 border-base-300 border shadow-sm"
+          data-memory-id="{{ entry.id }}"
+          data-memory-scope="{{ entry.scope }}"
+        >
+          <div class="card-body p-4">
+            <div class="flex items-start justify-between gap-2">
+              <div class="flex items-start gap-2">
+                {% if entry.can_write %}
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-sm"
+                    name="ids"
+                    value="{{ entry.id }}"
+                    form="memory-bulk-form"
+                    aria-label="Select memory {{ entry.scope }}/{{ entry.slug }}"
+                  />
+                {% endif %}
+                <h2 class="card-title text-base font-mono break-all">
+                  <a
+                    href="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}"
+                    class="link link-hover"
+                  >{{ entry.slug }}</a>
+                </h2>
+              </div>
+              <span class="badge badge-outline badge-sm shrink-0">{{ entry.scope }}</span>
+            </div>
+            {% if entry.countdown %}
+              <div
+                class="text-xs opacity-70"
+                data-expires-at="{{ entry.expires_at.isoformat() }}"
+                data-countdown="{{ entry.countdown }}"
+              >
+                {{ entry.countdown }}
+              </div>
+            {% elif entry.expires_at %}
+              <div
+                class="text-xs opacity-70"
+                data-expires-at="{{ entry.expires_at.isoformat() }}"
+              >
+                Expires {{ entry.expires_at.isoformat() }}
+              </div>
+            {% endif %}
+            {% if entry.tags %}
+              <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
+                {% for tag in entry.tags %}
+                  <li>
+                    <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+                  </li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+            <p class="text-sm opacity-80 whitespace-pre-wrap break-words">
+              {{ entry.preview }}
+            </p>
+            <div class="card-actions justify-end">
+              <a
+                class="btn btn-xs btn-ghost"
+                href="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}"
+                aria-label="View memory {{ entry.scope }}/{{ entry.slug }}"
+              >
+                View
+              </a>
+            </div>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  {# ----------- Recently expired section (cleanup pending) ----------- #}
+  {% if expired_entries %}
+    <section
+      id="memory-recently-expired"
+      class="space-y-2 mt-6"
+      aria-label="Recently expired memories (cleanup pending)"
+    >
+      <header class="flex items-baseline justify-between gap-2">
+        <h2 class="text-sm font-semibold opacity-70">
+          Recently expired (cleanup pending)
+        </h2>
+        <span class="text-xs opacity-60">
+          {{ expired_count }} expired, awaiting the next sweeper tick
+        </span>
+      </header>
+      <ul
+        class="grid gap-3 md:grid-cols-2 xl:grid-cols-3 opacity-60"
+        aria-label="Recently expired memories"
+      >
+        {% for entry in expired_entries %}
+          <li
+            class="card bg-base-200 border-base-300 border"
+            data-memory-id="{{ entry.id }}"
+            data-memory-scope="{{ entry.scope }}"
+            data-expired="true"
+          >
+            <div class="card-body p-4">
+              <div class="flex items-start justify-between gap-2">
+                <div class="flex items-start gap-2">
+                  {% if entry.can_write %}
+                    <input
+                      type="checkbox"
+                      class="checkbox checkbox-sm"
+                      name="ids"
+                      value="{{ entry.id }}"
+                      form="memory-bulk-form"
+                      aria-label="Select expired memory {{ entry.scope }}/{{ entry.slug }}"
+                    />
+                  {% endif %}
+                  <h3 class="card-title text-sm font-mono break-all">
+                    <a
+                      href="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}"
+                      class="link link-hover"
+                    >{{ entry.slug }}</a>
+                  </h3>
+                </div>
+                <span class="badge badge-outline badge-sm shrink-0">{{ entry.scope }}</span>
+              </div>
+              <div
+                class="text-xs"
+                data-expires-at="{{ entry.expires_at.isoformat() }}"
+              >
+                Expired {{ entry.expires_at.isoformat() }}
+              </div>
+              {% if entry.tags %}
+                <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
+                  {% for tag in entry.tags %}
+                    <li>
+                      <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+                    </li>
+                  {% endfor %}
+                </ul>
+              {% endif %}
+              <p class="text-xs whitespace-pre-wrap break-words">
+                {{ entry.preview }}
+              </p>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endif %}
+</section>

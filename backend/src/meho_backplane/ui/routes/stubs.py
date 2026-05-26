@@ -18,12 +18,13 @@ shell renders end-to-end before the per-surface Initiatives
   has the double-submit chain in place from request one.
 
 The remaining stub paths are kept consistent with the chassis
-``base.html`` sidebar -- ``/ui/knowledge``, ``/ui/connectors``,
-``/ui/memory``. ``/ui/topology`` and ``/ui/broadcast`` are intentionally
-NOT stubbed here: topology's real table view ships in G10.5-T1 (#880)
-and broadcast's real live-feed view ships in G10.1-T1 (#867), each
-owning its path; registering a stub for either would shadow the real
-route in the generated OpenAPI schema. The Goal #336 done-when and
+``base.html`` sidebar -- ``/ui/knowledge`` and ``/ui/connectors``.
+``/ui/topology``, ``/ui/broadcast``, and ``/ui/memory`` are
+intentionally NOT stubbed here: topology's real table view ships in
+G10.5-T1 (#880), broadcast's real live-feed view ships in G10.1-T1
+(#867), and memory's real list / detail / edit surface ships in
+G10.4-T1 (#877), each owning its path; registering a stub for any
+would shadow the real route in the generated OpenAPI schema. The Goal #336 done-when and
 Initiative #337 work-item #5 reference these exact URLs.
 
 Why one shared template
@@ -85,12 +86,6 @@ _SURFACE_STUBS: Final[tuple[_SurfaceStub, ...]] = (
         title="Connectors",
         initiative_number=340,
         summary="Per-tenant target CRUD + per-target detail (fingerprint, last probe, ops).",
-    ),
-    _SurfaceStub(
-        slug="memory",
-        title="Memory",
-        initiative_number=341,
-        summary="Browse + edit memories across the 5 scopes; scope-promotion UI.",
     ),
 )
 

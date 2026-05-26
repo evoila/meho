@@ -18,7 +18,8 @@ event — never in the unauthenticated 401 body — mirroring the existing
 
 * Missing ``Authorization`` header → 401 ``missing_token``
 * ``Authorization`` without ``Bearer `` prefix → 401 ``missing_token``
-* Unparseable JWT (random bytes) → 401 ``invalid_token`` (structural)
+* Unparseable JWT (random bytes) → 401 ``malformed_jws`` (structural,
+  per G0.13-T1 #1131 — was bare ``invalid_token`` pre-v0.7)
 * JWT signed by an unknown key → 401 ``signature_verification_failed``
 * JWT with a tampered signature → 401 ``signature_verification_failed``
 * JWT signed under a tampered payload → 401 ``signature_verification_failed``
@@ -29,8 +30,11 @@ event — never in the unauthenticated 401 body — mirroring the existing
 * JWT with wrong issuer (``iss`` != configured) → 401 ``invalid_issuer``
 * JWT missing required claim (``sub``) → 401 ``missing_sub``
 * JWT with the wrong algorithm (``HS256`` when only ``RS256`` accepted)
-  → 401 ``invalid_token`` (structural — authlib rejects pre-claims)
-* JWT with the ``none`` algorithm → 401 ``invalid_token`` (structural)
+  → 401 ``invalid_token`` (authlib raises a non-``DecodeError``
+  :class:`JoseError` for unsupported algorithms; falls to the residual)
+* JWT with the ``none`` algorithm → 401 ``invalid_token``
+  (:class:`UnsupportedAlgorithmError` is a :class:`JoseError` but not
+  a :class:`DecodeError` — residual catch-all)
 * JWT with a missing ``kid`` header → 401 ``invalid_token``
 * JWT with a ``kid`` that doesn't exist in the JWKS even after refresh
   → 401 ``invalid_token`` (and exactly one forced JWKS refresh ran)
@@ -43,8 +47,8 @@ Each test asserts:
 2. The exact ``{"detail": "<reason>"}`` body shape.
 3. No leaked exception message — the reason string is one of the
    centrally-defined tokens (``missing_token`` / ``invalid_token`` /
-   ``invalid_audience`` / ``invalid_issuer`` / ``missing_sub`` /
-   ``token_expired`` / ``token_not_yet_valid`` /
+   ``malformed_jws`` / ``invalid_audience`` / ``invalid_issuer`` /
+   ``missing_sub`` / ``token_expired`` / ``token_not_yet_valid`` /
    ``signature_verification_failed`` / ``jwks_unavailable``).
 
 Test isolation re-uses the fixture pattern Task #22 established: respx
@@ -169,11 +173,19 @@ def test_bearer_prefix_with_only_whitespace_returns_401() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_unparseable_random_bytes_returns_invalid_token() -> None:
-    """A random-bytes ``Bearer`` value rejects as ``invalid_token``.
+def test_unparseable_random_bytes_returns_malformed_jws() -> None:
+    """A random-bytes ``Bearer`` value rejects as ``malformed_jws``.
 
     The JWKS itself is reachable (so ``jwks_unavailable`` is the wrong
     discriminant); the failure has to come from authlib's decode pass.
+
+    G0.13-T1 #1131 promoted this from the residual ``invalid_token``
+    after the v0.6.0 dogfood signal flagged that the consumer's probe
+    (a curl call against ``/api/v1/health`` with the literal bearer
+    value ``not-a-real-jwt``) still surfaced bare ``invalid_token``
+    despite G0.9.1-T12 #797's classifier landing — the classifier
+    covered the claim-stage failures only, leaving authlib's
+    structural :class:`DecodeError` falling through to the residual.
     """
     client = TestClient(_build_app())
     with respx.mock(assert_all_called=False) as mock_router:
@@ -183,15 +195,36 @@ def test_unparseable_random_bytes_returns_invalid_token() -> None:
             headers={"Authorization": "Bearer total-garbage-not-a-jwt-at-all"},
         )
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "malformed_jws"}
 
 
-def test_two_segment_token_returns_invalid_token() -> None:
-    """A two-segment ``Bearer`` value (no signature) rejects as ``invalid_token``.
+def test_consumer_signal_bearer_returns_malformed_jws() -> None:
+    """The exact consumer-signal probe surfaces ``malformed_jws``.
+
+    Reproduces the bearer recorded in
+    ``rdc-hetzner-dc/meho-signals/auth-invalid-token-opaque-error.yaml``
+    (``Bearer not-a-real-jwt``) verbatim. Acceptance criterion 1 of
+    G0.13-T1 #1131: the consumer's exact bad-bearer scenario carries a
+    classifier code that names the failure class.
+    """
+    client = TestClient(_build_app())
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_discovery_and_jwks(mock_router, {"keys": []})
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": "Bearer not-a-real-jwt"},
+        )
+    assert response.status_code == 401
+    assert response.json() == {"detail": "malformed_jws"}
+
+
+def test_two_segment_token_returns_malformed_jws() -> None:
+    """A two-segment ``Bearer`` value (no signature) rejects as ``malformed_jws``.
 
     JWS compact serialisation has exactly three dot-separated segments.
     A two-segment ``header.payload`` string is structurally invalid;
-    authlib's decoder raises and the dependency must surface 401.
+    authlib's decoder raises :class:`DecodeError` and the dependency
+    surfaces 401 ``malformed_jws`` (G0.13-T1 #1131 — was ``invalid_token``).
     """
     client = TestClient(_build_app())
     with respx.mock(assert_all_called=False) as mock_router:
@@ -201,7 +234,7 @@ def test_two_segment_token_returns_invalid_token() -> None:
             headers={"Authorization": "Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0"},
         )
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "malformed_jws"}
 
 
 # ---------------------------------------------------------------------------

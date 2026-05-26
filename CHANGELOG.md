@@ -139,8 +139,29 @@ vcf-automation), the **G10.0** OAuth2.1 + PKCE BFF auth flow, the first
 two **G10 operator-UI surfaces** (broadcast live feed + topology graph),
 the **G3.8 Holodeck** typed connector, the **G6.4 broadcast meta-tools**
 that make the G7.1 consumer-onboarding CLAUDE.md broadcast-discipline
-contract executable, and the **G0.6.1** JsonFluxReducer wiring. No
-breaking changes.
+contract executable, and the **G0.6.1** JsonFluxReducer wiring.
+**Breaking changes: 1 — see Changed (breaking) section.**
+
+### Changed (breaking)
+
+- **MCP `add_to_memory` body field renamed `content` -> `body`
+  (deferred-callout from G0.9.1-T7, #779).** The rename actually
+  landed in this release window (the original task targeted v0.3.2 in
+  its CHANGELOG AC, but the release tagged as v0.6.0 due to the v0.3.2
+  slip; the breaking-change callout evaporated in the transition).
+  Live consumers pinned to the v0.3.1 wire field received a 422
+  `missing required field: body` with no migration breadcrumb. v0.6.x
+  ships a **one-cycle compatibility shim**: the MCP `add_to_memory`
+  tool accepts both `body` (canonical) and `content` (deprecated
+  alias). When `content` is supplied, a structured
+  `add_to_memory_field_deprecated` warning log line fires with
+  `replacement="body"`, `removal_version="0.7"`, and
+  `body_supplied=<bool>`. When both fields are supplied, `body` wins.
+  **The shim is removed in v0.7** -- agents and SDKs pinned to
+  `content` must migrate to `body` before the v0.7 release.
+  Acceptance criteria from #779 (v0.3.2 callout) are satisfied
+  retroactively here against the actual release window.
+  ([#1134](https://github.com/evoila/meho/issues/1134))
 
 ### Added
 

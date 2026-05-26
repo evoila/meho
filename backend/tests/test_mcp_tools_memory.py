@@ -11,9 +11,12 @@ tool surface:
   (``additionalProperties: false``) and the MEHO-internal RBAC fields
   stripped from the wire shape.
 * ``inputSchema`` ``required`` lists match the spec: ``[query]`` for
-  ``search_memory``; ``[body, scope]`` for ``add_to_memory`` (renamed
-  from ``content`` to align with ``add_to_knowledge`` + the REST
-  ``POST /api/v1/memory`` body schema per G0.9.1-T7 (#779)).
+  ``search_memory``; ``[scope]`` for ``add_to_memory`` -- with the
+  ``body`` field required server-side via the ``anyOf`` combinator
+  (G0.13-T4 #1134 one-cycle ``content`` -> ``body`` alias shim;
+  G0.9.1-T7 (#779) did the original rename to align with
+  ``add_to_knowledge`` + the REST ``POST /api/v1/memory`` body
+  schema).
 * Tool descriptions name what + when + which scope + cross-reference
   G5.2's TTL default (load-bearing per the AI-engineering anchor).
 * ``tools/call search_memory`` against a seeded corpus returns ranked
@@ -49,6 +52,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.schemas import INVALID_PARAMS
@@ -125,13 +129,25 @@ def test_tools_list_exposes_memory_tools_with_strict_input_schema(
 
     assert "add_to_memory" in tools_by_name
     add = tools_by_name["add_to_memory"]
-    assert add["inputSchema"]["required"] == ["body", "scope"]
+    # G0.13-T4 (#1134): the wire ``required`` lists only ``scope``;
+    # ``body`` is required server-side via the ``anyOf`` combinator
+    # which is stripped from the wire copy (the Anthropic Messages API
+    # rejects top-level combinators). The body-or-content contract is
+    # carried by the description prose.
+    assert add["inputSchema"]["required"] == ["scope"]
     assert add["inputSchema"]["additionalProperties"] is False
+    # ``anyOf`` is wire-safe-stripped on tools/list (top-level
+    # combinator).
+    assert "anyOf" not in add["inputSchema"]
     assert "body" in add["inputSchema"]["properties"]
-    # G0.9.1-T7 (#779): the old ``content`` name is gone; ``extra="forbid"``
-    # via additionalProperties:false means a v0.3.1 client posting
-    # ``content`` will fail loud at the JSON-Schema gate.
-    assert "content" not in add["inputSchema"]["properties"]
+    # G0.13-T4 (#1134): one-cycle deprecation shim re-adds ``content``
+    # as a wire-visible alias for ``body``. The schema gates "at least
+    # one of body/content" via ``anyOf`` on the server side; the wire
+    # description marks ``content`` as deprecated. v0.7 drops the shim
+    # and ``content`` goes back to being rejected by
+    # ``additionalProperties: false``.
+    assert "content" in add["inputSchema"]["properties"]
+    assert "DEPRECATED" in add["inputSchema"]["properties"]["content"]["description"]
     assert "scope" in add["inputSchema"]["properties"]
     assert "ttl" in add["inputSchema"]["properties"]
     assert "target_name" in add["inputSchema"]["properties"]
@@ -478,6 +494,256 @@ async def test_tools_call_add_to_memory_creates_entry_and_is_recallable(
     assert fetched is not None
     assert fetched.body == "Operator prefers concise CLI output."
     assert fetched.metadata["tags"] == ["preference"]
+
+
+# ---------------------------------------------------------------------------
+# G0.13-T4 (#1134): one-cycle deprecation shim for ``content`` field
+# ---------------------------------------------------------------------------
+#
+# The shim accepts ``content`` (the pre-v0.6 field name, renamed to
+# ``body`` by G0.9.1-T7 #779) for v0.6.x. Calls supplying ``content``
+# round-trip to the same stored row as ``body`` and emit a structured
+# ``add_to_memory_field_deprecated`` warning log line. When both fields
+# are supplied, ``body`` wins. The shim is dropped in v0.7 (see
+# ``docs/RELEASING.md`` v0.7 follow-ups).
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_tools_call_add_to_memory_accepts_content_alias(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """AC: ``content`` field rounds-trip to the same stored row as ``body``.
+
+    A v0.3.x client pinned to ``content`` succeeds and the body is
+    stored under the canonical ``body`` field; the substrate doesn't
+    care which wire field carried it. ``service.recall`` (REST shape)
+    returns the body just like a ``body``-shaped call would.
+    """
+    client, op = client_with_operator
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_memory",
+                "arguments": {
+                    "content": "Pinned-to-content client write.",
+                    "scope": "user",
+                    "slug": "shim-content-only",
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["result"]["isError"] is False
+    created = json.loads(payload["result"]["content"][0]["text"])
+    assert created["scope"] == "user"
+    assert created["slug"] == "shim-content-only"
+    assert created["body"] == "Pinned-to-content client write."
+
+    service = MemoryService()
+    fetched = await service.recall(op, scope=MemoryScope.USER, slug="shim-content-only")
+    assert fetched is not None
+    assert fetched.body == "Pinned-to-content client write."
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_tools_call_add_to_memory_content_emits_deprecation_log(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """AC: supplying ``content`` emits ``add_to_memory_field_deprecated``.
+
+    The structured warning carries ``replacement="body"`` so an
+    operator scanning logs sees the migration breadcrumb directly,
+    matching ai-engineering-best-practices guidance (agent-facing
+    schema changes need a migration breadcrumb in the response or
+    logs).
+    """
+    client, _op = client_with_operator
+
+    with capture_logs() as captured:
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "add_to_memory",
+                    "arguments": {
+                        "content": "Deprecation-log canary write.",
+                        "scope": "user",
+                        "slug": "shim-content-deprecation-log",
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+
+    deprecation_events = [
+        ev for ev in captured if ev.get("event") == "add_to_memory_field_deprecated"
+    ]
+    assert len(deprecation_events) == 1, (
+        f"expected exactly one add_to_memory_field_deprecated event; got captured={captured}"
+    )
+    event = deprecation_events[0]
+    assert event["replacement"] == "body"
+    assert event["log_level"] == "warning"
+    assert event["removal_version"] == "0.7"
+    assert event["body_supplied"] is False
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_tools_call_add_to_memory_body_wins_when_both_supplied(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """AC: when both ``body`` and ``content`` are supplied, ``body`` wins.
+
+    A client mid-migration (sending both fields) gets a deterministic
+    outcome: the canonical ``body`` is persisted. The deprecation log
+    still fires because ``content`` was supplied; the event carries
+    ``body_supplied=True`` so an operator can tell apart "pure pinned
+    client" from "mid-migration client" in the log stream.
+    """
+    client, op = client_with_operator
+
+    with capture_logs() as captured:
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "add_to_memory",
+                    "arguments": {
+                        "body": "Canonical body wins.",
+                        "content": "Legacy content loses.",
+                        "scope": "user",
+                        "slug": "shim-both-fields",
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    created = json.loads(response.json()["result"]["content"][0]["text"])
+    assert created["body"] == "Canonical body wins."
+
+    # Persisted row matches the body field, not content.
+    service = MemoryService()
+    fetched = await service.recall(op, scope=MemoryScope.USER, slug="shim-both-fields")
+    assert fetched is not None
+    assert fetched.body == "Canonical body wins."
+
+    # The deprecation log fires (content was supplied) and records that
+    # body was also supplied so the operator can identify mid-migration
+    # clients distinctly from pure pinned clients.
+    deprecation_events = [
+        ev for ev in captured if ev.get("event") == "add_to_memory_field_deprecated"
+    ]
+    assert len(deprecation_events) == 1
+    assert deprecation_events[0]["body_supplied"] is True
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_add_to_memory_rejects_neither_body_nor_content(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC: server-side ``anyOf`` rejects a call supplying neither field.
+
+    The wire ``required`` lists only ``scope``, but the server-side
+    schema (with the wire-stripped ``anyOf``) still enforces "at least
+    one of body/content". A call missing both surfaces as INVALID_PARAMS
+    via :mod:`jsonschema` validation in
+    :mod:`~meho_backplane.mcp.handlers`, not as a handler-level
+    ``KeyError``.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_memory",
+                "arguments": {"scope": "user"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body, f"expected JSON-RPC error; got {body}"
+    assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_tools_call_add_to_memory_body_only_no_deprecation_log(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """The canonical ``body``-only path does not emit the deprecation log.
+
+    Negative control for the shim: a modern client should not see the
+    warning in its log stream.
+    """
+    client, _op = client_with_operator
+
+    with capture_logs() as captured:
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "add_to_memory",
+                    "arguments": {
+                        "body": "Modern client write.",
+                        "scope": "user",
+                        "slug": "shim-body-only-control",
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    deprecation_events = [
+        ev for ev in captured if ev.get("event") == "add_to_memory_field_deprecated"
+    ]
+    assert deprecation_events == []
 
 
 @pytest.mark.parametrize(
@@ -891,69 +1157,20 @@ def test_tools_call_add_to_memory_requires_target_name_for_target_scope(
     assert "target_name" in body["error"]["message"]
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_tools_call_add_to_memory_rejects_missing_required(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """Schema validation fires before the handler — missing ``body`` → -32602."""
-    client, _op = client_with_operator
-    response = post_mcp(
-        client,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "add_to_memory",
-                "arguments": {"scope": "user"},
-            },
-        },
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["error"]["code"] == INVALID_PARAMS
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_tools_call_add_to_memory_rejects_legacy_content_field(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """G0.9.1-T7 (#779): the old ``content`` field is now rejected.
-
-    The MCP `add_to_memory` tool renamed `content` -> `body` to align
-    with `add_to_knowledge` and the REST `POST /api/v1/memory` body
-    schema. ``additionalProperties: false`` on the inputSchema means a
-    v0.3.1 client posting ``content`` (without ``body``) fails the
-    JSON-Schema gate with INVALID_PARAMS -- not a silent drop. This is
-    the breaking-change contract documented in CHANGELOG [0.3.2].
-    """
-    client, _op = client_with_operator
-    response = post_mcp(
-        client,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "add_to_memory",
-                "arguments": {
-                    "content": "legacy v0.3.1 wire shape",
-                    "scope": "user",
-                },
-            },
-        },
-    )
-    assert response.status_code == 200
-    err = response.json()["error"]
-    assert err["code"] == INVALID_PARAMS
+# G0.13-T4 (#1134) removed two tests that no longer match the contract:
+#
+# * ``test_tools_call_add_to_memory_rejects_missing_required`` -- the
+#   missing-body-and-content case is now covered by
+#   ``test_tools_call_add_to_memory_rejects_neither_body_nor_content``
+#   above (same INVALID_PARAMS assertion against the server-side
+#   ``anyOf`` gate).
+# * ``test_tools_call_add_to_memory_rejects_legacy_content_field`` --
+#   the legacy ``content`` field is intentionally re-accepted under
+#   the one-cycle deprecation shim and covered by
+#   ``test_tools_call_add_to_memory_accepts_content_alias`` +
+#   ``test_tools_call_add_to_memory_content_emits_deprecation_log``
+#   above. The shim is dropped in v0.7; restore a rejection assertion
+#   when that lands (see ``docs/RELEASING.md`` v0.7 follow-ups).
 
 
 # ---------------------------------------------------------------------------

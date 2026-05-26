@@ -783,9 +783,16 @@ def test_bulk_delete_unauthenticated_redirects_to_login() -> None:
             "/ui/memory/bulk",
             data={"action": "delete", "ids": [str(uuid.uuid4())]},
         )
-    # The session middleware short-circuits on the unauthenticated
-    # request before the CSRF check sees it.
-    assert response.status_code in {302, 403}
+    # The session middleware short-circuits on the unauthenticated request
+    # before the CSRF check sees it -- main.py installs UISessionMiddleware
+    # outermost and CSRFMiddleware inside, so the response is deterministically
+    # a 302 to /ui/auth/login?return_to=... (not a 403 from the CSRF layer).
+    # Asserting the exact status + Location shape pins this ordering so a
+    # future middleware swap would surface as a loud regression instead of
+    # silently flipping the auth boundary.
+    assert response.status_code == 302, response.text
+    assert response.headers["Location"].startswith("/ui/auth/login"), response.headers["Location"]
+    assert "return_to=" in response.headers["Location"], response.headers["Location"]
 
 
 def test_bulk_post_renders_checkboxes_only_for_writable_rows() -> None:

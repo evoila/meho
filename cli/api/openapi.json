@@ -6077,7 +6077,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/_SortColumn",
+              "$ref": "#/components/schemas/meho_backplane__ui__routes__topology__table___SortColumn",
               "default": "name"
             }
           },
@@ -6901,13 +6901,45 @@
         }
       }
     },
-    "/ui/knowledge": {
+    "/ui/connectors": {
       "get": {
         "tags": [
-          "ui-stubs"
+          "ui-connectors"
         ],
-        "summary": "Ui Stub Knowledge",
-        "operationId": "ui_stub_knowledge_ui_knowledge_get",
+        "summary": "Ui Connectors List",
+        "description": "Serve ``GET /ui/connectors``. See module docstring for the\nURL contract.\n\n``dir`` (not ``direction``) is the spelling on the URL the\nissue body pinned -- the alias above keeps the Python kwarg\nreadable (``direction``) without breaking the URL contract\nthe operator sees in the address bar.",
+        "operationId": "ui_connectors_list_ui_connectors_get",
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/meho_backplane__ui__routes__connectors__list_view___SortColumn",
+              "default": "name"
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/_SortDirection",
+              "default": "asc"
+            }
+          },
+          {
+            "name": "product",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "nullable": true,
+              "title": "Product"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -6918,17 +6950,171 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
     },
-    "/ui/connectors": {
+    "/ui/connectors/{name}": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Detail",
+        "description": "``GET /ui/connectors/{name}``.",
+        "operationId": "ui_connectors_detail_ui_connectors__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target name does not resolve in the caller's tenant. Returns the 404 from the shared :func:`~meho_backplane.targets.resolver.resolve_target` helper -- alias-aware, with near-miss suggestions when the substring search lands hits.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Target name resolves to multiple targets in the caller's tenant (ambiguous alias match). Returns the 409 from :func:`resolve_target`.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}/probe": {
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Reprobe",
+        "description": "``POST /ui/connectors/{name}/probe``.",
+        "operationId": "ui_connectors_reprobe_ui_connectors__name__probe_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operator is not a tenant_admin. The re-probe verb is tenant_admin-only, mirroring the ``/api/v1/targets/{name}/probe`` REST route's posture.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "404": {
+            "description": "Target name does not resolve in the caller's tenant.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Resolver reported ambiguous connector resolution. The alert fragment names the candidate set.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "501": {
+            "description": "Resolver found no matching connector for the target's (product, fingerprint.version) pair.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/knowledge": {
       "get": {
         "tags": [
           "ui-stubs"
         ],
-        "summary": "Ui Stub Connectors",
-        "operationId": "ui_stub_connectors_ui_connectors_get",
+        "summary": "Ui Stub Knowledge",
+        "operationId": "ui_stub_knowledge_ui_knowledge_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -12001,16 +12187,14 @@
         "title": "_EdgeEndpoint",
         "description": "Inbound JSON shape for one annotation endpoint.\n\nMirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:\n``name`` is required, ``kind`` is the optional disambiguator for a\nbare name that resolves to multiple :class:`GraphNode` rows in the\ntenant. Frozen so the route handler cannot accidentally rebind the\nfield; ``extra=\"forbid\"`` rejects typo'd keys at the boundary\n(``{from: {nme: ...}}`` is a 422, not a silently-ignored body)."
       },
-      "_SortColumn": {
+      "_SortDirection": {
         "type": "string",
         "enum": [
-          "name",
-          "kind",
-          "last_seen",
-          "first_seen"
+          "asc",
+          "desc"
         ],
-        "title": "_SortColumn",
-        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
+        "title": "_SortDirection",
+        "description": "Sort direction -- ``asc`` (default) or ``desc``."
       },
       "_ViewMode": {
         "type": "string",
@@ -12020,6 +12204,29 @@
         ],
         "title": "_ViewMode",
         "description": "Closed enum of view modes exposed on ``GET /ui/topology``.\n\n``table`` is the default (T1 / #880); ``graph`` switches to the\nCytoscape.js surface (T2 / #881). The enum's ``str`` mixin keeps\ntemplate URL building stable -- ``str(_ViewMode.GRAPH)`` is\n``\"graph\"`` (not ``\"_ViewMode.GRAPH\"``). An out-of-range value\nfails Pydantic validation (422) at the HTTP boundary so the route\nbody never sees an unknown mode."
+      },
+      "meho_backplane__ui__routes__connectors__list_view___SortColumn": {
+        "type": "string",
+        "enum": [
+          "name",
+          "product",
+          "host",
+          "last_probed_at",
+          "status"
+        ],
+        "title": "_SortColumn",
+        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors the human-meaningful columns in the rendered table. An\nout-of-enum value fails Pydantic validation at the HTTP boundary\nwith a 422 carrying the candidate list in the error context. The\nenum's ``str`` mixin keeps the template's ``{{ sort }}`` rendering\n+ ``href`` building stable -- ``str(_SortColumn.NAME)`` is\n``\"name\"`` (not ``\"_SortColumn.NAME\"``)."
+      },
+      "meho_backplane__ui__routes__topology__table___SortColumn": {
+        "type": "string",
+        "enum": [
+          "name",
+          "kind",
+          "last_seen",
+          "first_seen"
+        ],
+        "title": "_SortColumn",
+        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
       }
     }
   }

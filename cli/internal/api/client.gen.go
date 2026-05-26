@@ -235,18 +235,33 @@ const (
 	Node TopologyDiffEntrySource = "node"
 )
 
-// Defines values for UnderscoreSortColumn.
+// Defines values for UnderscoreSortDirection.
 const (
-	FirstSeen UnderscoreSortColumn = "first_seen"
-	Kind      UnderscoreSortColumn = "kind"
-	LastSeen  UnderscoreSortColumn = "last_seen"
-	Name      UnderscoreSortColumn = "name"
+	Asc  UnderscoreSortDirection = "asc"
+	Desc UnderscoreSortDirection = "desc"
 )
 
 // Defines values for UnderscoreViewMode.
 const (
 	Graph UnderscoreViewMode = "graph"
 	Table UnderscoreViewMode = "table"
+)
+
+// Defines values for MehoBackplaneUiRoutesConnectorsListViewSortColumn.
+const (
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnHost         MehoBackplaneUiRoutesConnectorsListViewSortColumn = "host"
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnLastProbedAt MehoBackplaneUiRoutesConnectorsListViewSortColumn = "last_probed_at"
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnName         MehoBackplaneUiRoutesConnectorsListViewSortColumn = "name"
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnProduct      MehoBackplaneUiRoutesConnectorsListViewSortColumn = "product"
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnStatus       MehoBackplaneUiRoutesConnectorsListViewSortColumn = "status"
+)
+
+// Defines values for MehoBackplaneUiRoutesTopologyTableSortColumn.
+const (
+	MehoBackplaneUiRoutesTopologyTableSortColumnFirstSeen MehoBackplaneUiRoutesTopologyTableSortColumn = "first_seen"
+	MehoBackplaneUiRoutesTopologyTableSortColumnKind      MehoBackplaneUiRoutesTopologyTableSortColumn = "kind"
+	MehoBackplaneUiRoutesTopologyTableSortColumnLastSeen  MehoBackplaneUiRoutesTopologyTableSortColumn = "last_seen"
+	MehoBackplaneUiRoutesTopologyTableSortColumnName      MehoBackplaneUiRoutesTopologyTableSortColumn = "name"
 )
 
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
@@ -3487,17 +3502,8 @@ type UnderscoreEdgeEndpoint struct {
 	Name string  `json:"name"`
 }
 
-// UnderscoreSortColumn Closed enum of sort columns exposed in the URL.
-//
-// Mirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`
-// -- redeclared at the route boundary so an out-of-range value
-// fails Pydantic validation (422 with the candidate list in the
-// error context) before the substrate's defensive
-// :class:`ValueError` guard runs. The enum's “str“ mixin keeps
-// the template's “{{ sort }}“ rendering / “href“ building
-// stable -- “str(SortColumn.NAME)“ is “"name"“ (not
-// “"_SortColumn.NAME"“).
-type UnderscoreSortColumn string
+// UnderscoreSortDirection Sort direction -- “asc“ (default) or “desc“.
+type UnderscoreSortDirection string
 
 // UnderscoreViewMode Closed enum of view modes exposed on “GET /ui/topology“.
 //
@@ -3508,6 +3514,28 @@ type UnderscoreSortColumn string
 // fails Pydantic validation (422) at the HTTP boundary so the route
 // body never sees an unknown mode.
 type UnderscoreViewMode string
+
+// MehoBackplaneUiRoutesConnectorsListViewSortColumn Closed enum of sort columns exposed in the URL.
+//
+// Mirrors the human-meaningful columns in the rendered table. An
+// out-of-enum value fails Pydantic validation at the HTTP boundary
+// with a 422 carrying the candidate list in the error context. The
+// enum's “str“ mixin keeps the template's “{{ sort }}“ rendering
+// + “href“ building stable -- “str(_SortColumn.NAME)“ is
+// “"name"“ (not “"_SortColumn.NAME"“).
+type MehoBackplaneUiRoutesConnectorsListViewSortColumn string
+
+// MehoBackplaneUiRoutesTopologyTableSortColumn Closed enum of sort columns exposed in the URL.
+//
+// Mirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`
+// -- redeclared at the route boundary so an out-of-range value
+// fails Pydantic validation (422 with the candidate list in the
+// error context) before the substrate's defensive
+// :class:`ValueError` guard runs. The enum's “str“ mixin keeps
+// the template's “{{ sort }}“ rendering / “href“ building
+// stable -- “str(SortColumn.NAME)“ is “"name"“ (not
+// “"_SortColumn.NAME"“).
+type MehoBackplaneUiRoutesTopologyTableSortColumn string
 
 // ListAgentPrincipalsApiV1AgentPrincipalsGetParams defines parameters for ListAgentPrincipalsApiV1AgentPrincipalsGet.
 type ListAgentPrincipalsApiV1AgentPrincipalsGetParams struct {
@@ -4092,6 +4120,13 @@ type UiBroadcastStreamUiBroadcastStreamGetParams struct {
 	Since *string `form:"since,omitempty" json:"since,omitempty"`
 }
 
+// UiConnectorsListUiConnectorsGetParams defines parameters for UiConnectorsListUiConnectorsGet.
+type UiConnectorsListUiConnectorsGetParams struct {
+	Sort    *MehoBackplaneUiRoutesConnectorsListViewSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
+	Dir     *UnderscoreSortDirection                           `form:"dir,omitempty" json:"dir,omitempty"`
+	Product *string                                            `form:"product,omitempty" json:"product,omitempty"`
+}
+
 // UiMemoryListUiMemoryGetParams defines parameters for UiMemoryListUiMemoryGet.
 type UiMemoryListUiMemoryGetParams struct {
 	Scope *string `form:"scope,omitempty" json:"scope,omitempty"`
@@ -4100,7 +4135,7 @@ type UiMemoryListUiMemoryGetParams struct {
 
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
-	Sort *UnderscoreSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
+	Sort *MehoBackplaneUiRoutesTopologyTableSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
 
 	// Direction Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``).
 	Direction *string             `form:"direction,omitempty" json:"direction,omitempty"`
@@ -4206,6 +4241,12 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotate
 
 // BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody defines body for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost for application/json ContentType.
 type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody = UnderscoreBulkImportRequest
+
+// UiConnectorsDetailUiConnectorsNameGetJSONRequestBody defines body for UiConnectorsDetailUiConnectorsNameGet for application/json ContentType.
+type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
+
+// UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody defines body for UiConnectorsReprobeUiConnectorsNameProbePost for application/json ContentType.
+type UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody = UISessionContext
 
 // UiMemoryBulkUiMemoryBulkPostFormdataRequestBody defines body for UiMemoryBulkUiMemoryBulkPost for application/x-www-form-urlencoded ContentType.
 type UiMemoryBulkUiMemoryBulkPostFormdataRequestBody = BodyUiMemoryBulkUiMemoryBulkPost
@@ -4853,8 +4894,18 @@ type ClientInterface interface {
 	// UiBroadcastStreamUiBroadcastStreamGet request
 	UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiStubConnectorsUiConnectorsGet request
-	UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiConnectorsListUiConnectorsGet request
+	UiConnectorsListUiConnectorsGet(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsDetailUiConnectorsNameGetWithBody request with any body
+	UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsReprobeUiConnectorsNameProbePostWithBody request with any body
+	UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiStubKnowledgeUiKnowledgeGet request
 	UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -6483,8 +6534,56 @@ func (c *Client) UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, para
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiStubConnectorsUiConnectorsGetRequest(c.Server)
+func (c *Client) UiConnectorsListUiConnectorsGet(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsListUiConnectorsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(c.Server, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(c.Server, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsReprobeUiConnectorsNameProbePostRequest(c.Server, name, body)
 	if err != nil {
 		return nil, err
 	}
@@ -13306,8 +13405,8 @@ func NewUiBroadcastStreamUiBroadcastStreamGetRequest(server string, params *UiBr
 	return req, nil
 }
 
-// NewUiStubConnectorsUiConnectorsGetRequest generates requests for UiStubConnectorsUiConnectorsGet
-func NewUiStubConnectorsUiConnectorsGetRequest(server string) (*http.Request, error) {
+// NewUiConnectorsListUiConnectorsGetRequest generates requests for UiConnectorsListUiConnectorsGet
+func NewUiConnectorsListUiConnectorsGetRequest(server string, params *UiConnectorsListUiConnectorsGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -13325,10 +13424,158 @@ func NewUiStubConnectorsUiConnectorsGetRequest(server string) (*http.Request, er
 		return nil, err
 	}
 
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Sort != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "sort", runtime.ParamLocationQuery, *params.Sort); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Dir != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "dir", runtime.ParamLocationQuery, *params.Dir); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Product != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "product", runtime.ParamLocationQuery, *params.Product); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewUiConnectorsDetailUiConnectorsNameGetRequest calls the generic UiConnectorsDetailUiConnectorsNameGet builder with application/json body
+func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server, name, "application/json", bodyReader)
+}
+
+// NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody generates requests for UiConnectorsDetailUiConnectorsNameGet with any type of body
+func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsReprobeUiConnectorsNameProbePostRequest calls the generic UiConnectorsReprobeUiConnectorsNameProbePost builder with application/json body
+func NewUiConnectorsReprobeUiConnectorsNameProbePostRequest(server string, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server, name, "application/json", bodyReader)
+}
+
+// NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody generates requests for UiConnectorsReprobeUiConnectorsNameProbePost with any type of body
+func NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/probe", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -14628,8 +14875,18 @@ type ClientWithResponsesInterface interface {
 	// UiBroadcastStreamUiBroadcastStreamGetWithResponse request
 	UiBroadcastStreamUiBroadcastStreamGetWithResponse(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error)
 
-	// UiStubConnectorsUiConnectorsGetWithResponse request
-	UiStubConnectorsUiConnectorsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubConnectorsUiConnectorsGetResponse, error)
+	// UiConnectorsListUiConnectorsGetWithResponse request
+	UiConnectorsListUiConnectorsGetWithResponse(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, reqEditors ...RequestEditorFn) (*UiConnectorsListUiConnectorsGetResponse, error)
+
+	// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with any body
+	UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
+
+	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
+
+	// UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse request with any body
+	UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
+
+	UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
 
 	// UiStubKnowledgeUiKnowledgeGetWithResponse request
 	UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error)
@@ -16991,13 +17248,14 @@ func (r UiBroadcastStreamUiBroadcastStreamGetResponse) StatusCode() int {
 	return 0
 }
 
-type UiStubConnectorsUiConnectorsGetResponse struct {
+type UiConnectorsListUiConnectorsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
-func (r UiStubConnectorsUiConnectorsGetResponse) Status() string {
+func (r UiConnectorsListUiConnectorsGetResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -17005,7 +17263,51 @@ func (r UiStubConnectorsUiConnectorsGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r UiStubConnectorsUiConnectorsGetResponse) StatusCode() int {
+func (r UiConnectorsListUiConnectorsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsDetailUiConnectorsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsDetailUiConnectorsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsDetailUiConnectorsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsReprobeUiConnectorsNameProbePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -18502,13 +18804,47 @@ func (c *ClientWithResponses) UiBroadcastStreamUiBroadcastStreamGetWithResponse(
 	return ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp)
 }
 
-// UiStubConnectorsUiConnectorsGetWithResponse request returning *UiStubConnectorsUiConnectorsGetResponse
-func (c *ClientWithResponses) UiStubConnectorsUiConnectorsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubConnectorsUiConnectorsGetResponse, error) {
-	rsp, err := c.UiStubConnectorsUiConnectorsGet(ctx, reqEditors...)
+// UiConnectorsListUiConnectorsGetWithResponse request returning *UiConnectorsListUiConnectorsGetResponse
+func (c *ClientWithResponses) UiConnectorsListUiConnectorsGetWithResponse(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, reqEditors ...RequestEditorFn) (*UiConnectorsListUiConnectorsGetResponse, error) {
+	rsp, err := c.UiConnectorsListUiConnectorsGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUiStubConnectorsUiConnectorsGetResponse(rsp)
+	return ParseUiConnectorsListUiConnectorsGetResponse(rsp)
+}
+
+// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDetailUiConnectorsNameGetResponse
+func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	rsp, err := c.UiConnectorsDetailUiConnectorsNameGetWithBody(ctx, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp)
+}
+
+// UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse request with arbitrary body returning *UiConnectorsReprobeUiConnectorsNameProbePostResponse
+func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error) {
+	rsp, err := c.UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error) {
+	rsp, err := c.UiConnectorsReprobeUiConnectorsNameProbePost(ctx, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
 }
 
 // UiStubKnowledgeUiKnowledgeGetWithResponse request returning *UiStubKnowledgeUiKnowledgeGetResponse
@@ -21846,17 +22182,79 @@ func ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp *http.Response) (*Ui
 	return response, nil
 }
 
-// ParseUiStubConnectorsUiConnectorsGetResponse parses an HTTP response from a UiStubConnectorsUiConnectorsGetWithResponse call
-func ParseUiStubConnectorsUiConnectorsGetResponse(rsp *http.Response) (*UiStubConnectorsUiConnectorsGetResponse, error) {
+// ParseUiConnectorsListUiConnectorsGetResponse parses an HTTP response from a UiConnectorsListUiConnectorsGetWithResponse call
+func ParseUiConnectorsListUiConnectorsGetResponse(rsp *http.Response) (*UiConnectorsListUiConnectorsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiStubConnectorsUiConnectorsGetResponse{
+	response := &UiConnectorsListUiConnectorsGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsDetailUiConnectorsNameGetResponse parses an HTTP response from a UiConnectorsDetailUiConnectorsNameGetWithResponse call
+func ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp *http.Response) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsDetailUiConnectorsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse parses an HTTP response from a UiConnectorsReprobeUiConnectorsNameProbePostWithResponse call
+func ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp *http.Response) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsReprobeUiConnectorsNameProbePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

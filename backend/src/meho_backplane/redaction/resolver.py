@@ -51,6 +51,7 @@ __all__ = [
     "DEFAULT_POLICY_PACKAGE",
     "DEFAULT_POLICY_RESOURCE",
     "clear_overrides",
+    "find_policy_by_id",
     "get_default_policy",
     "register_policy",
     "resolve_policy",
@@ -144,6 +145,45 @@ def clear_overrides() -> None:
     """
     with _overrides_lock:
         _overrides.clear()
+
+
+def find_policy_by_id(policy_id: str) -> RedactionPolicy | None:
+    """Return the registered :class:`RedactionPolicy` whose ``id`` matches.
+
+    Walks the registered overrides + the packaged default and returns
+    the first policy whose ``id`` equals *policy_id*. Returns ``None``
+    when no policy with that id is registered (typically because the
+    YAML file containing it has been retired since the audit row was
+    written, or the row was written by a different deployment).
+
+    The policy-replay sense (G11.4-T5 #1074) consumes this: an audit
+    row records :attr:`~meho_backplane.db.models.AuditLog.payload`'s
+    ``redaction_policy_id`` field; the replayer looks the policy up by
+    that id and re-runs :func:`~meho_backplane.redaction.engine.redact`
+    against the row's ``raw_payload``, verifying the engine still
+    produces the recorded manifest. A policy id that no longer
+    resolves is a structurally explicit "cannot replay" signal --
+    distinct from "the engine produced a different manifest" -- so
+    the consumer can render an actionable diagnosis rather than a
+    silent pass.
+
+    The lookup acquires the overrides lock briefly to snapshot the
+    table values; the default policy is cached on first access. The
+    returned policy is immutable (Pydantic ``frozen=True``) so the
+    caller can hold the reference past the lock without further
+    synchronisation. O(n) over the override table is fine: the table
+    has at most a handful of overrides in v0.2 (the per-tenant
+    authoring path is a follow-on Initiative; production today runs
+    on the packaged default).
+    """
+    with _overrides_lock:
+        for policy in _overrides.values():
+            if policy.id == policy_id:
+                return policy
+    default = get_default_policy()
+    if default.id == policy_id:
+        return default
+    return None
 
 
 def resolve_policy(

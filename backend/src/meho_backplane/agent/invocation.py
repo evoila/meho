@@ -98,6 +98,11 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.db.models import AgentRunStatus, AgentRunTrigger
 from meho_backplane.operations import agent_run as run_lifecycle
+from meho_backplane.operations._audit import (
+    AgentRunAuditMeta,
+    agent_run_audit_meta_var,
+    agent_session_id_var,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -382,6 +387,8 @@ class AgentInvoker:
         definition: AgentDefinition,
         operator: Operator,
         inputs: str,
+        *,
+        meta: AgentRunAuditMeta,
     ) -> None:
         """Background coroutine: run the loop and record its terminal state.
 
@@ -392,13 +399,27 @@ class AgentInvoker:
         background task (an unhandled task exception would surface only as a
         log warning at GC time).
 
-        Binds :data:`~meho_backplane.agent.invoke.current_agent_run_id_var` to
-        this run's id for the loop's duration, so the first ``invoke_agent``
-        call records its child with this run as the parent (the lineage key).
+        Binds three contextvars around the loop, each scoped to this run:
+
+        * :data:`~meho_backplane.agent.invoke.current_agent_run_id_var` --
+          the parent id for any ``invoke_agent`` call the loop makes
+          (the run-lineage key on the child ``agent_run`` row).
+        * :data:`~meho_backplane.operations._audit.agent_session_id_var`
+          (G11.4-T5 #1074) -- the session lineage key the dispatcher
+          writes onto every per-tool-call ``audit_log`` row, so the
+          G8.2-T3 #1011 reconstruct-sense replay can rebuild the
+          agent's full session graph by ``agent_session_id``.
+        * :data:`~meho_backplane.operations._audit.agent_run_audit_meta_var`
+          (G11.4-T5 #1074) -- the model / provider / cost snapshot
+          attribution-stamped onto every per-tool-call audit row's
+          payload (per the C2 acceptance criteria).
+
         The task carries its own contextvar copy (``asyncio.create_task``
-        snapshots the context), so the bind is isolated to this run.
+        snapshots the context), so the binds are isolated to this run.
         """
         run_token = current_agent_run_id_var.set(run_id)
+        session_token = agent_session_id_var.set(run_id)
+        meta_token = agent_run_audit_meta_var.set(meta)
         try:
             try:
                 handle = self._runtime.start(definition, operator, inputs)
@@ -415,6 +436,8 @@ class AgentInvoker:
                 return
             await self._finalize_run(run_id, output=_project_output(result.output), error=None)
         finally:
+            agent_run_audit_meta_var.reset(meta_token)
+            agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
 
     # -- public surface ---------------------------------------------------
@@ -457,7 +480,13 @@ class AgentInvoker:
         # committed — never a ``running`` row with no backing task.
         with actor_delegation(entry.identity_ref):
             run_id = await self._create_run_row(operator, entry, provider=provider, model=model)
-            task = self._launch_run(run_id, definition, operator, inputs)
+            task = self._launch_run(
+                run_id,
+                definition,
+                operator,
+                inputs,
+                meta=AgentRunAuditMeta(model=model, provider=provider),
+            )
 
         _log.info(
             "agent_invoke_started",
@@ -567,7 +596,13 @@ class AgentInvoker:
         )
         # No actor_delegation: the agent is the subject, not an actor on behalf
         # of a human, so actor_sub stays NULL.
-        task = self._launch_run(run_id, definition, operator, inputs)
+        task = self._launch_run(
+            run_id,
+            definition,
+            operator,
+            inputs,
+            meta=AgentRunAuditMeta(model=model, provider=provider),
+        )
         _log.info(
             "agent_scheduled_started",
             run_id=str(run_id),
@@ -590,6 +625,8 @@ class AgentInvoker:
         definition: AgentDefinition,
         operator: Operator,
         inputs: str,
+        *,
+        meta: AgentRunAuditMeta,
     ) -> asyncio.Task[None]:
         """Launch the loop as a background task anchored in the run store.
 
@@ -597,9 +634,15 @@ class AgentInvoker:
         mid-flight (asyncio weakly references bare tasks) and survives the
         request that created it; a done-callback evicts the entry on
         completion so a long-lived worker does not accumulate finished runs.
+
+        *meta* is the agent-run audit snapshot threaded into every
+        per-tool-call audit row's payload (G11.4-T5 #1074) -- carried
+        into the background task via
+        :data:`~meho_backplane.operations._audit.agent_run_audit_meta_var`
+        in :meth:`_run_loop_to_completion`.
         """
         task = asyncio.create_task(
-            self._run_loop_to_completion(run_id, definition, operator, inputs),
+            self._run_loop_to_completion(run_id, definition, operator, inputs, meta=meta),
             name=f"agent-invoke-{run_id}",
         )
         self._store[run_id] = _RunState(
@@ -659,7 +702,16 @@ class AgentInvoker:
         # streamed run records its child against this run (G11.1-T7 #1067). The
         # stream runs inline in the SSE response coroutine, so the token reset
         # in ``finally`` keeps the bind from leaking past the stream.
+        #
+        # G11.4-T5 #1074 -- also bind the session id + audit meta
+        # contextvars so the dispatcher's per-tool-call audit rows
+        # carry the run's lineage key + the model/provider snapshot.
+        # Same finally-token discipline; identical inline scope.
         run_token = current_agent_run_id_var.set(run_id)
+        session_token = agent_session_id_var.set(run_id)
+        meta_token = agent_run_audit_meta_var.set(
+            AgentRunAuditMeta(model=model, provider=provider),
+        )
         try:
             async for event in self._runtime.stream_events(definition, operator, inputs, run_id):
                 if event.kind is AgentRunEventKind.FINAL:
@@ -668,6 +720,8 @@ class AgentInvoker:
                     terminal_error = str(event.data.get("error"))
                 yield run_id, event
         finally:
+            agent_run_audit_meta_var.reset(meta_token)
+            agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
             await self._finalize_run(run_id, output=terminal_output, error=terminal_error)
 

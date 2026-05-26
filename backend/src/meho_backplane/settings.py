@@ -550,6 +550,17 @@ class Settings(BaseModel):
         the surface holds an HTTP connection open for a short interactive
         run before degrading to the pollable shape. Set via
         ``AGENT_SYNC_TIMEOUT_SECONDS``.
+    agent_approval_wait_timeout_seconds:
+        Overall wall-clock cap on the agent runtime's wait for a
+        ``requires_approval`` operation's decision broadcast event
+        (G11.1-T9 #1117). When an in-loop ``call_operation`` returns
+        ``awaiting_approval``, the wrapped tool subscribes to
+        ``approval.{approved,rejected}`` on the per-tenant Valkey stream
+        and blocks until the decision arrives, this cap elapses, or the
+        run is cancelled. Default 1800s = 30 minutes: long enough for
+        human review across timezone-distant teams without tying up an
+        agent loop indefinitely on a forgotten request. Set via
+        ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010). Default ``False``:
@@ -693,6 +704,16 @@ class Settings(BaseModel):
     # polls). Bounds how long the surface holds an HTTP connection open
     # for a short interactive run before degrading to the pollable shape.
     agent_sync_timeout_seconds: float = Field(default=30.0, gt=0)
+    # G11.1-T9 #1117 — overall wall-clock cap on the agent runtime's wait
+    # for a ``requires_approval`` operation's decision broadcast event.
+    # When an in-loop ``call_operation`` returns ``awaiting_approval``, the
+    # wrapped tool subscribes to ``approval.{approved,rejected}`` on the
+    # per-tenant Valkey stream and blocks until the decision arrives, this
+    # cap elapses, or the run is cancelled. Default 1800s = 30 minutes:
+    # long enough for human review across timezone-distant teams without
+    # tying up an agent loop indefinitely on a forgotten request. Set via
+    # ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
+    agent_approval_wait_timeout_seconds: float = Field(default=1800.0, gt=0)
     # G11.3-T2 #823 — cron + one-off trigger scheduler. ``tick_interval``
     # bounds how often the loop scans for due triggers; the default
     # (30 s) is the consumer-doc-accepted granularity for cron triggers
@@ -972,6 +993,9 @@ def get_settings() -> Settings:
         ),
         agent_sync_timeout_seconds=float(
             os.environ.get("AGENT_SYNC_TIMEOUT_SECONDS", "30.0"),
+        ),
+        agent_approval_wait_timeout_seconds=float(
+            os.environ.get("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "1800.0"),
         ),
         scheduler_tick_interval_seconds=int(
             os.environ.get("SCHEDULER_TICK_INTERVAL_SECONDS", "30"),

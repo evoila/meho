@@ -79,6 +79,7 @@ from pydantic_ai import Agent, RunContext, Tool, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import RunUsage
 
+from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
 from meho_backplane.agent.invoke import (
     ChildAgentResolver,
     ChildRunFinalizer,
@@ -88,6 +89,7 @@ from meho_backplane.agent.invoke import (
 from meho_backplane.agent.toolset import resolve_agent_tools
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.meta_tools import call_operation, list_operation_groups
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
@@ -387,15 +389,31 @@ def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:
         arguments; ``target`` is an optional ``{"name": "<slug>"}`` for
         operations that act on a specific managed target.
         """
-        return await call_operation(
-            ctx.deps,
-            {
-                "connector_id": connector_id,
-                "op_id": op_id,
-                "params": params or {},
-                "target": target,
-            },
-        )
+        call_arguments: dict[str, Any] = {
+            "connector_id": connector_id,
+            "op_id": op_id,
+            "params": params or {},
+            "target": target,
+        }
+        result = await call_operation(ctx.deps, call_arguments)
+        if result.get("status") == "awaiting_approval":
+            # G11.1-T9 (#1117) — bridge ``requires_approval`` ops back into
+            # the loop: subscribe to the broadcast feed for an
+            # ``approval.{approved,rejected}`` event and either re-dispatch
+            # with ``_approved=True`` on approval or surface the
+            # rejection / timeout to the model. Same shape the toolset-
+            # resolved path applies (see :func:`_make_meta_tool` in
+            # :mod:`meho_backplane.agent.toolset`); duplicated here because
+            # this code path is the T1 default surface used by definitions
+            # that didn't declare a toolset.
+            settings = get_settings()
+            return await resume_or_surface_awaiting_approval(
+                operator=ctx.deps,
+                call_arguments=call_arguments,
+                awaiting_envelope=result,
+                timeout_seconds=settings.agent_approval_wait_timeout_seconds,
+            )
+        return result
 
     @agent.tool
     async def list_operation_groups_tool(

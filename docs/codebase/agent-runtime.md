@@ -316,6 +316,90 @@ framework `Agent` construction + the `usage=ctx.usage` call, keeping
 `finalizer` (the durable child-row create / close hooks the live invoker owns)
 without `invoke.py` importing the framework's loop driver or the DB session.
 
+## Awaiting-approval resume (T9 #1117)
+
+When the agent's `call_operation` tool reaches an op with
+`requires_approval=True`, the dispatcher parks the dispatch durably (see
+[approvals](approvals.md)) and returns an `awaiting_approval` envelope rather
+than executing. Until #1117 the only path that resumed the run was the REST
+`POST /api/v1/approvals/{id}/approve` endpoint with the original `params` —
+the human-driven express lane that re-dispatches inline. Every other operator
+surface (`/decide`, MCP `meho.approvals.{approve,reject}`, CLI, wall-monitor)
+captures the decision durably and publishes `approval.{approved,rejected}` on
+the broadcast feed, but did **not** re-dispatch. Without an agent-side
+resume substrate, an agent run that bridged a `requires_approval` op via any
+path other than REST `/approve+params` was dead-on-arrival: the operator
+could approve, but the agent run never found out.
+
+The agent runtime closes that gap with a wrapped `call_operation`. On
+`status="awaiting_approval"`, the wrapper:
+
+1. **Subscribes** to the per-tenant Valkey stream (`meho:feed:{tenant_id}`)
+   via `XREAD BLOCK`, filtered to the request's own `approval_request_id`.
+   The wait is in `meho_backplane/agent/approval_wait.py`; the per-tenant
+   stream is the same one the SSE feed and `meho.broadcast.watch` read.
+2. **On approval** — re-invokes the dispatcher with `_approved=True` and the
+   original in-memory `params` (passed through `call_operation_with_approval`
+   in `operations/meta_tools.py`). The dispatcher's gate-bypass path skips
+   the policy gate; the durable approval-decision row is the authorization.
+3. **On rejection** — returns the original `awaiting_approval` envelope to
+   the model annotated with `extras["error_code"] = "approval_rejected"`
+   and `extras["decision"] = "rejected"` plus a rewritten `error` message,
+   so the agent's model sees a structured tool result it can reason about.
+4. **On timeout / broadcast outage** — returns the envelope annotated with
+   `extras["error_code"] = "awaiting_approval_timeout"` so the model can
+   distinguish "still pending, timed out" from "decision happened". The
+   durable decision row remains the source of truth; the agent can query
+   approval status or re-issue.
+
+The wait cap is `Settings.agent_approval_wait_timeout_seconds` (default
+1800s = 30 min, env `AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS`). It bounds how
+long an agent loop ties up its turn budget on a forgotten review; pick a
+value long enough for human review across timezone-distant teams.
+
+### Operator / agent split
+
+The substrate preserves the operator/agent split G11.2 established:
+
+| Path | Decision capture | Re-dispatch |
+|---|---|---|
+| REST `/approve` with `params` | inline | inline (human as operator + agent) |
+| REST `/decide`, MCP, CLI | durable row + broadcast | **agent runtime via wait+wrap** |
+
+Storing the `params` on the approval row would turn the table into a
+re-dispatch primitive holding secrets-bearing call payloads — a security
+and audit-surface tradeoff the issue body documents (`#1117` "Why not store
+params on approval_request"). The agent-side in-memory params are
+authoritative for the live-wait case this Task targets. Resuming agent
+runs whose process died between dispatch and approval is explicitly
+out-of-scope for v1.
+
+### Audit attribution
+
+The resumed dispatch is recorded under the agent principal (the original
+caller), with the approval-decision audit row holding the human reviewer's
+identity. The two-row decision audit invariant (`approval.request` +
+`approval.decision`) sits alongside the dispatch audit row from the
+re-dispatch, so the chain reads: agent attempted op → policy gate parked
+→ operator decided → agent resumed → op executed. Every row is
+correlated by `approval_request_id`.
+
+### Where it lands
+
+- **`agent/approval_wait.py`** — `wait_for_approval_decision(tenant_id,
+  approval_request_id, timeout_seconds)` (the read-side primitive) +
+  `resume_or_surface_awaiting_approval(...)` (the agent-facing entry
+  point that branches on decision).
+- **`agent/run.py`** and **`agent/toolset.py`** — the wrapped
+  `call_operation` tool. Both the T1 default surface (no toolset) and
+  the T3 resolved surface go through the resume substrate; the wrapping
+  is duplicated rather than factored out because the two adapters bind
+  arguments slightly differently and the wrap is one branch each.
+- **`operations/meta_tools.py`** — `call_operation_with_approval(operator,
+  arguments)`, the re-dispatch entry point. Threads `_approved=True`
+  into the same body `call_operation` uses; not part of the public
+  REST/MCP surface.
+
 ## Dependencies
 
 - **`pydantic-ai-slim[anthropic]`** (pinned in `backend/pyproject.toml`) —

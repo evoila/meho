@@ -22,6 +22,12 @@ The wider G11.1 initiative (#802) builds on this seam: definition persistence
 types this package exports.
 """
 
+from meho_backplane.agent.approval_wait import (
+    AWAITING_APPROVAL_TIMEOUT_ERROR_CODE,
+    ApprovalDecision,
+    resume_or_surface_awaiting_approval,
+    wait_for_approval_decision,
+)
 from meho_backplane.agent.invoke import (
     AGENT_INVOKE_DEPTH_TOP_LEVEL,
     AgentInvocationDepthExceeded,
@@ -54,6 +60,7 @@ from meho_backplane.agent.toolset import (
 
 __all__ = [
     "AGENT_INVOKE_DEPTH_TOP_LEVEL",
+    "AWAITING_APPROVAL_TIMEOUT_ERROR_CODE",
     "META_TOOL_NAMES",
     "AgentDefinition",
     "AgentInvocationDepthExceeded",
@@ -64,6 +71,7 @@ __all__ = [
     "AgentRunHandle",
     "AgentRunResult",
     "AgentRunStatus",
+    "ApprovalDecision",
     "ChildAgentResolver",
     "ChildRunFinalizer",
     "ChildRunRecorder",
@@ -76,4 +84,6 @@ __all__ = [
     "default_model_factory",
     "make_invoke_agent_tool",
     "resolve_agent_tools",
+    "resume_or_surface_awaiting_approval",
+    "wait_for_approval_decision",
 ]

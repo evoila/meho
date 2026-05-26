@@ -566,6 +566,216 @@ def test_create_target_with_all_fields(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/v1/targets — product-enum validation (G0.14-T3 #1144)
+# ---------------------------------------------------------------------------
+
+
+def _register_fake_k8s_connector() -> None:
+    """Register a no-op connector under ``product='k8s'`` for enum tests.
+
+    The autouse :func:`_empty_connector_registry` fixture clears the
+    registry between tests, so each enum-validation test that needs a
+    known set of valid products registers its own minimal stand-in
+    here. ``product='k8s'`` mirrors the real dogfood case
+    (``claude-rdc-hetzner-dc#697`` signal 5 — operator typed
+    ``'kubernetes'``, real registration is ``'k8s'``).
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _FakeK8sConnector(Connector):
+        product = "k8s"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector_v2(product="k8s", version="1.x", impl_id="k8s", cls=_FakeK8sConnector)
+
+
+def test_create_target_unknown_product_returns_422(client: TestClient) -> None:
+    """POST with a product no connector advertises returns a structured 422.
+
+    G0.14-T3 (#1144) acceptance criterion. Replays the real-world
+    typo from ``claude-rdc-hetzner-dc#697`` signal 5: the operator
+    posts ``product='kubernetes'`` (the friendly common name) when the
+    registered connector advertises ``'k8s'``. Before this PR the
+    POST succeeded and the broken row was unrecoverable (no DELETE,
+    no PATCH on ``product``). After this PR the POST is rejected at
+    the validation boundary with a structured detail naming the
+    typo'd value + the valid set + the convention doc.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "rdc-rke2-infra",
+                "product": "kubernetes",
+                "host": "10.10.0.1",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    # T11 convention compliance — a stable ``kind`` code, the offending
+    # product value, the valid set, and a human-readable message naming
+    # the doc reference. Each assertion pins one clause of the
+    # convention.
+    assert detail["kind"] == "unknown_product"
+    assert detail["product"] == "kubernetes"
+    assert detail["valid_products"] == ["k8s"]
+    assert "kubernetes" in detail["message"]
+    assert "k8s" in detail["message"]
+    assert "docs/codebase/error-message-shape.md" in detail["message"]
+
+
+def test_create_target_unknown_product_does_not_create_row(client: TestClient) -> None:
+    """A 422 from the product-enum guard does not commit the row.
+
+    Pinning that the validator runs BEFORE ``session.add(t)`` so a
+    rejected POST does not leave a tombstone the operator would
+    have to recover from. Re-POSTing the same name with a valid
+    product must succeed (it would 409 if the previous insert had
+    landed).
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        r_typo = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "rdc-rke2-infra",
+                "product": "kubernetes",
+                "host": "10.10.0.1",
+            },
+            headers=headers,
+        )
+        # Retry with the right product; if the typo POST had committed
+        # the row, this second POST would 409.
+        r_retry = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "rdc-rke2-infra",
+                "product": "k8s",
+                "host": "10.10.0.1",
+            },
+            headers=headers,
+        )
+    assert r_typo.status_code == 422
+    assert r_retry.status_code == 201
+
+
+def test_create_target_valid_product_succeeds(client: TestClient) -> None:
+    """POST with a registered product token still returns 201.
+
+    Sanity-check that the new validator does not break the happy
+    path: a request whose product matches the registered set
+    proceeds to the existing insert + 201 flow unchanged.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "rdc-rke2-infra",
+                "product": "k8s",
+                "host": "10.10.0.1",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["product"] == "k8s"
+
+
+def test_create_target_empty_registry_skips_validation(client: TestClient) -> None:
+    """An empty connector registry does not block POST.
+
+    The validator skips when ``registered_product_tokens()`` is
+    empty -- that state means "no connectors imported" (test
+    isolation, deploy booted before eager import ran), and
+    rejecting every product in that state would be the wrong
+    default. This pins that the existing test suite's
+    create-target paths (which use ``product='ssh'`` /
+    ``product='vsphere'`` without registering anything) continue
+    to work. The lifespan calls ``_eager_import_connectors`` in
+    production, so the empty-registry branch is a
+    test-environment-only path.
+    """
+    # No connector registered — autouse fixture cleared the registry.
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={"name": "no-registry-target", "product": "ssh", "host": "10.0.0.1"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+
+
+def test_create_target_unknown_product_lists_all_valid(client: TestClient) -> None:
+    """The 422 ``valid_products`` lists every registered product, sorted.
+
+    Multiple connectors registered → the rejected POST surfaces the
+    full set so the operator does not need a second round-trip to
+    ``GET /api/v1/connectors`` to find the right token. Sorted
+    order is the stability contract — generators that diff the
+    response body across releases stay deterministic.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _NoopConnector(Connector):
+        product = "placeholder"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector_v2(
+        product="vmware", version="9.0", impl_id="vmware-rest", cls=_NoopConnector
+    )
+    register_connector_v2(product="k8s", version="1.x", impl_id="k8s", cls=_NoopConnector)
+    register_connector_v2(product="vault", version="1.x", impl_id="vault", cls=_NoopConnector)
+
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "bad-product",
+                "product": "kubernetes",  # not registered
+                "host": "10.0.0.1",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    # Sorted, complete, no duplicates from v1-compat empty padding.
+    assert detail["valid_products"] == ["k8s", "vault", "vmware"]
+
+
+# ---------------------------------------------------------------------------
 # PATCH /api/v1/targets/{name} — update
 # ---------------------------------------------------------------------------
 

@@ -487,7 +487,7 @@
           "targets"
         ],
         "summary": "Create Target",
-        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.",
+        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.\n\nG0.14-T3 (#1144). The ``product`` field is validated at request time\nagainst :func:`~meho_backplane.connectors.registry.registered_product_tokens`.\nAn unknown product yields a structured 422 (see\n:func:`_build_unknown_product_detail`); the OpenAPI schema also\nexposes the enum (see :func:`meho_backplane.main.build_openapi_schema`)\nso Swagger / generator tooling surfaces the valid set before the\nrequest leaves the editor. Both layers share the same source-of-\ntruth helper so they cannot drift.\n\nValidation is skipped when the registry is empty \u2014 that state means\n\"no connectors imported\" (test isolation, or a deploy booted before\n:func:`_eager_import_connectors` ran). In production the lifespan\npopulates the registry before the first request arrives, so the\nskip branch never fires; a misregistered deploy that *did* hit it\nis recoverable via T4 #1145's PATCH-product or DELETE path.",
         "operationId": "create_target_api_v1_targets_post",
         "parameters": [
           {
@@ -11048,7 +11048,25 @@
             "type": "string",
             "maxLength": 100,
             "minLength": 1,
-            "title": "Product"
+            "title": "Product",
+            "enum": [
+              "bind9",
+              "gcloud",
+              "harbor",
+              "hetzner-robot",
+              "holodeck",
+              "k8s",
+              "nsx",
+              "pfsense",
+              "sddc-manager",
+              "vault",
+              "vcf-automation",
+              "vcf-fleet",
+              "vcf-logs",
+              "vcf-operations",
+              "vmware"
+            ],
+            "description": "Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss."
           },
           "host": {
             "type": "string",

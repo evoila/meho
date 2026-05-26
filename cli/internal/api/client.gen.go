@@ -222,6 +222,25 @@ const (
 	SurfaceResultVerdictYellow SurfaceResultVerdict = "yellow"
 )
 
+// Defines values for TargetCreateProduct.
+const (
+	Bind9         TargetCreateProduct = "bind9"
+	Gcloud        TargetCreateProduct = "gcloud"
+	Harbor        TargetCreateProduct = "harbor"
+	HetznerRobot  TargetCreateProduct = "hetzner-robot"
+	Holodeck      TargetCreateProduct = "holodeck"
+	K8s           TargetCreateProduct = "k8s"
+	Nsx           TargetCreateProduct = "nsx"
+	Pfsense       TargetCreateProduct = "pfsense"
+	SddcManager   TargetCreateProduct = "sddc-manager"
+	Vault         TargetCreateProduct = "vault"
+	VcfAutomation TargetCreateProduct = "vcf-automation"
+	VcfFleet      TargetCreateProduct = "vcf-fleet"
+	VcfLogs       TargetCreateProduct = "vcf-logs"
+	VcfOperations TargetCreateProduct = "vcf-operations"
+	Vmware        TargetCreateProduct = "vmware"
+)
+
 // Defines values for TopologyDiffEntryChangeKind.
 const (
 	Created TopologyDiffEntryChangeKind = "created"
@@ -2802,10 +2821,15 @@ type TargetCreate struct {
 	Notes           *string                 `json:"notes"`
 	Port            *int                    `json:"port"`
 	PreferredImplId *string                 `json:"preferred_impl_id"`
-	Product         string                  `json:"product"`
-	SecretRef       *string                 `json:"secret_ref"`
-	VpnRequired     *bool                   `json:"vpn_required,omitempty"`
+
+	// Product Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss.
+	Product     TargetCreateProduct `json:"product"`
+	SecretRef   *string             `json:"secret_ref"`
+	VpnRequired *bool               `json:"vpn_required,omitempty"`
 }
+
+// TargetCreateProduct Connector product slug. Must match the “product“ field of a registered connector class; see “GET /api/v1/connectors“ for the live list and “docs/codebase/error-message-shape.md“ for the 422 shape returned on miss.
+type TargetCreateProduct string
 
 // TargetSummary Short shape for list endpoints.
 //

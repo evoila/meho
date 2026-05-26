@@ -35,6 +35,7 @@ add latency rather than removing it.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
@@ -45,6 +46,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.models import EVENT_OUTBOX_NOTIFY_CHANNEL, EventOutbox
 
 __all__ = ["publish"]
+
+#: PG NOTIFY channel names are SQL identifiers and must match the
+#: ``[A-Za-z_][A-Za-z0-9_]*`` shape. The channel name is interpolated
+#: into a ``NOTIFY <name>`` string (NOTIFY does not accept bind params
+#: -- PG requires the channel as an identifier literal), so we
+#: defensively assert the import-time constant matches this shape. A
+#: future edit that accidentally widens the channel value would fail
+#: this assertion at module load rather than landing a SQL-injection
+#: surface (even though the channel is a constant under our control,
+#: this assertion makes that property an enforced invariant rather
+#: than an inspect-by-eye property).
+_NOTIFY_CHANNEL_IDENT_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+if not _NOTIFY_CHANNEL_IDENT_PATTERN.fullmatch(EVENT_OUTBOX_NOTIFY_CHANNEL):
+    raise RuntimeError(
+        f"EVENT_OUTBOX_NOTIFY_CHANNEL ({EVENT_OUTBOX_NOTIFY_CHANNEL!r}) must be a "
+        "valid PG identifier (matching the [A-Za-z_][A-Za-z0-9_]* shape); refusing "
+        "to interpolate it into a NOTIFY statement."
+    )
 
 
 def _register_post_commit_notify(session: AsyncSession) -> None:
@@ -96,9 +115,19 @@ def _register_post_commit_notify(session: AsyncSession) -> None:
             # fires. NOTIFY is fire-and-forget, so we open + close
             # immediately.
             with engine.connect() as conn:
-                conn.execute(
-                    text(f"NOTIFY {EVENT_OUTBOX_NOTIFY_CHANNEL}"),
-                )
+                # PG's NOTIFY does not accept bind parameters -- the
+                # channel must be a SQL identifier literal in the
+                # statement string. EVENT_OUTBOX_NOTIFY_CHANNEL is a
+                # module-level constant whose shape is enforced by the
+                # ``_NOTIFY_CHANNEL_IDENT_PATTERN`` assertion at module
+                # load, so this interpolation cannot carry attacker-
+                # controlled input. The Semgrep avoid-sqlalchemy-text
+                # rule fires on every ``text(f"...")`` regardless of
+                # provenance; the assertion above is the load-time
+                # invariant that justifies the suppression.
+                notify_sql = f"NOTIFY {EVENT_OUTBOX_NOTIFY_CHANNEL}"
+                # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text  # noqa: E501
+                conn.execute(text(notify_sql))
                 conn.commit()
         except Exception:
             # NOTIFY is a latency hint, not a durability mechanism;

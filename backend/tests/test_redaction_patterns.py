@@ -47,13 +47,7 @@ _EXPECTED_NAMES = {
 # source -- the regex still gets the same effective input shape, but
 # the literal high-entropy form never appears in the file. Same
 # posture as ``test_connectors_holodeck_auth.py``'s _FAKE_KEY_HEADER.
-_JWT_FIXTURE_POS = (
-    "eyJhbGciOiJIUzI1NiJ9"
-    + "."
-    + "eyJzdWIiOiIxMjM0NTY3ODkwIn0"
-    + "."
-    + "abcdefghij"
-)
+_JWT_FIXTURE_POS = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "abcdefghij"
 _AUTH_HEADER_FIXTURE = "Authorization: Bearer " + _JWT_FIXTURE_POS
 _CLIENT_SECRET_FIXTURE_POS = "client_secret" + " = " + "ABCDEFGHIJKL" + "12345"
 

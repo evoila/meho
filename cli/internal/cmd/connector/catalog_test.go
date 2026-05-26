@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -17,51 +16,6 @@ import (
 )
 
 func strptr(s string) *string { return &s }
-
-// --- parseCatalogRef -------------------------------------------------------
-
-func TestParseCatalogRefTable(t *testing.T) {
-	cases := []struct {
-		in               string
-		product, version string
-		wantErr          bool
-	}{
-		{"vmware/9.0", "vmware", "9.0", false},
-		{"sddc-manager/9.0", "sddc-manager", "9.0", false},
-		{"  vmware / 9.0  ", "vmware", "9.0", false},
-		{"vmware", "", "", true},
-		{"", "", "", true},
-		{"vmware/", "", "", true},
-		{"/9.0", "", "", true},
-	}
-	for _, c := range cases {
-		p, v, err := parseCatalogRef(c.in)
-		if c.wantErr {
-			if err == nil {
-				t.Errorf("parseCatalogRef(%q): want error, got (%q,%q)", c.in, p, v)
-			} else if !errors.Is(err, errCatalogResolve) {
-				t.Errorf("parseCatalogRef(%q): error should wrap errCatalogResolve, got %v", c.in, err)
-			}
-			continue
-		}
-		if err != nil || p != c.product || v != c.version {
-			t.Errorf("parseCatalogRef(%q) = (%q,%q,%v); want (%q,%q,nil)",
-				c.in, p, v, err, c.product, c.version)
-		}
-	}
-}
-
-// --- upstreamSpecs ---------------------------------------------------------
-
-func TestUpstreamSpecs(t *testing.T) {
-	got := upstreamSpecs([]string{"https://a/x.yaml", "https://b/y.yaml"})
-	if len(got) != 2 || got[0].URI != "https://a/x.yaml" || got[1].URI != "https://b/y.yaml" {
-		t.Fatalf("upstreamSpecs mapping wrong: %+v", got)
-	}
-	if len(upstreamSpecs(nil)) != 0 {
-		t.Fatalf("upstreamSpecs(nil) should be empty")
-	}
-}
 
 // --- validateIngestMode ----------------------------------------------------
 
@@ -140,109 +94,6 @@ func TestGetCatalogDecodesEntries(t *testing.T) {
 	}
 }
 
-// --- resolveCatalogEntry ---------------------------------------------------
-
-func catalogServer(t *testing.T, entries []CatalogEntry) string {
-	t.Helper()
-	srv := mockBackplane(t, map[string]mockHandler{
-		"GET /api/v1/connectors/catalog": func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(t, w, 200, CatalogResponse{Catalog: entries})
-		},
-	})
-	t.Cleanup(srv.Close)
-	primeToken(t, srv.URL)
-	return srv.URL
-}
-
-func TestResolveCatalogEntryHappyPath(t *testing.T) {
-	url := catalogServer(t, []CatalogEntry{{
-		Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
-		RequiresConnectorClass: "VmwareRestConnector",
-		Upstream:               []string{"https://example.test/vcenter.yaml"},
-	}})
-	entry, err := resolveCatalogEntry(context.Background(), url, "vmware/9.0")
-	if err != nil {
-		t.Fatalf("resolveCatalogEntry: %v", err)
-	}
-	if entry.ImplID != "vmware-rest" || len(entry.Upstream) != 1 {
-		t.Fatalf("unexpected entry: %+v", entry)
-	}
-}
-
-func TestResolveCatalogEntryNotFound(t *testing.T) {
-	url := catalogServer(t, []CatalogEntry{{
-		Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
-		Upstream: []string{"https://example.test/x.yaml"},
-	}})
-	_, err := resolveCatalogEntry(context.Background(), url, "nsx/4.2")
-	if err == nil || !errors.Is(err, errCatalogResolve) {
-		t.Fatalf("want errCatalogResolve, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "vmware/9.0") {
-		t.Errorf("not-found error should list available entries; got %v", err)
-	}
-}
-
-func TestResolveCatalogEntryTypedRefused(t *testing.T) {
-	url := catalogServer(t, []CatalogEntry{{
-		Product: "vault", Version: "1.x", ImplID: "vault",
-		RequiresConnectorClass: "VaultConnector",
-		Upstream:               nil,
-	}})
-	_, err := resolveCatalogEntry(context.Background(), url, "vault/1.x")
-	if err == nil || !errors.Is(err, errCatalogResolve) {
-		t.Fatalf("want errCatalogResolve, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "typed connector") {
-		t.Errorf("typed refusal message wrong: %v", err)
-	}
-}
-
-func TestResolveCatalogEntryTemplatedRefused(t *testing.T) {
-	url := catalogServer(t, []CatalogEntry{{
-		Product: "nsx", Version: "4.2", ImplID: "nsx-rest",
-		RequiresConnectorClass: "NsxConnector",
-		Upstream:               []string{"https://<nsx-mgr-fqdn>/api/v1/spec/openapi/nsx_api.yaml"},
-	}})
-	_, err := resolveCatalogEntry(context.Background(), url, "nsx/4.2")
-	if err == nil || !errors.Is(err, errCatalogResolve) {
-		t.Fatalf("want errCatalogResolve, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "templated") {
-		t.Errorf("templated refusal message wrong: %v", err)
-	}
-}
-
-func TestResolveCatalogEntryDuplicateRejected(t *testing.T) {
-	url := catalogServer(t, []CatalogEntry{
-		{Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
-			Upstream: []string{"https://example.test/a.yaml"}},
-		{Product: "vmware", Version: "9.0", ImplID: "vmware-rest-2",
-			Upstream: []string{"https://example.test/b.yaml"}},
-	})
-	_, err := resolveCatalogEntry(context.Background(), url, "vmware/9.0")
-	if err == nil || !errors.Is(err, errCatalogResolve) {
-		t.Fatalf("want errCatalogResolve, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "multiple entries") {
-		t.Errorf("duplicate message wrong: %v", err)
-	}
-}
-
-func TestResolveCatalogEntryEmptyUpstreamRejected(t *testing.T) {
-	url := catalogServer(t, []CatalogEntry{{
-		Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
-		Upstream: []string{"   "},
-	}})
-	_, err := resolveCatalogEntry(context.Background(), url, "vmware/9.0")
-	if err == nil || !errors.Is(err, errCatalogResolve) {
-		t.Fatalf("want errCatalogResolve, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "empty upstream") {
-		t.Errorf("empty-upstream message wrong: %v", err)
-	}
-}
-
 // --- printCatalogTable -----------------------------------------------------
 
 func TestPrintCatalogTableHappyPath(t *testing.T) {
@@ -307,26 +158,17 @@ func TestRegisteredTriplesFromMockServer(t *testing.T) {
 	}
 }
 
-// --- runIngest catalog mode (end-to-end through the verb) -------------------
+// --- runIngest catalog mode (G0.14-T9 / #1150) -----------------------------
 
-func TestRunIngestCatalogModeRoundTrip(t *testing.T) {
-	var posted IngestRequest
+// TestRunIngestCatalogModePostsCatalogEntry pins the post-#1150
+// contract: catalog mode POSTs `{"catalog_entry": "..."}` directly.
+// The backplane now resolves the entry server-side, so the CLI no
+// longer pre-fetches the catalog and posts the resolved quadruple.
+func TestRunIngestCatalogModePostsCatalogEntry(t *testing.T) {
+	var rawBody []byte
 	srv := mockBackplane(t, map[string]mockHandler{
-		"GET /api/v1/connectors/catalog": func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(t, w, 200, CatalogResponse{Catalog: []CatalogEntry{{
-				Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
-				RequiresConnectorClass: "VmwareRestConnector",
-				Upstream: []string{
-					"https://example.test/vcenter.yaml",
-					"https://example.test/vi-json.yaml",
-				},
-			}}})
-		},
 		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, r *http.Request) {
-			body, _ := io.ReadAll(r.Body)
-			if err := json.Unmarshal(body, &posted); err != nil {
-				t.Errorf("decode ingest body: %v", err)
-			}
+			rawBody, _ = io.ReadAll(r.Body)
 			writeJSON(t, w, 200, IngestResponse{
 				Ingestion: IngestionResult{ConnectorID: "vmware-rest-9.0", InsertedCount: 961},
 			})
@@ -340,13 +182,70 @@ func TestRunIngestCatalogModeRoundTrip(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	if err := runIngest(cmd, ingestOptions{Catalog: "vmware/9.0", BackplaneOverride: srv.URL}); err != nil {
+	if err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		BackplaneOverride: srv.URL,
+	}); err != nil {
 		t.Fatalf("runIngest catalog mode: %v", err)
 	}
-	if posted.Product != "vmware" || posted.Version != "9.0" || posted.ImplID != "vmware-rest" {
-		t.Fatalf("posted triple wrong: %+v", posted)
+
+	// Decode into a generic map to inspect the exact wire shape. The
+	// CLI must NOT post product/version/impl_id/specs in catalog mode
+	// — the backend's mutual-exclusivity validator would reject the
+	// body. The omitempty tags on IngestRequest's pointer fields are
+	// the load-bearing mechanism.
+	var posted map[string]any
+	if err := json.Unmarshal(rawBody, &posted); err != nil {
+		t.Fatalf("decode posted body: %v", err)
 	}
-	if len(posted.Specs) != 2 || posted.Specs[0].URI != "https://example.test/vcenter.yaml" {
-		t.Fatalf("posted specs wrong: %+v", posted.Specs)
+	if posted["catalog_entry"] != "vmware/9.0" {
+		t.Errorf("catalog_entry not posted: %+v", posted)
+	}
+	for _, banned := range []string{"product", "version", "impl_id", "specs"} {
+		if _, present := posted[banned]; present {
+			t.Errorf("catalog mode must not post %q (would conflict): %+v", banned, posted)
+		}
+	}
+}
+
+// TestRunIngestManualModePostsQuadruple pins the parallel contract:
+// manual mode POSTs the explicit quadruple, NOT a catalog_entry.
+// This is the regression guard for the historical
+// --product/--version/--impl/--spec form.
+func TestRunIngestManualModePostsQuadruple(t *testing.T) {
+	var rawBody []byte
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, r *http.Request) {
+			rawBody, _ = io.ReadAll(r.Body)
+			writeJSON(t, w, 200, IngestResponse{
+				Ingestion: IngestionResult{ConnectorID: "test-1.0", InsertedCount: 2},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runIngest(cmd, ingestOptions{
+		Product: "test", Version: "1.0", ImplID: "test-impl",
+		Specs:             []string{"https://example.test/spec.yaml"},
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runIngest manual mode: %v", err)
+	}
+
+	var posted map[string]any
+	if err := json.Unmarshal(rawBody, &posted); err != nil {
+		t.Fatalf("decode posted body: %v", err)
+	}
+	if _, present := posted["catalog_entry"]; present {
+		t.Errorf("manual mode must not post catalog_entry: %+v", posted)
+	}
+	if posted["product"] != "test" || posted["version"] != "1.0" || posted["impl_id"] != "test-impl" {
+		t.Errorf("manual mode posted quadruple wrong: %+v", posted)
 	}
 }

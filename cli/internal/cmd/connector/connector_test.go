@@ -857,7 +857,12 @@ func TestPostIngestRoundTripWithMockServer(t *testing.T) {
 				w.WriteHeader(400)
 				return
 			}
-			if req.Product != "vmware" || req.Version != "9.0" || req.ImplID != "vmware-rest" {
+			// G0.14-T9 (#1150): IngestRequest.Product/Version/ImplID are
+			// now *string so the JSON serializer can omit them on the
+			// catalog-driven shape. Deref for the equality check; nil
+			// here means the test request was misconstructed.
+			if req.Product == nil || req.Version == nil || req.ImplID == nil ||
+				*req.Product != "vmware" || *req.Version != "9.0" || *req.ImplID != "vmware-rest" {
 				t.Errorf("unexpected triple: %+v", req)
 			}
 			if len(req.Specs) != 1 || req.Specs[0].URI != "file:///abs/vcenter.yaml" {
@@ -882,8 +887,11 @@ func TestPostIngestRoundTripWithMockServer(t *testing.T) {
 	defer srv.Close()
 
 	primeToken(t, srv.URL)
+	product := "vmware"
+	version := "9.0"
+	implID := "vmware-rest"
 	got, err := postIngest(context.Background(), srv.URL, IngestRequest{
-		Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
+		Product: &product, Version: &version, ImplID: &implID,
 		Specs: []SpecSource{{URI: "file:///abs/vcenter.yaml"}},
 	})
 	if err != nil {
@@ -1142,8 +1150,11 @@ func TestHTTPErrorClassification403(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
+	product := "x"
+	version := "y"
+	implID := "z"
 	_, err := postIngest(context.Background(), srv.URL, IngestRequest{
-		Product: "x", Version: "y", ImplID: "z",
+		Product: &product, Version: &version, ImplID: &implID,
 		Specs: []SpecSource{{URI: "file:///a.yaml"}},
 	})
 	if err == nil {

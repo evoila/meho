@@ -1940,6 +1940,30 @@ type IngestKbRequest struct {
 // ingestion (vCenter's “vcenter.yaml“ + “vi-json.yaml“) lands as
 // multiple “SpecSource“ entries in one request.
 //
+// Two mutually-exclusive request shapes:
+//
+//   - **Explicit-quadruple shape** — “product“ + “version“ +
+//     “impl_id“ + “specs[]“ carry the resolved triple plus the
+//     spec sources the caller already knows. The MCP admin tool and
+//     the historical CLI manual mode use this shape.
+//   - **Catalog-driven shape** (G0.14-T9 / #1150) — “catalog_entry“
+//     carries a “"<product>/<version>"“ reference; the route
+//     handler resolves the entry against the packaged catalog (see
+//     :mod:`meho_backplane.operations.ingest.catalog`) and fills in
+//     “product“ / “version“ / “impl_id“ / “specs[]“ from the
+//     catalog entry before dispatching through the existing ingest
+//     path. REST-native agent runtimes that can't shell out to the
+//     CLI use this shape; the CLI's “--catalog“ flag has been
+//     refactored to POST this shape rather than resolving the entry
+//     client-side.
+//
+// The two shapes are mutually exclusive: a body that sets
+// “catalog_entry“ alongside any of “product“ / “version“ /
+// “impl_id“ / “specs[]“ fails 422 “catalog_entry_conflict“ at
+// the validator below. A body that sets neither fails 422
+// “ingest_request_underspecified“. “base_url“ and “dry_run“
+// are accepted in both shapes.
+//
 // “dry_run=True“ skips both the DB writes and the grouping pass:
 // only :func:`parse_openapi` runs, and the response carries
 // :class:`IngestionResultModel` counts derived from the parse output
@@ -1956,12 +1980,13 @@ type IngestKbRequest struct {
 // would otherwise mean the pipeline runs with the wrong impl_id
 // and the operator only finds out at review-time.
 type IngestRequest struct {
-	BaseUrl *string      `json:"base_url"`
-	DryRun  *bool        `json:"dry_run,omitempty"`
-	ImplId  string       `json:"impl_id"`
-	Product string       `json:"product"`
-	Specs   []SpecSource `json:"specs"`
-	Version string       `json:"version"`
+	BaseUrl      *string       `json:"base_url"`
+	CatalogEntry *string       `json:"catalog_entry"`
+	DryRun       *bool         `json:"dry_run,omitempty"`
+	ImplId       *string       `json:"impl_id"`
+	Product      *string       `json:"product"`
+	Specs        *[]SpecSource `json:"specs,omitempty"`
+	Version      *string       `json:"version"`
 }
 
 // IngestResponse Response shape for “POST /api/v1/connectors/ingest“.

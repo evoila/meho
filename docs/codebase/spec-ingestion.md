@@ -90,6 +90,37 @@ All T1–T8 substrate work merged to `main` before T9 (#409); the
 pipeline is shipped and ready for per-G3.x consumer Initiatives
 to drive ingestion against their target vendor surfaces.
 
+### Catalog-driven REST ingest (G0.14-T9 / #1150)
+
+`POST /api/v1/connectors/ingest` accepts a second request shape
+beyond the explicit-quadruple `(product, version, impl_id, specs[])`:
+a body of `{"catalog_entry": "<product>/<version>"}` resolves the
+catalog entry server-side (`load_catalog().get(product, version)`)
+and routes through the same `_run_ingest_with_http_mapping` path as
+if the caller had supplied the resolved quadruple. The two shapes
+are mutually exclusive — a `@model_validator(mode="after")` on
+`IngestRequest` rejects mixed bodies with `catalog_entry_conflict`
+(422) and empty bodies with `ingest_request_underspecified` (422)
+per the T11 [error-message-shape](error-message-shape.md) convention.
+
+Why server-side: a REST-native agent runtime (no shell-out to the
+CLI) needs an actionable REST surface that mirrors the discoverable
+`GET /api/v1/connectors/catalog` shape. Before #1150, only the CLI
+could resolve a catalog entry; the REST endpoint required the
+already-resolved quadruple. Moving the resolver server-side means
+the CLI's `--catalog` flag is now a thin shell that POSTs the
+catalog-driven body shape directly — one canonical resolution
+path, no client-side catalog cache to drift against the server's
+package data.
+
+The four catalog-side validation outcomes (`catalog_entry_malformed`,
+`catalog_entry_not_found`, `catalog_entry_typed_connector`,
+`catalog_entry_templated_upstream`) ship through
+`build_catalog_entry_*_detail` helpers in `error_envelopes.py` so
+the REST 422 envelope can't drift from any future MCP equivalent
+(same shared-builder pattern G0.9.1-T5 / #777 used for
+`VersionMismatchError`).
+
 T1 produces the proto shape every other stage consumes; T2 is the
 single write path into `endpoint_descriptor` for ingested rows; T3
 groups them; T4 gates dispatchability behind operator review; T6

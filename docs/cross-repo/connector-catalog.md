@@ -85,21 +85,71 @@ of each connector's first verified `--catalog` ingest.
    covers it, whether that class is registered on this backplane (`reg`
    column), the observed `spec_info_version`, and notes. Read-only;
    operator role suffices.
-2. `meho connector ingest --catalog <product>/<version>` — resolve the
-   entry and ingest its recommended triple + upstream spec URL(s) (the
-   backplane fetches each URL). Typed-connector entries (`upstream:
-   null`) and fqdn-templated upstream URLs are refused with a hint to
-   use the explicit `--spec` form instead. `--catalog` is mutually
-   exclusive with the manual `--product`/`--version`/`--impl`/`--spec`
-   flags. Add `--dry-run` to validate before committing.
+2. `meho connector ingest --catalog <product>/<version>` — POST
+   `{"catalog_entry": "<product>/<version>"}` to
+   `/api/v1/connectors/ingest`; the backplane resolves the entry,
+   fills in `product` + `version` + `impl_id` + `specs[]`, and runs
+   the standard ingest pipeline. Typed-connector entries (`upstream:
+   null`) and fqdn-templated upstream URLs are refused with a
+   structured 422 hint pointing at the explicit-quadruple shape.
+   `--catalog` is mutually exclusive with the manual
+   `--product`/`--version`/`--impl`/`--spec` flags. Add `--dry-run`
+   to validate before committing.
 3. `meho connector review <connector_id>` → `meho connector enable <id>` —
    vet the LLM-summarised groups and turn the operations on.
+
+REST-native clients (agent runtimes that can't shell out to the
+CLI) hit the same path by POSTing the catalog-driven body shape
+directly. See the *REST shape* section below.
 
 For an entry the catalog can't ingest directly (typed, or fqdn-templated
 upstream such as `nsx`), fall back to the explicit `meho connector ingest
 --product … --version … --impl … --spec <url>` form documented in
 [`connector-ingestion.md`](connector-ingestion.md), reading the `upstream`
 URL(s) from `catalog list`.
+
+## REST shape (G0.14-T9 / #1150)
+
+`POST /api/v1/connectors/ingest` accepts two mutually-exclusive
+request shapes. The catalog-driven shape moved server-side in
+G0.14-T9 so REST-native agent runtimes (which can't shell out to
+the CLI) reach the same ingest path the CLI's `--catalog` flag
+hits.
+
+**Catalog-driven shape** — pass `catalog_entry`; the server resolves
+the entry against the packaged catalog:
+
+```json
+{ "catalog_entry": "vmware/9.0", "dry_run": false }
+```
+
+**Explicit-quadruple shape** — pass the resolved triple plus the
+spec sources (MCP admin tool and historical clients):
+
+```json
+{
+  "product": "vmware",
+  "version": "9.0",
+  "impl_id": "vmware-rest",
+  "specs": [{ "uri": "https://example.lab/vcenter.yaml" }]
+}
+```
+
+A body that sets both shapes fails 422 `catalog_entry_conflict`. A
+body that sets neither fails 422 `ingest_request_underspecified`. A
+body that sets `catalog_entry` but the entry is unknown / malformed
+/ typed-only / fqdn-templated fails 422 with one of the four
+classifier codes below — every shape follows the T11
+[error-message-shape](../codebase/error-message-shape.md) convention:
+
+| Failure | Code | When |
+|---|---|---|
+| Reference missing `/` separator | `catalog_entry_malformed` | `"vmware9.0"` |
+| Reference well-formed, not in catalog | `catalog_entry_not_found` | `"foo/1.0"` |
+| Resolved entry has `upstream: null` | `catalog_entry_typed_connector` | `"vault/1.x"` |
+| Resolved entry's upstream has `<...>` placeholders | `catalog_entry_templated_upstream` | `"nsx/4.2"` |
+| Both shapes supplied | `catalog_entry_conflict` | shape conflict |
+| Neither shape supplied | `ingest_request_underspecified` | empty body |
 
 ## Adding or updating an entry
 

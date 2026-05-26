@@ -58,7 +58,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "ConnectorListItem",
@@ -120,6 +120,30 @@ class IngestRequest(BaseModel):
     ingestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as
     multiple ``SpecSource`` entries in one request.
 
+    Two mutually-exclusive request shapes:
+
+    * **Explicit-quadruple shape** — ``product`` + ``version`` +
+      ``impl_id`` + ``specs[]`` carry the resolved triple plus the
+      spec sources the caller already knows. The MCP admin tool and
+      the historical CLI manual mode use this shape.
+    * **Catalog-driven shape** (G0.14-T9 / #1150) — ``catalog_entry``
+      carries a ``"<product>/<version>"`` reference; the route
+      handler resolves the entry against the packaged catalog (see
+      :mod:`meho_backplane.operations.ingest.catalog`) and fills in
+      ``product`` / ``version`` / ``impl_id`` / ``specs[]`` from the
+      catalog entry before dispatching through the existing ingest
+      path. REST-native agent runtimes that can't shell out to the
+      CLI use this shape; the CLI's ``--catalog`` flag has been
+      refactored to POST this shape rather than resolving the entry
+      client-side.
+
+    The two shapes are mutually exclusive: a body that sets
+    ``catalog_entry`` alongside any of ``product`` / ``version`` /
+    ``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at
+    the validator below. A body that sets neither fails 422
+    ``ingest_request_underspecified``. ``base_url`` and ``dry_run``
+    are accepted in both shapes.
+
     ``dry_run=True`` skips both the DB writes and the grouping pass:
     only :func:`parse_openapi` runs, and the response carries
     :class:`IngestionResultModel` counts derived from the parse output
@@ -139,12 +163,79 @@ class IngestRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    product: str = Field(min_length=1, max_length=64)
-    version: str = Field(min_length=1, max_length=64)
-    impl_id: str = Field(min_length=1, max_length=128)
-    specs: list[SpecSource] = Field(min_length=1, max_length=16)
+    product: str | None = Field(default=None, min_length=1, max_length=64)
+    version: str | None = Field(default=None, min_length=1, max_length=64)
+    impl_id: str | None = Field(default=None, min_length=1, max_length=128)
+    specs: list[SpecSource] = Field(default_factory=list, max_length=16)
+    catalog_entry: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = Field(default=None, max_length=2048)
     dry_run: bool = False
+
+    @model_validator(mode="after")
+    def _exactly_one_request_shape(self) -> IngestRequest:
+        """Reject bodies that mix or omit both request shapes.
+
+        Catalog-driven shape: ``catalog_entry`` set, every quadruple
+        field unset / empty. Explicit-quadruple shape: every quadruple
+        field set, ``catalog_entry`` unset. Anything else is a
+        caller-side bug worth a 422 rather than a half-resolved
+        downstream failure (the route handler can't tell which shape
+        the caller intended, and silently picking one would land an
+        ingest under either the wrong triple or a half-populated
+        catalog entry).
+
+        The error messages carry the convention's diagnostic shape
+        (see :doc:`docs/codebase/error-message-shape.md`): a stable
+        ``snake_case`` classifier prefix (``catalog_entry_conflict``
+        / ``ingest_request_underspecified``) so REST callers and the
+        MCP-driving agent can branch without re-parsing the prose.
+        """
+        catalog_set = self.catalog_entry is not None
+        quadruple_set = (
+            self.product is not None
+            or self.version is not None
+            or self.impl_id is not None
+            or len(self.specs) > 0
+        )
+        if catalog_set and quadruple_set:
+            raise ValueError(
+                "catalog_entry_conflict: 'catalog_entry' is mutually exclusive "
+                "with 'product' / 'version' / 'impl_id' / 'specs[]'; "
+                "supply only one request shape. "
+                "See docs/codebase/error-message-shape.md.",
+            )
+        if not catalog_set and not quadruple_set:
+            raise ValueError(
+                "ingest_request_underspecified: supply either "
+                "'catalog_entry' (catalog-driven shape) or "
+                "'product' + 'version' + 'impl_id' + 'specs[]' "
+                "(explicit-quadruple shape). "
+                "See docs/codebase/error-message-shape.md.",
+            )
+        if not catalog_set:
+            # Explicit-quadruple shape — every quadruple field must
+            # be set. Partial-quadruple bodies (e.g. impl_id missing)
+            # would otherwise silently default to None and surface
+            # downstream as a confusing register_ingested error.
+            missing = [
+                name
+                for name, value in (
+                    ("product", self.product),
+                    ("version", self.version),
+                    ("impl_id", self.impl_id),
+                )
+                if value is None
+            ]
+            if not self.specs:
+                missing.append("specs")
+            if missing:
+                raise ValueError(
+                    "ingest_request_underspecified: explicit-quadruple shape "
+                    f"requires {missing}. Supply the missing field(s), or use "
+                    "the catalog-driven shape via 'catalog_entry'. "
+                    "See docs/codebase/error-message-shape.md.",
+                )
+        return self
 
 
 class IngestionResultModel(BaseModel):

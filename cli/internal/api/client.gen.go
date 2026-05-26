@@ -956,6 +956,40 @@ type BodyUiConnectorsEditSubmitUiConnectorsNamePatch struct {
 	VpnRequired *bool             `json:"vpn_required,omitempty"`
 }
 
+// BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost defines model for Body_ui_connectors_import_confirm_ui_connectors_import_confirm_post.
+type BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost struct {
+	Pasted *string `json:"pasted"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Upload     *string           `json:"upload"`
+}
+
+// BodyUiConnectorsImportPreviewUiConnectorsImportPost defines model for Body_ui_connectors_import_preview_ui_connectors_import_post.
+type BodyUiConnectorsImportPreviewUiConnectorsImportPost struct {
+	Pasted *string `json:"pasted"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Upload     *string           `json:"upload"`
+}
+
 // BodyUiMemoryBulkUiMemoryBulkPost defines model for Body_ui_memory_bulk_ui_memory_bulk_post.
 type BodyUiMemoryBulkUiMemoryBulkPost struct {
 	Action         string    `json:"action"`
@@ -4463,6 +4497,15 @@ type UiConnectorsCreateModalUiConnectorsCreateGetJSONRequestBody = UISessionCont
 // UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody defines body for UiConnectorsCreateSubmitUiConnectorsCreatePost for application/x-www-form-urlencoded ContentType.
 type UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody = BodyUiConnectorsCreateSubmitUiConnectorsCreatePost
 
+// UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody defines body for UiConnectorsImportPageUiConnectorsImportGet for application/json ContentType.
+type UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody = UISessionContext
+
+// UiConnectorsImportPreviewUiConnectorsImportPostMultipartRequestBody defines body for UiConnectorsImportPreviewUiConnectorsImportPost for multipart/form-data ContentType.
+type UiConnectorsImportPreviewUiConnectorsImportPostMultipartRequestBody = BodyUiConnectorsImportPreviewUiConnectorsImportPost
+
+// UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody defines body for UiConnectorsImportConfirmUiConnectorsImportConfirmPost for multipart/form-data ContentType.
+type UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody = BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost
+
 // UiConnectorsDetailUiConnectorsNameGetJSONRequestBody defines body for UiConnectorsDetailUiConnectorsNameGet for application/json ContentType.
 type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
 
@@ -5138,6 +5181,17 @@ type ClientInterface interface {
 	UiConnectorsCreateSubmitUiConnectorsCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiConnectorsCreateSubmitUiConnectorsCreatePostWithFormdataBody(ctx context.Context, body UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsImportPageUiConnectorsImportGetWithBody request with any body
+	UiConnectorsImportPageUiConnectorsImportGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsImportPageUiConnectorsImportGet(ctx context.Context, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsImportPreviewUiConnectorsImportPostWithBody request with any body
+	UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody request with any body
+	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsDetailUiConnectorsNameGetWithBody request with any body
 	UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -6860,6 +6914,54 @@ func (c *Client) UiConnectorsCreateSubmitUiConnectorsCreatePostWithBody(ctx cont
 
 func (c *Client) UiConnectorsCreateSubmitUiConnectorsCreatePostWithFormdataBody(ctx context.Context, body UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsCreateSubmitUiConnectorsCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsImportPageUiConnectorsImportGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsImportPageUiConnectorsImportGetRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsImportPageUiConnectorsImportGet(ctx context.Context, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsImportPageUiConnectorsImportGetRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsImportPreviewUiConnectorsImportPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(c.Server, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -14022,6 +14124,104 @@ func NewUiConnectorsCreateSubmitUiConnectorsCreatePostRequestWithBody(server str
 	return req, nil
 }
 
+// NewUiConnectorsImportPageUiConnectorsImportGetRequest calls the generic UiConnectorsImportPageUiConnectorsImportGet builder with application/json body
+func NewUiConnectorsImportPageUiConnectorsImportGetRequest(server string, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsImportPageUiConnectorsImportGetRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewUiConnectorsImportPageUiConnectorsImportGetRequestWithBody generates requests for UiConnectorsImportPageUiConnectorsImportGet with any type of body
+func NewUiConnectorsImportPageUiConnectorsImportGetRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/import")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsImportPreviewUiConnectorsImportPostRequestWithBody generates requests for UiConnectorsImportPreviewUiConnectorsImportPost with any type of body
+func NewUiConnectorsImportPreviewUiConnectorsImportPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/import")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody generates requests for UiConnectorsImportConfirmUiConnectorsImportConfirmPost with any type of body
+func NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/import/confirm")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiConnectorsDetailUiConnectorsNameGetRequest calls the generic UiConnectorsDetailUiConnectorsNameGet builder with application/json body
 func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -15522,6 +15722,17 @@ type ClientWithResponsesInterface interface {
 	UiConnectorsCreateSubmitUiConnectorsCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsCreateSubmitUiConnectorsCreatePostResponse, error)
 
 	UiConnectorsCreateSubmitUiConnectorsCreatePostWithFormdataBodyWithResponse(ctx context.Context, body UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsCreateSubmitUiConnectorsCreatePostResponse, error)
+
+	// UiConnectorsImportPageUiConnectorsImportGetWithBodyWithResponse request with any body
+	UiConnectorsImportPageUiConnectorsImportGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error)
+
+	UiConnectorsImportPageUiConnectorsImportGetWithResponse(ctx context.Context, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error)
+
+	// UiConnectorsImportPreviewUiConnectorsImportPostWithBodyWithResponse request with any body
+	UiConnectorsImportPreviewUiConnectorsImportPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportPreviewUiConnectorsImportPostResponse, error)
+
+	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse request with any body
+	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error)
 
 	// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with any body
 	UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
@@ -17999,6 +18210,72 @@ func (r UiConnectorsCreateSubmitUiConnectorsCreatePostResponse) StatusCode() int
 	return 0
 }
 
+type UiConnectorsImportPageUiConnectorsImportGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsImportPageUiConnectorsImportGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsImportPageUiConnectorsImportGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsImportPreviewUiConnectorsImportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsImportPreviewUiConnectorsImportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsImportPreviewUiConnectorsImportPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConnectorsDetailUiConnectorsNameGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -19635,6 +19912,41 @@ func (c *ClientWithResponses) UiConnectorsCreateSubmitUiConnectorsCreatePostWith
 		return nil, err
 	}
 	return ParseUiConnectorsCreateSubmitUiConnectorsCreatePostResponse(rsp)
+}
+
+// UiConnectorsImportPageUiConnectorsImportGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsImportPageUiConnectorsImportGetResponse
+func (c *ClientWithResponses) UiConnectorsImportPageUiConnectorsImportGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error) {
+	rsp, err := c.UiConnectorsImportPageUiConnectorsImportGetWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsImportPageUiConnectorsImportGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsImportPageUiConnectorsImportGetWithResponse(ctx context.Context, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error) {
+	rsp, err := c.UiConnectorsImportPageUiConnectorsImportGet(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsImportPageUiConnectorsImportGetResponse(rsp)
+}
+
+// UiConnectorsImportPreviewUiConnectorsImportPostWithBodyWithResponse request with arbitrary body returning *UiConnectorsImportPreviewUiConnectorsImportPostResponse
+func (c *ClientWithResponses) UiConnectorsImportPreviewUiConnectorsImportPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportPreviewUiConnectorsImportPostResponse, error) {
+	rsp, err := c.UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsImportPreviewUiConnectorsImportPostResponse(rsp)
+}
+
+// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse request with arbitrary body returning *UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse
+func (c *ClientWithResponses) UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error) {
+	rsp, err := c.UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp)
 }
 
 // UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDetailUiConnectorsNameGetResponse
@@ -23140,6 +23452,84 @@ func ParseUiConnectorsCreateSubmitUiConnectorsCreatePostResponse(rsp *http.Respo
 	}
 
 	response := &UiConnectorsCreateSubmitUiConnectorsCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsImportPageUiConnectorsImportGetResponse parses an HTTP response from a UiConnectorsImportPageUiConnectorsImportGetWithResponse call
+func ParseUiConnectorsImportPageUiConnectorsImportGetResponse(rsp *http.Response) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsImportPageUiConnectorsImportGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsImportPreviewUiConnectorsImportPostResponse parses an HTTP response from a UiConnectorsImportPreviewUiConnectorsImportPostWithResponse call
+func ParseUiConnectorsImportPreviewUiConnectorsImportPostResponse(rsp *http.Response) (*UiConnectorsImportPreviewUiConnectorsImportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsImportPreviewUiConnectorsImportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse parses an HTTP response from a UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithResponse call
+func ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp *http.Response) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

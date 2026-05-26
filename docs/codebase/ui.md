@@ -1482,6 +1482,9 @@ the same way broadcast / topology / memory retired theirs.
 | `POST` | `/ui/connectors/create` | (T2 #874) Create submit. Builds a `TargetCreate` and delegates to the REST `create_target` handler in-process. Success → 204 + `HX-Redirect: /ui/connectors`; validation failure → 422 + modal re-rendered with per-field errors. |
 | `GET` | `/ui/connectors/{name}/edit` | (T2 #874) HTMX-loaded edit-target modal, pre-populated server-side from the resolved target. Tenant_admin gated; alias-aware 404 on cross-tenant. |
 | `PATCH` | `/ui/connectors/{name}` | (T2 #874) Edit submit. Builds a `TargetUpdate` and delegates to the REST `update_target` handler in-process. Same success / failure shapes as create. |
+| `GET` | `/ui/connectors/import` | (T3 #875) Full bulk-import page: paste box + file upload. Tenant_admin gated. |
+| `POST` | `/ui/connectors/import` | (T3 #875) Parse the pasted / uploaded `targets.yaml` (`yaml.safe_load`) and render the CREATE-vs-UPDATE preview table; parse errors render inline (422, no 500). Read-only — no writes. |
+| `POST` | `/ui/connectors/import/confirm` | (T3 #875) Re-parse + re-classify against the tenant's current targets, validate the whole plan up front (schema-invalid entry → inline 422, no partial write), then apply it in-process via `create_target` (new) + `update_target` (existing); renders the result summary (N created, M updated). |
 
 ### Module layout
 
@@ -1593,3 +1596,83 @@ modal form inherits the `X-CSRF-Token` header from the page-level
 * `backend/src/meho_backplane/ui/templates/connectors/_probe_alert.html` — failure alert fragment (no_connector / ambiguous).
 * `backend/src/meho_backplane/ui/static/src/app/connectors-feed.js` — `connectorsRecentOps` Alpine controller.
 * `backend/tests/test_ui_connectors_view.py` — auth boundary, list (full + fragment + sort + filter + cross-tenant), detail (properties + alias + 404 + cross-tenant + recent ops + ops matrix + ambiguous / no-connector branches), fingerprint card (present / never), re-probe button visibility (operator vs tenant_admin), SSE wiring + URL-encoding, re-probe (success + 403 operator + 501 no-connector + 404 unknown).
+
+### Bulk import (Task #875)
+
+T3 layers a **bulk `targets.yaml` import** surface on top of the T1 / T2
+surfaces. The operator pastes or uploads a `targets.yaml`; the server
+parses it, classifies every entry CREATE-vs-UPDATE against the caller's
+tenant, and renders a preview table; on confirm the route applies the
+plan **in-process** via the existing target CRUD handlers
+(`create_target` for new names, `update_target` for existing ones).
+
+**No `/api/v1/targets/import` endpoint exists.** This UI mirrors the
+client-orchestrated CRUD the `meho targets import` CLI tool (G0.3-T6
+#257, `cli/internal/cmd/targets/import.go`) performs: parse → list
+existing names → classify CREATE vs UPDATE → POST new / PATCH existing.
+The key-mapping + classification logic in `import_view.py` is a
+server-side port of that CLI's `mapEntry` / `buildLivePlan`, so the web
+import and the CLI import produce byte-identical writes for the same
+YAML.
+
+**Mapping rules (parity with `import.go`).**
+
+* **Known top-level keys** — `name`, `aliases`, `product`, `host`,
+  `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`, `notes`,
+  `preferred_impl_id`, `extras` — map 1:1 to `TargetCreate` /
+  `TargetUpdate` fields.
+* **Unknown keys** spill into the `extras` JSONB column (merged with an
+  explicit `extras:` block when one is present).
+* **`fingerprint`** is server-managed (probe verb is the only writer;
+  the write schemas reject it via `extra='forbid'`) → dropped with a
+  preview warning.
+* **CREATE vs UPDATE** is decided by an existing-name lookup scoped to
+  the caller's tenant (excluding soft-deleted rows — the same filter the
+  `/api/v1/targets` list route the CLI calls applies).
+* On **UPDATE** the body is **sparse** (only YAML-present keys); `name`
+  and `product` are stripped (the PATCH route rejects `name`; `product`
+  is not patched on the CLI update path). The sparse shape means
+  re-importing a YAML that omits some fields does not wipe those columns
+  — the same load-bearing contract PR #362's review on #257 pinned.
+
+**Stateless preview → confirm.** The server holds no plan between the
+two requests: the preview echoes the submitted YAML into a hidden field
+and the confirm route re-parses + re-classifies it. Re-classifying on
+confirm keeps the server the source of truth — a target created between
+preview and confirm is correctly PATCHed rather than re-CREATEd into a
+409.
+
+**RBAC + CSRF + isolation.** All three routes depend on
+`resolve_operator_or_403` (tenant_admin only; operators 403 server-side).
+CSRF is enforced by the chassis `CSRFMiddleware` on the two `POST`
+routes. Cross-tenant isolation is two-layer: the existing-name lookup
+filters on `session_ctx.tenant_id`, and the in-process `create_target` /
+`update_target` handlers write / resolve under `operator.tenant_id`, so
+an import can only ever land in the caller's own tenant.
+
+**Validate the whole plan before any write (no partial import).**
+`build_plan` constructs *and* schema-validates every `TargetCreate` /
+`TargetUpdate` body up front — before the confirm route's write loop
+runs. A structurally-valid YAML carrying a schema-invalid value (a bad
+`auth_model` enum, an out-of-range `port`, etc.) therefore fails the
+*whole* plan (`ImportParseError`, rendered as the inline 422 fragment)
+and writes nothing, rather than committing the rows ahead of the bad
+entry and then 500-ing mid-loop. This mirrors the CLI's no-partial-write
+contract (`import.go` builds the full plan before any API call fires).
+The same pre-validation runs in `render_preview`, so the preview never
+green-lights a plan the confirm step would reject.
+
+**Errors render inline.** `yaml.safe_load` failures, a non-mapping root,
+a missing / empty `targets:` list, per-entry required-field violations
+(`name` / `product` / `host`), and Pydantic schema-validation failures
+all render an inline error in the preview fragment with HTTP 422 — never
+a 500.
+
+#### Files (Task #875)
+
+* `backend/src/meho_backplane/ui/routes/connectors/import_view.py` — parse (`yaml.safe_load`) + key-mapping + CREATE/UPDATE classification (port of `import.go`'s `mapEntry` / `buildLivePlan`) + up-front Pydantic body validation (whole plan validated before any write — no partial import) + render helpers + in-process confirm.
+* `backend/src/meho_backplane/ui/routes/connectors/import_router.py` — thin FastAPI route wrappers (multipart paste + upload parse; tenant_admin-gated deps); registered before the detail route so the literal `/ui/connectors/import` paths win the first-match lookup over `/ui/connectors/{name}`.
+* `backend/src/meho_backplane/ui/templates/connectors/import.html` — full-page paste-box + upload form.
+* `backend/src/meho_backplane/ui/templates/connectors/_import_preview.html` — preview table fragment (CREATE/UPDATE badges + per-entry warnings + confirm form, or an inline parse error).
+* `backend/src/meho_backplane/ui/templates/connectors/_import_result.html` — result summary fragment (N created, M updated).
+* `backend/tests/test_ui_connectors_import.py` — `build_plan` mapping / classification unit tests (extras spill, explicit-extras merge, fingerprint drop, sparse UPDATE) + behavioural tests: auth / RBAC (403 operator, 403 missing CSRF), preview (paste + upload + parse error + missing-field error + schema-invalid-value inline error), confirm (in-process create + update, sparse PATCH preserves omitted columns, malformed-YAML no-write, schema-invalid entry 422 + zero writes), cross-tenant isolation (import lands in caller tenant only; same-name in another tenant does not flip CREATE→UPDATE).

@@ -7319,6 +7319,129 @@
         }
       }
     },
+    "/ui/connectors/import": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Import Page",
+        "description": "``GET /ui/connectors/import`` -- the full import page.",
+        "operationId": "ui_connectors_import_page_ui_connectors_import_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Import Preview",
+        "description": "``POST /ui/connectors/import`` -- parse + render the preview table.\n\n``operator`` is resolved purely as the tenant_admin gate; the\npreview is read-only (it classifies but does not write), so the\nexisting-name lookup runs under ``session_ctx.tenant_id``.",
+        "operationId": "ui_connectors_import_preview_ui_connectors_import_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_import_preview_ui_connectors_import_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/import/confirm": {
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Import Confirm",
+        "description": "``POST /ui/connectors/import/confirm`` -- apply the plan in-process.",
+        "operationId": "ui_connectors_import_confirm_ui_connectors_import_confirm_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_import_confirm_ui_connectors_import_confirm_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/connectors/{name}/probe": {
       "post": {
         "tags": [
@@ -8652,6 +8775,50 @@
         },
         "type": "object",
         "title": "Body_ui_connectors_edit_submit_ui_connectors__name__patch"
+      },
+      "Body_ui_connectors_import_confirm_ui_connectors_import_confirm_post": {
+        "properties": {
+          "pasted": {
+            "type": "string",
+            "maxLength": 262144,
+            "nullable": true,
+            "title": "Pasted"
+          },
+          "upload": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "nullable": true,
+            "title": "Upload"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_import_confirm_ui_connectors_import_confirm_post"
+      },
+      "Body_ui_connectors_import_preview_ui_connectors_import_post": {
+        "properties": {
+          "pasted": {
+            "type": "string",
+            "maxLength": 262144,
+            "nullable": true,
+            "title": "Pasted"
+          },
+          "upload": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "nullable": true,
+            "title": "Upload"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_import_preview_ui_connectors_import_post"
       },
       "Body_ui_memory_bulk_ui_memory_bulk_post": {
         "properties": {

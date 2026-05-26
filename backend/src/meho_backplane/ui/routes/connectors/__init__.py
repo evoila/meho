@@ -29,8 +29,16 @@ Module layout:
   Uses the same :func:`~meho_backplane.connectors.resolver
   .resolve_connector_or_label` helper the ``/api/v1/targets/{name}/probe``
   REST route does so the two surfaces stay byte-compatible.
+* :mod:`~meho_backplane.ui.routes.connectors.forms_router` -- the
+  T2 (#874) create / edit form routes
+  (``GET``/``POST`` ``/ui/connectors/create`` +
+  ``GET /ui/connectors/{name}/edit`` + ``PATCH /ui/connectors/{name}``).
+  Tenant_admin-gated server-side; the DaisyUI modal forms HTMX-submit
+  into the REST ``POST``/``PATCH`` ``/api/v1/targets`` handlers
+  in-process so the UI and REST surfaces share one validation +
+  product-check + audit code path.
 
-The umbrella :func:`build_router` aggregates all three. It is mounted
+The umbrella :func:`build_router` aggregates all four. It is mounted
 **before** :func:`~meho_backplane.ui.routes.stubs.build_stubs_router`
 in :func:`~meho_backplane.ui.routes.build_router` so the real
 ``/ui/connectors`` and ``/ui/connectors/{name}`` handlers win the
@@ -52,6 +60,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from meho_backplane.ui.routes.connectors.detail import build_detail_router
+from meho_backplane.ui.routes.connectors.forms_router import build_forms_router
 from meho_backplane.ui.routes.connectors.list_view import build_list_router
 from meho_backplane.ui.routes.connectors.probe import build_probe_router
 
@@ -70,14 +79,21 @@ def build_router() -> APIRouter:
     Registration order is **load-bearing**: the literal ``GET /ui/connectors``
     list route registers before the parametrised ``GET /ui/connectors/{name}``
     detail route so the empty-tail URL is matched as the list rather than
-    captured with ``name=""``. The probe route's path is fully literal
+    captured with ``name=""``. The T2 forms router is included **before**
+    the detail router for the same reason -- its literal
+    ``GET /ui/connectors/create`` route must win the first-match-wins
+    lookup over ``GET /ui/connectors/{name}`` (otherwise ``"create"``
+    binds to ``name``). The probe route's path is fully literal
     (``/ui/connectors/{name}/probe``) so the ``POST`` verb plus the
     extra ``/probe`` segment makes it unambiguous regardless of order;
     we still include it last for the same readability convention the
-    memory router uses.
+    memory router uses. The forms router's ``PATCH /ui/connectors/{name}``
+    shares the detail route's path but is distinguished by HTTP method,
+    so its ordering relative to the detail ``GET`` is not load-bearing.
     """
     router = APIRouter()
     router.include_router(build_list_router())
+    router.include_router(build_forms_router())
     router.include_router(build_detail_router())
     router.include_router(build_probe_router())
     return router

@@ -1478,6 +1478,10 @@ the same way broadcast / topology / memory retired theirs.
 | `GET` | `/ui/connectors` | Sortable + filterable targets list. URL: `?sort=name|product|host|last_probed_at|status&dir=asc|desc&product=<slug>`. Full-page render or `_table_rows.html` fragment (HX-Request branch). |
 | `GET` | `/ui/connectors/{name}` | Per-target detail. Renders properties + fingerprint card + recent-ops card (SSE-live) + available-operations matrix. Alias-aware target resolution via `resolve_target`. |
 | `POST` | `/ui/connectors/{name}/probe` | Re-probe action. Tenant_admin RBAC gated server-side (the template hides the button optimistically; the handler is the authority). Persists the new fingerprint and swaps the refreshed `_fingerprint_card.html` fragment. |
+| `GET` | `/ui/connectors/create` | (T2 #874) HTMX-loaded create-target modal. Tenant_admin gated. Product `<select>` server-rendered from `registered_product_tokens()`; auth_model `<select>` from the `AuthModel` enum. |
+| `POST` | `/ui/connectors/create` | (T2 #874) Create submit. Builds a `TargetCreate` and delegates to the REST `create_target` handler in-process. Success → 204 + `HX-Redirect: /ui/connectors`; validation failure → 422 + modal re-rendered with per-field errors. |
+| `GET` | `/ui/connectors/{name}/edit` | (T2 #874) HTMX-loaded edit-target modal, pre-populated server-side from the resolved target. Tenant_admin gated; alias-aware 404 on cross-tenant. |
+| `PATCH` | `/ui/connectors/{name}` | (T2 #874) Edit submit. Builds a `TargetUpdate` and delegates to the REST `update_target` handler in-process. Same success / failure shapes as create. |
 
 ### Module layout
 
@@ -1510,13 +1514,76 @@ Every list / detail / probe path filters on `session_ctx.tenant_id`:
 * Ops matrix: `(operation_group.tenant_id IS NULL OR operation_group.tenant_id = :tenant_id)` — same shape `list_operation_groups` uses for the agent surface.
 * Recent-ops SSE: the underlying `/ui/broadcast/stream` bridge takes the tenant from the session row, never from a query parameter, so the per-target filter cannot leak across tenants.
 
+### Create / edit forms (Task #874)
+
+T2 layers the **write** surface on the T1 read surface. The DaisyUI
+modal forms HTMX-submit into the REST `POST` / `PATCH`
+`/api/v1/targets` *handlers* in-process (`create_target` /
+`update_target` imported directly), so the UI and REST surfaces share
+one validation + product-registry-check + audit-binding code path —
+the same posture T1's re-probe handler uses by sharing
+`resolve_connector_or_label` with the REST probe route. The
+form-field strings are fed into `TargetCreate` / `TargetUpdate`, so
+Pydantic runs the identical coercion + validation the REST body runs
+(port 1-65535, name `min_length=1`, `auth_model` enum membership).
+
+* **Success** → the handler returns 204 + `HX-Redirect: /ui/connectors`
+  (the canonical HTMX post-mutation navigation); the list re-renders
+  with the new / edited row.
+* **Validation failure** → the handler catches the `ValidationError`,
+  projects it to a `{field → message}` map, and re-renders the modal
+  fragment (422) with the messages under each field and the operator's
+  typed values echoed back. The form targets itself
+  (`hx-target="this"`, `hx-swap="outerHTML"`) so HTMX swaps the
+  errored form in place without losing input.
+
+Client-side validation (HTML5 `required` / `minlength` / numeric
+`min`/`max` with DaisyUI `input-error` styling) gives immediate
+feedback; the server-side Pydantic pass is authoritative.
+
+**Product dropdown source.** The create dropdown is rendered from
+`registered_product_tokens()` — the canonical set `create_target`
+validates `product` against — rather than from the raw
+`GET /api/v1/connectors` ingest list, so a selectable product is
+always an acceptable product (no dropdown / validator drift, no
+surprise 422 on a product the operator could pick).
+
+**RBAC posture.** All four routes depend on `resolve_operator_or_403`
+(the same rigorous tenant_admin write-gate T1's probe uses): a
+non-admin GET (modal) or POST/PATCH (submit) hits 403 server-side. The
+list / detail templates additionally hide the "Create target" / "Edit"
+buttons from non-admins (UX); the hide is not the security boundary.
+Because the in-process REST handler's own `Depends(require_role(...))`
+is not re-run on a direct function call, the 403 gate lives on the UI
+route deps and the lifted `Operator` is passed into the handler so it
+runs under the caller's tenant scope.
+
+**Cross-tenant isolation.** The edit modal + PATCH resolve the target
+via `resolve_target(db_session, session_ctx.tenant_id, name)` → 404 on
+a cross-tenant or unknown name, so a tenant_admin in tenant B can
+neither load nor PATCH tenant A's target. Create writes
+`tenant_id = operator.tenant_id` (the REST handler never trusts a
+body-supplied tenant).
+
+**CSRF.** `POST` / `PATCH` under `/ui/` are gated by the chassis
+`CSRFMiddleware` (signed double-submit) before the handler runs. The
+modal form inherits the `X-CSRF-Token` header from the page-level
+`hx-headers` directive; each modal render re-mints + re-sets the
+`meho_csrf` cookie so the double-submit pair lines up.
+
 ### Files
 
 * `backend/src/meho_backplane/ui/routes/connectors/__init__.py` — umbrella router factory.
-* `backend/src/meho_backplane/ui/routes/connectors/list_view.py` — list view handler + freshness classifier.
+* `backend/src/meho_backplane/ui/routes/connectors/list_view.py` — list view handler + freshness classifier (T2 adds the `is_tenant_admin` role probe for the create button).
 * `backend/src/meho_backplane/ui/routes/connectors/detail.py` — detail handler + connector_id resolution + ops matrix query + recent-ops query.
 * `backend/src/meho_backplane/ui/routes/connectors/operator.py` — role-probe (read) + operator-403 (write).
 * `backend/src/meho_backplane/ui/routes/connectors/probe.py` — re-probe POST handler.
+* `backend/src/meho_backplane/ui/routes/connectors/forms.py` — (T2 #874) create / edit render + submit helpers; builds `TargetCreate` / `TargetUpdate`, delegates to the REST handlers, maps `ValidationError` to per-field form errors.
+* `backend/src/meho_backplane/ui/routes/connectors/forms_router.py` — (T2 #874) create / edit route registration (thin FastAPI wrappers; tenant_admin-gated deps).
+* `backend/src/meho_backplane/ui/templates/connectors/_target_form_fields.html` — (T2 #874) shared form fields for both modals.
+* `backend/src/meho_backplane/ui/templates/connectors/_create_modal.html` — (T2 #874) create modal.
+* `backend/src/meho_backplane/ui/templates/connectors/_edit_modal.html` — (T2 #874) edit modal.
+* `backend/tests/test_ui_connectors_forms.py` — (T2 #874) create / edit form tests: modal render (admin) + 403 (operator), create success + Pydantic validation errors (port out of range, empty name), edit pre-population + PATCH, cross-tenant isolation, CSRF enforcement.
 * `backend/src/meho_backplane/ui/templates/connectors/list.html` — full-page list template.
 * `backend/src/meho_backplane/ui/templates/connectors/_table_rows.html` — list rows fragment (HTMX swap target).
 * `backend/src/meho_backplane/ui/templates/connectors/detail.html` — full-page detail template.

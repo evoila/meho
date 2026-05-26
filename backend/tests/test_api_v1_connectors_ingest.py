@@ -1095,6 +1095,41 @@ async def test_get_review_cross_tenant_returns_404(
     assert response.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_get_review_builtin_connector_visible_to_non_admin_operator(
+    client: TestClient,
+) -> None:
+    """G0.13-T5 (#1135): GET /{id}/review on a global (``tenant_id IS NULL``) row.
+
+    The listing endpoint promises "operator's-tenant rows +
+    built-ins" and surfaces them; the review endpoint must honour
+    the same scope rather than 404 on every global. Verifies the
+    full HTTP-to-service two-pass round-trip for a non-admin
+    operator role (the role that hit the bug on the daily-driver
+    path).
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=None,
+        product="vmware",
+        impl_id="vmware-rest",
+        group_count=2,
+        ops_per_group=3,
+    )
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["connector_id"] == "vmware-rest-9.0"
+    assert body["tenant_id"] is None
+    assert body["total_op_count"] == 6
+
+
 # ---------------------------------------------------------------------------
 # PATCH /{id}/groups/{key}
 # ---------------------------------------------------------------------------

@@ -5,9 +5,10 @@
 
 Covers the full tie-break ladder:
 
-1. Most-specific-version-match wins.
-2. Operator/tenant preference (``target.preferred_impl_id``).
-3. Connector class :attr:`priority` (higher wins).
+1. Versioned beats wildcard (G0.14-T2 #1143).
+2. Most-specific-version-match wins.
+3. Operator/tenant preference (``target.preferred_impl_id``).
+4. Connector class :attr:`priority` (higher wins).
 
 Plus the error paths (``NoMatchingConnector``,
 ``AmbiguousConnectorResolution``) and the v1 backward-compat fallback
@@ -244,7 +245,7 @@ def test_resolve_target_without_product_raises_no_match() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — most-specific-version-match wins
+# Step 2 — most-specific-version-match wins
 # ---------------------------------------------------------------------------
 
 
@@ -289,7 +290,7 @@ def test_resolve_bounded_beats_unbounded_range() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — operator/tenant preference
+# Step 3 — operator/tenant preference
 # ---------------------------------------------------------------------------
 
 
@@ -367,7 +368,7 @@ def test_resolve_operator_preference_not_a_candidate_is_ignored() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — class priority
+# Step 4 — class priority
 # ---------------------------------------------------------------------------
 
 

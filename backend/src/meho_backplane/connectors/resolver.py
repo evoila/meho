@@ -352,7 +352,7 @@ def _run_tie_break_ladder(
     if len(candidates) == 1:
         return candidates[0], "specificity", candidates
 
-    # Step 2 — operator/tenant preference. Falls through to priority when
+    # Step 3 — operator/tenant preference. Falls through to priority when
     # the override doesn't disambiguate (zero matches → ignored; multiple
     # matches → corner case where two impls share the preferred id, so
     # let priority break it rather than raising).
@@ -363,7 +363,7 @@ def _run_tie_break_ladder(
         if len(preferred) > 1:
             candidates = preferred
 
-    # Step 3 — connector class priority (higher wins).
+    # Step 4 — connector class priority (higher wins).
     best_priority = max(c.cls.priority for c in candidates)
     candidates = [c for c in candidates if c.cls.priority == best_priority]
     if len(candidates) == 1:

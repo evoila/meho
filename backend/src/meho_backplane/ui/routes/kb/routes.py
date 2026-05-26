@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""KB UI routes: list/search + entry detail + hover preview partial.
+"""KB UI routes: list/search + entry detail + hover preview partial + editor.
 
-Initiative #339 (G10.2 Knowledge base UI), Task #870 (T1). Mounts three
-routes:
+Initiative #339 (G10.2 Knowledge base UI). Tasks #870 (T1) + #872 (T3).
+
+T1 routes (read surface):
 
 * ``GET /ui/kb`` — main KB surface. Empty query renders a paginated
   entry list (slug-sorted). Non-empty query renders ranked search
@@ -32,6 +33,24 @@ routes:
   and query-term highlight markup. Called by
   ``hx-trigger="mouseenter delay:200ms"`` on result cards.
 
+T3 routes (editor + mobile reflow):
+
+* ``POST /ui/kb/editor-preview`` (HTMX editor preview partial) — accepts
+  ``body`` as a form field, renders the Markdown via
+  :func:`~meho_backplane.ui.routes.kb.render.render_markdown` (reusing
+  the same renderer as the entry-detail view), and returns the
+  ``kb/_editor_preview.html`` fragment. Called by the CodeMirror
+  editor's debounced input listener via HTMX. Any authenticated
+  operator can call this endpoint (preview is a read-only transform).
+
+* ``POST /ui/kb/new`` (editor save) — accepts ``slug``, ``body``, and
+  ``tags`` as form fields, validates ``tenant_admin`` role by loading
+  the full session and re-verifying the access token through
+  :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`, then calls
+  :meth:`~meho_backplane.kb.KbService.create_entry`. Returns an HTMX
+  redirect (``HX-Redirect``) to the new entry's detail page on success,
+  or re-renders the editor modal with a visible error message on failure.
+
 Tenant scoping
 --------------
 
@@ -44,9 +63,16 @@ surface's posture.
 RBAC
 ----
 
-``operator`` role minimum (enforced by
-:func:`~meho_backplane.ui.auth.middleware.require_ui_session`). Upload
-verbs (T2, T3) add a ``tenant_admin`` gate; this module is read-only.
+``operator`` role minimum for read + preview routes (enforced by
+:func:`~meho_backplane.ui.auth.middleware.require_ui_session`). The
+``POST /ui/kb/new`` save route additionally requires ``tenant_admin``:
+it loads the full decrypted session via
+:func:`~meho_backplane.ui.auth.session_store.load_session`, re-verifies
+the access token through
+:func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`, and returns
+403 if the operator's ``tenant_role`` is below ``TENANT_ADMIN``. This
+mirrors the ``/api/v1/kb POST`` RBAC posture without adding a separate
+auth middleware layer.
 
 HTMX conventions
 ----------------
@@ -83,10 +109,16 @@ from typing import Final
 
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
+from meho_backplane.auth.jwt import verify_jwt_for_audience
+from meho_backplane.auth.operator import TenantRole
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.kb import KbEntry, KbEntrySearchHit, KbService
+from meho_backplane.kb.schemas import InvalidKbSlugError
+from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
 from meho_backplane.ui.templating import get_templates
@@ -107,9 +139,50 @@ _MAX_PAGE_LIMIT: Final[int] = 200
 #: operator's free-form query verbatim in server logs.
 _MAX_QUERY_LENGTH: Final[int] = 500
 
+#: Maximum length of a slug submitted via the editor save form.
+#: Mirrors :data:`meho_backplane.api.v1.kb._SLUG_MAX_LENGTH`.
+_MAX_SLUG_LENGTH: Final[int] = 256
+
+#: Maximum body size accepted by the editor preview partial. Generous cap
+#: so in-progress large documents still render; the KB API enforces its
+#: own body limits downstream.
+_MAX_EDITOR_BODY_LENGTH: Final[int] = 65_536
+
+#: Maximum length of the comma-separated tags field on the editor save form.
+_MAX_TAGS_LENGTH: Final[int] = 500
+
 #: Module-level Depends closure for the require_ui_session gate.
 #: Matches the ruff B008 idiom the topology and dashboard routes use.
 _require_session = Depends(require_ui_session)
+
+
+async def _require_tenant_admin(session_ctx: UISessionContext) -> None:
+    """Verify the session's access token carries at least ``tenant_admin`` role.
+
+    Loads the full :class:`DecryptedSession` via
+    :func:`~meho_backplane.ui.auth.session_store.load_session` so the
+    plaintext access token is available for JWT re-verification.
+    :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience` re-runs the
+    full JWKS chain (signature, claims, audience) and surfaces the
+    ``tenant_role`` claim.
+
+    Raises :class:`fastapi.HTTPException` 403 when the session's role is
+    below ``TENANT_ADMIN`` or when the session has been revoked/expired
+    between the middleware check and this call (extremely rare but
+    possible under concurrent logout).
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session, db_session.begin():
+        decrypted = await load_session(db_session, session_ctx.session_id)
+    if decrypted is None:
+        raise HTTPException(status_code=403, detail="session_not_found")
+    settings = get_settings()
+    operator = await verify_jwt_for_audience(
+        f"Bearer {decrypted.access_token}",
+        expected_audience=settings.keycloak_audience,
+    )
+    if operator.tenant_role != TenantRole.TENANT_ADMIN:
+        raise HTTPException(status_code=403, detail="tenant_admin_required")
 
 
 def _highlight_query_terms(snippet: str, query: str) -> str:
@@ -378,5 +451,104 @@ def build_kb_router() -> APIRouter:
             "query": query,
         }
         return get_templates().TemplateResponse(request, "kb/_preview.html", context)
+
+    @router.post("/ui/kb/editor-preview", response_class=HTMLResponse)
+    async def kb_editor_preview(
+        request: Request,
+        session: UISessionContext = _require_session,
+        body: str = Form(default="", max_length=_MAX_EDITOR_BODY_LENGTH),
+    ) -> HTMLResponse:
+        """HTMX editor live-preview partial.
+
+        Accepts the current editor ``body`` as a form field, renders it
+        via :func:`render_markdown` (the same renderer as the entry-detail
+        view), and returns the ``kb/_editor_preview.html`` fragment. Called
+        by the CodeMirror editor's debounced HTMX POST (``hx-trigger="input
+        changed delay:500ms"``). Any authenticated operator (not just
+        ``tenant_admin``) can call this endpoint — it is a pure read-only
+        Markdown transform, not a write.
+
+        Tenant identity is present (from ``session``) but not needed here;
+        the preview is stateless (no DB read) and cross-tenant safe because
+        the body comes from the operator's own input, not a stored document.
+        """
+        rendered_body = render_markdown(body)
+        code_css = pygments_css()
+        context = {
+            "rendered_body": rendered_body,
+            "code_css": code_css,
+        }
+        return get_templates().TemplateResponse(request, "kb/_editor_preview.html", context)
+
+    @router.post("/ui/kb/new", response_class=HTMLResponse)
+    async def kb_editor_save(
+        request: Request,
+        session: UISessionContext = _require_session,
+        slug: str = Form(..., max_length=_MAX_SLUG_LENGTH),
+        body: str = Form(..., max_length=_MAX_EDITOR_BODY_LENGTH),
+        tags: str = Form(default="", max_length=_MAX_TAGS_LENGTH),
+    ) -> Response:
+        """Save a new KB entry from the editor modal.
+
+        Requires ``tenant_admin`` role — enforced by re-verifying the
+        session's access token through
+        :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`. Plain
+        ``operator`` role receives 403. The CSRF middleware gate runs
+        before this handler (``POST /ui/*`` passes through
+        :class:`~meho_backplane.ui.csrf.CSRFMiddleware`).
+
+        On success, returns ``HX-Redirect`` to the new entry's detail
+        page so HTMX swaps the page without a full navigation. On
+        validation failure (invalid slug, empty body) re-renders the
+        editor modal with an inline error message.
+
+        Tag parsing: the ``tags`` field is a comma-separated string
+        (``"tag-a, tag-b"``); individual values are stripped of
+        whitespace and empty strings are dropped. Tags are stored as
+        ``metadata["tags"]`` on the entry.
+        """
+        await _require_tenant_admin(session)
+
+        # Normalise tags: split on comma, strip whitespace, drop blanks.
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+        metadata: dict[str, object] = {}
+        if tag_list:
+            metadata["tags"] = tag_list
+
+        error_message: str | None = None
+        entry: KbEntry | None = None
+        try:
+            entry = await kb.create_entry(
+                tenant_id=session.tenant_id,
+                slug=slug.strip(),
+                body=body,
+                metadata=metadata if metadata else None,
+            )
+        except InvalidKbSlugError as exc:
+            error_message = str(exc)
+        except Exception:
+            log.exception("kb_editor_save_unexpected_error", slug=slug)
+            error_message = "Unexpected error saving entry. Please try again."
+
+        if entry is not None:
+            # HTMX redirect to the new entry's detail page.
+            return Response(
+                status_code=204,
+                headers={"HX-Redirect": f"/ui/kb/{entry.slug}"},
+            )
+
+        # Re-render the editor modal with the error message.
+        csrf_token = mint_csrf_token(str(session.session_id))
+        context = {
+            "error_message": error_message,
+            "slug": slug,
+            "body": body,
+            "tags": tags,
+            "csrf_token": csrf_token,
+        }
+        return get_templates().TemplateResponse(
+            request, "kb/_editor_modal.html", context, status_code=422
+        )
 
     return router

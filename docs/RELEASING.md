@@ -171,6 +171,13 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 - [ ] Deploy to `rke2-infra`.
 - [ ] Run smoke; confirm **smoke-green** (same pattern as
   v0.2.0 / v0.3.0 / v0.3.1).
+- [ ] Audit replay (G8.2) auto-lights-up when MCP clients send
+  `Mcp-Session-Id` — no env var required after G0.14-T6 #1147.
+  Older clients that don't send the header continue to work; audit
+  rows just won't carry `agent_session_id`. To confirm the deploy is
+  in the expected capture mode (`always` by default; `enforced` when
+  `MCP_REQUIRE_SESSION_ID=true`), inspect
+  `GET /api/v1/health`'s `mcp_session_id_capture` field.
 
 ### 6a. Post-deploy enablement — gated features
 

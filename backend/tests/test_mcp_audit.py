@@ -363,15 +363,19 @@ async def test_session_header_propagates_to_agent_session_id(
 
 
 @pytest.mark.asyncio
-async def test_absent_session_header_gets_fresh_uuid_per_call(
+async def test_absent_session_header_leaves_agent_session_id_null(
     client_with_operator: tuple[TestClient, Operator],
 ) -> None:
-    """AC: no header → non-NULL ``agent_session_id``; two calls differ.
+    """AC: no header → ``agent_session_id`` is NULL (G0.14-T6 #1147).
 
-    Single-call sessions are valid per the MCP spec; the fresh uuid4
-    keeps the column non-NULL so the row is still session-addressable.
-    Two header-less calls must get two distinct ids — otherwise the
-    fallback would collide every unattributed call into one bucket.
+    A header-less call must not invent a synthetic session id. Before
+    #1147 the transport fell back to a fresh per-call ``uuid4()``,
+    which produced non-NULL but completely uncorrelated rows that
+    polluted the G8.2 ``audit/sessions/{id}/replay`` search surface
+    (every call became its own one-row "session"). The decoupled
+    capture contract leaves the column NULL when the client never
+    sent a session id; the row still records the operation but is not
+    part of any session walk.
     """
     client, _op = client_with_operator
     envelope = {
@@ -387,20 +391,20 @@ async def test_absent_session_header_gets_fresh_uuid_per_call(
     rows = await _audit_rows()
     mcp_rows = [r for r in rows if r.method == "MCP"]
     assert len(mcp_rows) == 2
-    ids = [r.agent_session_id for r in mcp_rows]
-    assert all(i is not None for i in ids)
-    assert ids[0] != ids[1]
+    assert all(r.agent_session_id is None for r in mcp_rows)
 
 
 @pytest.mark.asyncio
-async def test_malformed_session_header_falls_back_to_fresh_uuid(
+async def test_malformed_session_header_leaves_agent_session_id_null(
     client_with_operator: tuple[TestClient, Operator],
 ) -> None:
-    """AC: a non-UUID ``Mcp-Session-Id`` does not 500 — it falls back.
+    """AC: a non-UUID ``Mcp-Session-Id`` does not 500 — it lands NULL.
 
-    A malformed *client* header can't go in the ``uuid`` column, so it
-    is treated as absent: the call succeeds (no transport error) and the
-    row carries a fresh, non-NULL uuid4 rather than the bad header value.
+    A malformed *client* header can't go in the ``uuid`` column. The
+    call still succeeds (the client is wrong; the server doesn't 500
+    on a client-side mistake) but the row's ``agent_session_id``
+    lands as NULL — same as a header-less call. A warning is logged
+    so the misbehaving client is observable in structlog.
     """
     client, _op = client_with_operator
 
@@ -420,7 +424,7 @@ async def test_malformed_session_header_falls_back_to_fresh_uuid(
     rows = await _audit_rows()
     mcp_rows = [r for r in rows if r.method == "MCP"]
     assert len(mcp_rows) == 1
-    assert mcp_rows[0].agent_session_id is not None
+    assert mcp_rows[0].agent_session_id is None
 
 
 @pytest.mark.asyncio
@@ -479,6 +483,44 @@ async def test_require_session_id_accepts_when_header_present(
     mcp_rows = [r for r in rows if r.method == "MCP"]
     assert len(mcp_rows) == 1
     assert mcp_rows[0].agent_session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_require_session_id_with_malformed_header_succeeds_with_null(
+    client_with_operator: tuple[TestClient, Operator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC: require-mode + malformed header → call succeeds, row is NULL.
+
+    A present-but-malformed header satisfies the require-a-session
+    contract at the transport layer (the client did send a value, just
+    an unparseable one), so the dispatch is not rejected. The audit
+    row's ``agent_session_id`` lands as NULL — same as the default-mode
+    malformed-header path — and the structured ``mcp_malformed_session_id``
+    warning lets the operator see which client is misbehaving without
+    a 4xx breaking client retry logic.
+    """
+    client, _op = client_with_operator
+    monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", "true")
+    get_settings.cache_clear()
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "meho.status", "arguments": {}},
+        },
+        headers={"Mcp-Session-Id": "not-a-uuid"},
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+
+    rows = await _audit_rows()
+    mcp_rows = [r for r in rows if r.method == "MCP"]
+    assert len(mcp_rows) == 1
+    assert mcp_rows[0].agent_session_id is None
 
 
 @pytest.mark.asyncio

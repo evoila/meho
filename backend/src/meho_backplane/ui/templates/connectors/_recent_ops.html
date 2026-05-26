@@ -1,0 +1,107 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Recent operations card (Task #873 work item #6). Lists the most
+  recent audit_log rows scoped to this target (server-rendered: the
+  last 10) and live-appends new events via the HTMX 2 ``sse``
+  extension subscribing to the broadcast bridge filtered to
+  ``target=<name>``.
+
+  Live-streaming model
+  --------------------
+  The HTMX ``sse`` extension opens an ``EventSource`` to the feed
+  fragment's ``sse-connect`` -- ``stream_endpoint`` carries the
+  pre-encoded ``/ui/broadcast/stream?target=<name>`` URL. A hidden
+  sink carries ``sse-swap="broadcast"``; an Alpine controller hooks
+  ``htmx:sse-before-message``, parses the JSON, ``preventDefault()``s
+  the raw swap, and prepends the event to its bounded ``events``
+  array. New rows render through the same row markup the
+  server-seeded rows use so a streamed row is visually identical to
+  a refresh-loaded row.
+
+  XSS hardening (review precedent: PR #1044 broadcast filter regex)
+  ----------------------------------------------------------------
+  ``target.name`` (which the SSE URL embeds) is operator-supplied
+  text. Jinja's ``urlencode`` filter is applied in the Python helper
+  (:func:`_build_stream_endpoint` -> ``urllib.parse.quote(safe='')``)
+  before the URL lands in the context, so by the time the template
+  renders ``stream_endpoint`` the bytes are already percent-encoded
+  and ride harmlessly into the attribute. The Alpine ``x-data``
+  attribute uses single-quoted delimiters so ``tojson`` output
+  (which never emits a raw ``'``) cannot break out of it -- mirrors
+  the precedent the broadcast feed sets in
+  ``broadcast/_feed.html``.
+-#}
+<article
+  id="recent-ops-card"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  aria-label="Recent operations on this target"
+  x-data='connectorsRecentOps({
+    cap: {{ recent_ops_dom_cap }},
+    seed: {{ recent_ops | tojson }}
+  })'
+  x-on:htmx:sse-before-message="onSseMessage($event)"
+  x-on:htmx:sse-open="connected = true"
+  x-on:htmx:sse-error="connected = false"
+>
+  <div class="card-body space-y-2">
+    <header class="flex items-center justify-between">
+      <h2 class="card-title text-base">
+        Recent operations
+        <span
+          class="ml-2 inline-flex items-center gap-1 text-xs font-normal opacity-70"
+          aria-live="polite"
+        >
+          <span
+            class="inline-block h-2 w-2 rounded-full"
+            :class="connected ? 'bg-success' : 'bg-warning'"
+            aria-hidden="true"
+          ></span>
+          <span x-text="connected ? 'live' : 'connecting…'"></span>
+        </span>
+      </h2>
+      <span class="text-xs opacity-70">
+        <span x-text="events.length"></span>
+        / {{ recent_ops_dom_cap }} rows
+      </span>
+    </header>
+
+    {# ---------- SSE sink ---------- #}
+    <div
+      hx-ext="sse"
+      sse-connect="{{ stream_endpoint }}"
+      sse-swap="broadcast"
+      class="hidden"
+      aria-hidden="true"
+    ></div>
+
+    {# ---------- Empty state ---------- #}
+    <div
+      x-show="events.length === 0"
+      class="text-sm opacity-60 py-4 text-center"
+    >
+      No operations recorded for this target yet.
+    </div>
+
+    {# ---------- Rows ---------- #}
+    <ul
+      x-show="events.length > 0"
+      class="divide-y divide-base-300 text-sm"
+      role="list"
+    >
+      <template x-for="ev in events" :key="ev.audit_id">
+        <li class="flex items-center gap-2 py-1.5">
+          <time
+            class="text-xs opacity-70 w-44 shrink-0"
+            x-bind:datetime="ev.occurred_at"
+            x-text="ev.occurred_at"
+          ></time>
+          <span class="badge badge-outline badge-xs" x-text="ev.method"></span>
+          <span class="font-mono text-xs truncate" x-text="ev.path"></span>
+          <span class="text-xs opacity-50 ml-auto" x-text="ev.status_code"></span>
+        </li>
+      </template>
+    </ul>
+  </div>
+</article>

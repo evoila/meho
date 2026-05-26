@@ -1,0 +1,107 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Connectors table-rows fragment (Task #873 work item #1).
+
+  Rendered in two contexts:
+    * As a partial ``{% include %}``d by ``list.html`` on the initial
+      full-page render.
+    * As a standalone fragment ``GET /ui/connectors`` returns when the
+      ``HX-Request`` header is set (sort header click, product filter
+      change). HTMX outerHTML-swaps it into the existing
+      ``#connectors-table-body`` element.
+
+  The ``Last probed`` column renders the timestamp as a relative
+  string ("3h ago", "yesterday") + a tooltip with the full ISO
+  timestamp for forensic clarity. Pure server-side via a small
+  ``_relative_time`` macro further down; no JS needed.
+-#}
+{% macro _relative_time(ts) -%}
+  {#- A tiny self-contained renderer for "X ago" copy. Server-side so
+      the surface stays HTMX-pure (no client-side date library). The
+      computation is approximate (one-minute resolution); the tooltip
+      carries the exact ISO timestamp for operators needing precision.
+      Inputs are tz-aware UTC datetimes (the ORM column is
+      ``DateTime(timezone=True)``). -#}
+  {%- set delta = (now_utc - ts).total_seconds() | int -%}
+  {%- if delta < 60 -%}
+    just now
+  {%- elif delta < 3600 -%}
+    {{ (delta // 60) }} min ago
+  {%- elif delta < 86400 -%}
+    {{ (delta // 3600) }} h ago
+  {%- elif delta < 604800 -%}
+    {{ (delta // 86400) }} d ago
+  {%- else -%}
+    {{ ts.strftime("%Y-%m-%d") }}
+  {%- endif -%}
+{%- endmacro %}
+<tbody id="connectors-table-body">
+  {% if rows %}
+    {% for row in rows %}
+      <tr data-target-name="{{ row.name }}">
+        <td>
+          <a
+            href="/ui/connectors/{{ row.name | urlencode }}"
+            class="link link-hover font-mono"
+            aria-label="View detail for {{ row.name }}"
+          >
+            {{ row.name }}
+          </a>
+        </td>
+        <td>{{ row.product }}</td>
+        <td class="font-mono text-xs">{{ row.host }}</td>
+        <td>
+          <span
+            class="text-xs"
+            title="{{ row.last_probed_at.isoformat() }}"
+          >
+            {{ _relative_time(row.last_probed_at) }}
+          </span>
+        </td>
+        <td>
+          {% if row.status == "ok" %}
+            <span class="badge badge-success badge-sm">ok</span>
+          {% elif row.status == "stale" %}
+            <span class="badge badge-warning badge-sm">stale</span>
+          {% else %}
+            <span class="badge badge-ghost badge-sm">never</span>
+          {% endif %}
+        </td>
+        <td class="text-xs opacity-70">
+          {% if row.aliases %}
+            {{ row.aliases | join(", ") }}
+          {% else %}
+            <span class="opacity-50">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <span class="badge badge-ghost badge-xs">{{ row.auth_model }}</span>
+        </td>
+        <td>
+          {% if row.vpn_required %}
+            <span aria-label="VPN required" title="VPN required">&#x1F512;</span>
+          {% else %}
+            <span class="opacity-30" aria-label="Direct access">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <a
+            href="/ui/connectors/{{ row.name | urlencode }}"
+            class="btn btn-ghost btn-xs"
+            aria-label="View {{ row.name }}"
+          >
+            View
+          </a>
+        </td>
+      </tr>
+    {% endfor %}
+  {% else %}
+    <tr>
+      <td colspan="9" class="text-center text-sm opacity-60 py-6">
+        No targets match the current filter.
+      </td>
+    </tr>
+  {% endif %}
+</tbody>

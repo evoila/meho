@@ -93,6 +93,7 @@ __all__ = [
     "OperationSearchHit",
     "UnknownConnectorError",
     "call_operation",
+    "call_operation_with_approval",
     "describe_descriptor",
     "list_operation_groups",
     "search_operations",
@@ -503,33 +504,28 @@ def _normalize_target_arg(
     return target_arg
 
 
-async def call_operation(
+async def _call_operation_impl(
     operator: Operator,
     arguments: dict[str, Any],
+    *,
+    approved: bool,
 ) -> dict[str, Any]:
-    """Invoke :func:`~meho_backplane.operations.dispatch` for ``op_id``.
+    """Resolve target + dispatch; shared body for the approved/unapproved entries.
+
+    Two public wrappers thread different ``approved`` values into the same
+    body: :func:`call_operation` (the default) calls the dispatcher's policy
+    gate; :func:`call_operation_with_approval` skips it because the durable
+    approval-decision row is the authorization (G11.1-T9 #1117 / G11.2-T4 #817).
+    Both share the same target-resolution + fqdn-override + structlog-audit
+    wiring so the audit row shapes stay symmetric.
 
     ``arguments`` shape: ``{"connector_id": str, "op_id": str,
-    "target": str | dict | None, "params": dict}``.
-
-    The handler accepts a ``target`` value in either of two equivalent
-    shapes -- bare string ``"rdc-vcenter"`` (forward-preferred; matches
-    ``query_topology`` / ``query_audit``) or partial dict
-    ``{"name": "rdc-vcenter"}`` (original; still works). Both are
-    normalised by :func:`_normalize_target_arg` to the dict form before
-    :func:`~meho_backplane.targets.resolver.resolve_target` is called,
-    so downstream code sees one canonical shape. Passing ``target=None``
-    is valid for typed operations whose handler does not consume a
-    target (the dispatcher accepts ``None`` through to the branch
-    handler).
-
-    Returns the :class:`~meho_backplane.connectors.schemas.OperationResult`
-    serialised via ``model_dump(mode="json")``. Errors surface inside
-    the result envelope (``status='error'`` + ``error='<code>: …'``)
-    rather than as exceptions — the dispatcher contract is "always
-    return a structured result". The route layer turns 4xx-class
-    errors into HTTP status codes; the meta-tool handler just returns
-    the envelope so the MCP transport keeps a uniform shape.
+    "target": str | dict | None, "params": dict}``. The ``target`` value is
+    normalised via :func:`_normalize_target_arg` (bare string ``"rdc-vcenter"``
+    or partial dict ``{"name": "rdc-vcenter"}`` both reduce to the canonical
+    dict form before :func:`~meho_backplane.targets.resolver.resolve_target`
+    is called). Passing ``target=None`` is valid for typed operations whose
+    handler does not consume a target.
     """
     connector_id = arguments["connector_id"]
     op_id = arguments["op_id"]
@@ -567,6 +563,7 @@ async def call_operation(
         op_id=op_id,
         target=resolved_target,
         params=params,
+        _approved=approved,
     )
     _log.info(
         "call_operation",
@@ -575,8 +572,62 @@ async def call_operation(
         status=result.status,
         duration_ms=result.duration_ms,
         tenant_id=str(operator.tenant_id),
+        approved=approved,
     )
     return result.model_dump(mode="json")
+
+
+async def call_operation(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Invoke :func:`~meho_backplane.operations.dispatch` for ``op_id``.
+
+    ``arguments`` shape: ``{"connector_id": str, "op_id": str,
+    "target": str | dict | None, "params": dict}``.
+
+    The handler accepts a ``target`` value as either a bare string
+    ``"rdc-vcenter"`` (matches ``query_topology`` / ``query_audit``) or
+    the partial dict ``{"name": "rdc-vcenter"}``. Both are normalised by
+    :func:`_normalize_target_arg` to the canonical dict form before
+    :func:`~meho_backplane.targets.resolver.resolve_target` is called.
+    Passing ``target=None`` is valid for typed operations whose handler
+    does not consume a target (the dispatcher accepts ``None`` through
+    to the branch handler).
+
+    Returns the :class:`~meho_backplane.connectors.schemas.OperationResult`
+    serialised via ``model_dump(mode="json")``. Errors surface inside
+    the result envelope (``status='error'`` + ``error='<code>: …'``)
+    rather than as exceptions — the dispatcher contract is "always
+    return a structured result". The route layer turns 4xx-class
+    errors into HTTP status codes; the meta-tool handler just returns
+    the envelope so the MCP transport keeps a uniform shape.
+    """
+    return await _call_operation_impl(operator, arguments, approved=False)
+
+
+async def call_operation_with_approval(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Re-dispatch a previously-parked ``call_operation`` after operator approval.
+
+    The agent runtime's approval-resume entry point (G11.1-T9 #1117). Called
+    exclusively from
+    :func:`~meho_backplane.agent.approval_wait.resume_or_surface_awaiting_approval`
+    after the broadcast feed reported ``approval.approved`` for an in-flight
+    agent run's pending request. Same body as :func:`call_operation` but
+    threads ``_approved=True`` into the dispatcher, which skips the policy
+    gate — the durable approval-decision row is the authorization the gate
+    bypass relies on.
+
+    Not part of the public MCP / REST surface: only the agent layer ever
+    re-dispatches on its own behalf. The REST ``POST /api/v1/approvals/{id}/approve``
+    path keeps its inline ``dispatch(..., _approved=True)`` call for the
+    human-driven express lane; the two coexist by design (the operator/agent
+    split documented in #1117).
+    """
+    return await _call_operation_impl(operator, arguments, approved=True)
 
 
 async def describe_descriptor(

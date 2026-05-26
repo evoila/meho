@@ -1,0 +1,203 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Shared target form fields for the create + edit modals (Task #874).
+  Included by ``_create_modal.html`` and ``_edit_modal.html`` so both
+  modals render the same field set + the same per-field error +
+  echoed-value wiring.
+
+  Context contract (set by
+  :func:`~meho_backplane.ui.routes.connectors.forms._build_form_context`):
+    * ``product_options`` -- list[str] of registered product tokens.
+    * ``auth_models``     -- list[str] of AuthModel enum values.
+    * ``errors``          -- dict[field -> message]; empty on a fresh
+                             render, populated on a 422 re-render.
+    * ``values``          -- dict[field -> submitted value]; echoed back
+                             on a 422 re-render so the operator keeps
+                             their typed input.
+    * ``mode``            -- "create" | "edit". In edit mode the ``name``
+                             input is read-only (rename = delete +
+                             create per the G0.3 contract).
+    * ``target``          -- (edit mode) the pre-populated target dict.
+
+  Client-side validation: HTML5 ``required`` + ``minlength`` + numeric
+  ``min``/``max`` on the port input give immediate DaisyUI feedback;
+  the server-side Pydantic validation (port 1-65535, name min_length=1,
+  auth_model enum) is the authoritative gate and re-renders this
+  fragment with ``errors`` on failure.
+
+  ``field_value(field, fallback)`` macro centralises the
+  "echoed submitted value > pre-populated target value > empty" lookup
+  so each input doesn't re-implement the precedence.
+-#}
+{%- macro field_value(field) -%}
+  {%- if values and field in values and values[field] not in (None, "") -%}
+    {{- values[field] -}}
+  {%- elif mode == "edit" and target is defined and target.get(field) not in (None, "") -%}
+    {{- target[field] -}}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro error_for(field) -%}
+  {%- if errors and field in errors -%}
+    <span class="label-text-alt text-error" role="alert" data-error-for="{{ field }}">
+      {{ errors[field] }}
+    </span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro error_class(field, base) -%}
+  {%- if errors and field in errors -%}{{ base }}{%- endif -%}
+{%- endmacro -%}
+
+<label class="form-control">
+  <span class="label-text">Name</span>
+  <input
+    type="text"
+    name="name"
+    required
+    minlength="1"
+    maxlength="200"
+    value="{{ field_value('name') }}"
+    {% if mode == "edit" %}readonly{% endif %}
+    class="input input-bordered input-sm font-mono {{ error_class('name', 'input-error') }}"
+    aria-label="Target name"
+    {% if mode == "edit" %}aria-describedby="target-name-immutable-hint"{% endif %}
+  />
+  {% if mode == "edit" %}
+    <span id="target-name-immutable-hint" class="text-xs opacity-60 mt-1">
+      Name is immutable. To rename, delete and re-create the target.
+    </span>
+  {% endif %}
+  {{ error_for('name') }}
+</label>
+
+<div class="grid gap-3 md:grid-cols-2">
+  <label class="form-control">
+    <span class="label-text">Product</span>
+    <select
+      name="product"
+      required
+      class="select select-bordered select-sm {{ error_class('product', 'select-error') }}"
+      aria-label="Connector product"
+    >
+      <option value="" disabled {% if not field_value('product') %}selected{% endif %}>
+        Select a product
+      </option>
+      {% for option in product_options %}
+        <option value="{{ option }}" {% if option == field_value('product') %}selected{% endif %}>
+          {{ option }}
+        </option>
+      {% endfor %}
+    </select>
+    {{ error_for('product') }}
+  </label>
+
+  <label class="form-control">
+    <span class="label-text">Auth model</span>
+    <select
+      name="auth_model"
+      required
+      class="select select-bordered select-sm {{ error_class('auth_model', 'select-error') }}"
+      aria-label="Auth model"
+    >
+      {%- set selected_auth = field_value('auth_model') or 'shared_service_account' -%}
+      {% for option in auth_models %}
+        <option value="{{ option }}" {% if option == selected_auth %}selected{% endif %}>
+          {{ option }}
+        </option>
+      {% endfor %}
+    </select>
+    {{ error_for('auth_model') }}
+  </label>
+</div>
+
+<div class="grid gap-3 md:grid-cols-2">
+  <label class="form-control">
+    <span class="label-text">Host</span>
+    <input
+      type="text"
+      name="host"
+      required
+      minlength="1"
+      maxlength="512"
+      value="{{ field_value('host') }}"
+      class="input input-bordered input-sm font-mono {{ error_class('host', 'input-error') }}"
+      aria-label="Host"
+      placeholder="host.example.internal"
+    />
+    {{ error_for('host') }}
+  </label>
+
+  <label class="form-control">
+    <span class="label-text">Port <span class="opacity-60">(optional)</span></span>
+    <input
+      type="number"
+      name="port"
+      min="1"
+      max="65535"
+      value="{{ field_value('port') }}"
+      class="input input-bordered input-sm {{ error_class('port', 'input-error') }}"
+      aria-label="Port"
+      placeholder="1-65535"
+    />
+    {{ error_for('port') }}
+  </label>
+</div>
+
+<label class="form-control">
+  <span class="label-text">Secret ref <span class="opacity-60">(optional)</span></span>
+  <input
+    type="text"
+    name="secret_ref"
+    maxlength="1024"
+    value="{{ field_value('secret_ref') }}"
+    class="input input-bordered input-sm font-mono {{ error_class('secret_ref', 'input-error') }}"
+    aria-label="Secret reference"
+    placeholder="secret/data/targets/&lt;name&gt;"
+    aria-describedby="target-secret-ref-hint"
+  />
+  <span id="target-secret-ref-hint" class="text-xs opacity-60 mt-1">
+    Vault path the connector reads credentials from.
+  </span>
+  {{ error_for('secret_ref') }}
+</label>
+
+<label class="form-control">
+  <span class="label-text">Aliases <span class="opacity-60">(comma-separated, optional)</span></span>
+  <input
+    type="text"
+    name="aliases"
+    maxlength="2048"
+    value="{{ field_value('aliases') }}"
+    class="input input-bordered input-sm {{ error_class('aliases', 'input-error') }}"
+    aria-label="Aliases"
+    placeholder="prod-cluster, primary"
+  />
+  {{ error_for('aliases') }}
+</label>
+
+<label class="form-control">
+  <span class="label-text">Notes <span class="opacity-60">(optional)</span></span>
+  <textarea
+    name="notes"
+    maxlength="8192"
+    class="textarea textarea-bordered min-h-[6rem] text-sm {{ error_class('notes', 'textarea-error') }}"
+    aria-label="Notes"
+    placeholder="Free-form operator notes."
+  >{{ field_value('notes') }}</textarea>
+  {{ error_for('notes') }}
+</label>
+
+<label class="label cursor-pointer justify-start gap-3">
+  <input
+    type="checkbox"
+    name="vpn_required"
+    value="true"
+    {% if field_value('vpn_required') in ('true', 'True', True) %}checked{% endif %}
+    class="checkbox checkbox-sm"
+    aria-label="VPN required"
+  />
+  <span class="label-text">VPN required</span>
+</label>

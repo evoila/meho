@@ -74,6 +74,12 @@
         this.dragOver = false;
         const dropped = Array.from(ev.dataTransfer.files).filter(f => f.name.endsWith(".md"));
         this.files = dropped;
+        // Sync dragged files into the hidden file input so HTMX's
+        // hx-include="#kb-file-input" serialises them in the multipart
+        // request (Alpine's this.files array is not read by HTMX).
+        const dt = new DataTransfer();
+        dropped.forEach(f => dt.items.add(f));
+        document.getElementById("kb-file-input").files = dt.files;
         if (dropped.length === 1) {
           const stem = dropped[0].name.replace(/\.md$/i, "");
           this.slugOverride = stem.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");

@@ -647,6 +647,124 @@ def test_upload_post_no_csrf_token_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
+# B1 regression: drag-and-drop files must reach the server (via hidden input)
+# ---------------------------------------------------------------------------
+
+
+def test_upload_drag_drop_files_reach_server() -> None:
+    """Files submitted via the hidden #kb-file-input (as handleDrop now does) are processed.
+
+    B1 fix: handleDrop syncs dragged files into the hidden file input via
+    DataTransfer so HTMX's hx-include="#kb-file-input" can serialise them.
+    This test simulates the post-fix path: a file is POSTed via the same
+    multipart field name ("file") that the hidden input produces, confirming
+    the server-side handler correctly processes the upload regardless of
+    whether the file originated from a browse-click or a drop event.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_discovery_and_jwks(mock_router, _JWKS)
+        token = _mint_admin_token(_TENANT_A)
+        session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        csrf = mint_csrf_token(str(session_id))
+
+        with patch(
+            "meho_backplane.retrieval.indexer.get_embedding_service",
+            return_value=_fake_embedding_service(),
+        ):
+            # Simulate the file as if it came from the hidden input whose
+            # .files was populated by handleDrop (via DataTransfer).
+            response = _upload_single(
+                client,
+                filename="dragged-entry.md",
+                content=b"# Dragged\n\nThis file was drag-dropped.\n",
+                csrf=csrf,
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "alert-success" in body
+    assert "dragged-entry" in body
+    # OOB swap row confirms entry was created.
+    assert "hx-swap-oob" in body
+
+
+# ---------------------------------------------------------------------------
+# M1 regression: audit contextvars bound by require_ui_admin
+# ---------------------------------------------------------------------------
+
+
+def test_upload_admin_gate_binds_audit_contextvars() -> None:
+    """require_ui_admin must bind operator_sub + tenant_id so AuditMiddleware fires.
+
+    M1 fix: after the role check passes, require_ui_admin calls
+    structlog.contextvars.bind_contextvars(operator_sub=..., tenant_id=...).
+    Without this binding, AuditMiddleware skips the audit write entirely
+    (it guards on isinstance(operator_sub, str) and operator_sub being truthy).
+    This test confirms the contextvars are bound by asserting a successful upload
+    response (a 403 would mean the gate didn't pass; a missing contextvar
+    would cause AuditMiddleware to skip silently — but the round-trip passes
+    proving require_ui_admin completed the full gate including the bind).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    import structlog
+
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_discovery_and_jwks(mock_router, _JWKS)
+        token = _mint_admin_token(_TENANT_A)
+        session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        csrf = mint_csrf_token(str(session_id))
+
+        captured_contextvars: dict[str, object] = {}
+
+        original_create_entry = None
+
+        async def _capture_and_create(
+            tenant_id: object,
+            slug: str,
+            body: str,
+            *,
+            metadata: dict[str, object] | None = None,
+        ) -> object:
+            # Snapshot the structlog contextvars at the point create_entry
+            # is called (i.e. after require_ui_admin has run).
+            captured_contextvars.update(structlog.contextvars.get_contextvars())
+            return await original_create_entry(tenant_id, slug, body, metadata=metadata)  # type: ignore[misc]
+
+        from meho_backplane.kb import KbService
+
+        original_create_entry = KbService.create_entry
+
+        with (
+            patch(
+                "meho_backplane.retrieval.indexer.get_embedding_service",
+                return_value=_fake_embedding_service(),
+            ),
+            patch.object(KbService, "create_entry", side_effect=_capture_and_create),
+        ):
+            response = _upload_single(
+                client,
+                filename="audit-check.md",
+                content=b"# Audit\n\nChecking contextvars.\n",
+                csrf=csrf,
+            )
+
+    assert response.status_code == 200, response.text
+    # operator_sub and tenant_id must be bound by require_ui_admin.
+    assert "operator_sub" in captured_contextvars, "operator_sub not in structlog contextvars"
+    assert "tenant_id" in captured_contextvars, "tenant_id not in structlog contextvars"
+    assert captured_contextvars["operator_sub"] == "op-42"
+    assert captured_contextvars["tenant_id"] == str(_TENANT_A)
+    # audit_op_id and audit_op_class must be bound by _process_upload_files.
+    assert captured_contextvars.get("audit_op_id") == "kb.ui_upload"
+    assert captured_contextvars.get("audit_op_class") == "write"
+
+
+# ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 

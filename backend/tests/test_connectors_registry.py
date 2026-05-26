@@ -334,6 +334,7 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     memory_expiry_enabled=False,
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
+                    scheduler_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -345,6 +346,11 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             ),
             patch("meho_backplane.main.start_grant_expiry_sweeper"),
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
+            # G11.3-T2 (#823) — scheduler patches; flag off in MagicMock so
+            # start_scheduler is never reached, but the symbol must still
+            # exist as a patchable target.
+            patch("meho_backplane.main.start_scheduler"),
+            patch("meho_backplane.main.stop_scheduler", new=AsyncMock()),
         ):
             # Manually step through the lifespan async generator.
             gen = lifespan(None)  # type: ignore[arg-type]
@@ -399,6 +405,7 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     memory_expiry_enabled=False,
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
+                    scheduler_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -410,6 +417,11 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             ),
             patch("meho_backplane.main.start_grant_expiry_sweeper"),
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
+            # G11.3-T2 (#823) — scheduler patches; flag off in MagicMock so
+            # start_scheduler is never reached, but the symbol must still
+            # exist as a patchable target.
+            patch("meho_backplane.main.start_scheduler"),
+            patch("meho_backplane.main.stop_scheduler", new=AsyncMock()),
         ):
             gen = lifespan(None)  # type: ignore[arg-type]
             await gen.__aenter__()

@@ -1,0 +1,77 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  KB main page: search box + (empty query) paginated entry list, or
+  (non-empty query) ranked result cards.
+
+  Initiative #339 (G10.2 Knowledge base UI), Task #870 (T1).
+
+  HTMX wiring:
+    * Search input: ``hx-trigger="keyup changed delay:300ms"`` fires
+      ``POST /ui/kb/search`` with the current ``q`` value and swaps
+      the ``#kb-results`` element (``hx-target + hx-swap="outerHTML"``).
+    * ``hx-push-url`` updates the browser URL so copy/paste reproduces
+      the active query.
+    * Results are rendered server-side into the ``_results.html`` partial;
+      the partial is also returned on full-page render to avoid
+      duplicating markup.
+
+  Template blocks:
+    * ``page_title`` — overrides ``<title>`` suffix.
+    * ``content`` — overrides the base.html main pane.
+    * ``scripts`` — empty (no extra JS needed for T1).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Knowledge &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Knowledge Base</h1>
+      <p class="text-sm opacity-70">
+        Search and browse the tenant's indexed knowledge entries.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Search bar ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body py-3">
+      <form
+        id="kb-search-form"
+        hx-post="/ui/kb/search"
+        hx-target="#kb-results"
+        hx-swap="outerHTML"
+        hx-push-url="/ui/kb?q={value}"
+        hx-trigger="keyup changed delay:300ms from:find input[name=q]"
+        hx-include="find input[name=q]"
+        onsubmit="return false;"
+        role="search"
+        aria-label="Search knowledge base"
+      >
+        <label class="form-control w-full">
+          <div class="label">
+            <span class="label-text sr-only">Search query</span>
+          </div>
+          <input
+            type="search"
+            name="q"
+            value="{{ query }}"
+            placeholder="Search entries&hellip;"
+            class="input input-bordered w-full"
+            autofocus
+            aria-label="Search knowledge base entries"
+            autocomplete="off"
+          />
+        </label>
+      </form>
+    </div>
+  </div>
+
+  {# ---------- Results / list area ---------- #}
+  {% include "kb/_results.html" %}
+</section>
+{% endblock %}

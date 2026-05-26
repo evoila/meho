@@ -17,14 +17,14 @@ shell renders end-to-end before the per-surface Initiatives
   state-changing form rendered before the surface Initiative lands
   has the double-submit chain in place from request one.
 
-The remaining stub paths are kept consistent with the chassis
-``base.html`` sidebar -- ``/ui/knowledge``, ``/ui/connectors``,
-``/ui/memory``. ``/ui/topology`` and ``/ui/broadcast`` are intentionally
-NOT stubbed here: topology's real table view ships in G10.5-T1 (#880)
-and broadcast's real live-feed view ships in G10.1-T1 (#867), each
-owning its path; registering a stub for either would shadow the real
-route in the generated OpenAPI schema. The Goal #336 done-when and
-Initiative #337 work-item #5 reference these exact URLs.
+The remaining stub paths cover ``/ui/connectors`` and ``/ui/memory``.
+``/ui/topology``, ``/ui/broadcast``, and ``/ui/kb`` are intentionally
+NOT stubbed here: topology's real table view ships in G10.5-T1 (#880),
+broadcast's real live-feed view ships in G10.1-T1 (#867), and the KB
+read surface ships in G10.2-T1 (#870), each owning its path. Registering
+a stub for any of these would shadow the real route in the generated
+OpenAPI schema. The Goal #336 done-when and Initiative #337 work-item
+#5 reference these exact URLs.
 
 Why one shared template
 -----------------------
@@ -74,12 +74,9 @@ class _SurfaceStub:
 
 
 _SURFACE_STUBS: Final[tuple[_SurfaceStub, ...]] = (
-    _SurfaceStub(
-        slug="knowledge",
-        title="Knowledge",
-        initiative_number=339,
-        summary="Search + view + drag-and-drop upload + Markdown editor over the team kb.",
-    ),
+    # ``knowledge`` stub retired: G10.2-T1 (#870) ships the real KB surface.
+    # ``broadcast`` stub retired: G10.1-T1 (#867) ships the real feed surface.
+    # ``topology`` stub retired: G10.5-T1 (#880) ships the real table surface.
     _SurfaceStub(
         slug="connectors",
         title="Connectors",

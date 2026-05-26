@@ -134,13 +134,15 @@ def _highlight_query_terms(snippet: str, query: str) -> str:
         return Markup(escape(snippet))
     terms = [t for t in query.split() if t]
     escaped_snippet = str(escape(snippet))
-    for term in terms:
-        pattern = re.compile(re.escape(term), re.IGNORECASE)
-        escaped_snippet = pattern.sub(
-            lambda m: f'<mark class="kb-term">{escape(m.group(0))}</mark>',
-            escaped_snippet,
-        )
-    return Markup(escaped_snippet)
+    pattern = re.compile(
+        "|".join(re.escape(t) for t in terms),
+        re.IGNORECASE,
+    )
+    result = pattern.sub(
+        lambda m: f'<mark class="kb-term">{escape(m.group(0))}</mark>',
+        escaped_snippet,
+    )
+    return Markup(result)
 
 
 def _make_snippet(body: str, max_chars: int = 200) -> str:
@@ -242,7 +244,7 @@ def build_kb_router() -> APIRouter:
     async def kb_search(
         request: Request,
         session: UISessionContext = _require_session,
-        q: str = Form(default=""),
+        q: str = Form(default="", max_length=_MAX_QUERY_LENGTH),
     ) -> HTMLResponse:
         """HTMX keyup-debounced search partial.
 
@@ -255,6 +257,8 @@ def build_kb_router() -> APIRouter:
         entries: list[KbEntry] = []
         hits: list[KbEntrySearchHit] = []
 
+        has_more = False
+
         if query:
             hits = await kb.search_entries(
                 session.tenant_id,
@@ -264,15 +268,17 @@ def build_kb_router() -> APIRouter:
         else:
             entries = await kb.list_entries(
                 session.tenant_id,
-                limit=_DEFAULT_PAGE_LIMIT,
+                limit=_DEFAULT_PAGE_LIMIT + 1,
                 offset=0,
             )
+            has_more = len(entries) > _DEFAULT_PAGE_LIMIT
+            entries = entries[:_DEFAULT_PAGE_LIMIT]
 
         context = {
             "query": query,
             "hits": hits,
             "entries": entries,
-            "has_more": False,
+            "has_more": has_more,
             "limit": _DEFAULT_PAGE_LIMIT,
             "offset": 0,
             "next_offset": _DEFAULT_PAGE_LIMIT,

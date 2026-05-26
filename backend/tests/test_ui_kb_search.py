@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -628,3 +628,120 @@ def test_cross_tenant_detail_returns_404() -> None:
         response = client.get("/ui/kb/secret-entry")
 
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# B1 — render.py _highlight_code: lang attribute escaping (XSS fix)
+# ---------------------------------------------------------------------------
+
+
+def test_highlight_code_escapes_lang_attribute() -> None:
+    """``_highlight_code`` HTML-escapes *lang* before injecting into class attr."""
+    from meho_backplane.ui.routes.kb.render import _highlight_code
+
+    malicious_lang = '"><script>alert(1)</script><span class="'
+    html = _highlight_code("x = 1", malicious_lang, "")
+    # The raw script tag must not appear unescaped in the output.
+    assert "<script>" not in html
+    # The lang is attribute-escaped; the value should contain &quot; or &gt;
+    assert "&quot;" in html or "&#34;" in html or "&gt;" in html
+
+
+# ---------------------------------------------------------------------------
+# B2 — routes.py POST /ui/kb/search: empty-query pagination (has_more)
+# ---------------------------------------------------------------------------
+
+
+def test_kb_search_post_empty_query_has_more_computed() -> None:
+    """POST /ui/kb/search with empty query and >_DEFAULT_PAGE_LIMIT entries
+    returns has_more=True and trims entries to the page limit.
+
+    Seeds _DEFAULT_PAGE_LIMIT + 1 fake entries via mocked list_entries so
+    the handler's +1-fetch / trim / has_more logic is exercised.
+    """
+    from datetime import datetime
+
+    from meho_backplane.kb.schemas import KbEntry as _KbEntry
+    from meho_backplane.ui.routes.kb.routes import _DEFAULT_PAGE_LIMIT
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+
+    _now = datetime(2026, 1, 1, tzinfo=UTC)
+    fake_entries = [
+        _KbEntry(
+            id=uuid.UUID(int=i + 1),
+            slug=f"entry-{i:03d}",
+            body="body",
+            metadata={},
+            tenant_id=_TENANT_A,
+            created_at=_now,
+            updated_at=_now,
+        )
+        for i in range(_DEFAULT_PAGE_LIMIT + 1)
+    ]
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with patch(
+            "meho_backplane.ui.routes.kb.routes.KbService.list_entries",
+            new_callable=AsyncMock,
+            return_value=fake_entries,
+        ):
+            response = client.post(
+                "/ui/kb/search",
+                data={"q": ""},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    # Pagination "Next" control should appear since has_more=True.
+    assert "Next" in response.text or "offset=" in response.text
+
+
+# ---------------------------------------------------------------------------
+# M1 — routes.py POST /ui/kb/search: max_length guard on q
+# ---------------------------------------------------------------------------
+
+
+def test_kb_search_post_query_too_long_returns_422() -> None:
+    """POST /ui/kb/search with q exceeding _MAX_QUERY_LENGTH returns 422."""
+    from meho_backplane.ui.routes.kb.routes import _MAX_QUERY_LENGTH
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+
+    oversized_query = "a" * (_MAX_QUERY_LENGTH + 1)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        response = client.post(
+            "/ui/kb/search",
+            data={"q": oversized_query},
+            headers={CSRF_HEADER_NAME: csrf},
+        )
+
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# M2 — routes.py _highlight_query_terms: single-pass (no double-mark)
+# ---------------------------------------------------------------------------
+
+
+def test_highlight_query_terms_no_double_mark() -> None:
+    """``_highlight_query_terms`` single alternating-union pass never nests
+    ``<mark>`` tags even when a term appears within the markup itself.
+    """
+    from meho_backplane.ui.routes.kb.routes import _highlight_query_terms
+
+    snippet = "The mark tag wraps a word."
+    result = _highlight_query_terms(snippet, "mark word")
+    result_str = str(result)
+    assert "<mark" in result_str
+    # Opening and closing tag counts must be equal (no nesting).
+    assert result_str.count("<mark") == result_str.count("</mark>")

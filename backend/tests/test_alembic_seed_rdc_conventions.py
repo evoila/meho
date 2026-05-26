@@ -8,7 +8,7 @@ Initiative #229 (G7.1 Tenant conventions + Layer 2 starter), Task
 operational conventions extracted from the consumer's ``CLAUDE.md``
 per decision #4. The tests cover the five contracts on the issue body:
 
-* **Tenant + 8 conventions land on a clean DB.** ``upgrade head`` from
+* **Tenant + 8 conventions land on a clean DB.** ``upgrade 0018`` from
   a clean DB produces the ``rdc-internal`` tenant row and 8
   ``operational`` convention rows scoped to that tenant; one matching
   history row per convention.
@@ -26,6 +26,15 @@ per decision #4. The tests cover the five contracts on the issue body:
   seeded convention rows + their seed-authored history rows, but
   leaves the tenant row intact and leaves operator-authored history
   rows (against seeded slugs) untouched.
+
+These assertions pin the ``0018`` migration's behaviour in isolation
+(``upgrade 0018``, not ``upgrade head``). G0.13-T7 (#1137) ships
+migration ``0025`` on top of ``0018`` that cleans up the
+``rdc-internal`` seed and replaces it with a generic ``default``
+tenant for OSS commercialization-readiness -- once ``upgrade head``
+runs, ``rdc-internal`` rows are no longer present. The
+``0018``-only assertions live here; the post-0025 head-state
+assertions live in :mod:`tests.test_alembic_seed_0025_supersede`.
 
 The tests follow the synchronous pattern established by
 :mod:`tests.test_migration_0011_backfill_when_to_use`:
@@ -329,7 +338,7 @@ def test_seed_lands_tenant_and_eight_conventions(
       the convention's body.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0018")
 
     tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert tenant_id is not None, "seed must create the rdc-internal tenant"
@@ -383,7 +392,7 @@ def test_priority_tiers_match_documented_assignment(
     surfaces here.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0018")
 
     tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert tenant_id is not None
@@ -432,7 +441,7 @@ def test_re_running_migration_is_idempotent(
     not change, and no duplicate history rows must land.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0018")
 
     tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert tenant_id is not None
@@ -487,7 +496,7 @@ def test_pre_existing_tenant_is_upserted_not_recreated(
         name="Operator's Custom Name",
     )
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0018")
 
     tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert tenant_id == pre_existing_id.hex, (
@@ -537,7 +546,7 @@ def test_operator_curated_convention_survives_seed(
         priority=42,
     )
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0018")
 
     # The operator's row survives unchanged.
     rows = _fetch_convention_rows(sync_url, operator_tenant_id.hex)
@@ -582,7 +591,7 @@ def test_downgrade_removes_seed_keeps_tenant_and_operator_history(
       history untouched.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0018")
 
     tenant_id_str = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert tenant_id_str is not None
@@ -655,7 +664,7 @@ def test_seed_conventions_fit_individual_token_budget(
     on the seed prose.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0018")
 
     from meho_backplane.conventions.schemas import (
         DEFAULT_MAX_PREAMBLE_TOKENS,

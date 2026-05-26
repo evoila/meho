@@ -98,13 +98,15 @@ async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> 
     per-test setup needs a parent tenant to avoid spurious
     ``IntegrityError`` under PRAGMA foreign_keys=ON.
 
-    The look-up-then-insert shape is load-bearing: migration ``0018``
-    seeds the ``rdc-internal`` tenant into the per-worker schema
-    template (:func:`tests.conftest._schema_template_db`), so a plain
-    ``session.add(Tenant(slug='rdc-internal', ...))`` would trip
-    ``UNIQUE constraint failed: tenant.slug``. Returning the seeded
-    row's id when the slug pre-exists keeps every existing caller
-    working without invasive per-test slug rewrites.
+    The look-up-then-insert shape is defence-in-depth: migration
+    ``0025`` seeds the ``default`` tenant into the per-worker schema
+    template (:func:`tests.conftest._schema_template_db`) -- after
+    G0.13-T7 (#1137) generalised the seed from ``rdc-internal`` to
+    ``default``. With this helper's default ``slug='rdc-internal'``
+    the look-up returns ``None`` and the helper inserts a fresh row;
+    callers passing ``slug='default'`` (none today) would land on the
+    seeded row instead. Returning the seeded row's id when the slug
+    pre-exists keeps the helper compatible with both shapes.
     """
     existing: uuid.UUID | None = await session.scalar(
         select(Tenant.id).where(Tenant.slug == slug),

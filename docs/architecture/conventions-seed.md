@@ -3,134 +3,147 @@ SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 evoila Group
 -->
 
-# Tenant conventions seed (`rdc-internal`)
+# Tenant conventions seed (`default`)
 
-> Sister to [docs/codebase/tenant_conventions.md](../codebase/tenant_conventions.md) -- that doc owns the table shape, ORM models, and CRUD control flow; this doc owns the one-shot seed migration that populates the `rdc-internal` tenant with the 8 operational conventions extracted from the consumer's `CLAUDE.md` per [decision #4](../planning/v0.2-decisions.md).
+> Sister to [docs/codebase/tenant_conventions.md](../codebase/tenant_conventions.md) -- that doc owns the table shape, ORM models, and CRUD control flow; this doc owns the seed migrations that populate the `default` tenant with the 2 illustrative conventions every fresh `evoila/meho` deploy receives, and explains the consumer-side template for re-applying customer-specific operational discipline that previously shipped baked into the OSS surface.
 >
-> Covers the implementation that landed under [Initiative #229 G7.1](https://github.com/evoila/meho/issues/229), Task [#317 G7.1-T5](https://github.com/evoila/meho/issues/317).
+> Covers the implementation that shipped under [Initiative #229 G7.1](https://github.com/evoila/meho/issues/229), Task [#317 G7.1-T5](https://github.com/evoila/meho/issues/317), and the OSS-commercialization-readiness follow-up [#1130 G0.13](https://github.com/evoila-bosnia/meho-internal/issues/1130), Task [#1137 G0.13-T7](https://github.com/evoila-bosnia/meho-internal/issues/1137).
 
-## What the seed does
+## What the seed does (current state)
 
-The seed migration [`backend/alembic/versions/0018_seed_rdc_internal_conventions.py`](../../backend/alembic/versions/0018_seed_rdc_internal_conventions.py) is a **data migration only** -- it adds no schema. The two tables it writes to (`tenant_conventions` and `tenant_convention_history`) were created by [T1 #313](../../backend/alembic/versions/0015_create_tenant_conventions.py).
+Two Alembic migrations are involved:
 
-On `upgrade head` the migration:
+- [`backend/alembic/versions/0018_seed_rdc_internal_conventions.py`](../../backend/alembic/versions/0018_seed_rdc_internal_conventions.py) -- preserved in OSS history. Originally upserted the `rdc-internal` tenant + 8 operational conventions extracted from one consumer's `CLAUDE.md` (decision #4 partition). Still runs as part of the migration chain (Alembic is forward-only), but its rows are immediately superseded by `0025`.
+- [`backend/alembic/versions/0025_supersede_rdc_internal_seed.py`](../../backend/alembic/versions/0025_supersede_rdc_internal_seed.py) -- the supersede landed by [#1137](https://github.com/evoila-bosnia/meho-internal/issues/1137). On `upgrade head`:
+  1. **Cleans up the rows `0018` authored** under the `rdc-internal` tenant. Narrows on `created_by_sub` / `actor_sub` = `'migration:seed-rdc-conventions'` so operator-curated content under seeded slugs survives. The `rdc-internal` tenant row itself is intentionally preserved (other v0.2 features key on `tenant_id`; deleting it would orphan that data).
+  2. **Upserts the generic `default` tenant** (`INSERT ... ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name`). If an operator already created a tenant with slug `'default'`, the upsert refreshes the display name and returns the existing id.
+  3. **Inserts 2 illustrative conventions** for the `default` tenant (`INSERT ... ON CONFLICT (tenant_id, slug) DO NOTHING`). Operator-authored rows under the same slug take precedence over the seed -- the migration never overwrites curated content.
+  4. **Inserts one CREATE-shape history row per seeded convention** (`body_before=NULL`, `body_after=<seed body>`, `actor_sub='migration:seed-default-conventions'`, `audit_id=NULL`). The history row is only written when the convention insert actually landed.
 
-1. **Upserts** the `rdc-internal` tenant row (`INSERT ... ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name`). If an operator manually created the row before the migration ran, its `id` is preserved and only the display name refreshes.
-2. **Inserts 8 `operational` conventions** for that tenant (`INSERT ... ON CONFLICT (tenant_id, slug) DO NOTHING`). Operator-authored rows under the same slug take precedence over the seed body -- the migration never overwrites a curated convention.
-3. **Inserts one CREATE-shape history row per seeded convention** (`body_before=NULL`, `body_after=<seed body>`, `actor_sub='migration:seed-rdc-conventions'`, `audit_id=NULL`). The history row is only written when the convention insert actually landed, so already-curated rows don't get a spurious "seed" entry in their edit trail.
+On `downgrade 0024`, the migration removes the 2 seeded `default` conventions and their matching history rows but **leaves the `default` tenant intact** -- and crucially does NOT restore the `rdc-internal` seed content. Restoring it would re-leak consumer-specific operational discipline into the public deploy. Operators who need the rdc-internal content back apply the consumer-side template documented [below](#consumer-side-template-for-rdc-internal-content).
 
-On `downgrade` the migration removes the 8 seeded conventions and their matching history rows, but **leaves the `rdc-internal` tenant intact** -- other v0.2 features key on `tenant_id` and dropping the tenant would orphan that data.
+## Why a generic default tenant
 
-## Why decision #4
+The `evoila/meho` repo is public. Migration `0018` originally upserted `rdc-internal` + 8 operational conventions extracted from one consumer's `CLAUDE.md` on every deploy. Adopting customer B's MCP clients were receiving customer A's internal operational discipline + repo references as their `initialize.instructions` text at session start -- the spec-optional MCP field T4 ([#316](https://github.com/evoila/meho/issues/316)) populates from the seeded `kind='operational'` conventions.
 
-[Decision #4](../planning/v0.2-decisions.md#4-g7-server-side-partition--operational-rules-only) draws the partition between the consumer's `CLAUDE.md` content that migrates to server-side conventions (Layer 1, this seed) and the content that stays in the consumer's repo. The principle: **operational rules** bind any session against the tenant regardless of where it runs (Slack agent, MCP client, CLI on a different machine); **repo-internal rules** apply only to repo work and have a filesystem of their own.
+[#1137](https://github.com/evoila-bosnia/meho-internal/issues/1137) (G0.13-T7) closes that OSS commercialization-readiness gap by replacing the consumer-specific seed with a generic illustration:
 
-Migrated to `rdc-internal` tenant conventions (this seed):
+- The `default` tenant + 2 illustrative conventions demonstrate the feature without baking in a specific consumer's identity.
+- The 2 conventions read as documentation about the convention surface itself (slug naming convention, the operator-facing nature of the surface) -- they explain what the feature does rather than carrying any specific operator's operational rules.
+- Operators replace the illustrative seed with their own content via the T2 API (`PATCH /api/v1/conventions/{slug}`) or T3 CLI (`meho conventions ...`).
+- The MCP `initialize.instructions` field still flows from `assemble_preamble(operator.tenant_id)` -- but for operators whose `tenant_id` is not `default` (the common case for any deploy), the field is empty until the operator authors their own conventions.
 
-- Vault canonical + 1Password residual
-- Naming rule -- no `claude` / AI-tool names in operator-visible identifiers
-- Secret-handling discipline (never paste into chat, never commit secrets)
-- CLI-wrapper fallback discipline during MEHO transition
-- Sensitive-lab-specifics-stay-private (no real hostnames/IPs in public repo)
+The two seeded conventions:
 
-Not migrated (stay in repo `CLAUDE.md`):
-
-- `/work-ticket` flow + ticket+PR discipline
-- Markdown-sidecar convention for OpenAPI specs
-- PR cadence rules
-- Repo-internal naming for branches / commits
-
-The seed extends decision #4's five-rule list with three additional **operational** rules pulled from cross-team operating practice (destructive-ops probe, audit-trail discipline, approval workflow). These were called out as in-scope by [issue #317](https://github.com/evoila/meho/issues/317)'s context section -- they share the "binds any session, regardless of where it runs" property decision #4 keys on.
-
-## Slug -> source paragraph mapping
-
-The 8 seeded slugs and the source paragraphs they migrate from. Source refers to [`evoila-bosnia/claude-rdc-hetzner-dc/CLAUDE.md`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/CLAUDE.md) except where noted.
-
-| Slug | Title | Source |
-|---|---|---|
-| `vault-canonical` | Vault is canonical for secrets | `CLAUDE.md` "Secrets" section -- the canonical-vs-residual partition and the pipe-don't-paste discipline. |
-| `naming-rule-no-ai-tool-names` | No AI-tool names in operator-visible identifiers | `CLAUDE.md` "Naming rule" section -- the prohibition on AI-tool tokens in operator-visible identifiers + the Holodeck `claude`-legacy carve-out. |
-| `secret-handling-discipline` | Secret-handling discipline | `CLAUDE.md` "Secrets" + "How to work with secrets" sections -- the "never enter chat / commit / PR" envelope + the rotation-on-leak path. |
-| `cli-wrapper-fallback-discipline` | CLI wrapper fallback during MEHO transition | v0.2 transition rules (cross-team operating practice during the chassis -> MEHO transition window). |
-| `destructive-ops-probe-first` | Probe before destructive ops | Cross-team operating practice -- the dependents-check + ticket-document + team-confirm sequence operators apply before destructive ops on shared targets. |
-| `audit-trail-discipline` | Document findings as you go | Cross-team operating practice -- the kb-as-investigation-record discipline. Forward-looking on `meho kb write` (G4); falls back to local `kb/` until G4 lands. |
-| `sensitive-lab-specifics-stay-private` | Sensitive lab specifics stay private | `CLAUDE.md` "Sensitive lab specifics stay private" section -- the public/private repo partition + the sanitised-examples rule. |
-| `approval-workflow-when-it-lands` | Approval workflow expectations | Forward-looking placeholder for v0.2.next G-Policy. Captures the team-norm operate-by-discussion shape until approval-workflow lands. |
-
-## Priority assignment
-
-[T4 #316](https://github.com/evoila/meho/issues/316)'s preamble assembler packs `kind='operational'` conventions **highest-priority-first** into a 600-token budget; over-budget entries are dropped whole (never mid-entry truncation of an operational rule). The seed assigns three priority tiers that reflect operator safety ranking:
-
-| Priority | Tier | Conventions | Rationale |
+| Slug | Title | Priority | What it demonstrates |
 |---|---|---|---|
-| **100** | Unrecoverable breach | `vault-canonical`, `secret-handling-discipline`, `sensitive-lab-specifics-stay-private` | Breach is unrecoverable in the operator-time sense: rotated secret or compromised tenant or leaked specifics on a public repo. Must reach every session even when the budget is tight. |
-| **50** | Recoverable but costly | `naming-rule-no-ai-tool-names`, `cli-wrapper-fallback-discipline`, `destructive-ops-probe-first` | Breach is recoverable but costly: incoherent target identifiers; deleted-wrapper-with-no-`meho`-replacement; collision on a destructive op. Important but acceptable to drop when the budget is tight. |
-| **10** | Aspirational / forward-looking | `audit-trail-discipline`, `approval-workflow-when-it-lands` | Forward-looking; the enforcement substrate either lands in G4 (`meho kb write`) or is not yet built (G-Policy approval workflow). Drop first when the budget overflows because the rule cannot yet be enforced in v0.2 even if the agent reads it. |
+| `slug-naming-kebab-case` | Convention slugs use kebab-case | 50 | The slug naming pattern the feature itself follows; appears in operator-facing URLs + CLI verbs. |
+| `conventions-are-operator-facing` | Conventions are operator-facing and tenant-scoped | 10 | Repeats decision #4's partition: operational rules (server-side) vs repo-discipline rules (consumer-side). Points at this doc. |
 
-The total estimated token cost of all 8 conventions packed together is approximately **671 tokens** (sum of `ceil(len(body) / 3.3)` per `meho_backplane.conventions.schemas.estimate_tokens`), which slightly exceeds the 600-token default budget. T4's priority-ranked packer will drop one or both of the priority-10 conventions when packing the full seed against an untouched budget -- this is the intended behaviour and the reason the priority tiers exist. The acceptance contract on [#317](https://github.com/evoila/meho/issues/317) explicitly allows "all 8 titles + bodies (or truncated subset if over budget)" in the assembled preamble.
+Both bodies are intentionally short (under ~200 chars each) so the per-entry token cost leaves headroom for operators adding their own conventions on top.
 
-Operators can re-rank individual conventions via the `PATCH /api/v1/conventions/{slug}` route (T2) once the seed has landed -- the seed sets initial priorities, not immutable ones.
+## Decision #4 partition (still load-bearing)
 
-## Audit-trace join semantics (G8)
+[Decision #4](../planning/v0.2-decisions.md#4-g7-server-side-partition--operational-rules-only) draws the partition between content that migrates to server-side tenant conventions (Layer 1) and content that stays in the consuming application's own repository (Layer 2). The principle: **operational rules** bind any session against the tenant regardless of where it runs (Slack agent, MCP client, CLI on a different machine); **repo-internal rules** apply only to repo work and have a filesystem of their own.
 
-Seed-authored history rows carry `audit_id = NULL` (the migration runs outside any HTTP request, so there is no `audit_log` row to point at). Any G8 audit-replay or audit-trace query that joins `tenant_convention_history` to `audit_log` **must use `LEFT JOIN`** -- an `INNER JOIN` silently drops every seeded history row from the result set.
+This partition is unchanged by [#1137](https://github.com/evoila-bosnia/meho-internal/issues/1137). What changed is **what content the public OSS repo ships as its baked-in seed**:
 
-Operator-authored edits (PATCH via [T2 #314](https://github.com/evoila/meho/issues/314)'s API) carry a real `audit_id` and join cleanly under either shape, so the gap only shows up against seeded slugs whose history has never been touched by an operator.
+- Before #1137: the OSS shipped one specific consumer's operational rules baked into the OSS surface (the `rdc-internal` seed).
+- After #1137: the OSS ships a generic illustration; consumer-specific operational rules live in consumer-side migrations.
 
-Recommended query template:
+## Consumer-side template for rdc-internal content
 
-```sql
-SELECT h.id,
-       h.convention_id,
-       h.actor_sub,
-       h.ts,
-       a.method,    -- NULL on seeded rows
-       a.path,      -- NULL on seeded rows
-       a.operator_sub  -- NULL on seeded rows; h.actor_sub carries the seed marker
-FROM tenant_convention_history h
-LEFT JOIN audit_log a ON a.id = h.audit_id
-WHERE h.convention_id = :convention_id
-ORDER BY h.ts ASC;
+The 8 `rdc-internal`-specific conventions that previously shipped baked into `0018` move to a consumer-side migration the consumer applies post-deploy in their own infrastructure. The template carries the same content `0018` originally seeded, indexed under a tenant slug the consumer chooses for their deploy (not necessarily `rdc-internal` -- the seed is generic-shape, not slug-pinned).
+
+The consumer-side migration applies on top of an `evoila/meho` deploy that has already run `upgrade head` (so `0025`'s cleanup ran). Recommended shape (consumer adapts to their own Alembic / sqitch / migration tooling):
+
+```python
+# Consumer-side migration: re-seed rdc-internal-specific operational
+# discipline that previously shipped baked into evoila/meho 0018.
+#
+# Run this against the consumer's own deploy AFTER `meho` upgrade-head
+# completes (so 0025's cleanup has run and the rdc-internal tenant
+# row is empty of seeded conventions).
+#
+# Replace ``YOUR_TENANT_SLUG`` with the slug your deploy uses --
+# either ``rdc-internal`` (kept compatible with the legacy slug) or
+# a fresh consumer-chosen slug. The seed marker
+# ``'migration:seed-consumer-conventions'`` lets your downgrade
+# narrow on the consumer-authored rows without touching whatever
+# else has accumulated under the same tenant.
+
+_TENANT_SLUG = "YOUR_TENANT_SLUG"
+_SEED_ACTOR_SUB = "migration:seed-consumer-conventions"
+
+_CONSUMER_CONVENTIONS = (
+    ("vault-canonical", "Vault is canonical for secrets", 100, "..."),
+    ("naming-rule-no-ai-tool-names", "...", 50, "..."),
+    ("secret-handling-discipline", "...", 100, "..."),
+    ("cli-wrapper-fallback-discipline", "...", 50, "..."),
+    ("destructive-ops-probe-first", "...", 50, "..."),
+    ("audit-trail-discipline", "...", 10, "..."),
+    ("sensitive-lab-specifics-stay-private", "...", 100, "..."),
+    ("approval-workflow-when-it-lands", "...", 10, "..."),
+)
+
+# upgrade(): upsert tenant by slug, insert conventions with
+# ON CONFLICT (tenant_id, slug) DO NOTHING + matching CREATE
+# history rows. Mirrors the discipline upstream 0018 established.
+# downgrade(): narrow deletes on _SEED_ACTOR_SUB; keep the tenant
+# row.
 ```
 
-The `actor_sub = 'migration:seed-rdc-conventions'` row reliably identifies seeded history entries even when the `audit_log` columns come back `NULL`, so callers can distinguish "seeded, no audit trail" from "operator edit, audit row was somehow pruned".
+The full convention body text (the 8 paragraphs originally extracted from the consumer's `CLAUDE.md`) is in OSS history at [`backend/alembic/versions/0018_seed_rdc_internal_conventions.py`](../../backend/alembic/versions/0018_seed_rdc_internal_conventions.py) and can be copied verbatim into the consumer-side migration.
+
+Companion tracking issue in the consumer's repo: filed alongside [#1137](https://github.com/evoila-bosnia/meho-internal/issues/1137) for the consumer to pick up the consumer-side migration on their next deploy cycle.
+
+## Why a new revision (`0025`) instead of editing `0018`
+
+Alembic migrations are forward-only: an existing deploy that already ran `0018` has the `rdc-internal` rows in its DB, and a no-data edit to `0018`'s body would not remove them on `upgrade head` (Alembic gates on the revision number, not the migration content). The forward-compatible fix is a new revision whose `upgrade()` performs the cleanup + new seed.
+
+`0018`'s file is preserved in git history as a record of what was once shipped. The OSS commit log captures the cleanup migration on top -- searchable, auditable, reversible.
+
+## Audit-trace join semantics (G8) — unchanged
+
+Both seed-authored history rows (`0018`'s rdc-internal seed and `0025`'s default seed) carry `audit_id = NULL` (the migrations run outside any HTTP request). Any G8 audit-replay query that joins `tenant_convention_history` to `audit_log` **must use `LEFT JOIN`** -- an `INNER JOIN` silently drops every seeded history row.
+
+The `actor_sub` discriminator distinguishes the three sources:
+
+- `migration:seed-rdc-conventions` -- the rows `0018` originally authored (cleaned up by `0025` on `upgrade head`; only present on stamped-mid-chain DBs).
+- `migration:seed-default-conventions` -- the rows `0025` authors under the `default` tenant.
+- JWT-shaped sub (e.g. `user:operator@example.com`) -- operator-authored content surviving across both migrations.
 
 ## Idempotency
 
-Re-running the migration is a no-op for already-seeded data:
+Both migrations are idempotent on replay:
 
-- The tenant `ON CONFLICT (slug) DO UPDATE` rewrites `name` to the same string the previous pass wrote.
-- The convention `ON CONFLICT (tenant_id, slug) DO NOTHING` skips every already-present row.
-- The history-row insert is gated on the conventions `RETURNING id` result -- only convention inserts that actually landed produce a history row.
-
-This matters for the test suite (the upgrade -> downgrade -> upgrade replay in [`backend/tests/test_alembic_seed_rdc_conventions.py`](../../backend/tests/test_alembic_seed_rdc_conventions.py)) and for the testcontainers PG replay cycle in [`backend/tests/test_migration_rollback.py`](../../backend/tests/test_migration_rollback.py).
+- `0018`: upsert + `ON CONFLICT DO NOTHING` shape; covered by [`backend/tests/test_alembic_seed_rdc_conventions.py`](../../backend/tests/test_alembic_seed_rdc_conventions.py) (SQLite) and `TestSeedRdcInternalConventionsPgIdempotency` in [`backend/tests/test_migration_rollback.py`](../../backend/tests/test_migration_rollback.py) (PG).
+- `0025`: cleanup narrows on the seed marker (matches zero rows on a replay where the cleanup already ran) + upsert + `ON CONFLICT DO NOTHING` shape; covered by [`backend/tests/test_alembic_seed_0025_supersede.py`](../../backend/tests/test_alembic_seed_0025_supersede.py) (SQLite) and `TestSupersedeDefaultConventionsPgIdempotency` in `test_migration_rollback.py` (PG).
 
 ## Reversibility
 
-`downgrade()` removes the 8 seeded convention rows and their matching history rows, narrowed on `created_by_sub='migration:seed-rdc-conventions'` and `actor_sub='migration:seed-rdc-conventions'` respectively. The narrowing means:
+`0018.downgrade()` removes the 8 originally-seeded `rdc-internal` conventions + their matching history rows (narrowed on `created_by_sub` / `actor_sub` = `'migration:seed-rdc-conventions'`).
 
-- A convention an operator authored under the same slug **before** the seed ran (and the seed skipped via `ON CONFLICT DO NOTHING`) survives the downgrade -- its `created_by_sub` carries the operator's JWT `sub`, not the seed marker.
-- A history entry the operator wrote against a seeded convention (via the T2 PATCH route) survives the downgrade -- its `actor_sub` carries the operator's JWT `sub`, not the seed marker.
+`0025.downgrade()` removes the 2 illustrative `default` conventions + their matching history rows (narrowed on `'migration:seed-default-conventions'`). The `default` tenant row is preserved. The downgrade does **not** restore the `rdc-internal` seed -- restoring consumer-specific content into the public deploy would defeat #1137's purpose.
 
-The `rdc-internal` tenant row is intentionally preserved on downgrade. Other v0.2 features (targets, audit rows, broadcast overrides, agent definitions) key on `tenant_id`; deleting the tenant would invisibly orphan that data even though the soft-FK discipline means no DB-level CASCADE would fire.
+Both downgrades leave operator-authored content (under seeded or unrelated slugs) untouched.
 
 ## How to add new seeded conventions
 
-This migration is a **one-shot** seed -- new conventions land via the T2 API (or T3 CLI when it ships under [#315](https://github.com/evoila/meho/issues/315)), not by amending this file. A follow-up migration that needs to add a seeded convention should:
+This guidance is unchanged from before #1137: amending an existing seed migration is the wrong shape (operator-edited content would survive the amendment while the new seed body would not land). A follow-up migration that needs to add a seeded convention should:
 
-1. Land its own new revision (e.g. `0019_seed_<convention>.py`) following the same upsert-or-skip discipline this migration established.
-2. Read the existing `rdc-internal` tenant id via `SELECT id FROM tenant WHERE slug = 'rdc-internal'` rather than inserting a duplicate tenant.
-3. Use the same `_SEED_ACTOR_SUB` synthetic marker (or a fresh one specific to that migration) so the downgrade predicate can be narrowed.
-4. Update the table in this doc to reflect the new slug + priority + source mapping.
-
-The reason for one-shot vs amend-and-replay: an operator who edited a seeded body post-seed should keep their edit. Re-running an amended seed migration cannot distinguish "operator hadn't gotten around to it" from "operator deliberately reverted to a different body" -- the `ON CONFLICT DO NOTHING` shape lets the operator's intent win every time.
+1. Land its own new revision (e.g. `0026_seed_<convention>.py`) following the upsert-or-skip discipline both existing seed migrations establish.
+2. Read the existing tenant id via `SELECT id FROM tenant WHERE slug = 'default'` rather than inserting a duplicate tenant.
+3. Use a fresh seed marker (e.g. `migration:seed-<short-name>`) so the downgrade predicate can narrow on the new migration's authored rows alone.
+4. Update the tables in this doc.
 
 ## References
 
 - Parent Initiative: [#229](https://github.com/evoila/meho/issues/229) (G7.1 tenant conventions + Layer 2 starter).
-- This task: [#317](https://github.com/evoila/meho/issues/317) (G7.1-T5 seed migration).
+- Original seed task: [#317](https://github.com/evoila/meho/issues/317) (G7.1-T5 seed migration).
+- Supersede Initiative: [#1130](https://github.com/evoila-bosnia/meho-internal/issues/1130) (G0.13 v0.6.0 dogfood hardening).
+- Supersede task: [#1137](https://github.com/evoila-bosnia/meho-internal/issues/1137) (G0.13-T7 generalize seed, move rdc-internal to consumer-side).
 - Companion docs:
   - [`docs/codebase/tenant_conventions.md`](../codebase/tenant_conventions.md) -- schema + API + ORM detail.
   - [`docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md) -- decision #4 (the G7 server-side partition).
-- Source `CLAUDE.md`: [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/CLAUDE.md) -- the operational paragraphs the seed migrates.
-- Prior-art data migration: [`backend/alembic/versions/0011_backfill_operation_group_when_to_use.py`](../../backend/alembic/versions/0011_backfill_operation_group_when_to_use.py) -- the self-contained `sa.table` shim discipline this migration mirrors.
+- Prior-art data migration: [`backend/alembic/versions/0011_backfill_operation_group_when_to_use.py`](../../backend/alembic/versions/0011_backfill_operation_group_when_to_use.py) -- the self-contained `sa.table` shim discipline both seed migrations mirror.

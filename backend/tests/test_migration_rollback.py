@@ -531,15 +531,25 @@ class TestSeedRdcInternalConventionsPgIdempotency:
             sync_url = pg.get_connection_url()
             async_url = _async_url_from(sync_url)
 
-            # Step 1 -- first ``upgrade head``. The seed migration
-            # runs as part of the chain.
+            # Step 1 -- first ``upgrade 0018``. The seed migration
+            # runs as the last step of the chain.
+            #
+            # We intentionally stop at ``0018`` (not ``head``) because
+            # G0.13-T7 (#1137) shipped migration ``0025`` on top of
+            # ``0018`` that cleans up the rdc-internal seed and
+            # replaces it with a generic ``default`` tenant for OSS
+            # commercialization-readiness. The original 0018-only
+            # idempotency contract this test pins predates that
+            # supersede; head-state idempotency for 0025 is covered
+            # by :class:`TestSupersedeDefaultConventionsPgIdempotency`
+            # below.
             monkeypatch.setenv("DATABASE_URL", async_url)
             get_settings.cache_clear()
             reset_engine_for_testing()
 
             cfg = alembic_config()
             cfg.set_main_option("sqlalchemy.url", async_url)
-            command.upgrade(cfg, "head")
+            command.upgrade(cfg, "0018")
 
             first = asyncio.run(_fetch_seed_state(async_url))
             assert first["tenant_count"] == 1, (
@@ -555,8 +565,8 @@ class TestSeedRdcInternalConventionsPgIdempotency:
             )
 
             # Step 2 -- stamp back to 0017 so the seed migration's
-            # data path replays (a plain ``upgrade head`` against a
-            # DB already at head would be a no-op via Alembic's
+            # data path replays (a plain ``upgrade 0018`` against a
+            # DB already at 0018 would be a no-op via Alembic's
             # revision gate; stamping rewinds the revision pointer
             # without touching data, then ``upgrade 0018`` re-runs
             # the migration's actual ``upgrade()`` body).
@@ -584,6 +594,141 @@ class TestSeedRdcInternalConventionsPgIdempotency:
 
             asyncio.run(dispose_engine())
             reset_engine_for_testing()
+
+
+# ---------------------------------------------------------------------------
+# G0.13-T7 #1137 — supersede migration 0025 PG-side idempotency replay
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _DOCKER_AVAILABLE, reason=_SKIP_REASON)
+class TestSupersedeDefaultConventionsPgIdempotency:
+    """Migration ``0025``'s cleanup + seed shape is idempotent on real PG.
+
+    Twin to :class:`TestSeedRdcInternalConventionsPgIdempotency` -- the
+    SQLite-side coverage lives in
+    :mod:`tests.test_alembic_seed_0025_supersede`; this class locks in
+    the cross-dialect guarantee on real PG.
+
+    Asserts:
+
+    * ``upgrade head`` (one shot) reaches the post-0025 state: no
+      rdc-internal seeded rows survive, 2 default conventions + 2
+      history rows are in place.
+    * Stamp 0024 + upgrade 0025 again is a no-op (the cleanup matches
+      zero rows on the replay, the seed's ON CONFLICT DO NOTHING shape
+      filters duplicate inserts).
+    """
+
+    def test_supersede_replay_against_pg_leaves_row_counts_unchanged(
+        self,
+        env_overrides: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Upgrade head then stamp 0024 + upgrade 0025 again: counts stable."""
+        from testcontainers.postgres import PostgresContainer
+
+        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        with PostgresContainer(image) as pg:
+            sync_url = pg.get_connection_url()
+            async_url = _async_url_from(sync_url)
+
+            monkeypatch.setenv("DATABASE_URL", async_url)
+            get_settings.cache_clear()
+            reset_engine_for_testing()
+
+            cfg = alembic_config()
+            cfg.set_main_option("sqlalchemy.url", async_url)
+            command.upgrade(cfg, "head")
+
+            first = asyncio.run(_fetch_default_seed_state(async_url))
+            # Post-0025 state: rdc-internal seeded rows cleaned, default
+            # tenant + 2 conventions + 2 history rows in place.
+            assert first["legacy_convention_count"] == 0, (
+                "0025 must remove every convention 0018 authored; "
+                f"got {first['legacy_convention_count']} survivors"
+            )
+            assert first["legacy_history_count"] == 0, (
+                "0025 must remove every seed-authored history row 0018 wrote; "
+                f"got {first['legacy_history_count']} survivors"
+            )
+            assert first["default_tenant_count"] == 1, (
+                "0025 must seed exactly one default tenant row; "
+                f"got {first['default_tenant_count']}"
+            )
+            assert first["default_convention_count"] == 2, (
+                "0025 must seed 2 illustrative default conventions; "
+                f"got {first['default_convention_count']}"
+            )
+            assert first["default_history_count"] == 2, (
+                "0025 must land one CREATE history row per seeded default "
+                f"convention; got {first['default_history_count']}"
+            )
+
+            # Replay 0025.
+            command.stamp(cfg, "0024")
+            command.upgrade(cfg, "0025")
+
+            second = asyncio.run(_fetch_default_seed_state(async_url))
+            assert second == first, (
+                f"re-running 0025 must be a complete no-op on PG -- saw {first} -> {second}"
+            )
+
+            asyncio.run(dispose_engine())
+            reset_engine_for_testing()
+
+
+async def _fetch_default_seed_state(async_url: str) -> dict[str, int]:
+    """Read post-0025 seed state counts back through a short-lived engine."""
+    engine = create_async_engine(async_url)
+    try:
+        async with engine.connect() as conn:
+            legacy_convention_count = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM tenant_conventions "
+                        "WHERE created_by_sub = 'migration:seed-rdc-conventions'",
+                    ),
+                )
+            ).scalar_one()
+            legacy_history_count = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM tenant_convention_history "
+                        "WHERE actor_sub = 'migration:seed-rdc-conventions'",
+                    ),
+                )
+            ).scalar_one()
+            default_tenant_count = (
+                await conn.execute(
+                    text("SELECT COUNT(*) FROM tenant WHERE slug = 'default'"),
+                )
+            ).scalar_one()
+            default_convention_count = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM tenant_conventions "
+                        "WHERE created_by_sub = 'migration:seed-default-conventions'",
+                    ),
+                )
+            ).scalar_one()
+            default_history_count = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM tenant_convention_history "
+                        "WHERE actor_sub = 'migration:seed-default-conventions'",
+                    ),
+                )
+            ).scalar_one()
+    finally:
+        await engine.dispose()
+    return {
+        "legacy_convention_count": int(legacy_convention_count),
+        "legacy_history_count": int(legacy_history_count),
+        "default_tenant_count": int(default_tenant_count),
+        "default_convention_count": int(default_convention_count),
+        "default_history_count": int(default_history_count),
+    }
 
 
 async def _fetch_seed_state(async_url: str) -> dict[str, int]:

@@ -30,11 +30,12 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.conventions.preamble import BLOCK_END, BLOCK_START, GUARD_PREFIX
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import TenantConvention
+from meho_backplane.db.models import Tenant, TenantConvention
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -220,3 +221,115 @@ async def test_initialize_logs_warning_on_dropped_slugs(
         f"expected over-budget warning naming dropped slug; got caplog={warning_text!r}, "
         f"stdout={captured_stdout!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# G0.13-T7 #1137 — signal-12 verification: default-seeded instructions carry
+# no consumer-specific tokens
+# ---------------------------------------------------------------------------
+
+#: Tokens that MUST NOT appear in the ``initialize.instructions`` text
+#: when the operator's tenant is the seeded ``default`` tenant. These
+#: identify content sourced from one specific consumer's ``CLAUDE.md``
+#: (the rdc-internal seed migration ``0018`` shipped). The data-layer
+#: scan lives in
+#: :mod:`tests.test_alembic_seed_0025_supersede`; this scan exercises
+#: the same contract end-to-end through the MCP wire surface so a
+#: regression in either the seed or the preamble assembler surfaces
+#: here.
+_FORBIDDEN_TOKENS: tuple[str, ...] = (
+    "evoila/meho",
+    "evoila-bosnia",
+    "rdc-internal",
+    "rdc-hetzner",
+    "Holodeck",
+    "holodeck",
+)
+
+
+@pytest.mark.asyncio
+async def test_initialize_against_default_tenant_carries_no_consumer_tokens(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """MCP ``initialize`` against the seeded ``default`` tenant -> no consumer-specific tokens.
+
+    Acceptance criterion (#1137 AC, signal-12 verification): "After
+    migration lands, ``initialize`` against a fresh-DB MCP server
+    returns ``instructions`` text that carries the generic illustrative
+    conventions only -- zero references to ``evoila/meho``,
+    ``evoila-bosnia/meho-internal``, ``rdc-internal``, Holodeck-claude,
+    or any other consumer-specific tokens. Test exercises a fresh MCP
+    initialize round-trip and asserts the absence of those tokens."
+
+    The migration chain (run by the conftest schema-template builder)
+    seeds the ``default`` tenant + 2 illustrative conventions. This
+    test rebinds the fixture operator's tenant to the seeded
+    ``default`` row's id so the ``_initialize`` handler's
+    ``assemble_preamble(operator.tenant_id)`` resolves the seeded
+    conventions; it then issues a real ``initialize`` JSON-RPC call
+    through the FastAPI TestClient and scans the returned
+    ``instructions`` text for the forbidden token list.
+    """
+    client, op = client_with_operator
+
+    # Resolve the seeded default tenant id (the schema-template
+    # builder ran ``alembic upgrade head``, so migration 0025 has
+    # seeded the ``default`` row).
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        default_tenant_id = await session.scalar(
+            select(Tenant.id).where(Tenant.slug == "default"),
+        )
+    assert default_tenant_id is not None, (
+        "migration 0025 must seed the default tenant for the signal-12 "
+        "verification to be meaningful"
+    )
+
+    # Rebind the test client's operator to the default tenant id
+    # so the MCP initialize handler's preamble assembler resolves
+    # the seeded conventions.
+    from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+
+    rebound_operator = Operator(
+        sub=op.sub,
+        name=op.name,
+        email=op.email,
+        raw_jwt=op.raw_jwt,
+        tenant_id=default_tenant_id,
+        tenant_role=TenantRole.READ_ONLY,
+    )
+
+    def _fake_verify_default() -> Operator:
+        return rebound_operator
+
+    client.app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify_default
+    try:
+        response = post_mcp(client, _initialize_envelope())
+    finally:
+        # Restore the original override -- the fixture's teardown
+        # will pop it from the dict on exit, but a mid-test rebind
+        # should leave behaviour as the fixture set it.
+        client.app.dependency_overrides[verify_mcp_jwt_and_bind] = (
+            lambda: op  # type: ignore[no-any-return]
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" not in body
+    instructions = body["result"].get("instructions") or ""
+    assert isinstance(instructions, str)
+
+    # Either: instructions is empty (no seeded conventions reached
+    # the operator's tenant_id -- unexpected here because we just
+    # bound to the seeded default tenant), OR instructions is
+    # non-empty AND carries no forbidden tokens.
+    assert instructions, (
+        "default tenant should carry seeded illustrative conventions in instructions; got empty"
+    )
+    haystack = instructions.lower()
+    for token in _FORBIDDEN_TOKENS:
+        assert token.lower() not in haystack, (
+            f"forbidden token {token!r} found in MCP initialize.instructions for the "
+            "default tenant -- the seed must contain no references to a specific "
+            "consumer's operational discipline or repo identifiers"
+        )

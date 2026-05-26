@@ -18,7 +18,11 @@ package collects the helpers shared across the convention surfaces:
 T1 (#313) shipped the schema; T2 (#314) shipped the API surface; T3
 (#315) layers CLI verbs; T4 (this module) layers the session-
 preamble assembler that reads through this package's budget
-heuristic. T5 (#317) seeds rows for the ``rdc-internal`` tenant.
+heuristic. T5 (#317) seeded rows for the ``rdc-internal`` tenant;
+G0.13-T7 (#1137) generalised that seed to a ``default`` tenant + 2
+illustrative conventions for OSS commercialization-readiness (the
+rdc-internal-specific content moved to a consumer-side migration
+template).
 
 The package boundary is deliberate: the budget heuristic must agree
 across the write-time 422 (T2) and the read-time priority-ranked

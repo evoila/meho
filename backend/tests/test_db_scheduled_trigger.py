@@ -112,9 +112,11 @@ async def _seed_tenant_and_definition(
     per-test setup needs both rows to avoid spurious
     :class:`IntegrityError` under PRAGMA foreign_keys=ON.
 
-    The slug must not be ``rdc-internal``: migration 0018 (G7.1-T5 #317)
-    seeds a real tenant with that slug into the migrated test DB, so
-    reusing it collides on the unique ``tenant.slug`` constraint.
+    The slug must not be ``default``: migration ``0025`` (G0.13-T7
+    #1137) seeds a real tenant with that slug into the migrated test
+    DB (replacing the ``rdc-internal`` seed migration ``0018`` had
+    previously shipped), so reusing either handle would collide on
+    the unique ``tenant.slug`` constraint.
     """
     tenant_id = uuid.uuid4()
     definition_id = uuid.uuid4()

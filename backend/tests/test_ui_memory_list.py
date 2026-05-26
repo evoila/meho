@@ -894,8 +894,15 @@ def test_patch_save_empty_body_returns_422() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_delete_removes_row_and_re_renders_list() -> None:
-    """DELETE returns the re-rendered card list with a flash banner."""
+def test_delete_removes_row_and_redirects_to_list() -> None:
+    """DELETE returns 204 + HX-Redirect so HTMX navigates to the list.
+
+    The detail page's confirm-delete button uses ``hx-target="body"
+    hx-swap="outerHTML"`` -- a fragment-only re-render would destroy
+    the chassis chrome. ``HX-Redirect`` makes HTMX issue a full client
+    GET against ``/ui/memory`` instead, which rebuilds the page from
+    the base template.
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_memory(
         tenant_id=_TENANT_A,
@@ -923,11 +930,17 @@ def test_delete_removes_row_and_re_renders_list() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 200, response.text
-    body = response.text
-    assert "Deleted memory user/ephemeral" in body
-    # The card list re-renders with the empty state.
-    assert 'id="memory-cards"' in body
+    assert response.status_code == 204, response.text
+    assert response.headers.get("HX-Redirect") == "/ui/memory"
+    assert response.text == ""
+    # Follow the redirect and confirm the chassis chrome is intact
+    # and the deleted row is absent from the rendered list.
+    follow = client.get("/ui/memory")
+    assert follow.status_code == 200, follow.text
+    follow_body = follow.text
+    assert "<html" in follow_body and "</html>" in follow_body
+    assert 'id="memory-cards"' in follow_body
+    assert "ephemeral" not in follow_body
 
 
 def test_delete_tenant_scoped_as_operator_returns_403() -> None:

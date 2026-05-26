@@ -487,13 +487,23 @@ async def delete_entry(
     scope: MemoryScope,
     slug: str,
 ) -> HTMLResponse:
-    """Delete the memory and re-render the list with a flash banner.
+    """Delete the memory and redirect the client back to the list page.
 
     Re-fetches under read RBAC so we can surface a true 404 when the
     row doesn't exist for this operator -- :meth:`MemoryService.forget`
     is idempotent and would otherwise return ``False`` silently, which
     misleads the UX (the modal said "delete" and the row didn't
     disappear because it was never there).
+
+    Response shape: an empty ``204`` carrying the ``HX-Redirect`` header
+    so HTMX issues a full client-side GET to ``/ui/memory``. The detail
+    page's confirm-delete button targets ``hx-target="body"`` so a
+    fragment-only re-render would destroy the chassis chrome
+    (``<html>``/``<head>``/``<body>``); ``HX-Redirect`` is the canonical
+    HTMX pattern for post-delete navigation -- see
+    https://htmx.org/headers/hx-redirect/. The list GET that follows
+    re-derives the empty-or-trimmed state, so no flash plumbing is
+    needed: the user lands on the list with the deleted row absent.
     """
     service = MemoryService()
     existing = await service.recall(operator=operator, scope=scope, slug=slug, target_name=None)
@@ -518,10 +528,8 @@ async def delete_entry(
         scope=scope.value,
         slug=slug,
     )
-    return await render_index(
-        request,
-        session_ctx,
-        scope=SCOPE_ALL,
-        tag=None,
-        flash=f"Deleted memory {scope.value}/{slug}",
+    del request  # not consumed -- HX-Redirect needs no request context.
+    return HTMLResponse(
+        status_code=204,
+        headers={"HX-Redirect": "/ui/memory"},
     )

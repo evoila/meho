@@ -49,11 +49,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    _AGENT_RUN_IN_FLIGHT_POLICIES,
     _AGENT_RUN_STATUSES,
     _AGENT_RUN_TRIGGERS,
     AgentRun,
     AgentRunStatus,
     AgentRunTrigger,
+    ScheduledTriggerInFlightPolicy,
     Tenant,
 )
 from meho_backplane.settings import get_settings
@@ -346,3 +348,157 @@ def test_migration_trigger_literals_match_model_enum() -> None:
     migration = _load_migration_0017()
 
     assert set(migration._AGENT_RUN_TRIGGERS) == {t.value for t in AgentRunTrigger}  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Lease / heartbeat / in_flight_policy columns (T4 #825)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_run_lease_columns_round_trip() -> None:
+    """Lease + in_flight_policy columns round-trip through the ORM.
+
+    T4 #825. ``lease_owner`` / ``lease_expires_at`` are nullable
+    side-effect columns the lifecycle service writes; ``in_flight_policy``
+    is NOT NULL with a server default. All three persist verbatim
+    through an insert + read cycle.
+    """
+    sessionmaker = get_sessionmaker()
+    run_id = uuid.uuid4()
+    lease_until = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        session.add(
+            AgentRun(
+                id=run_id,
+                tenant_id=tenant_id,
+                identity_sub="user-lease",
+                trigger=AgentRunTrigger.SCHEDULED.value,
+                model_tier="deep",
+                status=AgentRunStatus.RUNNING.value,
+                lease_owner="meho-backplane-pod-3:pid-42",
+                lease_expires_at=lease_until,
+                in_flight_policy=ScheduledTriggerInFlightPolicy.RESUME.value,
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await session.execute(select(AgentRun).where(AgentRun.id == run_id))
+        row = result.scalar_one()
+
+    assert row.lease_owner == "meho-backplane-pod-3:pid-42"
+    assert row.lease_expires_at is not None
+    # SQLite drops tz; compare wall-clock.
+    assert row.lease_expires_at.replace(tzinfo=None) == lease_until.replace(tzinfo=None)
+    assert row.in_flight_policy == "resume"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_in_flight_policy_default_is_fail_into_audit() -> None:
+    """The ORM default for ``in_flight_policy`` is ``'fail_into_audit'``.
+
+    T4 #825. The consumer doc accepts ``fail_into_audit`` as the
+    default outcome -- a run that does not opt into ``resume`` ends
+    up failed in the audit log. The server-side DEFAULT in the
+    migration fires for raw INSERTs; the ORM-side default fires for
+    SQLAlchemy ``add()`` calls. Both must produce the same value.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        run = AgentRun(
+            tenant_id=tenant_id,
+            identity_sub="user-default-policy",
+            trigger=AgentRunTrigger.DIRECT.value,
+            model_tier="cheap",
+        )
+        session.add(run)
+        await session.commit()
+        seen_policy = run.in_flight_policy
+        seen_lease_owner = run.lease_owner
+        seen_lease_expires_at = run.lease_expires_at
+
+    assert seen_policy == ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value
+    # Lease columns default to None (no worker has claimed yet).
+    assert seen_lease_owner is None
+    assert seen_lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_agent_run_in_flight_policy_check_rejects_unknown() -> None:
+    """A policy outside the closed enum raises :class:`IntegrityError`.
+
+    T4 #825 -- the DB-layer closed-enum guard. Same pattern as the
+    ``status`` / ``trigger`` constraints.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        session.add(
+            AgentRun(
+                tenant_id=tenant_id,
+                identity_sub="user-bad-policy",
+                trigger=AgentRunTrigger.DIRECT.value,
+                model_tier="cheap",
+                in_flight_policy="retry_with_backoff",  # outside the closed enum
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Drift guards (T4 #825 -- in_flight_policy column)
+# ---------------------------------------------------------------------------
+
+
+def test_in_flight_policy_kinds_match_scheduled_trigger_enum() -> None:
+    """:data:`_AGENT_RUN_IN_FLIGHT_POLICIES` mirrors :class:`ScheduledTriggerInFlightPolicy`.
+
+    The per-run column's vocabulary is *the same* closed enum as the
+    trigger's policy column -- the run row carries a snapshot of the
+    trigger's value at run-start. The agent-run-side tuple is defined
+    independently (because :class:`ScheduledTriggerInFlightPolicy` lives
+    further down in the model file -- see the comment on
+    :data:`_AGENT_RUN_IN_FLIGHT_POLICIES`); this guard catches drift.
+    """
+    assert set(_AGENT_RUN_IN_FLIGHT_POLICIES) == {p.value for p in ScheduledTriggerInFlightPolicy}
+
+
+def _load_migration_0026() -> object:
+    """Load migration ``0026`` as a module via its file path.
+
+    Same shape as :func:`_load_migration_0017` -- digit-prefixed
+    filename, not importable as a dotted module.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "alembic"
+        / "versions"
+        / "0026_add_agent_run_lease_reaper.py"
+    )
+    spec = importlib.util.spec_from_file_location("_migration_0026", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_migration_0026_in_flight_policy_literals_match_scheduled_trigger_enum() -> None:
+    """Migration ``0026``'s frozen policy tuple matches :class:`ScheduledTriggerInFlightPolicy`.
+
+    T4 #825. The migration records the vocabulary as a literal tuple
+    (not an import) so its DDL is a frozen snapshot; equality with the
+    enum is the drift guard that keeps the CHECK constraint and the
+    enum in lock-step.
+    """
+    migration = _load_migration_0026()
+
+    assert set(migration._AGENT_RUN_IN_FLIGHT_POLICIES) == {  # type: ignore[attr-defined]
+        p.value for p in ScheduledTriggerInFlightPolicy
+    }

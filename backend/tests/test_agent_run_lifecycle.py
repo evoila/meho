@@ -39,18 +39,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentRun, AgentRunStatus, AgentRunTrigger, Tenant
+from meho_backplane.db.models import (
+    AgentRun,
+    AgentRunStatus,
+    AgentRunTrigger,
+    ScheduledTriggerInFlightPolicy,
+    Tenant,
+)
 from meho_backplane.operations.agent_run import (
     ALLOWED_TRANSITIONS,
     TERMINAL_STATUSES,
     AgentRunNotFoundError,
     IllegalTransitionError,
+    LeaseLostError,
     UnauthorizedCancellationError,
     cancel_run,
+    claim_lease,
     create_run,
     fail_run,
     get_run,
+    heartbeat,
     increment_turns,
+    release_lease,
+    snapshot_in_flight_policy,
     start_run,
     succeed_run,
     transition,
@@ -449,3 +460,185 @@ async def test_cancel_run_raises_not_found_for_missing_id() -> None:
         with pytest.raises(AgentRunNotFoundError) as exc:
             await cancel_run(session, missing, operator=_operator(role=TenantRole.OPERATOR))
         assert exc.value.run_id == missing
+
+
+# ---------------------------------------------------------------------------
+# Lease / heartbeat / release / snapshot (T4 #825)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_claim_lease_stamps_owner_and_expiry() -> None:
+    """:func:`claim_lease` writes ``lease_owner`` + ``lease_expires_at``.
+
+    T4 #825 -- the worker's claim handshake. Status stays unchanged
+    (the caller composes claim_lease + start_run inside one
+    transaction).
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        run = await _make_run(session, status=AgentRunStatus.PENDING)
+        await claim_lease(session, run, owner="worker-a", ttl_seconds=60)
+        await session.commit()
+        run_id = run.id
+
+    async with sessionmaker() as session:
+        loaded = await get_run(session, run_id)
+        assert loaded is not None
+        assert loaded.lease_owner == "worker-a"
+        assert loaded.lease_expires_at is not None
+        # Status untouched -- claim_lease is a pure side-effect on lease columns.
+        assert loaded.status == AgentRunStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_extends_lease_for_holder() -> None:
+    """:func:`heartbeat` bumps ``lease_expires_at`` when the owner matches.
+
+    T4 #825. Conditional UPDATE -- atomic at the DB layer; the new
+    expiry value is what the caller sees after the helper returns.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        run = await _make_run(session, status=AgentRunStatus.PENDING)
+        await claim_lease(session, run, owner="worker-a", ttl_seconds=10)
+        # Walk to running so the heartbeat's status guard fires.
+        await transition(session, run, AgentRunStatus.RUNNING)
+        original_expiry = run.lease_expires_at
+        await session.commit()
+        run_id = run.id
+
+    assert original_expiry is not None
+
+    # New session -- production callers heartbeat from a fresh request.
+    async with sessionmaker() as session:
+        bumped = await heartbeat(session, run_id=run_id, owner="worker-a", ttl_seconds=60)
+        await session.commit()
+    assert bumped.lease_expires_at is not None
+    # SQLite drops tzinfo on read-back; compare wall-clock by
+    # normalising both sides to naive UTC. The production PG path
+    # preserves tz, so the production semantics are still
+    # "tz-aware > tz-aware".
+    assert bumped.lease_expires_at.replace(tzinfo=None) > original_expiry.replace(tzinfo=None)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_raises_lease_lost_when_owner_mismatches() -> None:
+    """A heartbeat from the wrong owner raises :class:`LeaseLostError`.
+
+    T4 #825 -- the worker's signal that its lease was stolen (by the
+    reaper or another claimer). Conditional UPDATE touches zero rows
+    -> raise.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        run = await _make_run(session, status=AgentRunStatus.PENDING)
+        await claim_lease(session, run, owner="worker-a", ttl_seconds=60)
+        await transition(session, run, AgentRunStatus.RUNNING)
+        await session.commit()
+        run_id = run.id
+
+    async with sessionmaker() as session:
+        with pytest.raises(LeaseLostError) as exc:
+            await heartbeat(session, run_id=run_id, owner="impostor", ttl_seconds=60)
+        assert exc.value.run_id == run_id
+        assert exc.value.owner == "impostor"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_raises_lease_lost_when_run_already_terminal() -> None:
+    """A heartbeat against a non-running row raises :class:`LeaseLostError`.
+
+    T4 #825 -- the worker must stop on a status that's no longer
+    ``running``. Covers the operator-cancel-mid-flight race: the
+    cancel landed first, the worker tries to heartbeat, the UPDATE
+    predicate fails the status check, the worker gets the signal to
+    stop.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        run = await _make_run(session, status=AgentRunStatus.PENDING)
+        await claim_lease(session, run, owner="worker-a", ttl_seconds=60)
+        await transition(session, run, AgentRunStatus.RUNNING)
+        # The transition() to a terminal state clears the lease as a
+        # side effect -- but we want to exercise the "status guard
+        # caught it" branch specifically. Use the operator-cancel
+        # path which goes through the same transition guard.
+        await transition(session, run, AgentRunStatus.CANCELLED)
+        await session.commit()
+        run_id = run.id
+
+    async with sessionmaker() as session:
+        with pytest.raises(LeaseLostError):
+            await heartbeat(session, run_id=run_id, owner="worker-a", ttl_seconds=60)
+
+
+@pytest.mark.asyncio
+async def test_release_lease_clears_owner_and_expiry() -> None:
+    """:func:`release_lease` nulls both lease columns without touching status."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        run = await _make_run(session, status=AgentRunStatus.PENDING)
+        await claim_lease(session, run, owner="worker-a", ttl_seconds=60)
+        await release_lease(session, run)
+        await session.commit()
+        run_id = run.id
+
+    async with sessionmaker() as session:
+        loaded = await get_run(session, run_id)
+        assert loaded is not None
+        assert loaded.lease_owner is None
+        assert loaded.lease_expires_at is None
+        # Status untouched.
+        assert loaded.status == AgentRunStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_terminal_transition_clears_lease_as_side_effect() -> None:
+    """``transition()`` clears the lease on any terminal status.
+
+    T4 #825 -- terminal-state side effect. A succeeded / failed /
+    cancelled run must not retain stale lease metadata (the partial
+    index would carry zombie entries; the reaper would skip them
+    because status != 'running', but the columns themselves should
+    reflect "no worker holds this").
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        run = await _make_run(session, status=AgentRunStatus.PENDING)
+        await claim_lease(session, run, owner="worker-a", ttl_seconds=60)
+        await transition(session, run, AgentRunStatus.RUNNING)
+        await transition(session, run, AgentRunStatus.SUCCEEDED)
+        await session.commit()
+        run_id = run.id
+
+    async with sessionmaker() as session:
+        loaded = await get_run(session, run_id)
+        assert loaded is not None
+        assert loaded.status == AgentRunStatus.SUCCEEDED.value
+        assert loaded.lease_owner is None
+        assert loaded.lease_expires_at is None
+        # ended_at still stamped -- the terminal-state side effects compose.
+        assert loaded.ended_at is not None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_in_flight_policy_overwrites_column() -> None:
+    """:func:`snapshot_in_flight_policy` writes the trigger's policy onto the row.
+
+    T4 #825 -- the run-start handshake. A definition edit mid-flight
+    cannot flip behavior because the run carries its own copy.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        run = await _make_run(session, status=AgentRunStatus.PENDING)
+        # Default is FAIL_INTO_AUDIT.
+        assert run.in_flight_policy == ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value
+        await snapshot_in_flight_policy(session, run, ScheduledTriggerInFlightPolicy.RESUME)
+        await session.commit()
+        run_id = run.id
+
+    async with sessionmaker() as session:
+        loaded = await get_run(session, run_id)
+        assert loaded is not None
+        assert loaded.in_flight_policy == ScheduledTriggerInFlightPolicy.RESUME.value

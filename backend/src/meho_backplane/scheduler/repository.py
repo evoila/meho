@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import (
     ScheduledTrigger,
+    ScheduledTriggerInFlightPolicy,
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "advance_cron_trigger",
     "claim_due_triggers",
     "create_cron_trigger",
+    "create_event_trigger",
     "create_one_off_trigger",
     "mark_one_off_fired",
 ]
@@ -63,11 +65,12 @@ async def create_cron_trigger(
     tenant_id: uuid.UUID,
     agent_definition_id: uuid.UUID,
     cron_expr: str,
-    inputs: dict[str, object],
+    inputs: dict[str, object] | None,
     identity_sub: str,
     created_by_sub: str,
     timezone: str = "UTC",
     base: datetime | None = None,
+    in_flight_policy: str = ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
 ) -> ScheduledTrigger:
     """Insert a cron trigger with a computed first ``next_fire_at``.
 
@@ -99,6 +102,7 @@ async def create_cron_trigger(
         timezone=timezone,
         next_fire_at=next_fire,
         status=ScheduledTriggerStatus.ACTIVE.value,
+        in_flight_policy=in_flight_policy,
         inputs=inputs,
         identity_sub=identity_sub,
         created_by_sub=created_by_sub,
@@ -114,9 +118,10 @@ async def create_one_off_trigger(
     tenant_id: uuid.UUID,
     agent_definition_id: uuid.UUID,
     run_at: datetime,
-    inputs: dict[str, object],
+    inputs: dict[str, object] | None,
     identity_sub: str,
     created_by_sub: str,
+    in_flight_policy: str = ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
 ) -> ScheduledTrigger:
     """Insert a one-off trigger that fires once at *run_at*.
 
@@ -145,6 +150,52 @@ async def create_one_off_trigger(
         fire_at=run_at_utc,
         next_fire_at=run_at_utc,
         status=ScheduledTriggerStatus.ACTIVE.value,
+        in_flight_policy=in_flight_policy,
+        inputs=inputs,
+        identity_sub=identity_sub,
+        created_by_sub=created_by_sub,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def create_event_trigger(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_definition_id: uuid.UUID,
+    event_filter: dict[str, object],
+    inputs: dict[str, object] | None,
+    identity_sub: str,
+    created_by_sub: str,
+    in_flight_policy: str,
+) -> ScheduledTrigger:
+    """Insert an event-subscription trigger.
+
+    Event triggers don't carry a wall-clock ``next_fire_at`` -- the
+    transactional outbox (G11.3-T3 #824) dispatches them when a matching
+    event row lands. ``next_fire_at`` is left ``NULL`` and the row is
+    invisible to :func:`claim_due_triggers`'s scan; the outbox dispatcher
+    is the only consumer that wakes an event trigger.
+
+    The discriminated-union invariant
+    (``ck_scheduled_trigger_kind_fields``) is enforced at the DB layer:
+    *event_filter* is the populated column, ``cron_expr`` and
+    ``fire_at`` stay ``NULL``.
+    """
+    row = ScheduledTrigger(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        agent_definition_id=agent_definition_id,
+        kind=ScheduledTriggerKind.EVENT.value,
+        cron_expr=None,
+        timezone="UTC",
+        fire_at=None,
+        event_filter=event_filter,
+        next_fire_at=None,
+        status=ScheduledTriggerStatus.ACTIVE.value,
+        in_flight_policy=in_flight_policy,
         inputs=inputs,
         identity_sub=identity_sub,
         created_by_sub=created_by_sub,

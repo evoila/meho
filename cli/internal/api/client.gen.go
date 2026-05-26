@@ -166,6 +166,27 @@ const (
 	RetireChecklistRequestSurfaceOperations RetireChecklistRequestSurface = "operations"
 )
 
+// Defines values for ScheduledTriggerInFlightPolicy.
+const (
+	FailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
+	Resume        ScheduledTriggerInFlightPolicy = "resume"
+)
+
+// Defines values for ScheduledTriggerKind.
+const (
+	ScheduledTriggerKindCron   ScheduledTriggerKind = "cron"
+	ScheduledTriggerKindEvent  ScheduledTriggerKind = "event"
+	ScheduledTriggerKindOneOff ScheduledTriggerKind = "one_off"
+)
+
+// Defines values for ScheduledTriggerStatus.
+const (
+	ScheduledTriggerStatusActive    ScheduledTriggerStatus = "active"
+	ScheduledTriggerStatusCancelled ScheduledTriggerStatus = "cancelled"
+	ScheduledTriggerStatusFired     ScheduledTriggerStatus = "fired"
+	ScheduledTriggerStatusPaused    ScheduledTriggerStatus = "paused"
+)
+
 // Defines values for SurfaceChecklistSurface.
 const (
 	SurfaceChecklistSurfaceKb         SurfaceChecklistSurface = "kb"
@@ -242,6 +263,21 @@ const (
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceKb         UsageEndpointApiV1RetrieveUsageGetParamsSurface = "kb"
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceMemory     UsageEndpointApiV1RetrieveUsageGetParamsSurface = "memory"
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceOperations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
+)
+
+// Defines values for ListTriggersApiV1SchedulerTriggersGetParamsKind.
+const (
+	ListTriggersApiV1SchedulerTriggersGetParamsKindCron   ListTriggersApiV1SchedulerTriggersGetParamsKind = "cron"
+	ListTriggersApiV1SchedulerTriggersGetParamsKindEvent  ListTriggersApiV1SchedulerTriggersGetParamsKind = "event"
+	ListTriggersApiV1SchedulerTriggersGetParamsKindOneOff ListTriggersApiV1SchedulerTriggersGetParamsKind = "one_off"
+)
+
+// Defines values for ListTriggersApiV1SchedulerTriggersGetParamsStatus.
+const (
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusActive    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "active"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusCancelled ListTriggersApiV1SchedulerTriggersGetParamsStatus = "cancelled"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusFired     ListTriggersApiV1SchedulerTriggersGetParamsStatus = "fired"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusPaused    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "paused"
 )
 
 // AgentDefinitionCreate POST body -- the inputs “create“ consumes. Pydantic v2 strict.
@@ -2209,6 +2245,287 @@ type RetrieveResponse struct {
 	QueryDurationMs float32        `json:"query_duration_ms"`
 }
 
+// ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
+//
+// Discriminated by *kind*: exactly one of “cron_expr“ / “fire_at“
+// / “event_filter“ must be set, matching the DB-side
+// “ck_scheduled_trigger_kind_fields“ invariant. The
+// :meth:`_validate_discriminated_union` validator enforces this at
+// the wire so a malformed body surfaces as 422 rather than as a
+// flush-time :class:`IntegrityError`.
+//
+// *agent_definition_id* is the existing-definition reference -- the
+// repository's FK check rejects an orphan id with 422 at insert; no
+// validation is duplicated here.
+//
+// *identity_sub* is the OIDC “sub“ the scheduler impersonates when
+// firing the trigger (distinct from *created_by_sub* which the
+// boundary derives from the operator). Defaulted to
+// “"__scheduler__"“ to match the migration-time backstop the
+// ORM-level default sets, so a minimal create body still validates.
+//
+// *in_flight_policy* defaults to “fail_into_audit“ per the consumer
+// doc; operators wanting at-least-once semantics opt into “resume“.
+//
+// *tenant_id* (optional) lets a tenant-admin caller create triggers in
+// another tenant for cross-tenant admin operations; “operator“ role
+// callers leave it “None“ and the boundary pins it to the JWT's
+// tenant id. The boundary enforces the RBAC -- this schema only
+// carries the field.
+type ScheduledTriggerCreate struct {
+	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
+	CronExpr          *string                 `json:"cron_expr"`
+	EventFilter       *map[string]interface{} `json:"event_filter"`
+	FireAt            *time.Time              `json:"fire_at"`
+	IdentitySub       *string                 `json:"identity_sub,omitempty"`
+
+	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+	// T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+	// storage shape and the dispatch behaviour aligned across the
+	// Initiative.
+	//
+	// Members:
+	//
+	// * :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+	//   resume a killed run from its last recorded state. At-least-once
+	//   semantics; the underlying agent run should be idempotent-friendly.
+	// * :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed`` with
+	//   a clean audit row explaining the interruption; the next trigger
+	//   tick fires a fresh run. The consumer doc (``agent-runtime-for-ops-
+	//   spec.md`` §P2) explicitly accepts this outcome as the default
+	//   policy -- which is why Option A (extend roll-our-own) is viable at
+	//   all without DBOS-style automatic resume.
+	//
+	// Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+	// the conservative policy that requires no extra infrastructure (just
+	// audit) and matches the consumer's accepted-outcome statement.
+	// Operators opt into :attr:`RESUME` per definition.
+	InFlightPolicy *ScheduledTriggerInFlightPolicy `json:"in_flight_policy,omitempty"`
+	Inputs         *map[string]interface{}         `json:"inputs"`
+
+	// Kind Closed enum of trigger shapes the G11.3 scheduler dispatches.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+	// :class:`ScheduledTrigger` row carries exactly one of three shapes,
+	// selected by this discriminator; the discriminated-union invariant is
+	// enforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``
+	// that pairs each kind with its mandatory column.
+	//
+	// Members:
+	//
+	// * :attr:`CRON` -- recurring trigger driven by a 5-field cron
+	//   expression (``cron_expr`` column). The dispatcher (T2 #823) reads
+	//   the expression via ``croniter`` and materialises ``next_fire_at``.
+	// * :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+	//   (``fire_at`` column). The dispatcher fires it once then marks
+	//   ``status = 'cancelled'`` (or the row stays inactive via
+	//   ``next_fire_at IS NULL``).
+	// * :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+	//   filter (``event_filter`` column). The transactional outbox (T3
+	//   #824) matches rows against the filter and dispatches.
+	//
+	// Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+	// coordinated DB + model change so the enum and the
+	// :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0020``'s
+	// frozen tuple) cannot drift. The lock-step discipline mirrors
+	// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+	// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+	// unit-test time.
+	Kind     ScheduledTriggerKind `json:"kind"`
+	TenantId *openapi_types.UUID  `json:"tenant_id"`
+	Timezone *string              `json:"timezone,omitempty"`
+}
+
+// ScheduledTriggerInFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
+//
+// Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+// T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+// storage shape and the dispatch behaviour aligned across the
+// Initiative.
+//
+// Members:
+//
+//   - :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+//     resume a killed run from its last recorded state. At-least-once
+//     semantics; the underlying agent run should be idempotent-friendly.
+//   - :attr:`FAIL_INTO_AUDIT` -- the killed run is marked “failed“ with
+//     a clean audit row explaining the interruption; the next trigger
+//     tick fires a fresh run. The consumer doc (“agent-runtime-for-ops-
+//     spec.md“ §P2) explicitly accepts this outcome as the default
+//     policy -- which is why Option A (extend roll-our-own) is viable at
+//     all without DBOS-style automatic resume.
+//
+// Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+// the conservative policy that requires no extra infrastructure (just
+// audit) and matches the consumer's accepted-outcome statement.
+// Operators opt into :attr:`RESUME` per definition.
+type ScheduledTriggerInFlightPolicy string
+
+// ScheduledTriggerKind Closed enum of trigger shapes the G11.3 scheduler dispatches.
+//
+// Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+// :class:`ScheduledTrigger` row carries exactly one of three shapes,
+// selected by this discriminator; the discriminated-union invariant is
+// enforced by the DB-side “ck_scheduled_trigger_kind_fields“ “CHECK“
+// that pairs each kind with its mandatory column.
+//
+// Members:
+//
+//   - :attr:`CRON` -- recurring trigger driven by a 5-field cron
+//     expression (“cron_expr“ column). The dispatcher (T2 #823) reads
+//     the expression via “croniter“ and materialises “next_fire_at“.
+//   - :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+//     (“fire_at“ column). The dispatcher fires it once then marks
+//     “status = 'cancelled'“ (or the row stays inactive via
+//     “next_fire_at IS NULL“).
+//   - :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+//     filter (“event_filter“ column). The transactional outbox (T3
+//     #824) matches rows against the filter and dispatches.
+//
+// Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+// coordinated DB + model change so the enum and the
+// :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration “0020“'s
+// frozen tuple) cannot drift. The lock-step discipline mirrors
+// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+// unit-test time.
+type ScheduledTriggerKind string
+
+// ScheduledTriggerListResponse Response envelope for “GET /api/v1/scheduler/triggers“.
+//
+// Wrapped in “{"triggers": [...]}“ so a future paging / cursor
+// field can land non-breakingly -- the same shape
+// :class:`~meho_backplane.api.v1.agents.AgentDefinitionListResponse`
+// adopted.
+type ScheduledTriggerListResponse struct {
+	Triggers []ScheduledTriggerRead `json:"triggers"`
+}
+
+// ScheduledTriggerRead Response shape for one “scheduled_trigger“ row.
+//
+// Mirrors :class:`~meho_backplane.db.models.ScheduledTrigger`'s column
+// set, projected to the wire types the JSON renderer can serialise.
+// “frozen=True“ matches the :mod:`meho_backplane.agents.schemas`
+// posture so a route handler cannot accidentally mutate the row after
+// returning it.
+type ScheduledTriggerRead struct {
+	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
+	CreatedAt         time.Time               `json:"created_at"`
+	CreatedBySub      string                  `json:"created_by_sub"`
+	CronExpr          *string                 `json:"cron_expr"`
+	EventFilter       *map[string]interface{} `json:"event_filter"`
+	FireAt            *time.Time              `json:"fire_at"`
+	Id                openapi_types.UUID      `json:"id"`
+	IdentitySub       string                  `json:"identity_sub"`
+
+	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+	// T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+	// storage shape and the dispatch behaviour aligned across the
+	// Initiative.
+	//
+	// Members:
+	//
+	// * :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+	//   resume a killed run from its last recorded state. At-least-once
+	//   semantics; the underlying agent run should be idempotent-friendly.
+	// * :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed`` with
+	//   a clean audit row explaining the interruption; the next trigger
+	//   tick fires a fresh run. The consumer doc (``agent-runtime-for-ops-
+	//   spec.md`` §P2) explicitly accepts this outcome as the default
+	//   policy -- which is why Option A (extend roll-our-own) is viable at
+	//   all without DBOS-style automatic resume.
+	//
+	// Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+	// the conservative policy that requires no extra infrastructure (just
+	// audit) and matches the consumer's accepted-outcome statement.
+	// Operators opt into :attr:`RESUME` per definition.
+	InFlightPolicy ScheduledTriggerInFlightPolicy `json:"in_flight_policy"`
+	Inputs         *map[string]interface{}        `json:"inputs"`
+
+	// Kind Closed enum of trigger shapes the G11.3 scheduler dispatches.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+	// :class:`ScheduledTrigger` row carries exactly one of three shapes,
+	// selected by this discriminator; the discriminated-union invariant is
+	// enforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``
+	// that pairs each kind with its mandatory column.
+	//
+	// Members:
+	//
+	// * :attr:`CRON` -- recurring trigger driven by a 5-field cron
+	//   expression (``cron_expr`` column). The dispatcher (T2 #823) reads
+	//   the expression via ``croniter`` and materialises ``next_fire_at``.
+	// * :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+	//   (``fire_at`` column). The dispatcher fires it once then marks
+	//   ``status = 'cancelled'`` (or the row stays inactive via
+	//   ``next_fire_at IS NULL``).
+	// * :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+	//   filter (``event_filter`` column). The transactional outbox (T3
+	//   #824) matches rows against the filter and dispatches.
+	//
+	// Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+	// coordinated DB + model change so the enum and the
+	// :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0020``'s
+	// frozen tuple) cannot drift. The lock-step discipline mirrors
+	// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+	// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+	// unit-test time.
+	Kind        ScheduledTriggerKind `json:"kind"`
+	LastFiredAt *time.Time           `json:"last_fired_at"`
+	NextFireAt  *time.Time           `json:"next_fire_at"`
+
+	// Status Closed lifecycle status of a :class:`ScheduledTrigger`.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1). The admin
+	// surface (T5 #826) walks triggers through this state machine; the
+	// dispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.
+	//
+	// Members:
+	//
+	// * :attr:`ACTIVE` -- the trigger is eligible for dispatch.
+	// * :attr:`PAUSED` -- the trigger is temporarily disabled by an
+	//   operator. ``next_fire_at`` is preserved so resuming reactivates
+	//   without recomputing.
+	// * :attr:`CANCELLED` -- terminal. The trigger row is retained for
+	//   audit purposes but never fires again.
+	// * :attr:`FIRED` -- terminal one-off state. Migration ``0025`` (T2
+	//   #823) widened the enum so a one-off trigger transitions
+	//   ``ACTIVE -> FIRED`` after its single dispatch instead of going
+	//   to ``CANCELLED`` (which carries operator-intent semantics).
+	//   :class:`ScheduledTrigger` rows in this state are retained for
+	//   audit (last-fired-at + identity_sub) but never re-dispatched.
+	Status    ScheduledTriggerStatus `json:"status"`
+	TenantId  openapi_types.UUID     `json:"tenant_id"`
+	Timezone  string                 `json:"timezone"`
+	UpdatedAt time.Time              `json:"updated_at"`
+}
+
+// ScheduledTriggerStatus Closed lifecycle status of a :class:`ScheduledTrigger`.
+//
+// Initiative #804 (G11.3 Scheduler), Task #822 (T1). The admin
+// surface (T5 #826) walks triggers through this state machine; the
+// dispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.
+//
+// Members:
+//
+//   - :attr:`ACTIVE` -- the trigger is eligible for dispatch.
+//   - :attr:`PAUSED` -- the trigger is temporarily disabled by an
+//     operator. “next_fire_at“ is preserved so resuming reactivates
+//     without recomputing.
+//   - :attr:`CANCELLED` -- terminal. The trigger row is retained for
+//     audit purposes but never fires again.
+//   - :attr:`FIRED` -- terminal one-off state. Migration “0025“ (T2
+//     #823) widened the enum so a one-off trigger transitions
+//     “ACTIVE -> FIRED“ after its single dispatch instead of going
+//     to “CANCELLED“ (which carries operator-intent semantics).
+//     :class:`ScheduledTrigger` rows in this state are retained for
+//     audit (last-fired-at + identity_sub) but never re-dispatched.
+type ScheduledTriggerStatus string
+
 // SkippedConnector One connector that did not contribute candidates for a product.
 //
 // “name“ is the connector implementation key (the “impl_id“ from
@@ -3424,6 +3741,33 @@ type UsageEndpointApiV1RetrieveUsageGetParams struct {
 // UsageEndpointApiV1RetrieveUsageGetParamsSurface defines parameters for UsageEndpointApiV1RetrieveUsageGet.
 type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
+// ListTriggersApiV1SchedulerTriggersGetParams defines parameters for ListTriggersApiV1SchedulerTriggersGet.
+type ListTriggersApiV1SchedulerTriggersGetParams struct {
+	Limit         *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int                                               `form:"offset,omitempty" json:"offset,omitempty"`
+	Kind          *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
+	Status        *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TenantFilter  *openapi_types.UUID                                `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string                                            `json:"authorization,omitempty"`
+}
+
+// ListTriggersApiV1SchedulerTriggersGetParamsKind defines parameters for ListTriggersApiV1SchedulerTriggersGet.
+type ListTriggersApiV1SchedulerTriggersGetParamsKind string
+
+// ListTriggersApiV1SchedulerTriggersGetParamsStatus defines parameters for ListTriggersApiV1SchedulerTriggersGet.
+type ListTriggersApiV1SchedulerTriggersGetParamsStatus string
+
+// CreateTriggerApiV1SchedulerTriggersPostParams defines parameters for CreateTriggerApiV1SchedulerTriggersPost.
+type CreateTriggerApiV1SchedulerTriggersPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams defines parameters for CancelTriggerApiV1SchedulerTriggersTriggerIdDelete.
+type CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
 	Product       *string `form:"product,omitempty" json:"product,omitempty"`
@@ -3695,6 +4039,9 @@ type EvalEndpointApiV1RetrieveEvalPostJSONRequestBody = EvalRequest
 
 // RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody defines body for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost for application/json ContentType.
 type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody = RetireChecklistRequest
+
+// CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody defines body for CreateTriggerApiV1SchedulerTriggersPost for application/json ContentType.
+type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCreate
 
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
@@ -4155,6 +4502,17 @@ type ClientInterface interface {
 
 	// UsageEndpointApiV1RetrieveUsageGet request
 	UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListTriggersApiV1SchedulerTriggersGet request
+	ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateTriggerApiV1SchedulerTriggersPostWithBody request with any body
+	CreateTriggerApiV1SchedulerTriggersPostWithBody(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateTriggerApiV1SchedulerTriggersPost(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CancelTriggerApiV1SchedulerTriggersTriggerIdDelete request
+	CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -5367,6 +5725,54 @@ func (c *Client) RetireChecklistEndpointApiV1RetrieveRetireChecklistPost(ctx con
 
 func (c *Client) UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUsageEndpointApiV1RetrieveUsageGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListTriggersApiV1SchedulerTriggersGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateTriggerApiV1SchedulerTriggersPostWithBody(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateTriggerApiV1SchedulerTriggersPost(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateTriggerApiV1SchedulerTriggersPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest(c.Server, triggerId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -9953,6 +10359,260 @@ func NewUsageEndpointApiV1RetrieveUsageGetRequest(server string, params *UsageEn
 	return req, nil
 }
 
+// NewListTriggersApiV1SchedulerTriggersGetRequest generates requests for ListTriggersApiV1SchedulerTriggersGet
+func NewListTriggersApiV1SchedulerTriggersGetRequest(server string, params *ListTriggersApiV1SchedulerTriggersGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/scheduler/triggers")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateTriggerApiV1SchedulerTriggersPostRequest calls the generic CreateTriggerApiV1SchedulerTriggersPost builder with application/json body
+func NewCreateTriggerApiV1SchedulerTriggersPostRequest(server string, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody generates requests for CreateTriggerApiV1SchedulerTriggersPost with any type of body
+func NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody(server string, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/scheduler/triggers")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest generates requests for CancelTriggerApiV1SchedulerTriggersTriggerIdDelete
+func NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest(server string, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "trigger_id", runtime.ParamLocationPath, triggerId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/scheduler/triggers/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListTargetsApiV1TargetsGetRequest generates requests for ListTargetsApiV1TargetsGet
 func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV1TargetsGetParams) (*http.Request, error) {
 	var err error
@@ -12791,6 +13451,17 @@ type ClientWithResponsesInterface interface {
 	// UsageEndpointApiV1RetrieveUsageGetWithResponse request
 	UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error)
 
+	// ListTriggersApiV1SchedulerTriggersGetWithResponse request
+	ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error)
+
+	// CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse request with any body
+	CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error)
+
+	CreateTriggerApiV1SchedulerTriggersPostWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error)
+
+	// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse request
+	CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error)
+
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
 
@@ -14436,6 +15107,74 @@ func (r UsageEndpointApiV1RetrieveUsageGetResponse) StatusCode() int {
 	return 0
 }
 
+type ListTriggersApiV1SchedulerTriggersGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ScheduledTriggerListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListTriggersApiV1SchedulerTriggersGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListTriggersApiV1SchedulerTriggersGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateTriggerApiV1SchedulerTriggersPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *ScheduledTriggerRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateTriggerApiV1SchedulerTriggersPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateTriggerApiV1SchedulerTriggersPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListTargetsApiV1TargetsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -16063,6 +16802,41 @@ func (c *ClientWithResponses) UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx
 		return nil, err
 	}
 	return ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp)
+}
+
+// ListTriggersApiV1SchedulerTriggersGetWithResponse request returning *ListTriggersApiV1SchedulerTriggersGetResponse
+func (c *ClientWithResponses) ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error) {
+	rsp, err := c.ListTriggersApiV1SchedulerTriggersGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListTriggersApiV1SchedulerTriggersGetResponse(rsp)
+}
+
+// CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse request with arbitrary body returning *CreateTriggerApiV1SchedulerTriggersPostResponse
+func (c *ClientWithResponses) CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	rsp, err := c.CreateTriggerApiV1SchedulerTriggersPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateTriggerApiV1SchedulerTriggersPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateTriggerApiV1SchedulerTriggersPostWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	rsp, err := c.CreateTriggerApiV1SchedulerTriggersPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateTriggerApiV1SchedulerTriggersPostResponse(rsp)
+}
+
+// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse request returning *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse
+func (c *ClientWithResponses) CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error) {
+	rsp, err := c.CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx, triggerId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse(rsp)
 }
 
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
@@ -18529,6 +19303,98 @@ func ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp *http.Response) (*Usage
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListTriggersApiV1SchedulerTriggersGetResponse parses an HTTP response from a ListTriggersApiV1SchedulerTriggersGetWithResponse call
+func ParseListTriggersApiV1SchedulerTriggersGetResponse(rsp *http.Response) (*ListTriggersApiV1SchedulerTriggersGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListTriggersApiV1SchedulerTriggersGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ScheduledTriggerListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateTriggerApiV1SchedulerTriggersPostResponse parses an HTTP response from a CreateTriggerApiV1SchedulerTriggersPostWithResponse call
+func ParseCreateTriggerApiV1SchedulerTriggersPostResponse(rsp *http.Response) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateTriggerApiV1SchedulerTriggersPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest ScheduledTriggerRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse parses an HTTP response from a CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse call
+func ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse(rsp *http.Response) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

@@ -50,6 +50,10 @@ from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
+from meho_backplane.agent.reaper import (
+    start_agent_run_reaper,
+    stop_agent_run_reaper,
+)
 from meho_backplane.agents import (
     start_grant_expiry_sweeper,
     stop_grant_expiry_sweeper,
@@ -79,6 +83,7 @@ from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
 from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
+from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -96,6 +101,7 @@ from meho_backplane.broadcast import (
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
+from meho_backplane.events import start_event_drain, stop_event_drain
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -304,6 +310,8 @@ class _BackgroundTasks:
     topology_history: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
+    agent_run_reaper: asyncio.Task[None] | None
+    event_drain: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -343,12 +351,27 @@ def _start_background_tasks() -> _BackgroundTasks:
     scheduler: asyncio.Task[None] | None = None
     if settings.scheduler_enabled:
         scheduler = start_scheduler()
+    # G11.3-T4 #825 — gated on AGENT_RUN_REAPER_ENABLED so operators
+    # running an external lease-reclaim mechanism (DBOS Transact, a
+    # workflow engine) can disable the in-tree reaper without
+    # patching code.
+    agent_run_reaper: asyncio.Task[None] | None = None
+    if settings.agent_run_reaper_enabled:
+        agent_run_reaper = start_agent_run_reaper()
+    # G11.3-T3 #824 — event-outbox drain loop. Gated on
+    # EVENT_DRAIN_ENABLED so operators using an external orchestrator
+    # (or running the test path without the drain) can opt out.
+    event_drain: asyncio.Task[None] | None = None
+    if settings.event_drain_enabled:
+        event_drain = start_event_drain()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
         topology_history=topology_history,
         grant_expiry=grant_expiry,
         scheduler=scheduler,
+        agent_run_reaper=agent_run_reaper,
+        event_drain=event_drain,
     )
 
 
@@ -360,6 +383,10 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.event_drain is not None:
+        await stop_event_drain(tasks.event_drain)
+    if tasks.agent_run_reaper is not None:
+        await stop_agent_run_reaper(tasks.agent_run_reaper)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
     if tasks.grant_expiry is not None:
@@ -607,6 +634,13 @@ app.include_router(api_v1_agent_principals_router)
 # / final events). Operator-level; tenant-scoped via the JWT; runs only an
 # enabled definition in the operator's tenant.
 app.include_router(api_v1_agent_runs_router)
+# G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
+# (list, paginated, operator-level), POST /scheduler/triggers (create,
+# tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).
+# Tenant-scoped via the JWT; tenant_admin may pass tenant_filter / a
+# body tenant_id to act cross-tenant for admin operations. Every
+# mutation writes an audit row and broadcasts under op_class=write.
+app.include_router(api_v1_scheduler_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``

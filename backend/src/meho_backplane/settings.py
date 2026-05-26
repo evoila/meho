@@ -640,6 +640,22 @@ class Settings(BaseModel):
     # elevation windows are typically hours, not days.
     grant_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
     grant_expiry_enabled: bool = True
+    # G11.3-T4 #825 -- agent_run reaper knobs. Same opt-out shape as
+    # GRANT_EXPIRY_ENABLED / MEMORY_EXPIRY_ENABLED so an operator
+    # running an external lease-reclaim mechanism (DBOS Transact, a
+    # workflow engine, etc.) can disable the in-tree reaper without
+    # patching code.
+    #
+    # The default tick (30s) + the default lease TTL (60s) give a
+    # worker two heartbeat windows of slack before reclaim -- a
+    # transient ~20s GC pause / network blip does not cost a run. The
+    # MAX_PER_TICK bound (50) keeps a post-outage backlog from
+    # monopolising one Postgres backend; a 500-row backlog drains
+    # across ~10 ticks.
+    agent_run_reaper_enabled: bool = True
+    agent_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    agent_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
+    agent_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -711,6 +727,14 @@ class Settings(BaseModel):
     scheduler_agent_vault_path_pattern: str = Field(
         default="secret/data/agents/{client_id}/credentials"
     )
+    # G11.3-T3 #824 — event-outbox drain loop cadence. 10 s default
+    # mirrors the consumer doc's accepted-latency target (the
+    # LISTEN/NOTIFY wake hint drops the typical latency to sub-second;
+    # this is the polled fall-back when no listener is connected).
+    # ``enabled`` mirrors SCHEDULER_ENABLED so operators using an
+    # external orchestrator (or running tests without the drain) opt out.
+    event_drain_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    event_drain_enabled: bool = True
     mcp_require_session_id: bool = False
 
     @field_validator("broadcast_redis_url")
@@ -911,6 +935,18 @@ def get_settings() -> Settings:
         grant_expiry_enabled=parse_bool_env(
             os.environ.get("GRANT_EXPIRY_ENABLED", "true"),
         ),
+        agent_run_reaper_enabled=parse_bool_env(
+            os.environ.get("AGENT_RUN_REAPER_ENABLED", "true"),
+        ),
+        agent_run_reaper_tick_interval_seconds=int(
+            os.environ.get("AGENT_RUN_REAPER_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        agent_run_reaper_max_per_tick=int(
+            os.environ.get("AGENT_RUN_REAPER_MAX_PER_TICK", "50"),
+        ),
+        agent_run_lease_ttl_seconds=int(
+            os.environ.get("AGENT_RUN_LEASE_TTL_SECONDS", "60"),
+        ),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),
@@ -950,6 +986,12 @@ def get_settings() -> Settings:
         scheduler_agent_vault_path_pattern=os.environ.get(
             "SCHEDULER_AGENT_VAULT_PATH_PATTERN",
             "secret/data/agents/{client_id}/credentials",
+        ),
+        event_drain_tick_interval_seconds=int(
+            os.environ.get("EVENT_DRAIN_TICK_INTERVAL_SECONDS", "10"),
+        ),
+        event_drain_enabled=parse_bool_env(
+            os.environ.get("EVENT_DRAIN_ENABLED", "true"),
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),

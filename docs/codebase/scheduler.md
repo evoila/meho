@@ -15,9 +15,11 @@ Two of the three G11.3 trigger shapes ship in T2 (this task, issue #823):
 - **One-off** — fires once at a stored instant, then transitions to a
   terminal `fired` state.
 
-The third shape (event-subscription, T3 #824) lands as a separate
-transactional-outbox table; its substrate decision is different because
-events arrive asynchronously rather than on a clock boundary.
+The third shape (event-subscription, T3 #824) lives in a sibling
+substrate (`event_outbox` table + drain loop in
+`backend/src/meho_backplane/events/`) because events arrive
+asynchronously rather than on a clock boundary. See [events.md](events.md)
+for that surface.
 
 T1 (#822) is an in-flight spike that may settle the durable-execution
 layer as DBOS Transact. T2 ships on the codebase's twice-stated
@@ -146,17 +148,17 @@ The two fire paths follow the same lifecycle shape:
    failures (Keycloak grant timeout, identity-binding refusal) are
    logged and swallowed under the at-most-once contract — the
    state transition has already committed; the missed fire is
-   visible in audit and an operator can re-fire via the admin
-   surface (T5).
+   visible in audit and an operator can re-create / re-fire via
+   the admin surface (T5 #826).
 
 This split is load-bearing for one-off triggers: without the
 precondition gate, an unresolved agent secret would be committed as
 `status='fired'` before `_dispatch_invocation` could reject the
-fire, silently consuming the one-off with no admin re-fire surface
-in v0.2 (T5 #826 unbuilt). The gate keeps the at-most-once contract
-honest for invoke-time failures (where it was always the right
-behaviour) without dropping work for the precondition cases (where
-it was always recoverable by the operator).
+fire, silently consuming the one-off. The gate keeps the
+at-most-once contract honest for invoke-time failures (where it was
+always the right behaviour) without dropping work for the
+precondition cases (where it was always recoverable by the
+operator).
 
 ### Cron fire path (`_fire_cron`)
 
@@ -263,13 +265,77 @@ scheduled instant by the time the agent run starts.
   replay every missed cron instant. The consumer doc accepts this; an
   operator who needs "fire-every-N-runs" semantics writes that into the
   agent definition itself.
-- **No admin surface yet** — create / list / cancel / pause flows ship
-  in G11.3-T5 (#826). T2 exposes the repository functions so tests can
-  construct triggers; production deploys insert via SQL or a future
-  T5 API.
 - **`AgentRunTrigger.SCHEDULED` provenance** — passed through to
   `AgentInvoker.run`'s new `trigger` kwarg. Audit queries that filter by
   trigger see scheduled runs distinctly from direct invocations.
+- **Pause / resume not exposed yet** — the T5 admin surface ships
+  create / list / cancel; pause-then-resume of an active trigger is
+  not in v0.2. `ScheduledTriggerStatus.PAUSED` exists in the enum and
+  the cancel path admits paused→cancelled transitions, but no public
+  verb writes paused. Operators that need a temporary disable today
+  cancel and re-create.
+
+## Admin surface (T5 #826)
+
+The T5 task lands the create / list / cancel verbs across all three
+transports. The single code path is
+`backend/src/meho_backplane/scheduler/service.py`'s
+`SchedulerAdminService`; the REST routes, MCP tools, and CLI verbs
+each translate transport-shaped arguments into service calls.
+
+### Verbs
+
+| Verb | REST | MCP | CLI | Role |
+|---|---|---|---|---|
+| Create | `POST /api/v1/scheduler/triggers` | `meho.scheduler.create` | `meho scheduler create` | `tenant_admin` |
+| List | `GET /api/v1/scheduler/triggers` | `meho.scheduler.list` | `meho scheduler list` | `operator` |
+| Cancel | `DELETE /api/v1/scheduler/triggers/{id}` | `meho.scheduler.cancel` | `meho scheduler cancel <id>` | `tenant_admin` |
+
+The discriminated-union validator on `ScheduledTriggerCreate` enforces
+exactly one of `cron_expr` / `fire_at` / `event_filter` per kind. An
+invalid cron expression surfaces as `invalid_arguments` at the
+boundary; an unknown `agent_definition_id` surfaces as
+`agent_definition_not_found` (422 / MCP invalid-params).
+
+### Cross-tenant admin
+
+`tenant_admin` callers may target another tenant by passing
+`tenant_id` in the create body or `tenant_filter` in the list /
+cancel query (REST) or `tenant_id` in the MCP create arguments. The
+MCP create handler rejects `tenant_id` from `operator` callers with
+`tenant_id_requires_tenant_admin` (it does *not* silently drop the
+field; review M1 on PR #1128). The REST list / cancel routes use the
+same role gate. Audit rows carry
+`audit_tenant_scope=other|self` so cross-tenant activity is
+greppable.
+
+### Cancel idempotency + 404 / 409 contract
+
+Cancel is **idempotent**: a second cancel against an already-cancelled
+trigger returns 204. A cancel against a row that hit terminal
+`fired` returns 409 `trigger_already_fired` — the lifecycle is
+`fired → end`, not `fired → cancelled`. A cancel against an absent
+or cross-tenant id returns 404 `trigger_not_found` (the existence of
+the trigger is **not** leaked across the tenant boundary via a
+403 / 404 differential).
+
+Concurrent cancels race safely via a read-after-update pattern: the
+pre-flight SELECT classifies obviously-already-terminal states; the
+conditional UPDATE matches the active / paused set; on rowcount==0
+the service re-reads the row and treats `cancelled` as success
+(idempotent), `fired` as 409, and absence as 404. This closes the
+phantom-409 TOCTOU window flagged in review B1 on PR #1128.
+
+### CLI input safety
+
+`meho scheduler create --event-filter @<path>` / `--inputs @<path>` /
+`--event-filter @-` reads from a file or stdin with a 256 KiB cap
+enforced via `io.LimitReader` (review M4 on PR #1128 — an unbounded
+read could OOM the CLI on an adversarial JSON file). The same helper
+rejects JSON `null` explicitly (review M3 on PR #1128 — `json.Unmarshal`
+of `null` into `map[string]any` sets the map to nil without error,
+which would silently forward an empty body field that the backend
+cannot distinguish from "omitted").
 
 ## References
 
@@ -277,7 +343,8 @@ scheduled instant by the time the agent run starts.
 - Initiative #804 (G11.3 Scheduler)
 - Goal #800 (G11 Agentic ops runtime)
 - Sibling tasks: #822 (T1 substrate-decision spike), #824 (T3 event
-  trigger), #825 (T4 in-flight resume), #826 (T5 admin surface)
+  trigger), #825 (T4 in-flight resume); #826 (T5 admin surface) lands
+  with this PR.
 - Precedent loops:
   [topology/scheduler.py](../../backend/src/meho_backplane/topology/scheduler.py),
   [memory/expiry.py](../../backend/src/meho_backplane/memory/expiry.py)

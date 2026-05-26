@@ -129,8 +129,16 @@ def _token(key: Any, *, role: TenantRole, sub: str = "op-test") -> str:
 #   ``operator`` matrix below for that reason; the routing-shadow
 #   itself is an adjacent finding for the orchestrator to file
 #   separately.
+# Fixed UUID literals for path parameters. The role gate fires before
+# any DB lookup, so the value need only parse as a UUID; deterministic
+# literals keep ``pytest-xdist`` test-collection IDs stable across
+# workers (``uuid.uuid4()`` here would re-evaluate per worker and trip
+# xdist's collection-determinism check).
+_GRANT_ID_SHOW = uuid.UUID("11111111-1111-1111-1111-111111111111")
+_GRANT_ID_REVOKE = uuid.UUID("22222222-2222-2222-2222-222222222222")
+
 _GRANT_ENDPOINTS: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
-    ("GET", f"/api/v1/agents/grants/{uuid.uuid4()}", None),
+    ("GET", f"/api/v1/agents/grants/{_GRANT_ID_SHOW}", None),
     (
         "POST",
         "/api/v1/agents/grants",
@@ -150,7 +158,7 @@ _GRANT_ENDPOINTS: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
             "expires_at": "2099-01-01T00:00:00+00:00",
         },
     ),
-    ("DELETE", f"/api/v1/agents/grants/{uuid.uuid4()}", None),
+    ("DELETE", f"/api/v1/agents/grants/{_GRANT_ID_REVOKE}", None),
 )
 
 

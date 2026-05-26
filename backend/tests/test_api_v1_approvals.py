@@ -106,22 +106,33 @@ def _token(key: Any, *, role: TenantRole, sub: str = "op-test") -> str:
 # Pydantic body parsing, so minimal valid bodies suffice for the POST
 # routes — the goal is to ensure 403 from the gate, not a 422 from
 # body validation.
+#
+# Fixed UUID literals for path parameters. The role gate fires before
+# any DB lookup, so the value need only parse as a UUID; deterministic
+# literals keep ``pytest-xdist`` test-collection IDs stable across
+# workers (``uuid.uuid4()`` here would re-evaluate per worker and trip
+# xdist's collection-determinism check).
+_APPROVAL_ID_SHOW = uuid.UUID("11111111-1111-1111-1111-111111111111")
+_APPROVAL_ID_APPROVE = uuid.UUID("22222222-2222-2222-2222-222222222222")
+_APPROVAL_ID_REJECT = uuid.UUID("33333333-3333-3333-3333-333333333333")
+_APPROVAL_ID_DECIDE = uuid.UUID("44444444-4444-4444-4444-444444444444")
+
 _APPROVAL_ENDPOINTS: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
     ("GET", "/api/v1/approvals", None),
-    ("GET", f"/api/v1/approvals/{uuid.uuid4()}", None),
+    ("GET", f"/api/v1/approvals/{_APPROVAL_ID_SHOW}", None),
     (
         "POST",
-        f"/api/v1/approvals/{uuid.uuid4()}/approve",
+        f"/api/v1/approvals/{_APPROVAL_ID_APPROVE}/approve",
         {"params": {}},
     ),
     (
         "POST",
-        f"/api/v1/approvals/{uuid.uuid4()}/reject",
+        f"/api/v1/approvals/{_APPROVAL_ID_REJECT}/reject",
         {"reason": ""},
     ),
     (
         "POST",
-        f"/api/v1/approvals/{uuid.uuid4()}/decide",
+        f"/api/v1/approvals/{_APPROVAL_ID_DECIDE}/decide",
         {"decision": "approved"},
     ),
 )

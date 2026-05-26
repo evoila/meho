@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -578,3 +579,235 @@ async def count_audit_rows(async_url: str) -> int:
 # The cure is to keep PG-driven tests ``async def`` (the
 # ``asyncio_mode = "auto"`` setting in ``backend/pyproject.toml`` makes
 # that the default) and to ``await`` the helper coroutines directly.
+
+
+# ---------------------------------------------------------------------------
+# Keycloak testcontainer fixture (G11.2-T7 #1098)
+# ---------------------------------------------------------------------------
+#
+# Closes the deferred live-IdP acceptance criterion of G11.2-T2 (#816):
+# T2 shipped ``get_client_credentials_token`` with respx contract tests
+# but the full JWT-validation chain has never been exercised against a
+# real Keycloak realm. This fixture boots an upstream Keycloak image in
+# dev mode with a pinned realm imported on startup; consuming tests
+# fetch a token via the real ``client_credentials`` grant and validate
+# it through :func:`meho_backplane.auth.jwt.verify_jwt_for_audience`.
+#
+# Image override: ``MEHO_TEST_KEYCLOAK_IMAGE``. Unlike the
+# ``MEHO_TEST_PGVECTOR_IMAGE`` / ``MEHO_TEST_VAULT_IMAGE`` rows further
+# up this file, the Keycloak fixture has **no docker.io default** —
+# Keycloak images are ~600 MB and pulling them through the cluster's
+# shared NAT egress reliably blows the Docker Hub anonymous-pull
+# bucket. CI sets ``MEHO_TEST_KEYCLOAK_IMAGE`` to the Harbor mirror;
+# local / agent-sandbox invocations without the env var skip cleanly
+# (the acceptance criterion in #1098 names this skip-when-unset shape
+# explicitly, and the consuming test asserts a non-skipped pass in CI
+# rather than a vacuous skip).
+#
+# Realm shape: ``meho-integration`` with one confidential client
+# ``agent:test-bot`` whose protocol mappers stamp ``aud`` +
+# ``tenant_id`` + ``tenant_role`` + ``principal_kind`` onto every
+# issued access token. The mappers are hardcoded-claim mappers (no
+# backing user attribute) so the realm import is fully declarative
+# and reproducible from the JSON alone. The realm file ships at
+# ``backend/tests/integration/_fixtures/meho-integration-realm.json``;
+# Keycloak's ``--import-realm`` requires the filename to follow the
+# ``<realm-name>-realm.json`` convention, which is why the file is
+# named that way rather than something more discoverable.
+#
+# The realm carries ``sslRequired: "none"``. Keycloak's default is
+# ``external`` (HTTPS required for non-localhost requests), and a
+# testcontainer's host-mapped port is reached through the daemon IP
+# rather than localhost; without the override Keycloak rejects every
+# token POST with 403 ``HTTPS required``. ``start-dev`` only sets
+# ``sslRequired=none`` on realms it *creates* — imports inherit the
+# default, so the explicit value in the JSON is load-bearing.
+
+_KEYCLOAK_REALM: str = "meho-integration"
+_KEYCLOAK_CLIENT_ID: str = "agent:test-bot"
+# This secret is generated *into* the testcontainer realm import and
+# only ever held in this module + the realm JSON. It is bound to a
+# throwaway per-test-run Keycloak instance that never persists, is
+# never reachable off the runner, and shares zero credentials with any
+# production realm — same secrets-in-fixtures discipline as
+# ``_DEV_ROOT_TOKEN`` in :mod:`tests.integration.test_connectors_vault_dev_e2e`.
+_KEYCLOAK_CLIENT_SECRET: str = "test-secret-do-not-use-anywhere-else-g11-2-t7"
+_KEYCLOAK_AUDIENCE: str = "meho-backplane-test"
+_KEYCLOAK_TENANT_ID: str = "11111111-1111-1111-1111-111111111111"
+_KEYCLOAK_TENANT_ROLE: str = "tenant_admin"
+_KEYCLOAK_PRINCIPAL_KIND: str = "agent"
+_KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME: str = "test-admin"
+# Same throwaway-credential rationale as ``_KEYCLOAK_CLIENT_SECRET``:
+# only ever issued into the ephemeral container, never used to grant
+# admin access to anything that outlives the test process.
+_KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD: str = "test-admin-pass-g11-2-t7"
+
+
+@dataclass(frozen=True)
+class KeycloakBootstrap:
+    """Connection + claim-shape bundle for the Keycloak integration realm.
+
+    Frozen so a test can stash one on the request state, log it, or
+    forward it without fear of mutation, in the same spirit as
+    :class:`~meho_backplane.auth.operator.Operator`.
+
+    Fields:
+
+    * ``base_url`` — the container's reachable HTTP root (no path),
+      e.g. ``http://127.0.0.1:38421``. Useful for direct admin probes.
+    * ``realm`` — the imported realm name (``meho-integration``).
+    * ``issuer_url`` — ``{base_url}/realms/{realm}``. This is what
+      :func:`meho_backplane.auth.jwt.verify_jwt_for_audience` checks
+      against the JWT's ``iss`` claim, and what
+      :func:`~meho_backplane.auth.agent_token.get_client_credentials_token`
+      uses to derive the token endpoint.
+    * ``client_id`` / ``client_secret`` — the confidential client the
+      ``client_credentials`` grant authenticates as. The secret is
+      pinned in the realm import so tests don't need to scrape it
+      back via the admin API.
+    * ``audience`` — the literal value the realm's audience mapper
+      stamps onto every issued access token. Passed as the
+      ``expected_audience`` argument to ``verify_jwt_for_audience``.
+    * ``expected_tenant_id`` / ``expected_tenant_role`` /
+      ``expected_principal_kind`` — the literal values the realm's
+      hardcoded-claim mappers stamp; the integration test asserts the
+      resulting :class:`Operator` carries these.
+    """
+
+    base_url: str
+    realm: str
+    issuer_url: str
+    client_id: str
+    client_secret: str
+    audience: str
+    expected_tenant_id: str
+    expected_tenant_role: str
+    expected_principal_kind: str
+
+
+@pytest.fixture(scope="module")
+def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
+    """Boot Keycloak with the integration realm imported, yield the bootstrap.
+
+    Module scope amortises the ~10-second Keycloak startup across every
+    test in the consuming module — the suite is small today (a single
+    end-to-end test in :mod:`tests.integration.test_auth_keycloak_client_credentials`)
+    but the fixture is the durable seam other auth integration tests
+    (JWKS rotation, admin client, future agent-principal lifecycle)
+    will attach to once they land. The cost of the container start
+    dwarfs every single-request test so amortising is mandatory.
+
+    Skip conditions, in priority order:
+
+    1. ``MEHO_TEST_KEYCLOAK_IMAGE`` unset → skip with the explicit
+       remediation. The image is required (no docker.io default) so
+       CI is the only environment that runs the suite by default,
+       matching the issue body's explicit "no fall back to a
+       300-megabyte Docker Hub pull" framing.
+    2. Docker socket not reachable in the sandbox → skip with the
+       same reason as every other testcontainers-driven suite in this
+       directory (uniform skip heuristic).
+    3. Container failed to start (privileged denied, image pull
+       rate-limit, cgroup refusal) → skip with the exception class
+       name, same pattern :func:`vault_dev_addr` in
+       :mod:`tests.integration.test_connectors_vault_dev_e2e` uses.
+
+    Bootstrapping shape: a realm-import JSON committed under
+    ``tests/integration/_fixtures/`` is bind-mounted read-only at
+    ``/opt/keycloak/data/import/`` and Keycloak is launched with
+    ``start-dev --import-realm``. Keycloak 26.x requires the file to
+    be named ``<realm-name>-realm.json`` (the file's name is
+    ``meho-integration-realm.json`` because of this convention).
+
+    Bootstrap admin credentials are set via
+    ``KC_BOOTSTRAP_ADMIN_USERNAME`` / ``KC_BOOTSTRAP_ADMIN_PASSWORD``
+    (the 26.x replacement for ``KEYCLOAK_ADMIN`` /
+    ``KEYCLOAK_ADMIN_PASSWORD``). The integration test does not use
+    admin credentials — it authenticates as the imported
+    confidential client — but Keycloak refuses to start without
+    bootstrap admin creds on a fresh database.
+    """
+    image = os.environ.get("MEHO_TEST_KEYCLOAK_IMAGE")
+    if not image:
+        pytest.skip(
+            "MEHO_TEST_KEYCLOAK_IMAGE not set; the live-Keycloak "
+            "integration test runs in CI where the Harbor-proxied "
+            "image is provisioned. To run locally, set the env var "
+            "to a Keycloak 26.x image tag (e.g. quay.io/keycloak/keycloak:26.0)."
+        )
+    if not DOCKER_AVAILABLE:
+        pytest.skip(SKIP_REASON)
+
+    # Same local-import discipline as the Postgres + Vault fixtures
+    # above: testcontainers transitively imports the ``docker`` SDK
+    # which probes the socket on import, so keeping the import inside
+    # the fixture lets the module collect on a no-Docker sandbox.
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.waiting_utils import wait_for_logs
+
+    realm_file = Path(__file__).parent / "_fixtures" / f"{_KEYCLOAK_REALM}-realm.json"
+    if not realm_file.is_file():
+        # Defensive: the realm-import JSON is committed alongside this
+        # conftest; an absent file is a packaging error, not a test
+        # environment one — surface a clear failure rather than letting
+        # Keycloak silently start with no realms imported.
+        pytest.fail(
+            f"Keycloak realm-import fixture missing at {realm_file}; "
+            "expected committed under tests/integration/_fixtures/."
+        )
+
+    container = (
+        DockerContainer(image)
+        .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", _KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME)
+        .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", _KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD)
+        .with_command("start-dev --import-realm")
+        # ``ro`` mount: the realm file is read at startup and never
+        # written back, so denying writes hardens against an accidental
+        # in-container overwrite (and matches the principle the test
+        # fixtures committed to: deterministic, reproducible inputs).
+        .with_volume_mapping(
+            str(realm_file.parent),
+            "/opt/keycloak/data/import",
+            "ro",
+        )
+        .with_exposed_ports(8080)
+    )
+
+    try:
+        container.start()
+    except Exception as exc:
+        # Broad catch is intentional: testcontainers wraps the docker
+        # SDK's varied failure modes (privileged denied, cgroup
+        # refusal, registry rate-limit, manifest-not-found, daemon
+        # socket missing) under a heterogeneous set of exceptions; the
+        # only useful response is "skip with the class name and
+        # message" so the suite stays diagnosable without enumerating
+        # every transitive docker.errors subtype. Mirrors the same
+        # pattern in :func:`vault_dev_addr` of
+        # :mod:`tests.integration.test_connectors_vault_dev_e2e`.
+        pytest.skip(f"Keycloak container failed to start ({type(exc).__name__}): {exc}")
+
+    try:
+        # Quarkus logs ``started in <N>.<N>s. Listening on: http://...:8080``
+        # once the server is up and serving. Wait on the unambiguous
+        # "Listening on" prefix — the realm-import line that precedes
+        # it is itself a useful but slightly Keycloak-version-specific
+        # signal, so anchor on the Quarkus boot line instead.
+        wait_for_logs(container, "Listening on:", timeout=120)
+        host = container.get_container_host_ip()
+        port = container.get_exposed_port(8080)
+        base_url = f"http://{host}:{port}"
+        bootstrap = KeycloakBootstrap(
+            base_url=base_url,
+            realm=_KEYCLOAK_REALM,
+            issuer_url=f"{base_url}/realms/{_KEYCLOAK_REALM}",
+            client_id=_KEYCLOAK_CLIENT_ID,
+            client_secret=_KEYCLOAK_CLIENT_SECRET,
+            audience=_KEYCLOAK_AUDIENCE,
+            expected_tenant_id=_KEYCLOAK_TENANT_ID,
+            expected_tenant_role=_KEYCLOAK_TENANT_ROLE,
+            expected_principal_kind=_KEYCLOAK_PRINCIPAL_KIND,
+        )
+        yield bootstrap
+    finally:
+        container.stop()

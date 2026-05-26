@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **`/ready` features block + agent-runtime 503 symmetry +
+  `docs/RELEASING.md` post-deploy enablement** (G0.14-T7 #1148).
+  `GET /ready` now carries a structured `features` block enumerating
+  the four v0.6.0 gated surfaces (`agent_runtime`, `ui_surface`,
+  `audit_replay`, `approval_queue`) with `configured: bool`,
+  `missing_env: [...]`, and a `docs` reference per feature — one
+  GET answers "which features will work out of the box on my
+  deploy?". The 503 from `POST /api/v1/agent-principals` when the
+  Keycloak admin client is unwired now carries the symmetric
+  `/ui/auth/login` shape (three-clause: domain code +
+  `KEYCLOAK_ADMIN_URL / KEYCLOAK_ADMIN_CLIENT_ID /
+  KEYCLOAK_ADMIN_CLIENT_SECRET` + `docs/cross-repo/keycloak-admin-client.md`),
+  exposed as the new `KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL` constant.
+  `docs/RELEASING.md` gains §6a "Post-deploy enablement" walking
+  operators through each gate. T11-convention-compliant per
+  `docs/codebase/error-message-shape.md` (audit table updated).
+  Closes `claude-rdc-hetzner-dc#697` signals 16 + 17.
+
 ### Changed
 
 - **`call_operation` accepts bare-string `target` alongside dict —

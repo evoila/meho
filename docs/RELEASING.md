@@ -172,6 +172,85 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 - [ ] Run smoke; confirm **smoke-green** (same pattern as
   v0.2.0 / v0.3.0 / v0.3.1).
 
+### 6a. Post-deploy enablement — gated features
+
+As of v0.6.0 the backplane ships four feature surfaces that **the
+image alone does not light up** — each needs additional deploy
+configuration that the smoke pass at step 6 does *not* exercise
+(`claude-rdc-hetzner-dc#697` signals 16 + 17). An operator who
+expects "smoke green = everything works" hits a 503 (best case)
+or a silent NULL column (audit replay, pre-G0.14-T6) the first
+time they reach for one of these surfaces.
+
+The state of each gate is visible on `GET /ready`'s `features`
+block (G0.14-T7 #1148) — one structured GET answers "which
+features will work out of the box?":
+
+```json
+{
+  "features": {
+    "agent_runtime":  {"configured": false, "missing_env": ["KEYCLOAK_ADMIN_URL", "..."], "docs": "..."},
+    "ui_surface":     {"configured": false, "missing_env": ["UI_KEYCLOAK_CLIENT_ID", "..."], "docs": "..."},
+    "audit_replay":   {"configured": true,  "capture_mode": "enforced", "missing_env": []},
+    "approval_queue": {"configured": false, "depends_on": "agent_runtime"}
+  }
+}
+```
+
+Walk the four gates in the order an operator hits them:
+
+- [ ] **UI surface** (Helm `ui.*` values; affects every `/ui/auth/*`
+  request). Set `UI_KEYCLOAK_CLIENT_ID` and `UI_KEYCLOAK_CLIENT_SECRET`
+  in the backplane pod's environment — the secret renders from Vault
+  via the deploy's existing render-into-env chain (the same one that
+  lands `DATABASE_URL` / `UI_SESSION_ENCRYPTION_KEY`). Provision the
+  confidential `meho-web` Keycloak client per
+  [`docs/cross-repo/keycloak-web-client.md`](cross-repo/keycloak-web-client.md).
+  Without these, `GET /ui/auth/login` returns 503 `ui_oauth_not_configured`
+  and the operator console cannot complete OAuth.
+
+- [ ] **Agent runtime** (`POST /api/v1/agent-principals` lifecycle;
+  affects everything downstream that needs an agent identity). Set
+  `KEYCLOAK_ADMIN_URL`, `KEYCLOAK_ADMIN_CLIENT_ID`, and
+  `KEYCLOAK_ADMIN_CLIENT_SECRET`. Provision the confidential
+  admin Keycloak client (with `manage-clients` service-account role
+  on the realm) per
+  [`docs/cross-repo/keycloak-admin-client.md`](cross-repo/keycloak-admin-client.md).
+  Without these, `POST /api/v1/agent-principals` returns 503
+  `keycloak_admin_not_configured: KEYCLOAK_ADMIN_URL / KEYCLOAK_ADMIN_CLIENT_ID
+  / KEYCLOAK_ADMIN_CLIENT_SECRET are unset.` — the named env vars are
+  exactly the three to set.
+
+- [ ] **Audit replay** (MCP session-id capture for the audit log's
+  `agent_session_id` column). No env var required for capture once
+  G0.14-T6 (#1147) lands — capture is unconditional, no operator
+  knob. Until T6 lands, capture is gated on `MCP_REQUIRE_SESSION_ID=true`
+  (which also flips a missing header into a `-32600` reject before
+  dispatch). The `/ready` `features.audit_replay.capture_mode` field
+  exposes the current state — `"enforced"` pre-T6,
+  `"always"` post-T6. Operators tracking the audit-replay readiness
+  signal off `/ready` get a stable contract across the T6 transition.
+
+- [ ] **Approval queue** (agent-grant approval surface;
+  `POST /api/v1/agents/grants` and the agent grant lifecycle). No
+  separate env vars — the queue activates automatically once
+  **agent runtime** above is configured. The `/ready` block exposes
+  `approval_queue.depends_on: "agent_runtime"` so operators know
+  there is no second admin client to provision.
+
+Verify the gates by re-hitting `GET /ready` after each provisioning
+step and reading the `features` block:
+
+```bash
+curl -s "https://<your-meho-host>/ready" | jq '.features'
+```
+
+Every gate should read `"configured": true` (or
+`"capture_mode": "always"` for `audit_replay` post-T6) when fully
+enabled. Any `"configured": false` with a non-empty `missing_env`
+list is an unfinished provisioning step — name the listed env vars
+into the pod's environment and re-deploy.
+
 ### 7. Post-release
 
 - [ ] Close the release Initiative; update the board / MVP roadmap.
@@ -191,6 +270,10 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published
 [ ] 6. Deployed to rke2-infra; smoke-green
+[ ] 6a. Post-deploy enablement — for each gate in /ready features:
+        configure the env vars per the cited Vault doc; verify gate
+        flips to configured (or capture_mode=always for audit_replay
+        post-T6)
 [ ] 7. Initiative closed; board/roadmap updated; consumers notified
 ```
 

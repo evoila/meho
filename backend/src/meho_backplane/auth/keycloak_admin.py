@@ -59,6 +59,7 @@ import structlog
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
+    "KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL",
     "KeycloakAdminClient",
     "KeycloakAdminError",
     "KeycloakAdminNotConfiguredError",
@@ -67,6 +68,25 @@ __all__ = [
 ]
 
 _ADMIN_HTTP_TIMEOUT_SECONDS: float = 10.0
+
+#: Gold-standard 503 detail surfaced by ``POST /api/v1/agent-principals``
+#: (and any other admin-surfaced route that catches
+#: :class:`KeycloakAdminNotConfiguredError`) when the Keycloak admin
+#: client is unwired. Symmetric with the
+#: :data:`~meho_backplane.ui.auth.flow.MISSING_CLIENT_SECRET_DETAIL`
+#: shape (G0.14-T7 #1148 — three-clause: domain code + named env vars
+#: + doc reference). Compliant with the convention codified in
+#: ``docs/codebase/error-message-shape.md`` (G0.14-T11 #1141). The
+#: constant lives here, not at the route, so any future admin-using
+#: route catches the same exception and emits the same message
+#: verbatim.
+KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL: str = (
+    "keycloak_admin_not_configured: KEYCLOAK_ADMIN_URL / "
+    "KEYCLOAK_ADMIN_CLIENT_ID / KEYCLOAK_ADMIN_CLIENT_SECRET are unset. "
+    "Provision the confidential admin client per "
+    "docs/cross-repo/keycloak-admin-client.md before defining agent "
+    "principals."
+)
 
 
 class KeycloakAdminError(Exception):

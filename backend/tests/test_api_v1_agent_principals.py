@@ -36,6 +36,7 @@ from sqlalchemy import select
 import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.keycloak_admin import (
+    KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL,
     KeycloakAdminError,
     KeycloakAdminNotConfiguredError,
     KeycloakClientNotFoundError,
@@ -426,7 +427,15 @@ async def test_cross_tenant_isolation(client: TestClient) -> None:
 async def test_keycloak_not_configured_returns_503(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``KeycloakAdminNotConfiguredError`` on register → 503."""
+    """``KeycloakAdminNotConfiguredError`` on register → 503.
+
+    The 503 detail is the gold-standard three-clause message
+    (G0.14-T7 #1148): domain code + named env vars + doc reference.
+    Symmetric with ``/ui/auth/login``'s
+    :data:`~meho_backplane.ui.auth.flow.MISSING_CLIENT_SECRET_DETAIL`
+    and compliant with the convention codified in
+    ``docs/codebase/error-message-shape.md`` (G0.14-T11 #1141).
+    """
     await _seed_tenants()
     key = make_rsa_keypair("kid-503")
 
@@ -447,7 +456,19 @@ async def test_keycloak_not_configured_returns_503(
             headers={"Authorization": f"Bearer {_token(key)}"},
         )
     assert resp.status_code == 503, resp.text
-    assert resp.json()["detail"] == "keycloak_admin_not_configured"
+    detail = resp.json()["detail"]
+    assert detail == KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL
+    # Sanity: the three load-bearing parts of the convention are
+    # present. The constant assertion above is the wire-stable
+    # contract; the substring assertions below pin the convention's
+    # three-clause shape (code prefix + env vars + doc reference)
+    # so a future refactor that rewords the detail must keep all
+    # three.
+    assert detail.startswith("keycloak_admin_not_configured")
+    assert "KEYCLOAK_ADMIN_URL" in detail
+    assert "KEYCLOAK_ADMIN_CLIENT_ID" in detail
+    assert "KEYCLOAK_ADMIN_CLIENT_SECRET" in detail
+    assert "docs/cross-repo/keycloak-admin-client.md" in detail
 
 
 @pytest.mark.asyncio

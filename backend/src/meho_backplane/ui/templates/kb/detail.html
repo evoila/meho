@@ -4,7 +4,7 @@
 
   KB entry detail page: server-rendered Markdown + sidebar metadata.
 
-  Initiative #339 (G10.2 Knowledge base UI), Task #870 (T1).
+  Initiative #339 (G10.2 Knowledge base UI). Tasks #870 (T1) + #872 (T3).
 
   Layout:
     * Two-column on medium+ screens: main Markdown body (left, wider)
@@ -148,6 +148,50 @@ mark.kb-term {
   background-color: oklch(var(--wa) / 0.4);
   padding: 0.1em 0.15em;
   border-radius: 0.2em;
+}
+
+/*
+ * Mobile-readable Markdown reflow (G10.2-T3 / issue #872).
+ *
+ * Desktop-first per Goal #336, but the entry view must reflow
+ * usably at narrow widths (half-screen, tablet portrait, phone).
+ *
+ * Rules:
+ *   kb-body — the prose container wrapping the rendered Markdown.
+ *   1. Long lines wrap rather than causing horizontal scroll on the
+ *      page. ``overflow-wrap: break-word`` + ``word-break: break-word``
+ *      handle both pathological slugs and long URLs inside prose.
+ *   2. Code blocks (``pre.kb-code``) scroll horizontally inside their
+ *      own box. The parent prose container does NOT scroll; only the
+ *      pre element does (``overflow-x: auto`` already set above).
+ *      ``max-width: 100%`` keeps the block from escaping the card.
+ *   3. Tables: DaisyUI's ``table`` class handles overflow on small
+ *      screens when wrapped in ``overflow-x-auto``. The rendered
+ *      Markdown does not use that wrapper, so we add a max-width cap
+ *      and overflow on the table element itself.
+ *   4. Images: scale down to at most their container width.
+ *   5. ``min-width: 0`` on the ``<article>`` (already present via
+ *      Tailwind's ``min-w-0`` class in detail.html) allows the flex
+ *      child to shrink below its intrinsic size.
+ */
+.kb-body {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.kb-body pre.kb-code {
+  max-width: 100%;
+}
+
+.kb-body table {
+  max-width: 100%;
+  overflow-x: auto;
+  display: block;
+}
+
+.kb-body img {
+  max-width: 100%;
+  height: auto;
 }
 </style>
 {% endblock %}

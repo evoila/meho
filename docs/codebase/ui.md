@@ -375,8 +375,48 @@ A module-level `threading.Lock` guards the shared `MarkdownIt` instance
 generated once at module load and injected as an inline `<style>` block
 in the entry-detail template.
 
-Upload (T2) and Markdown editor (T3) will add routes to the same
-`meho_backplane.ui.routes.kb` package in subsequent tasks.
+## KB editor modal + mobile reflow (G10.2-T3 #872)
+
+T3 extends `meho_backplane.ui.routes.kb` with two write routes and
+mobile-reflow CSS on the entry detail page:
+
+- `POST /ui/kb/editor-preview` — HTMX live-preview partial. Accepts a
+  `body` form field (max 65 536 bytes), renders it via `render_markdown`,
+  returns the `kb/_editor_preview.html` fragment. Any authenticated
+  operator can call this (read-only Markdown transform; no role gate).
+- `POST /ui/kb/new` — editor save. Requires `tenant_admin` role (enforced
+  by `_require_tenant_admin()`: loads the full `DecryptedSession` via
+  `load_session()`, verifies the access token via
+  `verify_jwt_for_audience()`, checks `operator.tenant_role ==
+  TenantRole.TENANT_ADMIN`). On success returns HTTP 204 +
+  `HX-Redirect: /ui/kb/<slug>`; on failure re-renders the
+  `kb/_editor_modal.html` fragment with a 422 and an inline error banner.
+
+**Editor modal** (`kb/_editor_modal.html`): DaisyUI `<dialog>` element
+with a slug input, a CodeMirror 6 editor pane (`#kb-editor-cm`), a live
+preview column (`#kb-editor-preview-content`), and a hidden textarea
+(`#kb-editor-body`) that HTMX reads for the preview POST. Variables use
+`| default('')` / `| default(none)` so the template is safe when
+`{% include %}`'d from `index.html` without the editor-specific context
+keys (Jinja2 StrictUndefined catches bare names; the `| default()`
+filter intercepts the Undefined object before the strict check fires).
+
+**CodeMirror 6** (`static/src/vendor/codemirror-bundle.min.js`): a
+single-file IIFE bundle (SHA256 `a411a47c…`, 606 KB) built offline with
+esbuild from `codemirror@6.0.1` + `@codemirror/lang-markdown@6.3.2`.
+Exposes the `CM` global with `EditorView`, `EditorState`, `basicSetup`,
+`markdown`, `keymap`, `defaultKeymap`, `historyKeymap`, `indentWithTab`.
+Mounted via a `MutationObserver` on the `<dialog>` `open` attribute — the
+editor is created on first modal open and reused across open/close cycles
+so the operator's draft persists without a hidden-textarea seed.
+
+**Mobile reflow** (`kb/detail.html` `{% block scripts %}`): CSS added to
+`.kb-body` prevents horizontal page overflow at narrow widths:
+`overflow-wrap: break-word`, `word-break: break-word`; code blocks cap at
+`max-width: 100%` and scroll inside their own box; tables use
+`display: block; overflow-x: auto`; images cap at `max-width: 100%`.
+
+Upload (T2) may add further routes to the same package.
 
 The chassis smoke test
 [`backend/tests/test_ui_chassis_smoke.py`](../../backend/tests/test_ui_chassis_smoke.py)

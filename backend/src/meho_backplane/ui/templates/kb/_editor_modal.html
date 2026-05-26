@@ -1,0 +1,211 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  KB editor modal: CodeMirror 6 + HTMX live-preview pane.
+
+  Initiative #339 (G10.2 Knowledge base UI), Task #872 (T3).
+
+  Layout:
+    * DaisyUI ``modal`` dialog (HTML <dialog> element, opened via
+      ``showModal()``). The modal is inline in the page and toggled
+      by the "New entry" button on the KB index header.
+    * Two-column layout inside the dialog: editor pane (left) +
+      live-preview pane (right). On narrow screens the preview
+      collapses below the editor (flex-wrap).
+    * The CodeMirror 6 editor mounts into ``#kb-editor-cm`` after the
+      modal opens. The ``codemirror-bundle.min.js`` IIFE is loaded as
+      a ``<script>`` tag in the parent template's ``{% block scripts %}``
+      (see ``index.html``) so ``CM`` is available as a window global.
+
+  HTMX wiring:
+    * The form posts to ``POST /ui/kb/new`` (save). On success the
+      route returns ``HX-Redirect`` so HTMX navigates to the new entry.
+    * The editor preview pane listens on the hidden ``#kb-editor-body``
+      textarea (synced by the CodeMirror JS): ``hx-trigger="input
+      changed delay:500ms"`` fires ``POST /ui/kb/editor-preview`` and
+      swaps ``#kb-editor-preview-content`` (``hx-swap="innerHTML"``).
+
+  CSRF:
+    * The form carries ``X-CSRF-Token`` in its ``hx-headers`` attribute
+      (same pattern as ``kb/index.html``'s search section). The
+      ``csrf_token`` context variable is provided by the parent route
+      handler (``GET /ui/kb``).
+
+  CodeMirror integration:
+    * The IIFE bundle exposes ``CM.EditorView``, ``CM.EditorState``,
+      ``CM.basicSetup``, ``CM.markdown``, ``CM.defaultKeymap``,
+      ``CM.historyKeymap``, ``CM.keymap``.
+    * The editor is initialized in the ``meho-kb-editor-init`` inline
+      script when ``kb-editor-modal`` fires the ``dialog-open`` event.
+      The script syncs editor content to the hidden textarea on every
+      change so the standard HTML form + HTMX POST picks it up
+      without additional JS glue.
+
+  Context variables:
+    error_message  -- str | None: validation error from a failed save
+    slug           -- str: pre-populated slug (empty on first open)
+    body           -- str: pre-populated body (empty on first open)
+    tags           -- str: pre-populated tags (empty on first open)
+    csrf_token     -- str: CSRF token for HTMX headers
+-#}
+
+{#- This template is rendered as either:
+    1. A full ``<dialog>`` block included from ``index.html`` (initial
+       page render — ``error_message`` is None).
+    2. A bare fragment re-rendered by ``POST /ui/kb/new`` on validation
+       failure (422 — ``error_message`` is set). In that case HTMX
+       swaps ``#kb-editor-modal`` with this response.
+-#}
+<dialog
+  id="kb-editor-modal"
+  class="modal"
+  aria-label="New knowledge entry editor"
+>
+  <div class="modal-box w-11/12 max-w-5xl p-0 overflow-hidden flex flex-col max-h-[90vh]">
+    {# ----- Header ----- #}
+    <div class="flex items-center justify-between px-6 py-4 border-b border-base-300">
+      <h2 class="text-lg font-semibold">New knowledge entry</h2>
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm btn-circle"
+        aria-label="Close editor"
+        onclick="document.getElementById('kb-editor-modal').close()"
+      >✕</button>
+    </div>
+
+    {# ----- Error banner (shown on save failure) ----- #}
+    {% set _error = error_message | default(none) %}
+    {% if _error %}
+    <div
+      role="alert"
+      class="alert alert-error rounded-none text-sm"
+      aria-live="assertive"
+    >
+      <span>{{ _error }}</span>
+    </div>
+    {% endif %}
+
+    {# ----- Slug + Tags row ----- #}
+    <div class="px-6 pt-4 pb-2 flex flex-wrap gap-4">
+      <label class="form-control flex-1 min-w-48">
+        <div class="label py-0">
+          <span class="label-text font-medium">Slug</span>
+          <span class="label-text-alt opacity-60">kebab-case, required</span>
+        </div>
+        <input
+          type="text"
+          id="kb-editor-slug"
+          name="slug"
+          form="kb-editor-form"
+          value="{{ slug | default('') }}"
+          placeholder="my-entry-slug"
+          class="input input-bordered input-sm"
+          required
+          autocomplete="off"
+          aria-label="Entry slug (kebab-case identifier)"
+        />
+      </label>
+      <label class="form-control flex-1 min-w-48">
+        <div class="label py-0">
+          <span class="label-text font-medium">Tags</span>
+          <span class="label-text-alt opacity-60">comma-separated, optional</span>
+        </div>
+        <input
+          type="text"
+          id="kb-editor-tags"
+          name="tags"
+          form="kb-editor-form"
+          value="{{ tags | default('') }}"
+          placeholder="ops, runbook"
+          class="input input-bordered input-sm"
+          autocomplete="off"
+          aria-label="Comma-separated tags"
+        />
+      </label>
+    </div>
+
+    {# ----- Editor + Preview split pane ----- #}
+    <div class="flex flex-wrap flex-1 overflow-hidden min-h-0">
+      {# Editor column #}
+      <div class="flex flex-col flex-1 min-w-64 border-r border-base-300 overflow-hidden">
+        <div class="px-4 py-1 border-b border-base-200 text-xs font-medium opacity-60 uppercase tracking-wide">
+          Markdown
+        </div>
+        {# CodeMirror mounts here; the <div> is the parent container #}
+        <div
+          id="kb-editor-cm"
+          class="flex-1 overflow-auto font-mono text-sm"
+          aria-label="Markdown editor"
+        ></div>
+        {# Hidden textarea synced from CodeMirror, submitted with the form #}
+        <textarea
+          id="kb-editor-body"
+          name="body"
+          form="kb-editor-form"
+          class="sr-only"
+          aria-hidden="true"
+          tabindex="-1"
+          hx-post="/ui/kb/editor-preview"
+          hx-trigger="input changed delay:500ms"
+          hx-target="#kb-editor-preview-content"
+          hx-swap="innerHTML"
+          hx-include="#kb-editor-body"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'
+        >{{ body | default('') }}</textarea>
+      </div>
+
+      {# Preview column #}
+      <div class="flex flex-col flex-1 min-w-64 overflow-hidden">
+        <div class="px-4 py-1 border-b border-base-200 text-xs font-medium opacity-60 uppercase tracking-wide">
+          Preview
+        </div>
+        <div
+          id="kb-editor-preview-content"
+          class="flex-1 overflow-auto p-4 prose prose-sm max-w-none kb-body"
+          aria-live="polite"
+          aria-label="Rendered preview"
+        >
+          {# Initial empty-state hint; replaced by HTMX on first keystroke #}
+          <p class="opacity-40 text-sm">
+            Start typing to see a preview…
+          </p>
+        </div>
+      </div>
+    </div>
+
+    {# ----- Footer: form + actions ----- #}
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-base-300">
+      <form
+        id="kb-editor-form"
+        hx-post="/ui/kb/new"
+        hx-target="#kb-editor-modal"
+        hx-swap="outerHTML"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'
+        onsubmit="return false;"
+      >
+        {# Slug, tags, body are associated via form="kb-editor-form" on the inputs above #}
+      </form>
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        onclick="document.getElementById('kb-editor-modal').close()"
+      >
+        Cancel
+      </button>
+      <button
+        type="submit"
+        form="kb-editor-form"
+        class="btn btn-primary btn-sm"
+        aria-label="Save knowledge entry"
+      >
+        Save entry
+      </button>
+    </div>
+  </div>
+
+  {# Backdrop click closes the modal #}
+  <form method="dialog" class="modal-backdrop">
+    <button type="submit" aria-label="Close editor">close</button>
+  </form>
+</dialog>

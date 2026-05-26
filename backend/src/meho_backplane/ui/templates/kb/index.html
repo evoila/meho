@@ -3,9 +3,10 @@
   Copyright (c) 2026 evoila Group
 
   KB main page: search box + (empty query) paginated entry list, or
-  (non-empty query) ranked result cards.
+  (non-empty query) ranked result cards. "New entry" button opens the
+  CodeMirror 6 editor modal (T3).
 
-  Initiative #339 (G10.2 Knowledge base UI), Task #870 (T1).
+  Initiative #339 (G10.2 Knowledge base UI). Tasks #870 (T1) + #872 (T3).
 
   HTMX wiring:
     * Search input: ``hx-trigger="keyup changed delay:300ms"`` fires
@@ -16,11 +17,17 @@
     * Results are rendered server-side into the ``_results.html`` partial;
       the partial is also returned on full-page render to avoid
       duplicating markup.
+    * "New entry" button: ``onclick="document.getElementById('kb-editor-modal').showModal()"``
+      opens the inline ``<dialog>`` editor modal.
+    * Save form (inside ``_editor_modal.html``): ``hx-post="/ui/kb/new"``
+      → on success ``HX-Redirect`` navigates to the new entry; on failure
+      the modal is replaced with an error-annotated version.
 
   Template blocks:
     * ``page_title`` — overrides ``<title>`` suffix.
     * ``content`` — overrides the base.html main pane.
-    * ``scripts`` — empty (no extra JS needed for T1).
+    * ``scripts`` — loads the vendored CodeMirror 6 IIFE bundle and
+      initialises the editor when the modal opens.
 -#}
 {% extends "base.html" %}
 
@@ -35,6 +42,20 @@
         Search and browse the tenant's indexed knowledge entries.
       </p>
     </div>
+    {# "New entry" button — opens the editor modal. The button is always
+       rendered; the server enforces tenant_admin on the actual save POST.
+       Non-admin operators see a 403 if they try to save, which is
+       acceptable: the modal is a convenience surface, not a privilege
+       boundary. The gate sits at the /ui/kb/new POST endpoint. #}
+    <button
+      type="button"
+      class="btn btn-primary btn-sm gap-1"
+      aria-label="Open new entry editor"
+      onclick="document.getElementById('kb-editor-modal').showModal()"
+    >
+      <span aria-hidden="true">＋</span>
+      New entry
+    </button>
   </header>
 
   {# ---------- Search bar ---------- #}
@@ -74,4 +95,146 @@
   {# ---------- Results / list area ---------- #}
   {% include "kb/_results.html" %}
 </section>
+
+{# ----- Editor modal (included inline; toggled by the button above) ----- #}
+{%- include "kb/_editor_modal.html" -%}
+
+{% endblock %}
+
+{% block scripts %}
+{#-
+  CodeMirror 6 IIFE bundle — vendored in static/src/vendor/codemirror-bundle.min.js,
+  SHA256-pinned in VENDOR.md. The bundle exposes the ``CM`` global:
+    CM.EditorView, CM.EditorState, CM.basicSetup, CM.markdown, CM.keymap,
+    CM.defaultKeymap, CM.historyKeymap, CM.indentWithTab.
+
+  Script load order: the bundle tag below runs before the inline init
+  script that follows. Both are inside ``{% block scripts %}`` which base.html
+  renders at the bottom of <body> (after the DOMContentLoaded parse), so
+  the ``<dialog>`` element is already in the DOM.
+
+  Editor initialisation strategy:
+    1. Listen for the first ``<dialog>`` ``open`` attribute change via a
+       MutationObserver (``attributeFilter: ["open"]``).
+    2. On first open, mount the CodeMirror 6 view into ``#kb-editor-cm``.
+    3. On every editor change, write the current document string into the
+       hidden ``#kb-editor-body`` textarea so the HTMX form submission and
+       the preview HTMX POST both read the latest content.
+    4. Keep a reference to the view; re-use it on subsequent opens so that
+       content persists across open/close cycles (operator can draft, close,
+       re-open without losing work).
+    5. On each modal open, focus the slug input if it is empty; otherwise
+       focus the editor.
+-#}
+<script src="/ui/static/src/vendor/codemirror-bundle.min.js" defer></script>
+<script defer>
+(function () {
+  "use strict";
+
+  var _editorView = null;
+
+  function _syncToTextarea(docStr) {
+    var ta = document.getElementById("kb-editor-body");
+    if (ta) {
+      ta.value = docStr;
+      // Trigger the HTMX input event so the debounced preview fires.
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }
+
+  function _mountEditor() {
+    if (_editorView) {
+      // Already mounted — editor persists across open/close.
+      return;
+    }
+    var container = document.getElementById("kb-editor-cm");
+    if (!container || typeof CM === "undefined") {
+      return;
+    }
+    // Seed initial content from the hidden textarea (populated on re-render
+    // after a failed save so the operator's draft is not lost).
+    var ta = document.getElementById("kb-editor-body");
+    var initialContent = ta ? ta.value : "";
+
+    var updateListener = CM.EditorView.updateListener.of(function (update) {
+      if (update.docChanged) {
+        _syncToTextarea(update.state.doc.toString());
+      }
+    });
+
+    _editorView = new CM.EditorView({
+      state: CM.EditorState.create({
+        doc: initialContent,
+        extensions: [
+          CM.basicSetup,
+          CM.markdown(),
+          CM.keymap.of([CM.indentWithTab, ...CM.defaultKeymap, ...CM.historyKeymap]),
+          updateListener,
+        ],
+      }),
+      parent: container,
+    });
+  }
+
+  function _onModalOpen() {
+    _mountEditor();
+    // Focus slug if empty, else editor.
+    var slugInput = document.getElementById("kb-editor-slug");
+    if (slugInput && !slugInput.value.trim()) {
+      slugInput.focus();
+    } else if (_editorView) {
+      _editorView.focus();
+    }
+  }
+
+  // Attach a MutationObserver to *modal* that calls _onModalOpen() when
+  // the dialog's ``open`` attribute is set.  Extracted so it can be
+  // re-bound after HTMX replaces the <dialog> element via outerHTML swap.
+  function _bindModalObserver(modal) {
+    var observer = new MutationObserver(function (mutations) {
+      mutations.forEach(function (mutation) {
+        if (
+          mutation.type === "attributes" &&
+          mutation.attributeName === "open" &&
+          modal.open
+        ) {
+          _onModalOpen();
+        }
+      });
+    });
+    observer.observe(modal, { attributes: true, attributeFilter: ["open"] });
+  }
+
+  // Initial bind on first page load.
+  document.addEventListener("DOMContentLoaded", function () {
+    var modal = document.getElementById("kb-editor-modal");
+    if (!modal) {
+      return;
+    }
+    _bindModalObserver(modal);
+  });
+
+  // After a 422 re-render HTMX swaps the entire <dialog> via outerHTML.
+  // The old MutationObserver watches the now-detached node, and _editorView
+  // points to a CodeMirror view mounted inside that detached tree.
+  // Re-bind to the freshly inserted <dialog> and reset the editor so
+  // _mountEditor() starts clean on the next open.
+  document.body.addEventListener("htmx:afterSwap", function (evt) {
+    var target = evt.detail && evt.detail.target;
+    if (!target || target.id !== "kb-editor-modal") {
+      return;
+    }
+    // Destroy the stale CodeMirror view (it is attached to a detached node).
+    if (_editorView) {
+      _editorView.destroy();
+      _editorView = null;
+    }
+    // Find the fresh <dialog> that HTMX inserted and bind a new observer.
+    var freshModal = document.getElementById("kb-editor-modal");
+    if (freshModal) {
+      _bindModalObserver(freshModal);
+    }
+  });
+}());
+</script>
 {% endblock %}

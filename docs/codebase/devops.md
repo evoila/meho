@@ -605,6 +605,40 @@ re-verified after the 2026-05-20 #698 promotion of the integration
 lane, the structural corrective to the v0.2 / G3.4 green-but-hollow
 incidents #634 / #697).
 
+### Merge queue (#769)
+
+`ci.yml` triggers on `merge_group` in addition to `pull_request` and
+`push`. The `merge_group` event fires when a PR is admitted to the
+GitHub merge queue and runs the full check matrix against the
+**synthesised merge commit** — PR head + current `main` tip + any
+PRs ahead in the queue. A merge that would break `main` fails in the
+queue and never reaches `main`, ending the inherited-red episodes from
+2026-05-20/21 where cancelled post-merge CI allowed broken combinations
+to land silently.
+
+Merge-queue setup (admin action, separate from this code change):
+
+1. Enable "Require merge queue" in the repository's branch-protection
+   ruleset for `main` (Settings → Rules → Branches → protect main →
+   add "Require merge queue" rule, or via
+   `gh api -X PUT repos/evoila/meho/rulesets/14556458 ...`).
+2. Configure merge-queue required checks: `Python (ruff + mypy +
+   pytest)`, `Python (integration testcontainers)`,
+   `Go (golangci-lint + go test)`, `Helm (lint + template +
+   kubeconform)`. These are the same contexts already required by the
+   `pull_request` gate; enabling them as merge-queue required checks
+   means the queue enforces the same bar against the actual merge
+   result, not just the PR's own head.
+3. The `ci.yml` `merge_group` trigger in this PR is the code-side
+   prerequisite for step 2 — without it, the queue would have no CI
+   signal to block on.
+
+Concurrency note: `cancel-in-progress` is conditional on
+`github.event_name != 'merge_group'`. A cancelled queue check causes
+the merge attempt to fail and the PR falls out of the queue — so
+merge-queue runs are never cancelled. PR force-pushes and rapid main
+commits still cancel their own prior runs as before.
+
 ### Matrix
 
 | Job | Surface | Steps |

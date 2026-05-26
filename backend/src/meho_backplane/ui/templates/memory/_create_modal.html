@@ -1,0 +1,236 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded create modal for the Memory surface (Initiative #341
+  Task #878). Loaded into ``#memory-modal-container`` on the list
+  page by the "+" button's ``hx-get`` to ``/ui/memory/create``. The
+  inserted dialog is opened by an inline ``showModal()`` call wired
+  through HTMX's ``after-swap`` callback so the operator sees the
+  modal without an extra click.
+
+  Form posts to ``POST /ui/memory/create`` which returns 204 with
+  ``HX-Redirect: /ui/memory`` -- HTMX then reloads the full list
+  page so the new row appears.
+
+  CSRF posture: the page-level ``hx-headers`` directive on
+  ``index.html`` echoes the CSRF token; HTMX inherits the header
+  through the inserted form, so the modal form does not need its own
+  ``hx-headers`` override. The route also sets the cookie on every
+  modal render so a freshly-issued token lines up with the cookie.
+
+  RBAC posture: the scope selector is server-filtered via
+  :func:`writable_scopes_for` so the operator only sees scopes they
+  can write to. The service layer re-checks ``can_write`` on submit
+  -- this list is the UX gate, not the security gate. A read-only
+  operator hitting this route gets an empty list (no scopes
+  selectable); the route's ``Depends(resolve_ui_operator)`` does not
+  in itself enforce a non-read-only role, so we render the empty
+  state explicitly rather than 403'ing on render. (The submit would
+  403 anyway via the service-layer ``PermissionDeniedError`` -> 403
+  mapping.)
+
+  Target name field: conditionally shown via a tiny inline script
+  that toggles ``display`` based on the selected scope. The list of
+  target-scoped scope values is rendered into a ``data-`` attribute
+  so the script reads it from the DOM without re-hardcoding the
+  enum on the client.
+-#}
+<dialog id="memory-create-modal" class="modal modal-open">
+  <div class="modal-box max-w-3xl">
+    <h3 class="font-semibold text-lg" id="memory-create-modal-title">Create memory</h3>
+
+    {% if not writable_scopes %}
+      <div class="alert alert-warning my-3" role="status">
+        <span>
+          Your current role does not allow writing any memory scope.
+          Ask your tenant admin for elevated permissions.
+        </span>
+      </div>
+      <div class="modal-action">
+        <form method="dialog">
+          <button class="btn btn-sm" type="submit">Close</button>
+        </form>
+      </div>
+    {% else %}
+      <form
+        id="memory-create-form"
+        hx-post="/ui/memory/create"
+        hx-target="this"
+        hx-swap="none"
+        hx-disabled-elt="find button[type=submit]"
+        data-target-scoped-values="{{ target_scoped_values | join(',') }}"
+        class="space-y-3 py-2"
+        aria-labelledby="memory-create-modal-title"
+      >
+        <label class="form-control">
+          <span class="label-text">Scope</span>
+          <select
+            name="scope"
+            class="select select-bordered select-sm"
+            required
+            data-action="scope-select"
+          >
+            {% for scope in writable_scopes %}
+              <option value="{{ scope.value }}">{{ scope.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label
+          class="form-control"
+          data-target-name-row
+          style="display: none;"
+        >
+          <span class="label-text">Target name</span>
+          <input
+            type="text"
+            name="target_name"
+            maxlength="{{ target_name_max_length }}"
+            class="input input-bordered input-sm"
+            placeholder="Required for user-target and target scopes"
+            aria-describedby="memory-create-target-name-hint"
+          />
+          <span id="memory-create-target-name-hint" class="text-xs opacity-60 mt-1">
+            The connector / target this memory binds to.
+          </span>
+        </label>
+
+        <label class="form-control">
+          <span class="label-text">Slug <span class="opacity-60">(optional)</span></span>
+          <input
+            type="text"
+            name="slug"
+            maxlength="{{ slug_max_length }}"
+            class="input input-bordered input-sm font-mono"
+            placeholder="Auto-generated when omitted"
+            pattern="[A-Za-z0-9_\-\.]*"
+            aria-describedby="memory-create-slug-hint"
+          />
+          <span id="memory-create-slug-hint" class="text-xs opacity-60 mt-1">
+            Letters, digits, hyphen, underscore, dot. Leave blank for a generated slug.
+          </span>
+        </label>
+
+        <div class="grid gap-3 md:grid-cols-2">
+          <label class="form-control">
+            <span class="label-text">Body (Markdown)</span>
+            <textarea
+              name="body"
+              required
+              maxlength="{{ body_max_length }}"
+              class="textarea textarea-bordered min-h-[16rem] font-mono text-sm"
+              hx-post="/ui/memory/preview"
+              hx-trigger="keyup changed delay:300ms"
+              hx-target="#memory-create-preview"
+              hx-swap="outerHTML"
+              hx-include="this"
+              aria-label="Memory body in Markdown"
+              placeholder="# Heading
+
+Markdown body. Bare URLs (https://example.com) are linkified."
+            ></textarea>
+            <span class="text-xs opacity-60 mt-1">
+              Up to {{ body_max_length }} characters. Server-side preview updates as you type.
+            </span>
+          </label>
+
+          <div class="form-control">
+            <span class="label-text">Preview</span>
+            <article
+              id="memory-create-preview"
+              class="prose prose-sm max-w-none bg-base-100 border-base-300 border rounded-box p-4 opacity-50"
+              aria-label="Memory body preview"
+            >
+              Preview will render here as you type.
+            </article>
+          </div>
+        </div>
+
+        <div class="grid gap-3 md:grid-cols-2">
+          <label class="form-control">
+            <span class="label-text">Expires at <span class="opacity-60">(optional)</span></span>
+            <input
+              type="datetime-local"
+              name="expires_at"
+              class="input input-bordered input-sm"
+              aria-describedby="memory-create-expires-hint"
+            />
+            <span id="memory-create-expires-hint" class="text-xs opacity-60 mt-1">
+              Leave blank to use the scope's default TTL.
+            </span>
+          </label>
+
+          <label class="form-control">
+            <span class="label-text">Tags <span class="opacity-60">(comma-separated)</span></span>
+            <input
+              type="text"
+              name="tags"
+              maxlength="{{ tags_max_length }}"
+              class="input input-bordered input-sm"
+              placeholder="wine, preference, runbook"
+              aria-describedby="memory-create-tags-hint"
+            />
+            <span id="memory-create-tags-hint" class="text-xs opacity-60 mt-1">
+              Stored as a JSON list on the row; useful for the tag filter.
+            </span>
+          </label>
+        </div>
+
+        <div class="modal-action">
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost"
+            data-action="cancel-create"
+            onclick="document.getElementById('memory-create-modal').close()"
+          >
+            Cancel
+          </button>
+          <button type="submit" class="btn btn-sm btn-primary" data-action="create-submit">
+            Create
+          </button>
+        </div>
+      </form>
+    {% endif %}
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>
+
+{# Tiny inline script: toggle the target_name row's visibility when
+   the scope selector changes. Scoped to this modal -- the script
+   reads the scope-to-targetable list off the form's
+   ``data-target-scoped-values`` attribute so the enum is not
+   re-hardcoded on the client. Pulled inline (not into a separate
+   <script src>) because the modal is HTMX-injected and a fresh
+   request for the JS file would race the showModal() call. #}
+<script>
+  (function () {
+    var modal = document.getElementById('memory-create-modal');
+    if (!modal) return;
+    var form = modal.querySelector('#memory-create-form');
+    if (!form) return;
+    var scopedRaw = form.getAttribute('data-target-scoped-values') || '';
+    var scopedSet = new Set(scopedRaw.split(',').filter(Boolean));
+    var select = form.querySelector('[data-action="scope-select"]');
+    var row = form.querySelector('[data-target-name-row]');
+    var targetInput = row ? row.querySelector('input[name="target_name"]') : null;
+    function toggle() {
+      if (!select || !row) return;
+      var requiresTarget = scopedSet.has(select.value);
+      row.style.display = requiresTarget ? '' : 'none';
+      if (targetInput) {
+        if (requiresTarget) {
+          targetInput.setAttribute('required', 'required');
+        } else {
+          targetInput.removeAttribute('required');
+        }
+      }
+    }
+    if (select) {
+      select.addEventListener('change', toggle);
+      toggle();
+    }
+  }());
+</script>

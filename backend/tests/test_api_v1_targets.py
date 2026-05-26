@@ -566,6 +566,216 @@ def test_create_target_with_all_fields(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/v1/targets — product-enum validation (G0.14-T3 #1144)
+# ---------------------------------------------------------------------------
+
+
+def _register_fake_k8s_connector() -> None:
+    """Register a no-op connector under ``product='k8s'`` for enum tests.
+
+    The autouse :func:`_empty_connector_registry` fixture clears the
+    registry between tests, so each enum-validation test that needs a
+    known set of valid products registers its own minimal stand-in
+    here. ``product='k8s'`` mirrors the real dogfood case
+    (``claude-rdc-hetzner-dc#697`` signal 5 — operator typed
+    ``'kubernetes'``, real registration is ``'k8s'``).
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _FakeK8sConnector(Connector):
+        product = "k8s"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector_v2(product="k8s", version="1.x", impl_id="k8s", cls=_FakeK8sConnector)
+
+
+def test_create_target_unknown_product_returns_422(client: TestClient) -> None:
+    """POST with a product no connector advertises returns a structured 422.
+
+    G0.14-T3 (#1144) acceptance criterion. Replays the real-world
+    typo from ``claude-rdc-hetzner-dc#697`` signal 5: the operator
+    posts ``product='kubernetes'`` (the friendly common name) when the
+    registered connector advertises ``'k8s'``. Before this PR the
+    POST succeeded and the broken row was unrecoverable (no DELETE,
+    no PATCH on ``product``). After this PR the POST is rejected at
+    the validation boundary with a structured detail naming the
+    typo'd value + the valid set + the convention doc.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "rdc-rke2-infra",
+                "product": "kubernetes",
+                "host": "10.10.0.1",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    # T11 convention compliance — a stable ``kind`` code, the offending
+    # product value, the valid set, and a human-readable message naming
+    # the doc reference. Each assertion pins one clause of the
+    # convention.
+    assert detail["kind"] == "unknown_product"
+    assert detail["product"] == "kubernetes"
+    assert detail["valid_products"] == ["k8s"]
+    assert "kubernetes" in detail["message"]
+    assert "k8s" in detail["message"]
+    assert "docs/codebase/error-message-shape.md" in detail["message"]
+
+
+def test_create_target_unknown_product_does_not_create_row(client: TestClient) -> None:
+    """A 422 from the product-enum guard does not commit the row.
+
+    Pinning that the validator runs BEFORE ``session.add(t)`` so a
+    rejected POST does not leave a tombstone the operator would
+    have to recover from. Re-POSTing the same name with a valid
+    product must succeed (it would 409 if the previous insert had
+    landed).
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        r_typo = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "rdc-rke2-infra",
+                "product": "kubernetes",
+                "host": "10.10.0.1",
+            },
+            headers=headers,
+        )
+        # Retry with the right product; if the typo POST had committed
+        # the row, this second POST would 409.
+        r_retry = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "rdc-rke2-infra",
+                "product": "k8s",
+                "host": "10.10.0.1",
+            },
+            headers=headers,
+        )
+    assert r_typo.status_code == 422
+    assert r_retry.status_code == 201
+
+
+def test_create_target_valid_product_succeeds(client: TestClient) -> None:
+    """POST with a registered product token still returns 201.
+
+    Sanity-check that the new validator does not break the happy
+    path: a request whose product matches the registered set
+    proceeds to the existing insert + 201 flow unchanged.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "rdc-rke2-infra",
+                "product": "k8s",
+                "host": "10.10.0.1",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["product"] == "k8s"
+
+
+def test_create_target_empty_registry_skips_validation(client: TestClient) -> None:
+    """An empty connector registry does not block POST.
+
+    The validator skips when ``registered_product_tokens()`` is
+    empty -- that state means "no connectors imported" (test
+    isolation, deploy booted before eager import ran), and
+    rejecting every product in that state would be the wrong
+    default. This pins that the existing test suite's
+    create-target paths (which use ``product='ssh'`` /
+    ``product='vsphere'`` without registering anything) continue
+    to work. The lifespan calls ``_eager_import_connectors`` in
+    production, so the empty-registry branch is a
+    test-environment-only path.
+    """
+    # No connector registered — autouse fixture cleared the registry.
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={"name": "no-registry-target", "product": "ssh", "host": "10.0.0.1"},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+
+
+def test_create_target_unknown_product_lists_all_valid(client: TestClient) -> None:
+    """The 422 ``valid_products`` lists every registered product, sorted.
+
+    Multiple connectors registered → the rejected POST surfaces the
+    full set so the operator does not need a second round-trip to
+    ``GET /api/v1/connectors`` to find the right token. Sorted
+    order is the stability contract — generators that diff the
+    response body across releases stay deterministic.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _NoopConnector(Connector):
+        product = "placeholder"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector_v2(
+        product="vmware", version="9.0", impl_id="vmware-rest", cls=_NoopConnector
+    )
+    register_connector_v2(product="k8s", version="1.x", impl_id="k8s", cls=_NoopConnector)
+    register_connector_v2(product="vault", version="1.x", impl_id="vault", cls=_NoopConnector)
+
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "bad-product",
+                "product": "kubernetes",  # not registered
+                "host": "10.0.0.1",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    # Sorted, complete, no duplicates from v1-compat empty padding.
+    assert detail["valid_products"] == ["k8s", "vault", "vmware"]
+
+
+# ---------------------------------------------------------------------------
 # PATCH /api/v1/targets/{name} — update
 # ---------------------------------------------------------------------------
 
@@ -699,3 +909,513 @@ def test_create_unauthenticated_returns_401(client: TestClient) -> None:
 def test_update_unauthenticated_returns_401(client: TestClient) -> None:
     response = client.patch("/api/v1/targets/any-name", json={"host": "x"})
     assert response.status_code == 401
+
+
+def test_delete_unauthenticated_returns_401(client: TestClient) -> None:
+    response = client.delete("/api/v1/targets/any-name")
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/v1/targets/{name} (G0.14-T4 #1145)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_target_soft_deletes_and_returns_204(client: TestClient) -> None:
+    """DELETE on a live target returns 204 and stamps ``deleted_at``.
+
+    Subsequent GET on the same name resolves to 404 because the
+    resolver filters ``deleted_at IS NULL``; the row stays in the
+    DB so the ``audit_log.target_id`` soft-FK keeps pointing at it.
+
+    Also asserts the ``AuditMiddleware`` wrote an audit row with
+    ``payload['op_id'] == 'targets.delete'`` -- the
+    ``audit_op_id`` contextvar bound inside the route handler is the
+    only signal cross-tenant audit queries (``meho audit query
+    --op-id=targets.delete``) have to find the delete events.
+    """
+    from sqlalchemy import select as _select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import AuditLog
+    from meho_backplane.db.models import Target as TargetORM
+
+    tenant_id = DEFAULT_TENANT_ID
+    t = await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="to-delete",
+        product="ssh",
+        host="10.0.0.1",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/to-delete",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 204
+
+    # The row stays in the DB but is now soft-deleted.
+    sm = get_sessionmaker()
+    async with sm() as session:
+        row = (await session.execute(_select(TargetORM).where(TargetORM.id == t.id))).scalar_one()
+    assert row.deleted_at is not None
+
+    # The DELETE produced an audit row with op_id=targets.delete,
+    # the correct target_id soft-FK, and the operator's sub from the
+    # JWT. The contextvar binding inside the route handler is what
+    # surfaces the canonical op_id (otherwise the middleware would
+    # write http.delete:/api/v1/targets/{name} as a fallback).
+    async with sm() as session:
+        audit_rows = (
+            (
+                await session.execute(
+                    _select(AuditLog)
+                    .where(AuditLog.method == "DELETE")
+                    .where(AuditLog.target_id == t.id),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(audit_rows) == 1
+    audit = audit_rows[0]
+    assert audit.payload["op_id"] == "targets.delete"
+    assert audit.payload["op_class"] == "write"
+    assert audit.status_code == 204
+    assert audit.operator_sub == "admin-1"
+
+    # A follow-up GET resolves to 404 because the resolver filters
+    # deleted_at IS NULL.
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        follow_up = client.get(
+            "/api/v1/targets/to-delete",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert follow_up.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_target_excluded_from_list(client: TestClient) -> None:
+    """Soft-deleted targets are excluded from ``GET /api/v1/targets``."""
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="live-one",
+        product="ssh",
+        host="10.0.0.1",
+    )
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="doomed",
+        product="ssh",
+        host="10.0.0.2",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.delete(
+            "/api/v1/targets/doomed",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_id)}"},
+        )
+        listing = client.get(
+            "/api/v1/targets",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert listing.status_code == 200
+    names = {t["name"] for t in listing.json()}
+    assert names == {"live-one"}
+
+
+@pytest.mark.asyncio
+async def test_delete_target_not_found_returns_404(client: TestClient) -> None:
+    """DELETE on a non-existent target returns 404 via resolve_target."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/no-such-name",
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_target_operator_role_returns_403(client: TestClient) -> None:
+    """``operator`` role cannot DELETE a target."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/any",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_delete_target_cross_tenant_returns_404(client: TestClient) -> None:
+    """A target in tenant_a is invisible to a DELETE from tenant_b (404, not 403)."""
+    tenant_a = str(uuid.uuid4())
+    tenant_b = str(uuid.uuid4())
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_a),
+        name="tenant-a-target",
+        product="ssh",
+        host="10.0.0.1",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/tenant-a-target",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_b)}"},
+        )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_target_with_graph_node_refs_returns_409(client: TestClient) -> None:
+    """When the target is referenced by graph_node rows, DELETE returns 409
+    with the count and the ``?force=true`` remediation hint.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _datetime
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import GraphNode, Tenant
+
+    tenant_id = DEFAULT_TENANT_ID
+    tenant_uuid = uuid.UUID(tenant_id)
+    # graph_node.tenant_id is a real FK to tenant.id — seed the tenant
+    # row first so the FK does not block the GraphNode insert. The
+    # _insert_target helper does *not* seed tenant rows (targets.tenant_id
+    # is a soft-FK; chassis-era audit rows have no tenant either).
+    sm = get_sessionmaker()
+    async with sm() as session:
+        existing_tenant = await session.get(Tenant, tenant_uuid)
+        if existing_tenant is None:
+            # Migration ``0028_supersede_rdc_internal_seed`` seeds a
+            # tenant with ``slug='default'`` (a different random UUID).
+            # Use a per-tenant_uuid slug so the test's tenant row does
+            # not collide with the migration seed's UNIQUE(slug)
+            # constraint.
+            session.add(
+                Tenant(
+                    id=tenant_uuid,
+                    slug=f"tenant-{tenant_uuid}",
+                    name=f"tenant-{tenant_uuid}",
+                ),
+            )
+            await session.commit()
+    t = await _insert_target(
+        tenant_id=tenant_uuid,
+        name="has-refs",
+        product="k8s",
+        host="10.0.0.1",
+    )
+    async with sm() as session:
+        session.add(
+            GraphNode(
+                id=uuid.uuid4(),
+                tenant_id=tenant_uuid,
+                kind="target",
+                name="cluster-a",
+                target_id=t.id,
+                properties={},
+                discovered_by="kubernetes",
+                first_seen=_datetime.now(_UTC),
+            ),
+        )
+        await session.commit()
+
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/has-refs",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["kind"] == "target_has_references"
+    assert detail["graph_node_refs"] == 1
+    assert "force=true" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_delete_target_with_graph_node_refs_force_true_succeeds(
+    client: TestClient,
+) -> None:
+    """``?force=true`` proceeds with the soft-delete despite graph_node refs.
+
+    Also asserts the audit row carries ``op_id='targets.delete'`` --
+    the forced-delete path is the same code path as the unforced
+    happy path (the ``force`` branch only skips the 409), so the
+    audit-row contract must hold both ways.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _datetime
+
+    from sqlalchemy import select as _select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import AuditLog, GraphNode, Tenant
+    from meho_backplane.db.models import Target as TargetORM
+
+    tenant_id = DEFAULT_TENANT_ID
+    tenant_uuid = uuid.UUID(tenant_id)
+    sm = get_sessionmaker()
+    async with sm() as session:
+        existing_tenant = await session.get(Tenant, tenant_uuid)
+        if existing_tenant is None:
+            # Migration ``0028_supersede_rdc_internal_seed`` seeds a
+            # tenant with ``slug='default'`` (a different random UUID).
+            # Use a per-tenant_uuid slug so the test's tenant row does
+            # not collide with the migration seed's UNIQUE(slug)
+            # constraint.
+            session.add(
+                Tenant(
+                    id=tenant_uuid,
+                    slug=f"tenant-{tenant_uuid}",
+                    name=f"tenant-{tenant_uuid}",
+                ),
+            )
+            await session.commit()
+    t = await _insert_target(
+        tenant_id=tenant_uuid,
+        name="forced-delete",
+        product="k8s",
+        host="10.0.0.1",
+    )
+    async with sm() as session:
+        session.add(
+            GraphNode(
+                id=uuid.uuid4(),
+                tenant_id=tenant_uuid,
+                kind="target",
+                name="cluster-b",
+                target_id=t.id,
+                properties={},
+                discovered_by="kubernetes",
+                first_seen=_datetime.now(_UTC),
+            ),
+        )
+        await session.commit()
+
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/forced-delete?force=true",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 204
+
+    async with sm() as session:
+        row = (await session.execute(_select(TargetORM).where(TargetORM.id == t.id))).scalar_one()
+    assert row.deleted_at is not None
+
+    # Forced delete writes the same op_id=targets.delete audit row.
+    async with sm() as session:
+        audit_rows = (
+            (
+                await session.execute(
+                    _select(AuditLog)
+                    .where(AuditLog.method == "DELETE")
+                    .where(AuditLog.target_id == t.id),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(audit_rows) == 1
+    audit = audit_rows[0]
+    assert audit.payload["op_id"] == "targets.delete"
+    assert audit.payload["op_class"] == "write"
+    assert audit.status_code == 204
+    assert audit.operator_sub == "admin-1"
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/v1/targets/{name} product update (G0.14-T4 #1145)
+# ---------------------------------------------------------------------------
+
+
+def test_patch_product_unknown_returns_422(client: TestClient) -> None:
+    """PATCH with an unknown product yields the structured 422.
+
+    Mirrors the convention codified in T11
+    (``docs/codebase/error-message-shape.md``): a snake_case
+    ``kind``, a human ``message`` naming the offending value and
+    the remediation, a machine-actionable ``valid_products`` list.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+    from meho_backplane.connectors.schemas import ProbeResult as _ProbeResult
+
+    class _K8sConnector(Connector):
+        product = "k8s"
+
+        async def probe(self, target: Any) -> _ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector("k8s", _K8sConnector)
+
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        # Create with valid product first.
+        client.post(
+            "/api/v1/targets",
+            json={"name": "typo-target", "product": "k8s", "host": "10.0.0.1"},
+            headers=headers,
+        )
+        # Now try to PATCH the product to a typo.
+        response = client.patch(
+            "/api/v1/targets/typo-target",
+            json={"product": "kubernetes"},
+            headers=headers,
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "unknown_product"
+    assert detail["product"] == "kubernetes"
+    assert "k8s" in detail["valid_products"]
+
+
+def test_patch_product_valid_succeeds(client: TestClient) -> None:
+    """PATCH with a registered product updates the row and bumps ``updated_at``.
+
+    The recovery flow signal 6 wants: misregistered ``kubernetes``
+    → corrected to ``k8s`` in-place.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+    from meho_backplane.connectors.schemas import ProbeResult as _ProbeResult
+
+    class _K8sConnector(Connector):
+        product = "k8s"
+
+        async def probe(self, target: Any) -> _ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    class _OtherConnector(Connector):
+        product = "ssh"
+
+        async def probe(self, target: Any) -> _ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector("k8s", _K8sConnector)
+    register_connector("ssh", _OtherConnector)
+
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.post(
+            "/api/v1/targets",
+            json={"name": "fix-me", "product": "ssh", "host": "10.0.0.1"},
+            headers=headers,
+        )
+        response = client.patch(
+            "/api/v1/targets/fix-me",
+            json={"product": "k8s"},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.json()["product"] == "k8s"
+
+
+def test_patch_product_null_returns_422_not_500(client: TestClient) -> None:
+    """PATCH with ``{"product": null}`` yields a structured 422, not a 500.
+
+    ``TargetUpdate.product`` is typed ``str | None`` with
+    ``default=None`` because the absent-marker for "client did not
+    send this field" is the only way Pydantic can distinguish
+    "client said null" from "client said nothing" in v1
+    (``model_dump(exclude_unset=True)`` keys on field presence, not
+    value). Without an explicit null guard in the route handler, a
+    client that sends ``{"product": null}`` reaches the ``setattr``
+    loop, assigns ``None`` to ``Target.product`` (NOT NULL), and the
+    flush trips an IntegrityError that surfaces to the operator as
+    a 500. That violates T11's error-message-shape contract --
+    callers cannot branch on ``500 Internal Server Error`` the same
+    way they branch on a snake_case ``kind``. This test pins the
+    handler-level null guard so a future refactor that drops it
+    fails closed.
+    """
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.post(
+            "/api/v1/targets",
+            json={"name": "null-target", "product": "ssh", "host": "10.0.0.1"},
+            headers=headers,
+        )
+        response = client.patch(
+            "/api/v1/targets/null-target",
+            json={"product": None},
+            headers=headers,
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "invalid_null"
+    assert detail["field"] == "product"
+    assert "null" in detail["message"].lower()
+
+
+def test_patch_product_same_value_passes_without_validator(client: TestClient) -> None:
+    """A PATCH that re-asserts the existing product passes without registry lookup.
+
+    Edge case: an operator scripts a PATCH that sends every field
+    including ``product=<current value>``. The validator must
+    short-circuit on equality so a PATCH does not break when the
+    connector registry is in a transient unregistered state at
+    request time (e.g. mid-rolling-restart). Only product *changes*
+    are validated against the registry.
+    """
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        # Empty registry -- no connectors registered.
+        client.post(
+            "/api/v1/targets",
+            json={"name": "stable", "product": "legacy", "host": "10.0.0.1"},
+            headers=headers,
+        )
+        # PATCH the host while sending product=legacy (unchanged).
+        response = client.patch(
+            "/api/v1/targets/stable",
+            json={"product": "legacy", "host": "new.host"},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.json()["product"] == "legacy"
+    assert response.json()["host"] == "new.host"

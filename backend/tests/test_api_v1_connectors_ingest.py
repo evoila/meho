@@ -746,6 +746,166 @@ async def test_list_class_only_entries_excluded_under_status_narrowing(
 
 
 # ---------------------------------------------------------------------------
+# G0.13-T3 (#1133) next_step hint contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _registered_class_only_with_uncatalogued_entry() -> Iterator[None]:
+    """Register one v2 connector whose ``(product, version)`` is NOT in the catalog.
+
+    Drives the not-in-catalog branch of :func:`_next_step_for_registered`.
+    Uses a deliberately synthetic ``("custom-vendor", "1.0")`` triple — no
+    catalog entry exists under that pair (the catalog ships seven curated
+    products and ``custom-vendor`` is not one of them), so the hint must
+    fall through to the manual-mode rationale.
+
+    Re-uses :class:`HarborConnector` as the placeholder class because it
+    has a no-arg construct path and the test only exercises the listing —
+    the class is never instantiated.
+    """
+    from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.connectors.registry import (
+        all_connectors_v2,
+        register_connector_v2,
+    )
+
+    existing = all_connectors_v2()
+    if ("custom-vendor", "1.0", "custom-rest") not in existing:
+        register_connector_v2(
+            product="custom-vendor",
+            version="1.0",
+            impl_id="custom-rest",
+            cls=HarborConnector,
+        )
+    yield
+
+
+@pytest.mark.asyncio
+async def test_list_registered_row_carries_catalog_next_step_hint(
+    client: TestClient,
+    _registered_class_only_connectors: None,
+) -> None:
+    """Catalog-hit branch: ``state="registered"`` rows carry the ``--catalog`` verb.
+
+    G0.13-T3 (#1133) AC #1 + #3 (catalog-hit half):
+    rows with ``state="registered"`` include a ``next_step`` field with
+    ``verb`` + ``rationale``, and the hint correctly distinguishes "catalog
+    has it" — the verb points at ``meho connector ingest --catalog
+    <product>/<version>``.
+
+    SDDC is the load-bearing case: the listing emits ``product="sddc"``
+    (parser-derived), but the catalog stores ``product="sddc-manager"``
+    (registry-side). The hint must use the catalog's native key, i.e.
+    ``--catalog sddc-manager/9.0`` not ``--catalog sddc/9.0``. Harbor
+    exercises the trivial case where registry and parsed product agree.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+
+    harbor = by_id["harbor-rest-2.x"]
+    assert harbor["state"] == "registered"
+    assert harbor["next_step"] is not None
+    assert harbor["next_step"]["verb"] == "meho connector ingest --catalog harbor/2.x"
+    assert "catalog" in harbor["next_step"]["rationale"]
+    assert "ingest" in harbor["next_step"]["rationale"]
+
+    sddc = by_id["sddc-rest-9.0"]
+    assert sddc["state"] == "registered"
+    assert sddc["next_step"] is not None
+    # Catalog lookup must use the *registry's* product ("sddc-manager"),
+    # not the parsed product ("sddc") — see _next_step_for_registered.
+    assert sddc["next_step"]["verb"] == "meho connector ingest --catalog sddc-manager/9.0"
+    assert "catalog" in sddc["next_step"]["rationale"]
+
+
+@pytest.mark.asyncio
+async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
+    client: TestClient,
+    _registered_class_only_with_uncatalogued_entry: None,
+) -> None:
+    """Catalog-miss branch: not-in-catalog rows point at manual-mode ingest.
+
+    G0.13-T3 (#1133) AC #2 + #3 (catalog-miss half): when the catalog
+    doesn't carry the registered connector, the rationale says so and
+    points at manual-mode ``meho connector ingest`` with ``--spec``.
+
+    Uses a synthetic ``("custom-vendor", "1.0")`` v2 registration with
+    no catalog entry. The hint must:
+
+    * point at ``meho connector ingest --product custom-vendor --version
+      1.0 --impl custom-rest --spec <upstream-openapi-uri>`` (the
+      manual-mode invocation), echoing the registry's natural key so
+      the operator copies the right values verbatim;
+    * carry a rationale that says the catalog has no entry so the
+      operator knows they need to source the OpenAPI spec themselves.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+
+    custom = by_id["custom-rest-1.0"]
+    assert custom["state"] == "registered"
+    assert custom["next_step"] is not None
+    verb = custom["next_step"]["verb"]
+    assert "--catalog" not in verb
+    assert "--product custom-vendor" in verb
+    assert "--version 1.0" in verb
+    assert "--impl custom-rest" in verb
+    assert "--spec" in verb
+    rationale = custom["next_step"]["rationale"]
+    assert "not in catalog" in rationale
+    assert "--spec" in rationale
+
+
+@pytest.mark.asyncio
+async def test_list_ingested_row_omits_next_step_hint(
+    client: TestClient,
+) -> None:
+    """``state="ingested"`` rows set ``next_step=None`` (no operator action remains).
+
+    G0.13-T3 (#1133) AC #1 (ingested-rows half): an ingested connector's
+    dispatcher resolves operations against it, so there is no workflow-
+    completion verb to surface. The contract is ``next_step=null`` (we
+    chose the null shape, documented in the schema, rather than the
+    field-omission alternative — both were called out as
+    implementer's-call in the task body).
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        group_count=1,
+        ops_per_group=2,
+    )
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+
+    vmware = by_id["vmware-rest-9.0"]
+    assert vmware["state"] == "ingested"
+    # Field is present in the wire shape (Pydantic emits the default) and
+    # explicitly null — the catalog-completion verb only applies to the
+    # registered-but-not-yet-ingested branch.
+    assert "next_step" in vmware
+    assert vmware["next_step"] is None
+
+
+# ---------------------------------------------------------------------------
 # G0.9.1-T1 (#773) listing-integrity contract
 # ---------------------------------------------------------------------------
 
@@ -1093,6 +1253,41 @@ async def test_get_review_cross_tenant_returns_404(
             headers=_authed(token),
         )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_review_builtin_connector_visible_to_non_admin_operator(
+    client: TestClient,
+) -> None:
+    """G0.13-T5 (#1135): GET /{id}/review on a global (``tenant_id IS NULL``) row.
+
+    The listing endpoint promises "operator's-tenant rows +
+    built-ins" and surfaces them; the review endpoint must honour
+    the same scope rather than 404 on every global. Verifies the
+    full HTTP-to-service two-pass round-trip for a non-admin
+    operator role (the role that hit the bug on the daily-driver
+    path).
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=None,
+        product="vmware",
+        impl_id="vmware-rest",
+        group_count=2,
+        ops_per_group=3,
+    )
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["connector_id"] == "vmware-rest-9.0"
+    assert body["tenant_id"] is None
+    assert body["total_op_count"] == 6
 
 
 # ---------------------------------------------------------------------------

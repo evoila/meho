@@ -148,8 +148,10 @@ def isolated_registry() -> Iterator[None]:
     )
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import (
+        agent_grants,
         agent_runs,
         agents,
+        approvals,
         audit,
         broadcast_overrides,
         connector_admin,
@@ -188,6 +190,16 @@ def isolated_registry() -> Iterator[None]:
     # G11.1-T4 (#811): the agent invocation MCP tools (meho.agents.run +
     # meho.agents.run_status) join the reload list for the same reason.
     importlib.reload(agent_runs)
+    # G11.2-T5 (#818) approvals + T6 (#819) agent grants: the MCP tool
+    # modules (``meho.approvals.*`` and ``meho.agents.grant.*``) join
+    # the reload list for the same reason every other tool module
+    # does -- the autouse ``clear_registries()`` above would otherwise
+    # leave them unregistered in any test file that imports this
+    # fixture after the first one runs in the process. The negative
+    # RBAC suites (G11.2 follow-up #1113) rely on this entry to
+    # exercise ``tools/list`` filter + ``tools/call`` re-check gates.
+    importlib.reload(agent_grants)
+    importlib.reload(approvals)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)
     importlib.reload(kb_resource)

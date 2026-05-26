@@ -48,6 +48,7 @@ __all__ = [
     "list_connector_impls",
     "register_connector",
     "register_connector_v2",
+    "registered_product_tokens",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -177,6 +178,39 @@ def list_connector_impls() -> list[tuple[str, str, str]]:
     debug endpoints render deterministically across hosts.
     """
     return sorted(_REGISTRY_V2.keys())
+
+
+def registered_product_tokens() -> set[str]:
+    """Return the set of product tokens advertised by registered connectors.
+
+    G0.14-T3 (#1144). The set is the union of the v2 registry's ``product``
+    keys, drained of the empty-string placeholder. The padding placeholders
+    appear on the ``version`` / ``impl_id`` axes when a v1
+    :func:`register_connector` call writes a ``(product, "", "")`` entry;
+    the bare product token is what callers see. An empty ``product`` value
+    has no addressable meaning (the resolver could never tie-break it
+    against a real registration) and is filtered defensively.
+
+    This is the canonical source of "what product slugs the operator may
+    POST" — every operator-facing validation path (POST
+    :func:`~meho_backplane.api.v1.targets.create_target`, PATCH
+    :func:`~meho_backplane.api.v1.targets.update_target`, the OpenAPI
+    ``TargetCreate.product`` enum hook in
+    :mod:`meho_backplane.main`) reads from here so they never disagree
+    about which tokens are valid. The set tracks the resolver's notion
+    of "valid product" at probe / dispatch time, so a request that
+    passes here does not surprise the operator with a 501 on the next
+    probe.
+
+    Returned as a fresh ``set`` so callers can mutate / sort without
+    affecting the underlying registry.
+
+    Sibling Task T4 #1145 inlines an equivalent ``_registered_products()``
+    in :mod:`meho_backplane.api.v1.targets`; once both PRs land the
+    inline helper consolidates against this function (note in #1164's
+    PR description).
+    """
+    return {product for (product, _version, _impl_id) in _REGISTRY_V2 if product}
 
 
 def _eager_import_connectors() -> None:

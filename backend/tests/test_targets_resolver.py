@@ -336,3 +336,108 @@ async def test_resolve_target_exact_name_duplicate_raises_ambiguous() -> None:
     assert detail["error"] == "ambiguous_target"
     assert detail["query"] == "dup-name"
     assert len(detail["matches"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Soft-delete filter (G0.14-T4 #1145)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_excludes_soft_deleted_by_name() -> None:
+    """A soft-deleted target is invisible to the resolver by exact name.
+
+    G0.14-T4 (#1145): the resolver filters ``deleted_at IS NULL`` on
+    the exact-name probe so a re-creation under the same name does
+    not collide with the tombstone (CLI cache referencing the
+    deleted name surfaces the standard 404 with near-misses,
+    matching the resolver's contract).
+    """
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    deleted = _make_target(
+        tenant_id=tenant_id,
+        name="retired",
+        product="ssh",
+        host="10.0.0.1",
+        deleted_at=datetime.now(UTC),
+    )
+
+    async with sessionmaker() as session:
+        session.add(deleted)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        with pytest.raises(TargetNotFoundError):
+            await resolve_target(session, tenant_id, "retired")
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_excludes_soft_deleted_by_alias() -> None:
+    """A soft-deleted target's alias is also invisible to the resolver.
+
+    G0.14-T4 (#1145): the alias step filters ``deleted_at IS NULL``
+    so an alias on a retired row does not shadow a live re-creation
+    that re-uses the alias.
+    """
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    deleted = _make_target(
+        tenant_id=tenant_id,
+        name="retired-with-alias",
+        aliases=["legacy-name"],
+        product="ssh",
+        host="10.0.0.1",
+        deleted_at=datetime.now(UTC),
+    )
+
+    async with sessionmaker() as session:
+        session.add(deleted)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        with pytest.raises(TargetNotFoundError):
+            await resolve_target(session, tenant_id, "legacy-name")
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_near_misses_exclude_soft_deleted() -> None:
+    """Near-miss suggestions only include live targets.
+
+    G0.14-T4 (#1145): an operator typo-correcting against a recently
+    deleted target should not be pointed at the tombstone — only
+    live near-misses surface in the 404 ``matches`` field.
+    """
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    deleted = _make_target(
+        tenant_id=tenant_id,
+        name="rke2-infra",
+        product="ssh",
+        host="10.0.0.1",
+        deleted_at=datetime.now(UTC),
+    )
+    live = _make_target(
+        tenant_id=tenant_id,
+        name="rke2-infra-k8s",
+        product="ssh",
+        host="10.0.0.2",
+    )
+
+    async with sessionmaker() as session:
+        session.add_all([deleted, live])
+        await session.commit()
+
+    async with sessionmaker() as session:
+        with pytest.raises(TargetNotFoundError) as exc_info:
+            await resolve_target(session, tenant_id, "rke2")
+
+    matches = exc_info.value.detail["matches"]
+    names = {m["name"] for m in matches}
+    assert names == {"rke2-infra-k8s"}

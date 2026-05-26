@@ -3,13 +3,15 @@
 
 """``/api/v1/targets`` — CRUD surface for the targets registry.
 
-5 routes (G0.3-T3 / Task #254):
+7 routes (G0.3-T3 / Task #254; extended by G9.1-T5 / G0.14-T4):
 
-* ``GET  /api/v1/targets``           — list, keyset-paginated. ``operator`` role.
-* ``GET  /api/v1/targets/{name}``    — describe (alias-aware). ``operator`` role.
-* ``POST /api/v1/targets/{name}/probe`` — invoke connector probe. ``operator`` role.
-* ``POST /api/v1/targets``           — create. ``tenant_admin`` role.
-* ``PATCH /api/v1/targets/{name}``   — update (partial). ``tenant_admin`` role.
+* ``GET  /api/v1/targets``                — list, keyset-paginated. ``operator`` role.
+* ``GET  /api/v1/targets/discover``       — discover candidates. ``operator`` role.
+* ``GET  /api/v1/targets/{name}``         — describe (alias-aware). ``operator`` role.
+* ``POST /api/v1/targets/{name}/probe``   — invoke connector probe. ``operator`` role.
+* ``POST /api/v1/targets``                — create. ``tenant_admin`` role.
+* ``PATCH /api/v1/targets/{name}``        — update (partial). ``tenant_admin`` role.
+* ``DELETE /api/v1/targets/{name}``       — soft-delete. ``tenant_admin`` role.
 
 All routes are tenant-scoped via ``operator.tenant_id`` extracted from the
 JWT by :func:`~meho_backplane.middleware.verify_jwt_and_bind`. Cross-tenant
@@ -81,27 +83,65 @@ fingerprint survives. A connector that raises propagates the exception
 leaving the row untouched. The column therefore always reflects the
 *last successful* probe. The target must exist for the probe to fire —
 a non-existent target returns 404 via ``resolve_target``.
+
+DELETE + product PATCH (G0.14-T4 #1145)
+----------------------------------------
+
+The G0.14-T4 amendment closes the
+*"misregistered target cannot be recovered"* hole the v0.6.0 dogfood
+exercise surfaced (signal 6, `claude-rdc-hetzner-dc#697`):
+
+* **``DELETE /api/v1/targets/{name}``** soft-deletes the row by
+  stamping ``deleted_at``; the row stays queryable from the
+  ``audit_log.target_id`` soft-FK (audit is append-only per
+  v0.1-spec §6) but is invisible to every dispatch path that goes
+  through :func:`~meho_backplane.targets.resolver.resolve_target`.
+  A cascade check counts ``graph_node.target_id`` references and
+  defaults to **409 with the count + a `?force=true` hint** when
+  the target is wired into the topology graph; ``?force=true``
+  proceeds with the soft-delete anyway (the FK is
+  ``ON DELETE SET NULL`` so the graph rows are safe). Active
+  audit references are not counted in the cascade check — they
+  exist for every authenticated request against the target by
+  design and would always block the DELETE.
+* **``PATCH /api/v1/targets/{name}``** now accepts ``product`` so
+  an operator who misregisters ``product='kubernetes'`` (the real
+  ``rke2-infra`` typo from the dogfood) can correct it to ``'k8s'``
+  in-place instead of deleting and re-creating. The new value is
+  validated at request time against the registered connector
+  products; an unknown product yields a structured 422 listing the
+  ``valid_products`` so an agent / CLI can branch on the
+  diagnostic without re-parsing prose (T3 #1144 ships the same
+  validator at POST time; the two share the resolver-product
+  helper in :mod:`meho_backplane.connectors.registry`).
+
+Both pair with each other: an operator can either correct the
+``product`` in-place (PATCH) or delete the broken row and re-create
+a fresh one (DELETE + POST). Either recovery path works; both
+available is the strongest answer.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Final
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.base import Connector
-from meho_backplane.connectors.registry import all_connectors_v2
+from meho_backplane.connectors.registry import all_connectors_v2, registered_product_tokens
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.db.engine import get_session
+from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.targets.resolver import resolve_target
@@ -125,6 +165,13 @@ _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 #: this constant pairs with is load-bearing (mirrors the ``kb.show``
 #: rationale in :mod:`meho_backplane.api.v1.kb`).
 _DISCOVER_OP_ID = "targets.discover"
+
+#: Canonical op id for the DELETE route's audit row. Mirrors the
+#: ``meho.connector.edit_*`` audit precedent (``api/v1/connectors_ingest.py``)
+#: and the ``conventions.delete`` shape so cross-tenant audit
+#: queries (G8) can filter on ``audit_op_id LIKE 'targets.%'``
+#: without a special case.
+_DELETE_OP_ID: Final[str] = "targets.delete"
 
 
 class SkippedConnector(BaseModel):
@@ -174,6 +221,40 @@ def _to_summary(t: TargetORM) -> TargetSummary:
     )
 
 
+def _build_unknown_product_detail(
+    product: str,
+    valid_products: list[str],
+) -> dict[str, object]:
+    """Build the T11-compliant ``unknown_product`` 422 detail.
+
+    G0.14-T3 (#1144). Mirrors the ``/probe`` 501's diagnostic shape
+    but moves it forward to the POST / PATCH validation boundary so
+    the operator sees the actionable error at create time instead of
+    after committing a permanent broken row. The detail follows the
+    convention codified in ``docs/codebase/error-message-shape.md``
+    (T11 #1141): a stable ``kind`` code, a ``message`` naming the
+    offending value + remediation + a doc reference, and a machine-
+    actionable ``valid_products`` list the client can branch on.
+
+    Pure builder — no I/O, no logging. Called from both
+    :func:`create_target` (POST) and (after T4 #1145 consolidation)
+    :func:`update_target` (PATCH); the shared shape is what lets a
+    CLI / agent handle the two surfaces identically.
+    """
+    return {
+        "kind": "unknown_product",
+        "product": product,
+        "valid_products": valid_products,
+        "message": (
+            f"product={product!r} is not registered; "
+            f"pick one of {valid_products!r} or register a "
+            f"connector for it before retrying. "
+            f"See docs/codebase/error-message-shape.md for "
+            f"the convention."
+        ),
+    }
+
+
 def _to_full(t: TargetORM) -> Target:
     return Target(
         id=t.id,
@@ -193,7 +274,34 @@ def _to_full(t: TargetORM) -> Target:
         preferred_impl_id=t.preferred_impl_id,
         created_at=t.created_at,
         updated_at=t.updated_at,
+        deleted_at=t.deleted_at,
     )
+
+
+def _registered_products() -> set[str]:
+    """Return the set of products advertised by registered connector classes.
+
+    Read from the v2 registry snapshot (which subsumes v1 entries
+    as ``(product, "", "")``) and dropped of empty-string entries so
+    only meaningful product slugs surface. The set drives the
+    ``product``-on-PATCH validator and matches the resolver's notion
+    of "valid product" at probe / dispatch time so a PATCH that
+    passes here does not surprise the operator with a 501 on the
+    next probe.
+
+    Inline at the PATCH site rather than imported from a sibling
+    helper because T3 #1144 (which ships the same enum at POST time)
+    has not yet merged at the time of writing; the two sites will
+    consolidate against a shared helper once both land (see PR
+    description on #1145).
+
+    TODO: consolidate with sibling PR #1166's
+    ``registered_product_tokens()`` helper in
+    ``connectors/registry.py`` once it merges — scheduled for a
+    Wave 5 follow-up so the duplication does not race the parallel
+    PRs.
+    """
+    return {product for (product, _version, _impl_id) in all_connectors_v2() if product}
 
 
 @router.get("", response_model=list[TargetSummary])
@@ -210,8 +318,16 @@ async def list_targets(
     Pass ``cursor=<last-name-seen>`` to fetch the next page. The
     ``product`` filter is exact-match; pass it to narrow by product
     slug. ``limit`` defaults to 100, max 500.
+
+    Soft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)
+    are excluded from the list — the same filter the resolver applies
+    so list and dispatch never disagree about which targets are
+    visible to the tenant.
     """
-    stmt = select(TargetORM).where(TargetORM.tenant_id == operator.tenant_id)
+    stmt = select(TargetORM).where(
+        TargetORM.tenant_id == operator.tenant_id,
+        TargetORM.deleted_at.is_(None),
+    )
     if product is not None:
         stmt = stmt.where(TargetORM.product == product)
     if cursor is not None:
@@ -424,7 +540,29 @@ async def create_target(
     the tenant. The ``id`` and timestamps are generated server-side.
     ``tenant_id`` is always taken from the JWT — the body cannot override
     it.
+
+    G0.14-T3 (#1144). The ``product`` field is validated at request time
+    against :func:`~meho_backplane.connectors.registry.registered_product_tokens`.
+    An unknown product yields a structured 422 (see
+    :func:`_build_unknown_product_detail`); the OpenAPI schema also
+    exposes the enum (see :func:`meho_backplane.main.build_openapi_schema`)
+    so Swagger / generator tooling surfaces the valid set before the
+    request leaves the editor. Both layers share the same source-of-
+    truth helper so they cannot drift.
+
+    Validation is skipped when the registry is empty — that state means
+    "no connectors imported" (test isolation, or a deploy booted before
+    :func:`_eager_import_connectors` ran). In production the lifespan
+    populates the registry before the first request arrives, so the
+    skip branch never fires; a misregistered deploy that *did* hit it
+    is recoverable via T4 #1145's PATCH-product or DELETE path.
     """
+    valid_products = sorted(registered_product_tokens())
+    if valid_products and body.product not in valid_products:
+        raise HTTPException(
+            status_code=422,
+            detail=_build_unknown_product_detail(body.product, valid_products),
+        )
     now = datetime.now(UTC)
     t = TargetORM(
         id=uuid.uuid4(),
@@ -463,12 +601,71 @@ async def update_target(
     """Partially update a target.
 
     Only fields present in the request body are modified (Pydantic
-    ``exclude_unset``). ``name`` and ``product`` are not patchable —
-    rename a target by deleting and re-creating it (v0.2 decision).
+    ``exclude_unset``). ``name`` is not patchable — rename a target by
+    deleting and re-creating it (v0.2 decision). ``product`` is patchable
+    as of G0.14-T4 (#1145); the new value is validated against the
+    registered connector products and an unknown product yields a
+    structured 422 listing the ``valid_products`` so an operator
+    typo-correcting a misregistered target sees the same actionable
+    diagnostic at PATCH time that they would see at probe time.
     ``updated_at`` is always refreshed on a successful write.
     """
     t = await resolve_target(session, operator.tenant_id, name)
     updates = body.model_dump(exclude_unset=True)
+    # Reject ``{"product": null}`` explicitly. ``Field(default=None)`` on
+    # ``TargetUpdate.product`` is the absent-marker for "client did not
+    # send this field" -- the only legal way to keep the field optional
+    # while supporting PATCH semantics in v1. Without this guard the
+    # ``setattr`` loop below assigns ``None`` to ``Target.product`` (NOT
+    # NULL) and SQLAlchemy / the database raises an IntegrityError that
+    # FastAPI maps to a 500 -- bypassing the T11 error-message-shape
+    # contract callers branch on. Mirror the ``unknown_product`` 422
+    # shape so the diagnostic stays uniform: a snake_case ``kind``, a
+    # human ``message`` naming the offending value + the remediation,
+    # and a pointer to the convention doc.
+    if "product" in updates and updates["product"] is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "kind": "invalid_null",
+                "field": "product",
+                "message": (
+                    "product cannot be null; targets.product is NOT NULL. "
+                    "Omit the field to leave it unchanged, or pass a "
+                    "valid product token instead. "
+                    "See docs/codebase/error-message-shape.md for the "
+                    "convention."
+                ),
+            },
+        )
+    new_product = updates.get("product")
+    if new_product is not None and new_product != t.product:
+        # Mirror the probe / dispatch resolver's notion of "valid
+        # product" at PATCH time so a typo-correcting operator does
+        # not trade an immediately-broken target for a target that
+        # will surface as 501 at the next probe. The structured
+        # detail follows ``docs/codebase/error-message-shape.md`` --
+        # a snake_case code, a human-readable message naming the
+        # offending value and the remediation step, and a machine-
+        # actionable ``valid_products`` list the client can branch
+        # on.
+        valid_products = sorted(_registered_products())
+        if new_product not in valid_products:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "kind": "unknown_product",
+                    "product": new_product,
+                    "valid_products": valid_products,
+                    "message": (
+                        f"product={new_product!r} is not registered; "
+                        f"pick one of {valid_products!r} or register a "
+                        f"connector for it before retrying. "
+                        f"See docs/codebase/error-message-shape.md for "
+                        f"the convention."
+                    ),
+                },
+            )
     for k, v in updates.items():
         setattr(t, k, v)
     t.updated_at = datetime.now(UTC)
@@ -480,3 +677,155 @@ async def update_target(
         fields=list(updates.keys()),
     )
     return _to_full(t)
+
+
+@router.delete(
+    "/{name}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    responses={
+        # 409 ``target_has_references`` -- declared explicitly so
+        # FastAPI's autogen OpenAPI surfaces the cascade-conflict shape
+        # to SDK clients. The route handler below raises ``HTTPException(
+        # 409, detail={"kind": "target_has_references", ...})`` when the
+        # target is wired into the topology graph and ``?force=true`` is
+        # not set. Without this declaration the spec only lists 204 + 422
+        # and clients have no schema-driven signal for the recoverable
+        # cascade-conflict (the operator's first-line "retry with
+        # ?force=true" remediation). Mirrors the
+        # ``GET /api/v1/topology/history/{name}`` convention from
+        # ``api/v1/topology.py`` -- structured ``detail`` shape with a
+        # snake_case ``kind`` discriminator and an inline content schema
+        # so the regen'd Go client lands a typed JSON409 wrapper.
+        409: {
+            "description": (
+                "Target is referenced by ``graph_node`` rows; "
+                "retry with ``?force=true`` to soft-delete anyway "
+                "(``graph_node.target_id`` is ``ON DELETE SET NULL`` so "
+                "the topology rows survive). See "
+                "``docs/codebase/error-message-shape.md`` for the "
+                "convention."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["target_has_references"],
+                                    },
+                                    "graph_node_refs": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                    },
+                                    "message": {"type": "string"},
+                                },
+                                "required": [
+                                    "kind",
+                                    "graph_node_refs",
+                                    "message",
+                                ],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+    },
+)
+async def delete_target(
+    name: str,
+    force: bool = Query(default=False),
+    operator: Operator = _require_admin,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Soft-delete a target.
+
+    G0.14-T4 (#1145) — recovery path for misregistered targets
+    (signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps
+    ``deleted_at`` on the row instead of removing it so the
+    append-only :attr:`AuditLog.target_id` soft-FK keeps pointing
+    at *something* (audit is append-only per v0.1-spec §6); every
+    read path filters ``deleted_at IS NULL`` so the row is
+    invisible to dispatch / probe / list / discover after the
+    DELETE returns.
+
+    Cascade-check: counts ``graph_node.target_id`` references
+    (G9.1-T1 #448 substrate) and defaults to **409 with the
+    count + a ``?force=true`` hint** when the target is wired
+    into the topology graph. ``?force=true`` proceeds with the
+    soft-delete anyway — the FK is
+    ``ON DELETE SET NULL`` so the graph rows survive the delete
+    safely; the operator confirms by passing ``force=true``.
+    Audit references are not counted because the audit table
+    accumulates a row per authenticated request against the
+    target and would always block the delete.
+
+    Returns 204 on success. The audit row is written by the
+    :class:`~meho_backplane.audit.AuditMiddleware` with
+    ``audit_op_id='targets.delete'`` (mirrors the
+    ``meho.connector.edit_*`` precedent so cross-tenant audit
+    queries can filter by op id prefix).
+
+    Re-deletes collapse to 404 — the second DELETE goes through
+    :func:`~meho_backplane.targets.resolver.resolve_target`
+    which filters ``deleted_at IS NULL``, so the row no longer
+    resolves once the first DELETE flushes.
+
+    ``tenant_admin`` role required (cross-tenant DELETE returns
+    the standard 404 conflation that :func:`resolve_target`
+    enforces).
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_DELETE_OP_ID,
+        audit_op_class="write",
+    )
+    t = await resolve_target(session, operator.tenant_id, name)
+
+    # Cascade count -- only graph_node references. The audit_log
+    # table accumulates a row per authenticated request against
+    # the target; counting them would block every DELETE forever
+    # and is not the intent of the cascade check.
+    count_stmt = (
+        select(func.count())
+        .select_from(GraphNode)
+        .where(
+            GraphNode.target_id == t.id,
+        )
+    )
+    graph_node_ref_count = int((await session.execute(count_stmt)).scalar_one())
+
+    if graph_node_ref_count > 0 and not force:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "kind": "target_has_references",
+                "graph_node_refs": graph_node_ref_count,
+                "message": (
+                    f"target {t.name!r} is referenced by "
+                    f"{graph_node_ref_count} graph_node row(s); "
+                    f"retry with ?force=true to delete anyway "
+                    f"(graph_node.target_id is ON DELETE SET NULL "
+                    f"so the topology rows survive). "
+                    f"See docs/codebase/error-message-shape.md for "
+                    f"the convention."
+                ),
+            },
+        )
+
+    t.deleted_at = datetime.now(UTC)
+    await session.flush()
+    _log.info(
+        "target_deleted",
+        target_id=str(t.id),
+        name=t.name,
+        tenant_id=str(operator.tenant_id),
+        graph_node_refs=graph_node_ref_count,
+        force=force,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

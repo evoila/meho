@@ -242,6 +242,9 @@ specifically referenced).
 | `POST /api/v1/agent-principals` 503 (Keycloak admin not configured) | `{"detail":"keycloak_admin_not_configured"}` | partial — names the domain but not the env vars or the doc | T7 #1148 (symmetrize with the `/ui/auth/login` shape) |
 | `POST /api/v1/agent-principals` 502 (Keycloak admin runtime error) | `{"detail":"keycloak_admin_error"}` | intentionally bare (upstream failure; remediation is identical regardless of upstream code; structured log carries detail) | — |
 | `/api/v1/auth-config` features visibility (whether agent-runtime is configured) | implicit — the agent-runtime configuration state is not surfaced anywhere on `/ready` or `/api/v1/auth-config` (signal 17) | non-compliant *as a discoverability gap* — when the surface emits `keycloak_admin_not_configured` the operator has no way to discover the feature was supposed to be configured | T7 #1148 (`/ready` features block with `configured: bool` + `missing_env`) |
+| `POST /api/v1/targets` 422 (`unknown_product` — typo at create time) | structured `detail` with `kind="unknown_product"`, `product`, `valid_products[]`, `message` (`_build_unknown_product_detail` in `api/v1/targets.py`); also exposed proactively as a JSON Schema enum on `TargetCreate.product` via `build_openapi_schema` in `main.py` | compliant (structured + discoverable) — sibling **Option A** (enum in OpenAPI) and **Option C** (recovery-time 422) from the task body; T4 #1145 ships the same shape at PATCH time | T3 #1144 |
+| `PATCH /api/v1/targets/{name}` 422 (unknown_product) | structured `detail` with `kind='unknown_product'`, `product`, `valid_products[]`, `message` (`api/v1/targets.py` `update_target`) | compliant (structured) — landed in T4 #1145 | — |
+| `DELETE /api/v1/targets/{name}` 409 (target_has_references) | structured `detail` with `kind='target_has_references'`, `graph_node_refs`, `message` naming the `?force=true` remediation (`api/v1/targets.py` `delete_target`) | compliant (structured) — landed in T4 #1145 | — |
 
 The table is the audit artefact's deliverable, not a separate
 spreadsheet. Adding new error surfaces against the convention
@@ -304,7 +307,15 @@ set).
   `/ui/auth/login`) + `backend/src/meho_backplane/ui/auth/flow.py`
   (`MISSING_CLIENT_SECRET_DETAIL` constant).
 - `backend/src/meho_backplane/api/v1/targets.py` (`/probe` 501
-  message).
+  message; `POST /api/v1/targets` `unknown_product` 422 via
+  `_build_unknown_product_detail`, T3 #1144).
+- `backend/src/meho_backplane/connectors/registry.py` —
+  `registered_product_tokens()`, the canonical source-of-truth for
+  the `TargetCreate.product` enum and the validators in
+  `create_target` (POST) + `update_target` (PATCH, T4 #1145).
+- `backend/src/meho_backplane/main.py` — `build_openapi_schema`
+  hook that injects the live product enum into the OpenAPI
+  document so generator tooling surfaces it (T3 #1144 Option A).
 - `backend/src/meho_backplane/api/v1/connectors_ingest.py` (REST
   ingest 422 + 4xx error shape via shared builders).
 - `backend/src/meho_backplane/operations/ingest/error_envelopes.py`
@@ -350,6 +361,16 @@ set).
   the operator cannot discover *what* needs to be configured to
   satisfy a `*_not_configured` error. T7 #1148 adds the features
   block.
+- **Signal 5** — `POST /api/v1/targets` accepts any `product`
+  string but the resolver matches on exact connector-class tokens,
+  so a single typo (`'kubernetes'` instead of `'k8s'`) silently
+  creates a permanent broken row. T3 #1144 ships boot-time enum
+  generation (Option A: JSON Schema enum on `TargetCreate.product`
+  populated from the live registry, surfaces in Swagger /
+  OpenAPI-driven tooling) plus a structured 422 with
+  `valid_products: [...]` on miss (Option C: recovery-time net).
+  Both layers share `registered_product_tokens()` as the
+  source-of-truth so they cannot disagree.
 
 ## References
 

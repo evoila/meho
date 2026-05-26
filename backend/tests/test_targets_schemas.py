@@ -258,7 +258,76 @@ def test_target_update_rejects_port_out_of_range() -> None:
         TargetUpdate(port=0)
 
 
-def test_target_update_name_and_product_absent() -> None:
-    """name and product are not patchable — absent from TargetUpdate."""
+def test_target_update_name_absent() -> None:
+    """``name`` is not patchable — rename = delete + re-create."""
     assert "name" not in TargetUpdate.model_fields
-    assert "product" not in TargetUpdate.model_fields
+
+
+def test_target_update_product_is_patchable() -> None:
+    """``product`` is patchable as of G0.14-T4 #1145.
+
+    The original G0.3 contract treated ``product`` as immutable; the
+    v0.6.0 dogfood (signal 6) showed the combination of "no DELETE"
+    + "no PATCH on product" left a misregistered target permanently
+    broken. T4 #1145 adds ``product`` to ``TargetUpdate`` with route-
+    handler validation against the registered connectors.
+    """
+    assert "product" in TargetUpdate.model_fields
+    # Accepts a non-empty string.
+    u = TargetUpdate(product="k8s")
+    assert u.product == "k8s"
+
+
+def test_target_update_rejects_empty_product() -> None:
+    """``product`` must be at least one character (min_length=1)."""
+    with pytest.raises(ValidationError):
+        TargetUpdate(product="")
+
+
+def test_target_full_schema_includes_deleted_at() -> None:
+    """``Target.deleted_at`` is part of the read shape (G0.14-T4 #1145)."""
+    assert "deleted_at" in Target.model_fields
+    # Live targets have ``None``.
+    now = datetime.now(UTC)
+    t = Target(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        name="live",
+        aliases=(),
+        product="ssh",
+        host="h",
+        port=None,
+        fqdn=None,
+        secret_ref=None,
+        auth_model=AuthModel.SHARED_SERVICE_ACCOUNT,
+        vpn_required=False,
+        extras={},
+        notes=None,
+        fingerprint=None,
+        preferred_impl_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    assert t.deleted_at is None
+    # The field round-trips with a real timestamp.
+    deleted = Target(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        name="retired",
+        aliases=(),
+        product="ssh",
+        host="h",
+        port=None,
+        fqdn=None,
+        secret_ref=None,
+        auth_model=AuthModel.SHARED_SERVICE_ACCOUNT,
+        vpn_required=False,
+        extras={},
+        notes=None,
+        fingerprint=None,
+        preferred_impl_id=None,
+        created_at=now,
+        updated_at=now,
+        deleted_at=now,
+    )
+    assert deleted.deleted_at == now

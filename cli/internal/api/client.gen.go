@@ -875,6 +875,22 @@ type BaselineMetricsOverride struct {
 	PrecisionAt5 float32 `json:"precision_at_5"`
 }
 
+// BodyUiMemoryPatchUiMemoryScopeSlugPatch defines model for Body_ui_memory_patch_ui_memory__scope___slug__patch.
+type BodyUiMemoryPatchUiMemoryScopeSlugPatch struct {
+	Body string `json:"body"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+}
+
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.
 //
 // “extra="forbid"“ rejects unknown fields with 422 -- catches a
@@ -3051,6 +3067,21 @@ type TopologyTimelineResult struct {
 	Rows       []TopologyTimelineEntry `json:"rows"`
 }
 
+// UISessionContext Per-request session identity exposed on “request.state“.
+//
+// Frozen so a route handler that stashes the context on a logger
+// or forwards it to a service layer cannot accidentally mutate
+// fields downstream. The shape mirrors :class:`Operator` for the
+// fields T5 (#866) needs to render an authenticated page header;
+// “raw_jwt“ / “tenant_role“ are intentionally absent because
+// the session-cookie path does not load them today (the encrypted
+// row carries only the access token, not the decoded claims).
+type UISessionContext struct {
+	OperatorSub string             `json:"operator_sub"`
+	SessionId   openapi_types.UUID `json:"session_id"`
+	TenantId    openapi_types.UUID `json:"tenant_id"`
+}
+
 // UsageReport Top-level shape returned by :func:`compute_usage` + the API route.
 //
 // “buckets“ is sorted by “(date, surface)“ ascending — the text
@@ -3946,6 +3977,12 @@ type UiBroadcastStreamUiBroadcastStreamGetParams struct {
 	Since *string `form:"since,omitempty" json:"since,omitempty"`
 }
 
+// UiMemoryListUiMemoryGetParams defines parameters for UiMemoryListUiMemoryGet.
+type UiMemoryListUiMemoryGetParams struct {
+	Scope *string `form:"scope,omitempty" json:"scope,omitempty"`
+	Tag   *string `form:"tag,omitempty" json:"tag,omitempty"`
+}
+
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
 	Sort *UnderscoreSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
@@ -4054,6 +4091,15 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotate
 
 // BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody defines body for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost for application/json ContentType.
 type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody = UnderscoreBulkImportRequest
+
+// UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody defines body for UiMemoryDeleteUiMemoryScopeSlugDelete for application/json ContentType.
+type UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody = UISessionContext
+
+// UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody defines body for UiMemoryPatchUiMemoryScopeSlugPatch for application/x-www-form-urlencoded ContentType.
+type UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody = BodyUiMemoryPatchUiMemoryScopeSlugPatch
+
+// UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody defines body for UiMemoryEditFormUiMemoryScopeSlugEditGet for application/json ContentType.
+type UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody = UISessionContext
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
 func (t ApproveResponseBody_DispatchResult) AsApproveResponseBodyDispatchResult0() (ApproveResponseBodyDispatchResult0, error) {
@@ -4618,8 +4664,29 @@ type ClientInterface interface {
 	// UiStubKnowledgeUiKnowledgeGet request
 	UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiStubMemoryUiMemoryGet request
-	UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiMemoryListUiMemoryGet request
+	UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryTagsUiMemoryTagsGet request
+	UiMemoryTagsUiMemoryTagsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody request with any body
+	UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryDeleteUiMemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryDetailUiMemoryScopeSlugGet request
+	UiMemoryDetailUiMemoryScopeSlugGet(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryPatchUiMemoryScopeSlugPatchWithBody request with any body
+	UiMemoryPatchUiMemoryScopeSlugPatchWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody request with any body
+	UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryEditFormUiMemoryScopeSlugEditGet(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -6215,8 +6282,104 @@ func (c *Client) UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors .
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiStubMemoryUiMemoryGetRequest(c.Server)
+func (c *Client) UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryListUiMemoryGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryTagsUiMemoryTagsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryTagsUiMemoryTagsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryDeleteUiMemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequest(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryDetailUiMemoryScopeSlugGet(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryDetailUiMemoryScopeSlugGetRequest(c.Server, scope, slug)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPatchUiMemoryScopeSlugPatchWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithFormdataBody(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryEditFormUiMemoryScopeSlugEditGet(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequest(c.Server, scope, slug, body)
 	if err != nil {
 		return nil, err
 	}
@@ -12828,8 +12991,8 @@ func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, erro
 	return req, nil
 }
 
-// NewUiStubMemoryUiMemoryGetRequest generates requests for UiStubMemoryUiMemoryGet
-func NewUiStubMemoryUiMemoryGetRequest(server string) (*http.Request, error) {
+// NewUiMemoryListUiMemoryGetRequest generates requests for UiMemoryListUiMemoryGet
+func NewUiMemoryListUiMemoryGetRequest(server string, params *UiMemoryListUiMemoryGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -12847,10 +13010,278 @@ func NewUiStubMemoryUiMemoryGetRequest(server string) (*http.Request, error) {
 		return nil, err
 	}
 
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Tag != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tag", runtime.ParamLocationQuery, *params.Tag); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewUiMemoryTagsUiMemoryTagsGetRequest generates requests for UiMemoryTagsUiMemoryTagsGet
+func NewUiMemoryTagsUiMemoryTagsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/tags")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequest calls the generic UiMemoryDeleteUiMemoryScopeSlugDelete builder with application/json body
+func NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequest(server string, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody(server, scope, slug, "application/json", bodyReader)
+}
+
+// NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody generates requests for UiMemoryDeleteUiMemoryScopeSlugDelete with any type of body
+func NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryDetailUiMemoryScopeSlugGetRequest generates requests for UiMemoryDetailUiMemoryScopeSlugGet
+func NewUiMemoryDetailUiMemoryScopeSlugGetRequest(server string, scope MemoryScope, slug string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithFormdataBody calls the generic UiMemoryPatchUiMemoryScopeSlugPatch builder with application/x-www-form-urlencoded body
+func NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithFormdataBody(server string, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody(server, scope, slug, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody generates requests for UiMemoryPatchUiMemoryScopeSlugPatch with any type of body
+func NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequest calls the generic UiMemoryEditFormUiMemoryScopeSlugEditGet builder with application/json body
+func NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequest(server string, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody(server, scope, slug, "application/json", bodyReader)
+}
+
+// NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody generates requests for UiMemoryEditFormUiMemoryScopeSlugEditGet with any type of body
+func NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s/edit", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -13566,8 +13997,29 @@ type ClientWithResponsesInterface interface {
 	// UiStubKnowledgeUiKnowledgeGetWithResponse request
 	UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error)
 
-	// UiStubMemoryUiMemoryGetWithResponse request
-	UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error)
+	// UiMemoryListUiMemoryGetWithResponse request
+	UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error)
+
+	// UiMemoryTagsUiMemoryTagsGetWithResponse request
+	UiMemoryTagsUiMemoryTagsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiMemoryTagsUiMemoryTagsGetResponse, error)
+
+	// UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse request with any body
+	UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error)
+
+	UiMemoryDeleteUiMemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error)
+
+	// UiMemoryDetailUiMemoryScopeSlugGetWithResponse request
+	UiMemoryDetailUiMemoryScopeSlugGetWithResponse(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*UiMemoryDetailUiMemoryScopeSlugGetResponse, error)
+
+	// UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse request with any body
+	UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error)
+
+	UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error)
+
+	// UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse request with any body
+	UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error)
+
+	UiMemoryEditFormUiMemoryScopeSlugEditGetWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error)
 
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
@@ -15914,13 +16366,14 @@ func (r UiStubKnowledgeUiKnowledgeGetResponse) StatusCode() int {
 	return 0
 }
 
-type UiStubMemoryUiMemoryGetResponse struct {
+type UiMemoryListUiMemoryGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
-func (r UiStubMemoryUiMemoryGetResponse) Status() string {
+func (r UiMemoryListUiMemoryGetResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -15928,7 +16381,116 @@ func (r UiStubMemoryUiMemoryGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r UiStubMemoryUiMemoryGetResponse) StatusCode() int {
+func (r UiMemoryListUiMemoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryTagsUiMemoryTagsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryTagsUiMemoryTagsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryTagsUiMemoryTagsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryDeleteUiMemoryScopeSlugDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryDeleteUiMemoryScopeSlugDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryDeleteUiMemoryScopeSlugDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryDetailUiMemoryScopeSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryDetailUiMemoryScopeSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryDetailUiMemoryScopeSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryPatchUiMemoryScopeSlugPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryPatchUiMemoryScopeSlugPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryPatchUiMemoryScopeSlugPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryEditFormUiMemoryScopeSlugEditGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryEditFormUiMemoryScopeSlugEditGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryEditFormUiMemoryScopeSlugEditGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -17159,13 +17721,82 @@ func (c *ClientWithResponses) UiStubKnowledgeUiKnowledgeGetWithResponse(ctx cont
 	return ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp)
 }
 
-// UiStubMemoryUiMemoryGetWithResponse request returning *UiStubMemoryUiMemoryGetResponse
-func (c *ClientWithResponses) UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error) {
-	rsp, err := c.UiStubMemoryUiMemoryGet(ctx, reqEditors...)
+// UiMemoryListUiMemoryGetWithResponse request returning *UiMemoryListUiMemoryGetResponse
+func (c *ClientWithResponses) UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error) {
+	rsp, err := c.UiMemoryListUiMemoryGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUiStubMemoryUiMemoryGetResponse(rsp)
+	return ParseUiMemoryListUiMemoryGetResponse(rsp)
+}
+
+// UiMemoryTagsUiMemoryTagsGetWithResponse request returning *UiMemoryTagsUiMemoryTagsGetResponse
+func (c *ClientWithResponses) UiMemoryTagsUiMemoryTagsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiMemoryTagsUiMemoryTagsGetResponse, error) {
+	rsp, err := c.UiMemoryTagsUiMemoryTagsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryTagsUiMemoryTagsGetResponse(rsp)
+}
+
+// UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse request with arbitrary body returning *UiMemoryDeleteUiMemoryScopeSlugDeleteResponse
+func (c *ClientWithResponses) UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error) {
+	rsp, err := c.UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryDeleteUiMemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error) {
+	rsp, err := c.UiMemoryDeleteUiMemoryScopeSlugDelete(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse(rsp)
+}
+
+// UiMemoryDetailUiMemoryScopeSlugGetWithResponse request returning *UiMemoryDetailUiMemoryScopeSlugGetResponse
+func (c *ClientWithResponses) UiMemoryDetailUiMemoryScopeSlugGetWithResponse(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*UiMemoryDetailUiMemoryScopeSlugGetResponse, error) {
+	rsp, err := c.UiMemoryDetailUiMemoryScopeSlugGet(ctx, scope, slug, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryDetailUiMemoryScopeSlugGetResponse(rsp)
+}
+
+// UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse request with arbitrary body returning *UiMemoryPatchUiMemoryScopeSlugPatchResponse
+func (c *ClientWithResponses) UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error) {
+	rsp, err := c.UiMemoryPatchUiMemoryScopeSlugPatchWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error) {
+	rsp, err := c.UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBody(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse(rsp)
+}
+
+// UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse request with arbitrary body returning *UiMemoryEditFormUiMemoryScopeSlugEditGetResponse
+func (c *ClientWithResponses) UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error) {
+	rsp, err := c.UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryEditFormUiMemoryScopeSlugEditGetWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error) {
+	rsp, err := c.UiMemoryEditFormUiMemoryScopeSlugEditGet(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse(rsp)
 }
 
 // UiTopologyTableUiTopologyGetWithResponse request returning *UiTopologyTableUiTopologyGetResponse
@@ -20346,17 +20977,147 @@ func ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp *http.Response) (*UiStubKnow
 	return response, nil
 }
 
-// ParseUiStubMemoryUiMemoryGetResponse parses an HTTP response from a UiStubMemoryUiMemoryGetWithResponse call
-func ParseUiStubMemoryUiMemoryGetResponse(rsp *http.Response) (*UiStubMemoryUiMemoryGetResponse, error) {
+// ParseUiMemoryListUiMemoryGetResponse parses an HTTP response from a UiMemoryListUiMemoryGetWithResponse call
+func ParseUiMemoryListUiMemoryGetResponse(rsp *http.Response) (*UiMemoryListUiMemoryGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiStubMemoryUiMemoryGetResponse{
+	response := &UiMemoryListUiMemoryGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryTagsUiMemoryTagsGetResponse parses an HTTP response from a UiMemoryTagsUiMemoryTagsGetWithResponse call
+func ParseUiMemoryTagsUiMemoryTagsGetResponse(rsp *http.Response) (*UiMemoryTagsUiMemoryTagsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryTagsUiMemoryTagsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse parses an HTTP response from a UiMemoryDeleteUiMemoryScopeSlugDeleteWithResponse call
+func ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse(rsp *http.Response) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryDeleteUiMemoryScopeSlugDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryDetailUiMemoryScopeSlugGetResponse parses an HTTP response from a UiMemoryDetailUiMemoryScopeSlugGetWithResponse call
+func ParseUiMemoryDetailUiMemoryScopeSlugGetResponse(rsp *http.Response) (*UiMemoryDetailUiMemoryScopeSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryDetailUiMemoryScopeSlugGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse parses an HTTP response from a UiMemoryPatchUiMemoryScopeSlugPatchWithResponse call
+func ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse(rsp *http.Response) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryPatchUiMemoryScopeSlugPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse parses an HTTP response from a UiMemoryEditFormUiMemoryScopeSlugEditGetWithResponse call
+func ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse(rsp *http.Response) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryEditFormUiMemoryScopeSlugEditGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

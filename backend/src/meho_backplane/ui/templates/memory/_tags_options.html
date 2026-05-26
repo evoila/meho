@@ -1,0 +1,13 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Datalist <option> partial for the tag autocomplete (Initiative #341
+  Task #877). Loaded via HTMX on the index page's ``<datalist>``
+  ``hx-trigger="load"``; the datalist renders type-ahead suggestions
+  for the tag-filter <input>.
+
+  Browsers wire ``<datalist>``-bound ``<input list>`` autocomplete
+  natively, so no JS is required -- HTMX just injects the option list.
+-#}
+{% for tag in tags %}<option value="{{ tag }}"></option>{% endfor %}

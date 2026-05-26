@@ -554,6 +554,39 @@ def test_detail_full_page_renders_markdown_body() -> None:
     assert "<code>code</code>" in text
 
 
+def test_detail_strips_attribute_injection_from_fenced_code_lang() -> None:
+    """A crafted fenced-code lang token cannot escape the ``class="..."`` attribute.
+
+    Before the allowlist landed, the fenced-code info string was
+    interpolated verbatim into ``<code class="language-{lang}">``: a
+    body of ```` ```a"onmouseover="alert(1)"x ```` rendered as an HTML
+    fragment carrying a live ``onmouseover`` handler. The fix
+    restricts the rendered ``lang`` to ``[A-Za-z0-9_+-.]+`` and falls
+    back to ``text`` otherwise.
+    """
+    from meho_backplane.ui.routes.memory.render import render_markdown
+
+    payload = '```a"onmouseover="alert(1)"x\nfoo\n```'
+    out = str(render_markdown(payload))
+    assert "onmouseover" not in out
+    assert 'class="language-text"' in out
+
+
+def test_render_markdown_linkifies_bare_urls() -> None:
+    """``render_markdown`` converts a bare HTTPS URL into an ``<a>`` tag.
+
+    ``linkify=True`` on the ``markdown-it-py`` constructor silently
+    no-ops when ``linkify-it-py`` isn't installed. Pinning the test
+    here makes the dependency contract failable: a future
+    ``pyproject.toml`` edit that drops the ``[linkify]`` extra fails
+    this assertion before CI gets to the integration smoke.
+    """
+    from meho_backplane.ui.routes.memory.render import render_markdown
+
+    out = str(render_markdown("Visit https://example.com"))
+    assert '<a href="https://example.com"' in out
+
+
 def test_detail_strips_inline_html_from_body() -> None:
     """Raw ``<script>`` in a memory body renders as escaped text, not script."""
     _seed_tenant(_TENANT_A, "tenant-a")

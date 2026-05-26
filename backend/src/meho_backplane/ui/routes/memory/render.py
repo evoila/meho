@@ -74,6 +74,7 @@ References
 
 from __future__ import annotations
 
+import re
 import threading
 
 from markdown_it import MarkdownIt
@@ -86,6 +87,18 @@ from pygments.util import ClassNotFound
 __all__ = ["pygments_css", "render_markdown"]
 
 _lock = threading.Lock()
+
+#: Conservative allowlist for the fenced-code ``language-{lang}`` class
+#: attribute. Pygments lexer aliases use this character set
+#: (``python``, ``c++``, ``objective-c``, ``shell-session``), so the
+#: filter passes every well-formed lang token through while dropping
+#: anything that could break out of the ``class="..."`` attribute. A
+#: ``lang`` string that doesn't fullmatch falls back to ``text``.
+#: Defence against attribute-injection XSS:
+#:   ```a"onmouseover="alert(1)"x
+#: would otherwise interpolate verbatim into ``class="language-..."``
+#: and ship a working JS handler to the browser.
+_LANG_PATTERN_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_+\-.]+$")
 
 #: Shared :class:`HtmlFormatter` instance. ``nowrap=True`` emits bare
 #: ``<span>`` tokens so the wrapping ``<pre><code>`` block is
@@ -119,8 +132,13 @@ def _highlight_code(code: str, lang: str, attrs: str) -> str:
         lexer = TextLexer()
     highlighted = highlight(code, lexer, _FORMATTER)
     # Match the wrapping shape the KB renderer uses so a future
-    # consolidation can collapse the two modules into one.
-    lang_class = lang or "text"
+    # consolidation can collapse the two modules into one. The lang
+    # token is dropped to ``text`` unless it fullmatches the
+    # conservative allowlist -- markdown-it-py hands the fenced-code
+    # info string through verbatim, so a body like
+    # ```a"onmouseover="alert(1)"x  would otherwise inject a JS event
+    # handler into the rendered ``class="language-..."`` attribute.
+    lang_class = lang if lang and _LANG_PATTERN_RE.fullmatch(lang) else "text"
     return (
         f'<pre class="memory-code"><code class="language-{lang_class}">{highlighted}</code></pre>'
     )
@@ -136,7 +154,7 @@ def _highlight_code(code: str, lang: str, attrs: str) -> str:
 _MD = MarkdownIt(
     "commonmark",
     {"html": False, "linkify": True, "highlight": _highlight_code},
-).enable(["table", "strikethrough"])
+).enable(["table", "strikethrough", "linkify"])
 
 
 def render_markdown(body: str) -> Markup:

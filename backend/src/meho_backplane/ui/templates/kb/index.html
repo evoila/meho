@@ -187,12 +187,10 @@
     }
   }
 
-  // Wait until the DOM is ready, then observe the modal's ``open`` attribute.
-  document.addEventListener("DOMContentLoaded", function () {
-    var modal = document.getElementById("kb-editor-modal");
-    if (!modal) {
-      return;
-    }
+  // Attach a MutationObserver to *modal* that calls _onModalOpen() when
+  // the dialog's ``open`` attribute is set.  Extracted so it can be
+  // re-bound after HTMX replaces the <dialog> element via outerHTML swap.
+  function _bindModalObserver(modal) {
     var observer = new MutationObserver(function (mutations) {
       mutations.forEach(function (mutation) {
         if (
@@ -205,6 +203,37 @@
       });
     });
     observer.observe(modal, { attributes: true, attributeFilter: ["open"] });
+  }
+
+  // Initial bind on first page load.
+  document.addEventListener("DOMContentLoaded", function () {
+    var modal = document.getElementById("kb-editor-modal");
+    if (!modal) {
+      return;
+    }
+    _bindModalObserver(modal);
+  });
+
+  // After a 422 re-render HTMX swaps the entire <dialog> via outerHTML.
+  // The old MutationObserver watches the now-detached node, and _editorView
+  // points to a CodeMirror view mounted inside that detached tree.
+  // Re-bind to the freshly inserted <dialog> and reset the editor so
+  // _mountEditor() starts clean on the next open.
+  document.body.addEventListener("htmx:afterSwap", function (evt) {
+    var target = evt.detail && evt.detail.target;
+    if (!target || target.id !== "kb-editor-modal") {
+      return;
+    }
+    // Destroy the stale CodeMirror view (it is attached to a detached node).
+    if (_editorView) {
+      _editorView.destroy();
+      _editorView = null;
+    }
+    // Find the fresh <dialog> that HTMX inserted and bind a new observer.
+    var freshModal = document.getElementById("kb-editor-modal");
+    if (freshModal) {
+      _bindModalObserver(freshModal);
+    }
   });
 }());
 </script>

@@ -1749,6 +1749,26 @@ type HTTPValidationError struct {
 }
 
 // HealthResponse “GET /api/v1/health“ response body.
+//
+// “mcp_session_id_capture“ (G0.14-T6 #1147) reports the deploy's
+// audit-replay capture mode in a single field:
+//
+//   - “"always"“ — any “Mcp-Session-Id“ header the client sends is
+//     captured into “audit_log.agent_session_id“; a missing header is
+//     accepted (the row's session id lands as NULL). This is the
+//     default and what G8.2 audit-replay needs to light up on a stock
+//     deploy.
+//   - “"enforced"“ — capture works the same way **plus** a missing
+//     header is a JSON-RPC “-32600“ reject before any audit row is
+//     written. Flipped on by “MCP_REQUIRE_SESSION_ID=true“ in
+//     compliance deploys that forbid header-less calls.
+//
+// The field is the canonical operator-facing surface for the
+// capture state until T7 #1148's “/ready“ features block ships
+// the richer enumeration (T7's “audit_replay“ block pulls from
+// the same
+// :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
+// helper so both surfaces stay consistent).
 type HealthResponse struct {
 	// Db Database migration status.
 	//
@@ -1762,7 +1782,8 @@ type HealthResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
-	Db DbStatus `json:"db"`
+	Db                  DbStatus `json:"db"`
+	McpSessionIdCapture string   `json:"mcp_session_id_capture"`
 
 	// Operator Operator identity surface exposed to the CLI.
 	//

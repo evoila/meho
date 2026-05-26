@@ -9282,6 +9282,10 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "preamble_status": {
+            "$ref": "#/components/schemas/PreambleInclusion",
+            "nullable": true
           }
         },
         "type": "object",
@@ -9298,7 +9302,7 @@
           "updated_at"
         ],
         "title": "Convention",
-        "description": "Full-row representation returned by GET-single / POST / PATCH.\n\nCarries the entire ``body`` text -- the natural shape for\n``GET /{slug}`` and the return value of POST/PATCH where the\ncaller wants to confirm what they wrote landed verbatim.\n``kind`` is exposed as the raw string from the DB rather than\nas :class:`ConventionKind`; the API layer's pydantic models\nbound writes to the enum but read paths surface whatever the\nDB stored (a future ``kind`` value introduced by a migration\nwould otherwise blow up the JSON encoder on every read)."
+        "description": "Full-row representation returned by GET-single / POST / PATCH.\n\nCarries the entire ``body`` text -- the natural shape for\n``GET /{slug}`` and the return value of POST/PATCH where the\ncaller wants to confirm what they wrote landed verbatim.\n``kind`` is exposed as the raw string from the DB rather than\nas :class:`ConventionKind`; the API layer's pydantic models\nbound writes to the enum but read paths surface whatever the\nDB stored (a future ``kind`` value introduced by a migration\nwould otherwise blow up the JSON encoder on every read).\n\n``preamble_status`` (G0.14-T8 #1149) is the post-write inclusion\nsignal POST/PATCH attach: ``None`` on ``GET /{slug}`` (the\naggregate budget signal lives on the list response's\n``budget_status``) and on writes against ``workflow`` /\n``reference`` kinds (those are not preamble-bound). Populated\nonly when the write touched an ``operational`` row."
       },
       "ConventionCreate": {
         "properties": {
@@ -10515,6 +10519,40 @@
         ],
         "title": "PermissionVerdict",
         "description": "Three-state verdict returned by the permission resolver.\n\n:attr:`AUTO_EXECUTE` \u2014 the op proceeds without human review.\n:attr:`NEEDS_APPROVAL` \u2014 the op is parked pending an operator\ndecision; the approval queue (G11.2-T4) handles the resume path.\n:attr:`DENY` \u2014 the op is refused immediately with a structured,\nagent-reasonable error.\n\nThe vocabulary is intentionally closed: a fourth verdict would\nrequire a code + migration change, which is the cheapest way to\nprevent drift between the DB layer and the policy engine."
+      },
+      "PreambleInclusion": {
+        "properties": {
+          "included": {
+            "type": "boolean",
+            "title": "Included"
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 1.0,
+            "nullable": true,
+            "title": "Position"
+          },
+          "token_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Token Count"
+          },
+          "would_drop_slugs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Would Drop Slugs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "included",
+          "token_count",
+          "would_drop_slugs"
+        ],
+        "title": "PreambleInclusion",
+        "description": "Whether a just-written convention reaches the session preamble.\n\nG0.14-T8 (#1149, signal 18) -- the post-write feedback shape\n``POST /api/v1/conventions`` and ``PATCH /api/v1/conventions/{slug}``\nattach to the response when the convention is ``kind='operational'``.\nWithout it, the operator gets a ``201`` (or ``200`` on PATCH), assumes\nthe rule is in effect, and the agent silently never sees it because\nthe preamble packer dropped it on budget overflow.\n\nFields:\n\n* ``included`` -- ``True`` when the slug landed in the assembled\n  preamble (after the priority-ranked pack against\n  :data:`DEFAULT_MAX_PREAMBLE_TOKENS`). ``False`` when the packer\n  dropped it whole on overflow.\n* ``position`` -- 1-based index of the convention in the assembled\n  preamble's packed order (the packer iterates ``priority DESC,\n  created_at ASC``; ``position=1`` means highest-priority slot in\n  the operator's tenant). ``None`` when ``included=False``.\n* ``token_count`` -- the convention body's own estimated token\n  cost via :func:`estimate_tokens`. Useful for the operator to\n  see why a near-budget body got dropped (it weighed more than\n  the remaining headroom).\n* ``would_drop_slugs`` -- the full ``dropped_slugs`` list the\n  packer produced on this assembly. When ``included=True`` this\n  names *other* slugs that fell out of the preamble (the just-\n  written convention may have pushed a lower-priority neighbour\n  out); when ``included=False`` the list contains *this* slug\n  plus any others dropped under the same pack. The shape lets\n  a single ``meho conventions create ...`` round-trip surface\n  both the personal outcome (did mine land?) and the collateral\n  damage (did mine push someone else out?).\n\nWhy a separate model instead of inlining fields on\n:class:`Convention`: the response shape ``Convention`` is used\nby ``GET /{slug}`` too, where ``preamble_status`` would be\nredundant (operators inspecting a row already have the\n``GET /api/v1/conventions``'s ``budget_status`` envelope for\naggregate budget signal). Keeping the inclusion shape on a\nsub-model means GET-single can drop the field cleanly while\nPOST/PATCH attach it."
       },
       "PromoteBody": {
         "properties": {

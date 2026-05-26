@@ -78,6 +78,7 @@ from typing import Final, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
@@ -91,8 +92,10 @@ __all__ = [
     "BLOCK_END",
     "BLOCK_START",
     "GUARD_PREFIX",
+    "PreambleAssembly",
     "PreambleResult",
     "assemble_preamble",
+    "assemble_preamble_detailed",
 ]
 
 
@@ -150,6 +153,76 @@ class PreambleResult(NamedTuple):
     dropped_slugs: list[str]
 
 
+class PreambleAssembly(NamedTuple):
+    """Verbose assembly return shape -- :class:`PreambleResult` plus the kept ordering.
+
+    G0.14-T8 (#1149, signal 18) added the
+    :func:`assemble_preamble_detailed` variant so the
+    ``POST/PATCH /api/v1/conventions`` handlers can resolve a
+    just-written slug's preamble position from the same pack the MCP
+    ``initialize`` consumer sees. Fields:
+
+    * ``text`` / ``dropped_slugs`` -- identical to
+      :class:`PreambleResult` so callers needing the wire-format
+      preamble can keep using the same access pattern.
+    * ``kept_slugs`` -- slugs that landed in the preamble, in pack
+      order (``priority DESC, created_at ASC`` then greedy add to
+      budget). ``len(kept_slugs)`` equals the number of operational
+      blocks the agent session receives; ``kept_slugs.index(slug) + 1``
+      is the 1-based preamble position for a slug the operator just
+      wrote.
+    * ``token_counts`` -- ``{slug: estimate_tokens(block)}`` for every
+      operational row considered (kept and dropped). Caller uses it
+      to surface the just-written slug's own budget weight on
+      ``preamble_status.token_count`` without re-running
+      :func:`~meho_backplane.conventions.schemas.estimate_tokens`.
+
+    The MCP read path stays on :func:`assemble_preamble` (returns a
+    :class:`PreambleResult`); the inclusion-feedback write path uses
+    :func:`assemble_preamble_detailed` so the post-write resolution
+    sees the same pack the read path produces. A divergence between
+    "the preamble I told the operator they were in" and "the
+    preamble the agent session actually received" is the failure
+    mode signal 18 names; using one packer for both reads eliminates
+    it by construction.
+    """
+
+    text: str
+    dropped_slugs: list[str]
+    kept_slugs: list[str]
+    token_counts: dict[str, int]
+
+
+async def _fetch_operational_conventions(
+    session: AsyncSession,
+    tenant_id: UUID,
+) -> list[TenantConvention]:
+    """Read all ``kind='operational'`` rows for *tenant_id* in pack order.
+
+    Extracted helper shared by :func:`assemble_preamble_detailed`'s
+    two code paths -- when it owns a session vs. when the caller
+    passes one in. Centralises the ORDER BY contract (``priority
+    DESC, created_at ASC``) so the two paths cannot drift.
+    """
+    result = await session.execute(
+        select(TenantConvention)
+        .where(
+            TenantConvention.tenant_id == tenant_id,
+            # ``kind`` is stored as free-form text per T1's
+            # schema-deferred decision; the API layer (T2) binds
+            # writes to :class:`ConventionKind`. Reading the enum's
+            # ``.value`` here keeps the comparison exact-match
+            # against the same string T2 wrote.
+            TenantConvention.kind == ConventionKind.OPERATIONAL.value,
+        )
+        .order_by(
+            TenantConvention.priority.desc(),
+            TenantConvention.created_at.asc(),
+        ),
+    )
+    return list(result.scalars().all())
+
+
 async def assemble_preamble(
     tenant_id: UUID,
     max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
@@ -167,71 +240,55 @@ async def assemble_preamble(
     how to surface "no preamble" (the MCP ``_initialize`` wrapper
     maps it to ``instructions: None`` on the wire).
 
-    Token-budget math
-    -----------------
-
-    Each entry's cost is computed via
-    :func:`~meho_backplane.conventions.schemas.estimate_tokens`
-    (chars-per-token heuristic; 3.3 chars/token, conservative
-    direction for ASCII English -- see the schemas docstring for
-    the full rationale). The header + delimiter + guard cost is
-    computed through the same helper so the budget contract stays
-    end-to-end aligned with T2's write-time 422 check; a body the
-    write gate admits always fits this packer's budget under the
-    same arithmetic.
-
-    The function opens its own DB session via
-    :func:`~meho_backplane.db.engine.get_sessionmaker` rather than
-    accepting one from the caller -- the MCP ``initialize`` handler
-    is not a FastAPI request handler and has no
-    :func:`~meho_backplane.db.engine.get_session` dependency-injected
-    session; the assembler is the natural owner of the read
-    transaction. Same shape :mod:`~meho_backplane.mcp.resources.tenant_info`
-    uses for its DB probe.
+    Delegates to :func:`assemble_preamble_detailed` and discards the
+    verbose fields -- the MCP read path only needs ``text`` and
+    ``dropped_slugs``. The G0.14-T8 (#1149) post-write inclusion
+    feedback uses the verbose form so a single pack drives both
+    consumers (no risk of "the position I told the operator" drifting
+    from "the preamble the agent session received").
     """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        result = await session.execute(
-            select(TenantConvention)
-            .where(
-                TenantConvention.tenant_id == tenant_id,
-                # ``kind`` is stored as free-form text per T1's
-                # schema-deferred decision; the API layer (T2)
-                # binds writes to :class:`ConventionKind`. Reading
-                # the enum's ``.value`` here keeps the comparison
-                # exact-match against the same string T2 wrote.
-                TenantConvention.kind == ConventionKind.OPERATIONAL.value,
-            )
-            .order_by(
-                TenantConvention.priority.desc(),
-                TenantConvention.created_at.asc(),
-            ),
-        )
-        conventions = result.scalars().all()
+    detailed = await assemble_preamble_detailed(tenant_id, max_tokens=max_tokens)
+    return PreambleResult(detailed.text, detailed.dropped_slugs)
 
-    if not conventions:
-        return PreambleResult("", [])
 
-    # Header is fixed-overhead per the issue body's example: a section
-    # heading + the guard prefix + a blank-line separator. The header
-    # cost is counted against the budget so a tenant with one
-    # over-budget convention can't trick the packer into letting it
-    # through (the header has to fit too).
-    header_lines: list[str] = [
+#: Fixed-overhead header that precedes the packed blocks in the
+#: assembled preamble. A section heading + the guard prefix + a
+#: blank-line separator. The header cost is counted against the
+#: budget so a tenant with one over-budget convention can't trick
+#: the packer into letting it through (the header has to fit too).
+_HEADER_TEXT: Final[str] = "\n".join(
+    [
         "## Operational conventions for this tenant",
         "",
         GUARD_PREFIX,
         "",
-    ]
-    header_text = "\n".join(header_lines)
+    ],
+)
 
+
+def _pack_conventions(
+    conventions: list[TenantConvention],
+    max_tokens: int,
+) -> tuple[list[str], list[str], list[str], dict[str, int]]:
+    """Greedy-pack ordered ``conventions`` against the ``max_tokens`` budget.
+
+    Returns ``(kept_blocks, kept_slugs, dropped_slugs, token_counts)``.
+    The first entry that would push the cumulative token count past
+    *max_tokens* (and every entry after it) is dropped whole and
+    recorded in ``dropped_slugs``. The issue body is explicit:
+    "Silent truncation of an operational rule is a safety bug, not a
+    UX nit." Lowest-priority entries are the last considered (caller
+    sorts ``priority DESC, created_at ASC``), so they're naturally
+    the first dropped under the iteration order.
+    """
     # ``estimate_tokens`` is the same heuristic T2's POST/PATCH 422
     # gate uses, so the two sites cannot drift: a body that T2 admits
     # fits this packer's budget under the same arithmetic.
-    used_tokens = estimate_tokens(header_text)
-
+    used_tokens = estimate_tokens(_HEADER_TEXT)
     kept_blocks: list[str] = []
+    kept_slugs: list[str] = []
     dropped: list[str] = []
+    token_counts: dict[str, int] = {}
     for conv in conventions:
         # Block shape: a level-3 heading per convention so the
         # rendered Markdown is grep-friendly in the assembled
@@ -239,27 +296,92 @@ async def assemble_preamble(
         # as separate sections.
         block = f"### {conv.title}\n{conv.body.strip()}\n"
         block_tokens = estimate_tokens(block)
+        # Record every considered slug's cost -- G0.14-T8 callers
+        # need to surface the just-written slug's weight whether it
+        # landed in the preamble or got dropped.
+        token_counts[conv.slug] = block_tokens
         if used_tokens + block_tokens > max_tokens:
-            # Drop the whole entry rather than truncate -- the issue
-            # body is explicit: "Silent truncation of an operational
-            # rule is a safety bug, not a UX nit." Lowest-priority
-            # entries are the last considered, so they're naturally
-            # the first dropped under the iteration order; the test
-            # suite asserts this contract.
             dropped.append(conv.slug)
             continue
         kept_blocks.append(block)
+        kept_slugs.append(conv.slug)
         used_tokens += block_tokens
+    return kept_blocks, kept_slugs, dropped, token_counts
 
-    # Body assembly: header followed by blank-line-separated blocks.
-    # The blocks already carry their own trailing newline so a
-    # single "\n" separator between them produces one blank line
-    # (rendered as: block-content + "\n" + "\n" + next-block-content).
-    body_text = header_text + "\n".join(kept_blocks)
 
-    # Positional wrapper: the BLOCK_START / BLOCK_END strings are
-    # never derived from user content, so a body containing
-    # "END_TENANT_CONVENTIONS>>" cannot escape the block. The
-    # f-string interpolation is a one-shot, no recursive expansion.
-    text = f"{BLOCK_START}\n{body_text}\n{BLOCK_END}"
-    return PreambleResult(text, dropped)
+def _wrap_preamble(kept_blocks: list[str]) -> str:
+    """Render the packed blocks into the wire-format preamble string.
+
+    Body assembly: header followed by blank-line-separated blocks.
+    The blocks already carry their own trailing newline so a single
+    ``\\n`` separator between them produces one blank line (rendered
+    as: block-content + ``\\n`` + ``\\n`` + next-block-content).
+
+    Then the positional wrapper: the :data:`BLOCK_START` /
+    :data:`BLOCK_END` strings are never derived from user content,
+    so a body containing ``END_TENANT_CONVENTIONS>>`` cannot escape
+    the block. The f-string interpolation is a one-shot, no
+    recursive expansion.
+    """
+    body_text = _HEADER_TEXT + "\n".join(kept_blocks)
+    return f"{BLOCK_START}\n{body_text}\n{BLOCK_END}"
+
+
+async def assemble_preamble_detailed(
+    tenant_id: UUID,
+    max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
+    *,
+    session: AsyncSession | None = None,
+) -> PreambleAssembly:
+    """Assemble the preamble and return the verbose pack record.
+
+    G0.14-T8 (#1149, signal 18) addition. Same packer logic as
+    :func:`assemble_preamble` -- ``priority DESC, created_at ASC``,
+    greedy fill against the ``max_tokens`` budget, lowest-priority
+    overflow drops whole -- but the return shape also carries
+    ``kept_slugs`` (pack order of slugs that landed in the preamble)
+    and ``token_counts`` (the estimated token cost per row).
+
+    The two are what the POST/PATCH preamble-status feedback needs:
+
+    * ``kept_slugs`` lets the route handler resolve the just-written
+      slug's 1-based preamble position without re-running the pack
+      (``kept_slugs.index(slug) + 1``).
+    * ``token_counts`` lets the handler surface the just-written
+      slug's own token weight via ``preamble_status.token_count``
+      without a second :func:`~meho_backplane.conventions.schemas.estimate_tokens`
+      call on the body text.
+
+    When *session* is ``None`` the function opens its own DB session
+    via :func:`~meho_backplane.db.engine.get_sessionmaker` -- the
+    MCP ``initialize`` handler is not a FastAPI request handler and
+    has no :func:`~meho_backplane.db.engine.get_session`
+    dependency-injected session; the assembler is the natural owner
+    of the read transaction.
+
+    When *session* is supplied, the assembler reads through it
+    rather than opening its own. G0.14-T8's POST/PATCH preamble-
+    status feedback uses this so the pack reflects the in-progress
+    write (the convention's INSERT/UPDATE has flushed but not
+    committed; a separately-opened session would not see it).
+    SQLAlchemy 2.x reads within the same transaction see
+    flushed-but-not-committed rows, so the just-written convention
+    appears in the assembler's query as long as the caller has
+    flushed before calling.
+    """
+    if session is None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as owned_session:
+            conventions = await _fetch_operational_conventions(owned_session, tenant_id)
+    else:
+        conventions = await _fetch_operational_conventions(session, tenant_id)
+
+    if not conventions:
+        return PreambleAssembly("", [], [], {})
+
+    kept_blocks, kept_slugs, dropped, token_counts = _pack_conventions(
+        conventions,
+        max_tokens,
+    )
+    text = _wrap_preamble(kept_blocks)
+    return PreambleAssembly(text, dropped, kept_slugs, token_counts)

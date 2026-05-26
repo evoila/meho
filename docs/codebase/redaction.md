@@ -22,11 +22,17 @@ known to the engine, e.g. `bearer_token`, `kubeconfig`, `uuid`) to an
 The **engine** walks a nested dict / list / str payload, applies the
 rules in policy order, and returns:
 
-- `redacted` — the same payload shape with string leaves rewritten per
-  the matching rule's action.
+- `redacted` — same *nesting* as the input, but normalised to
+  JSON-shaped containers: `Mapping` subtypes (e.g. `OrderedDict`,
+  `defaultdict`) flatten to `dict` and `Sequence` subtypes (other
+  than `str` / `bytes` / `bytearray`) flatten to `list`. Only string
+  leaves change content; everything else is structure. The result is
+  always JSON-serialisable so the downstream JSONFlux reducer can
+  consume it without further shape-fixing.
 - `manifest` — a tuple of `RedactionManifestEntry` records, one per
-  rule firing per leaf, carrying `type`, `count`, `span`, `reason`,
-  and `path`. C1-b will persist this verbatim into the audit row.
+  rule firing per leaf, carrying `rule`, `pattern`, `action`,
+  `count`, `span`, `reason`, and `path`. C1-b will persist this
+  verbatim into the audit row.
 
 The engine is **pure and side-effect-free**: no I/O, no logging, no
 clocks. Identical inputs produce identical outputs (load-bearing for
@@ -142,6 +148,16 @@ No new runtime dependencies were added by Task #1070.
   manifest tracks `count` and the span of the *first* match; if an
   audit consumer needs per-match spans, that is a Tier-1 extension
   worth filing after C1-b lands and we see real consumption patterns.
+- **Manifest `span` is indexed against the per-rule input, not the
+  true original leaf.** When two rules fire on the same leaf in one
+  policy, the second rule sees the already-redacted output of the
+  first; the span it records is an offset into *that* rewritten
+  string, not the original. For a single-rule policy the span equals
+  the offset in the true original. Replay consumers that need to
+  reconstruct the substring `span` indexes into must re-apply earlier
+  rules in policy order first. The diagnostic value of `span` is
+  consequently bounded; `count`, `rule`, and `path` remain the
+  load-bearing manifest fields.
 - **No per-tenant policy resolution yet.** This task ships the schema
   and engine only. The middleware (#1071) is responsible for
   resolving "which policy applies to this call" from settings / DB;

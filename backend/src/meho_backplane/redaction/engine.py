@@ -34,9 +34,14 @@ JSONFlux boundary.
 * ``count`` -- number of matches in this leaf. Multiple matches in one
   leaf collapse into one manifest entry (count tracks them); the audit
   row stays compact even on a paste-heavy payload.
-* ``span`` -- ``(start, end)`` of the *first* match in the original
-  string, byte-indexed against the pre-redaction value. For
-  diagnostic display only; the count is the load-bearing quantity.
+* ``span`` -- ``(start, end)`` of the *first* match in the leaf as
+  the firing rule saw it (i.e. the input to *this* rule, after any
+  earlier rule already rewrote the leaf). For a single-rule policy
+  this equals the offset in the true original; for a multi-rule
+  policy where an earlier rule fired on the same leaf, replay
+  consumers must re-apply earlier rules first to reconstruct the
+  string ``span`` indexes against. For diagnostic display only; the
+  count is the load-bearing quantity.
 * ``reason`` -- the rule's ``reason`` string, propagated verbatim.
 * ``path`` -- dotted path to the leaf within the payload tree
   (``"items.3.password"``). Consumers correlate this with the raw row.
@@ -97,11 +102,15 @@ class RedactionManifestEntry(BaseModel):
 class RedactionResult(BaseModel):
     """Engine return value: ``(redacted, manifest)``.
 
-    The redacted payload is structurally identical to the input (same
-    nesting; only string leaves change) so callers can hand it to the
-    JSONFlux reducer without further shape-fixing. The manifest is
-    ordered by traversal: stable for a given input, which lets the
-    C1-d round-trip CI gate diff manifest-to-manifest.
+    The redacted payload has the same *nesting* as the input but is
+    always normalised to JSON-shaped containers: ``Mapping`` subtypes
+    flatten to ``dict``, ``Sequence`` subtypes (excluding ``str`` /
+    ``bytes`` / ``bytearray``) flatten to ``list``, and only string
+    leaves change. This matches the JSONFlux reduce boundary the
+    payload is being prepared for; callers can hand the result to the
+    reducer without further shape-fixing. The manifest is ordered by
+    traversal: stable for a given input, which lets the C1-d
+    round-trip CI gate diff manifest-to-manifest.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -161,12 +170,15 @@ def _walk_and_apply(
 ) -> object:
     """Recurse through *node*, applying *rule* at every string leaf.
 
-    The walk is shape-preserving: mappings stay mappings, sequences
-    stay (the same) sequence type by way of ``type(node)(...)`` where
-    safe, falling back to ``list`` for unrecognized sequence subtypes.
-    The Pydantic schema validates payloads only at the connector
-    boundary, not here -- the engine is duck-typed against ``Mapping``
-    and ``Sequence`` (excluding ``str`` / ``bytes``).
+    The walk is *nesting*-preserving but **not subtype-preserving**:
+    every ``Mapping`` (including ``OrderedDict``, ``defaultdict``, and
+    user subclasses) is materialised as a plain ``dict``, and every
+    ``Sequence`` other than ``str`` / ``bytes`` / ``bytearray`` is
+    materialised as a plain ``list``. The output is therefore always
+    JSON-serialisable, which is the contract the JSONFlux reduce
+    boundary downstream relies on. The Pydantic schema validates
+    payloads only at the connector boundary, not here -- the engine
+    is duck-typed against ``Mapping`` and ``Sequence``.
     """
     if isinstance(node, str):
         return _apply_to_str(node, rule, manifest, path=path)

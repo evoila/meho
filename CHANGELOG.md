@@ -138,6 +138,19 @@ connector-related release-notes line.
   target's connector resolves; ambiguous probes return 409 with
   the resolver's message. Closes G0.14-T1 signals 7, 8, 19 from
   `claude-rdc-hetzner-dc#697`. (#1142)
+- `/api/v1/feed` no longer drops to a bare HTTP 500 when the
+  broadcast subsystem is unreachable. The SSE generator now catches
+  `redis.exceptions.RedisError` (covers `ConnectionError`,
+  `TimeoutError`, `ResponseError`) inside the XREAD loop, emits a
+  single `event: feed_error` frame carrying a T11-compliant
+  `{code, message, doc}` payload
+  (`broadcast_subsystem_unavailable`), and closes the stream
+  cleanly so the browser `EventSource` reconnect machinery does
+  not tight-loop on the failure. The empty-stream case (fresh
+  deploy, no events published yet) was already handled — redis-py
+  returns `None` for an absent stream key, which falls through to
+  the existing heartbeat path. Closes G0.14-T5 signal 10 from
+  `claude-rdc-hetzner-dc#697`. (#1146)
 - **G0.13-T1 auth-invalid-token classifier extended to authlib
   `DecodeError`.** Promotes the decode-stage failure for a non-JWT
   bearer (e.g. `Bearer not-a-real-jwt`) at `/api/v1/health` from the

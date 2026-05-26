@@ -30,7 +30,7 @@ The non-compliant sites are the symmetric inverse: they name the
 domain (`keycloak_admin_not_configured`) without the remediation, or
 they collapse to a bare 500 with no JSON body at all. Per-surface
 fixes for the catalogued non-compliant entries live in sibling Tasks
-(T1 #1140 dispatcher; T5 #1146 feed; T7 #1148 agent-principals
+(T1 #1142 dispatcher; T5 #1146 feed; T7 #1148 agent-principals
 symmetry) and cite this doc as their convention reference.
 
 This is a learning artefact for both new contributors writing new
@@ -233,11 +233,12 @@ specifically referenced).
 | `/ui/auth/login` 503 (no client credentials) | `ui_oauth_not_configured: UI_KEYCLOAK_CLIENT_ID / UI_KEYCLOAK_CLIENT_SECRET are unset. Render the confidential client credentials from Vault per docs/cross-repo/keycloak-web-client.md before serving /ui/auth/*.` | compliant (gold-standard) | — |
 | `POST /api/v1/targets/{name}/probe` 501 (no connector for product) | `no connector registered for product='kubernetes'` | compliant (gold-standard) | — |
 | `POST /api/v1/connectors/ingest` 422 (spec_label_mismatch) | structured `detail` with `kind`, `requested_version`, `spec_info_versions[]`, `message` (`build_version_mismatch_detail` in `error_envelopes.py`) | compliant (gold-standard, structured) | — |
-| `POST /api/v1/connectors/ingest` 422 (uncovered_version_label) | structured `detail` with `product`, `version`, `impl_id`, `registered_classes[]`, `message` (`build_uncovered_version_label_detail`) | compliant (structured) | — |
-| `AmbiguousConnectorResolution` log message (resolver tie-break failure) | `resolution ambiguous after tie-break ladder for (product='k8s', version=None); candidates=[...]; set target.preferred_impl_id to one of them` | compliant *as a log message*, but **the diagnostic never reaches the operator** because the dispatcher swallows the exception; the response body collapses to a bare 500 envelope (signal 8) | T1 #1140 (catch and surface in `extras.exception_message`) |
+| `POST /api/v1/connectors/ingest` 422 (uncovered_version_label, **REST**) | `detail=str(exc)` — the `UncoveredVersionLabel.__str__` text only; no structured `kind` / `product` / `version` / `registered_classes[]` payload (see `api/v1/connectors_ingest.py:302-305`) | partial — message is human-readable but REST does not emit the structured envelope the MCP path does. The shared `build_uncovered_version_label_detail` builder exists in `error_envelopes.py`; REST is not yet wired to it | follow-up (no ticket yet) — call `build_uncovered_version_label_detail(exc)` in the REST route for parity with `VersionMismatchError` (sibling row), the existing G0.9.1-T5 #777 shared-builder pattern |
+| `connector_admin.ingest_connector` MCP tool 422 (uncovered_version_label, **MCP**) | JSON-RPC `-32602` with structured `data` containing `product`, `version`, `impl_id`, `registered_classes[]`, `message` (`build_uncovered_version_label_detail` at `mcp/tools/connector_admin.py:235-239`) | compliant (structured) | — |
+| `AmbiguousConnectorResolution` log message (resolver tie-break failure) | `resolution ambiguous after tie-break ladder for (product='k8s', version=None); candidates=[...]; set target.preferred_impl_id to one of them` | compliant *as a log message*, but **the diagnostic never reaches the operator** because the dispatcher swallows the exception; the response body collapses to a bare 500 envelope (signal 8) | T1 #1142 (catch and surface in `extras.exception_message`) |
 | `GET /api/v1/health` 401 (residual bare `invalid_token`) | `{"detail":"invalid_token"}` | partial (post-#797 the common cases are classified; the residual case is intentionally bare per the *intentionally bare* section above, pending G0.13-T1 follow-up) | G0.13-T1 #1131 (reproduce + extend OR document residual) |
 | `GET /api/v1/feed` 500 (Redis xread failure) | `500 Internal Server Error` with no JSON body | non-compliant (no code, no message, no remediation) | T5 #1146 (catch `RedisError`, emit sentinel SSE or structured 503) |
-| Dispatcher composite-handler failures (resolver exceptions in typed/composite branch) | bare 500 envelope (signal 8); `NoMatchingConnector` / `AmbiguousConnectorResolution` propagate uncaught | non-compliant (no code, no remediation) | T1 #1140 (catch + label `no_connector`; surface `extras.exception_message`) |
+| Dispatcher composite-handler failures (resolver exceptions in typed/composite branch) | bare 500 envelope (signal 8); `NoMatchingConnector` / `AmbiguousConnectorResolution` propagate uncaught | non-compliant (no code, no remediation) | T1 #1142 (catch + label `no_connector`; surface `extras.exception_message`) |
 | `POST /api/v1/agent-principals` 503 (Keycloak admin not configured) | `{"detail":"keycloak_admin_not_configured"}` | partial — names the domain but not the env vars or the doc | T7 #1148 (symmetrize with the `/ui/auth/login` shape) |
 | `POST /api/v1/agent-principals` 502 (Keycloak admin runtime error) | `{"detail":"keycloak_admin_error"}` | intentionally bare (upstream failure; remediation is identical regardless of upstream code; structured log carries detail) | — |
 | `/api/v1/auth-config` features visibility (whether agent-runtime is configured) | implicit — the agent-runtime configuration state is not surfaced anywhere on `/ready` or `/api/v1/auth-config` (signal 17) | non-compliant *as a discoverability gap* — when the surface emits `keycloak_admin_not_configured` the operator has no way to discover the feature was supposed to be configured | T7 #1148 (`/ready` features block with `configured: bool` + `missing_env`) |
@@ -324,7 +325,7 @@ set).
   envelope).
 - `backend/src/meho_backplane/operations/dispatcher.py` — the typed
   and composite branches that currently swallow resolver exceptions
-  (signal 8; T1 #1140).
+  (signal 8; T1 #1142).
 
 ## Known issues
 
@@ -332,7 +333,7 @@ set).
   `(None, None)` on `NoMatchingConnector` instead of the ingested
   branch's `(None, "no_connector")` label; combined with no catch
   for `AmbiguousConnectorResolution`, the resolver's well-shaped
-  diagnostic never reaches the response envelope. T1 #1140 mirrors
+  diagnostic never reaches the response envelope. T1 #1142 mirrors
   the ingested branch's label and adds the
   `AmbiguousConnectorResolution` catch.
 - **Signal 10** — `/api/v1/feed` does not catch `RedisError` from
@@ -365,7 +366,7 @@ set).
   `build_uncovered_version_label_detail` lifted into a shared module
   so REST and MCP emit the same shape.
 - **Sibling Tasks that cite this doc:**
-  T1 [#1140](https://github.com/evoila/meho/issues/1140) (dispatcher),
+  T1 [#1142](https://github.com/evoila/meho/issues/1142) (dispatcher),
   T5 [#1146](https://github.com/evoila/meho/issues/1146) (feed),
   T7 [#1148](https://github.com/evoila/meho/issues/1148)
   (agent-principals + `/ready` features block).

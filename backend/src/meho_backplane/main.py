@@ -83,6 +83,7 @@ from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
 from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
+from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -633,6 +634,13 @@ app.include_router(api_v1_agent_principals_router)
 # / final events). Operator-level; tenant-scoped via the JWT; runs only an
 # enabled definition in the operator's tenant.
 app.include_router(api_v1_agent_runs_router)
+# G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
+# (list, paginated, operator-level), POST /scheduler/triggers (create,
+# tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).
+# Tenant-scoped via the JWT; tenant_admin may pass tenant_filter / a
+# body tenant_id to act cross-tenant for admin operations. Every
+# mutation writes an audit row and broadcasts under op_class=write.
+app.include_router(api_v1_scheduler_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``

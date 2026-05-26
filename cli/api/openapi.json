@@ -4679,6 +4679,225 @@
         }
       }
     },
+    "/api/v1/scheduler/triggers": {
+      "get": {
+        "tags": [
+          "scheduler"
+        ],
+        "summary": "List Triggers",
+        "description": "List scheduled triggers for the operator's tenant, newest-first.\n\nTenant scoping: ``operator`` / ``read_only`` callers are scoped to\n``operator.tenant_id`` and any non-null ``tenant_filter`` returns\n403. Only ``tenant_admin`` may cross tenants.",
+        "operationId": "list_triggers_api_v1_scheduler_triggers_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "cron",
+                "one_off",
+                "event"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "active",
+                "paused",
+                "cancelled",
+                "fired"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledTriggerListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "scheduler"
+        ],
+        "summary": "Create Trigger",
+        "description": "Create one scheduled trigger under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\ntrigger is created under that tenant (cross-tenant admin); when\nnull, the trigger is created under ``operator.tenant_id``. The\nschema's discriminated-union validator already proved exactly one\nof ``cron_expr`` / ``fire_at`` / ``event_filter`` is set; the\nservice runs the FK pre-flight.",
+        "operationId": "create_trigger_api_v1_scheduler_triggers_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduledTriggerCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledTriggerRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scheduler/triggers/{trigger_id}": {
+      "delete": {
+        "tags": [
+          "scheduler"
+        ],
+        "summary": "Cancel Trigger",
+        "description": "Cancel one scheduled trigger by id (transitions ``status='cancelled'``).\n\n``tenant_admin`` only. A cross-tenant / absent id returns 404\n``trigger_not_found`` -- never 403 -- so the existence of a\ntrigger is not leaked across the tenant boundary. A trigger\nalready in terminal ``fired`` state returns 409\n``trigger_already_fired`` (the lifecycle is ``fired`` -> end,\nnot ``fired`` -> ``cancelled``).\n\nCross-tenant: pass ``tenant_filter`` to cancel a trigger under\nanother tenant; ``operator`` role is locked to the JWT's tenant.\nThe check happens here even though the route is\n``tenant_admin``-gated, for forward-compat in case the role gate\nrelaxes in a future release.",
+        "operationId": "cancel_trigger_api_v1_scheduler_triggers__trigger_id__delete",
+        "parameters": [
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Trigger Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals": {
       "get": {
         "tags": [
@@ -9596,6 +9815,226 @@
         ],
         "title": "RetrieveResponse",
         "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
+      },
+      "ScheduledTriggerCreate": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ScheduledTriggerKind"
+          },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Agent Definition Id"
+          },
+          "cron_expr": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Fire At"
+          },
+          "event_filter": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Event Filter"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Timezone",
+            "default": "UTC"
+          },
+          "inputs": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Inputs"
+          },
+          "identity_sub": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Identity Sub",
+            "default": "__scheduler__"
+          },
+          "in_flight_policy": {
+            "$ref": "#/components/schemas/ScheduledTriggerInFlightPolicy",
+            "default": "fail_into_audit"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "agent_definition_id"
+        ],
+        "title": "ScheduledTriggerCreate",
+        "description": "Request body for ``POST /api/v1/scheduler/triggers``.\n\nDiscriminated by *kind*: exactly one of ``cron_expr`` / ``fire_at``\n/ ``event_filter`` must be set, matching the DB-side\n``ck_scheduled_trigger_kind_fields`` invariant. The\n:meth:`_validate_discriminated_union` validator enforces this at\nthe wire so a malformed body surfaces as 422 rather than as a\nflush-time :class:`IntegrityError`.\n\n*agent_definition_id* is the existing-definition reference -- the\nrepository's FK check rejects an orphan id with 422 at insert; no\nvalidation is duplicated here.\n\n*identity_sub* is the OIDC ``sub`` the scheduler impersonates when\nfiring the trigger (distinct from *created_by_sub* which the\nboundary derives from the operator). Defaulted to\n``\"__scheduler__\"`` to match the migration-time backstop the\nORM-level default sets, so a minimal create body still validates.\n\n*in_flight_policy* defaults to ``fail_into_audit`` per the consumer\ndoc; operators wanting at-least-once semantics opt into ``resume``.\n\n*tenant_id* (optional) lets a tenant-admin caller create triggers in\nanother tenant for cross-tenant admin operations; ``operator`` role\ncallers leave it ``None`` and the boundary pins it to the JWT's\ntenant id. The boundary enforces the RBAC -- this schema only\ncarries the field."
+      },
+      "ScheduledTriggerInFlightPolicy": {
+        "type": "string",
+        "enum": [
+          "resume",
+          "fail_into_audit"
+        ],
+        "title": "ScheduledTriggerInFlightPolicy",
+        "description": "Closed policy of what happens to a fired run that gets killed mid-flight.\n\nInitiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;\nT4 #825 owns the resume/fail mechanics. The closed enum keeps the\nstorage shape and the dispatch behaviour aligned across the\nInitiative.\n\nMembers:\n\n* :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to\n  resume a killed run from its last recorded state. At-least-once\n  semantics; the underlying agent run should be idempotent-friendly.\n* :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed`` with\n  a clean audit row explaining the interruption; the next trigger\n  tick fires a fresh run. The consumer doc (``agent-runtime-for-ops-\n  spec.md`` \u00a7P2) explicitly accepts this outcome as the default\n  policy -- which is why Option A (extend roll-our-own) is viable at\n  all without DBOS-style automatic resume.\n\nDefault at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --\nthe conservative policy that requires no extra infrastructure (just\naudit) and matches the consumer's accepted-outcome statement.\nOperators opt into :attr:`RESUME` per definition."
+      },
+      "ScheduledTriggerKind": {
+        "type": "string",
+        "enum": [
+          "cron",
+          "one_off",
+          "event"
+        ],
+        "title": "ScheduledTriggerKind",
+        "description": "Closed enum of trigger shapes the G11.3 scheduler dispatches.\n\nInitiative #804 (G11.3 Scheduler), Task #822 (T1). One\n:class:`ScheduledTrigger` row carries exactly one of three shapes,\nselected by this discriminator; the discriminated-union invariant is\nenforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``\nthat pairs each kind with its mandatory column.\n\nMembers:\n\n* :attr:`CRON` -- recurring trigger driven by a 5-field cron\n  expression (``cron_expr`` column). The dispatcher (T2 #823) reads\n  the expression via ``croniter`` and materialises ``next_fire_at``.\n* :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time\n  (``fire_at`` column). The dispatcher fires it once then marks\n  ``status = 'cancelled'`` (or the row stays inactive via\n  ``next_fire_at IS NULL``).\n* :attr:`EVENT` -- event-subscription trigger keyed on a JSONB\n  filter (``event_filter`` column). The transactional outbox (T3\n  #824) matches rows against the filter and dispatches.\n\nClosed enum -- the vocabulary is fixed at v0.2; widening it is a\ncoordinated DB + model change so the enum and the\n:data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0020``'s\nfrozen tuple) cannot drift. The lock-step discipline mirrors\n:class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard\nin :mod:`tests.test_db_scheduled_trigger` enforces equality at\nunit-test time."
+      },
+      "ScheduledTriggerListResponse": {
+        "properties": {
+          "triggers": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduledTriggerRead"
+            },
+            "type": "array",
+            "title": "Triggers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "triggers"
+        ],
+        "title": "ScheduledTriggerListResponse",
+        "description": "Response envelope for ``GET /api/v1/scheduler/triggers``.\n\nWrapped in ``{\"triggers\": [...]}`` so a future paging / cursor\nfield can land non-breakingly -- the same shape\n:class:`~meho_backplane.api.v1.agents.AgentDefinitionListResponse`\nadopted."
+      },
+      "ScheduledTriggerRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Agent Definition Id"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ScheduledTriggerKind"
+          },
+          "cron_expr": {
+            "type": "string",
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Fire At"
+          },
+          "event_filter": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Event Filter"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ScheduledTriggerStatus"
+          },
+          "in_flight_policy": {
+            "$ref": "#/components/schemas/ScheduledTriggerInFlightPolicy"
+          },
+          "next_fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Next Fire At"
+          },
+          "last_fired_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Fired At"
+          },
+          "inputs": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Inputs"
+          },
+          "identity_sub": {
+            "type": "string",
+            "title": "Identity Sub"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "agent_definition_id",
+          "kind",
+          "cron_expr",
+          "timezone",
+          "fire_at",
+          "event_filter",
+          "status",
+          "in_flight_policy",
+          "next_fire_at",
+          "last_fired_at",
+          "inputs",
+          "identity_sub",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ScheduledTriggerRead",
+        "description": "Response shape for one ``scheduled_trigger`` row.\n\nMirrors :class:`~meho_backplane.db.models.ScheduledTrigger`'s column\nset, projected to the wire types the JSON renderer can serialise.\n``frozen=True`` matches the :mod:`meho_backplane.agents.schemas`\nposture so a route handler cannot accidentally mutate the row after\nreturning it."
+      },
+      "ScheduledTriggerStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "paused",
+          "cancelled",
+          "fired"
+        ],
+        "title": "ScheduledTriggerStatus",
+        "description": "Closed lifecycle status of a :class:`ScheduledTrigger`.\n\nInitiative #804 (G11.3 Scheduler), Task #822 (T1). The admin\nsurface (T5 #826) walks triggers through this state machine; the\ndispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.\n\nMembers:\n\n* :attr:`ACTIVE` -- the trigger is eligible for dispatch.\n* :attr:`PAUSED` -- the trigger is temporarily disabled by an\n  operator. ``next_fire_at`` is preserved so resuming reactivates\n  without recomputing.\n* :attr:`CANCELLED` -- terminal. The trigger row is retained for\n  audit purposes but never fires again.\n* :attr:`FIRED` -- terminal one-off state. Migration ``0025`` (T2\n  #823) widened the enum so a one-off trigger transitions\n  ``ACTIVE -> FIRED`` after its single dispatch instead of going\n  to ``CANCELLED`` (which carries operator-intent semantics).\n  :class:`ScheduledTrigger` rows in this state are retained for\n  audit (last-fired-at + identity_sub) but never re-dispatched."
       },
       "SkippedConnector": {
         "properties": {

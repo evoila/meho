@@ -99,7 +99,7 @@ async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> 
     ``IntegrityError`` under PRAGMA foreign_keys=ON.
 
     The look-up-then-insert shape is defence-in-depth: migration
-    ``0025`` seeds the ``default`` tenant into the per-worker schema
+    ``0028`` seeds the ``default`` tenant into the per-worker schema
     template (:func:`tests.conftest._schema_template_db`) -- after
     G0.13-T7 (#1137) generalised the seed from ``rdc-internal`` to
     ``default``. With this helper's default ``slug='rdc-internal'``

@@ -72,7 +72,7 @@ async def _seed_tenant(slug: str = "rdc-internal") -> uuid.UUID:
 
     Look-up-then-insert -- the per-worker schema template
     (:func:`tests.conftest._schema_template_db`) carries the
-    ``default`` tenant after migration ``0025`` (G0.13-T7 #1137
+    ``default`` tenant after migration ``0028`` (G0.13-T7 #1137
     generalised the seed from ``rdc-internal``); a plain INSERT under
     a seeded slug would trip ``UNIQUE constraint failed: tenant.slug``.
     """

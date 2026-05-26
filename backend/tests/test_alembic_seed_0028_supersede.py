@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0025_supersede_rdc_internal_seed``.
+"""Behavioural tests for Alembic migration ``0028_supersede_rdc_internal_seed``.
 
 Initiative #1130 (G0.13 v0.6.0 dogfood hardening), Task #1137 (T7).
 The migration supersedes ``0018``'s ``rdc-internal`` seed: it cleans
@@ -24,12 +24,12 @@ five contracts on the issue body:
   seed.** On a DB that never had ``rdc-internal`` data (e.g. a
   stamped-from-future fixture), the cleanup is a no-op and the
   default seed still lands.
-* **Re-running the migration is a no-op.** Stamp back to ``0024``,
-  re-run ``upgrade 0025``: the cleanup + new-seed pass is filter-
+* **Re-running the migration is a no-op.** Stamp back to ``0027``,
+  re-run ``upgrade 0028``: the cleanup + new-seed pass is filter-
   shaped (uses ``ON CONFLICT DO NOTHING`` for the seed), so no
   duplicate conventions or history rows land.
 * **Downgrade keeps the default tenant and does NOT restore
-  rdc-internal.** ``downgrade "0024"`` removes the 2 default
+  rdc-internal.** ``downgrade "0027"`` removes the 2 default
   conventions + their history rows, leaves the ``default`` tenant
   row intact, and does NOT re-seed the ``rdc-internal`` content
   (restoring it would re-leak consumer identity into the public
@@ -72,13 +72,13 @@ _LEGACY_SEED_ACTOR_SUB: Final[str] = "migration:seed-rdc-conventions"
 #: The legacy tenant slug.
 _LEGACY_TENANT_SLUG: Final[str] = "rdc-internal"
 
-#: The new seed marker ``0025`` writes on every row it authors.
+#: The new seed marker ``0028`` writes on every row it authors.
 _SEED_ACTOR_SUB: Final[str] = "migration:seed-default-conventions"
 
 #: The new tenant slug.
 _TENANT_SLUG: Final[str] = "default"
 
-#: The 2 slugs ``0025`` seeds under the ``default`` tenant.
+#: The 2 slugs ``0028`` seeds under the ``default`` tenant.
 _EXPECTED_SLUGS: Final[frozenset[str]] = frozenset(
     {
         "slug-naming-kebab-case",
@@ -112,7 +112,7 @@ def alembic_cfg(
     verbatim (sync fixture because ``alembic.command.upgrade`` calls
     ``asyncio.run`` internally via the env.py async cookbook).
     """
-    db_path = tmp_path / "migration_0025.db"
+    db_path = tmp_path / "migration_0028.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -306,7 +306,7 @@ def test_head_replaces_rdc_internal_with_default(
 ) -> None:
     """``upgrade head`` -> rdc-internal seed gone, default seed in place.
 
-    Asserts the headline contract: ``0025`` cleans up ``0018``'s rows
+    Asserts the headline contract: ``0028`` cleans up ``0018``'s rows
     and seeds the new default tenant.
     """
     cfg, sync_url = alembic_cfg
@@ -327,7 +327,7 @@ def test_head_replaces_rdc_internal_with_default(
         {"tenant_id": legacy_tenant_id, "sub": _LEGACY_SEED_ACTOR_SUB},
     )
     assert legacy_convention_count == 0, (
-        "0025 must remove every convention 0018 authored under rdc-internal; "
+        "0028 must remove every convention 0018 authored under rdc-internal; "
         f"got {legacy_convention_count} survivors"
     )
     legacy_history_count = _count(
@@ -337,13 +337,13 @@ def test_head_replaces_rdc_internal_with_default(
         {"sub": _LEGACY_SEED_ACTOR_SUB},
     )
     assert legacy_history_count == 0, (
-        "0025 must remove every seed-authored history row 0018 wrote; "
+        "0028 must remove every seed-authored history row 0018 wrote; "
         f"got {legacy_history_count} survivors"
     )
 
     # New: default tenant + 2 conventions + 2 CREATE history rows.
     default_tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
-    assert default_tenant_id is not None, "0025 must seed the generic default tenant"
+    assert default_tenant_id is not None, "0028 must seed the generic default tenant"
     rows = _fetch_convention_rows(sync_url, default_tenant_id)
     assert len(rows) == 2, f"expected 2 seeded default conventions; got {len(rows)}"
     assert {str(r["slug"]) for r in rows} == _EXPECTED_SLUGS
@@ -352,7 +352,7 @@ def test_head_replaces_rdc_internal_with_default(
         "preamble assembler packs them at session start"
     )
     assert all(r["created_by_sub"] == _SEED_ACTOR_SUB for r in rows), (
-        "every seeded default row records the 0025 seed marker"
+        "every seeded default row records the 0028 seed marker"
     )
 
     for row in rows:
@@ -407,16 +407,16 @@ def test_seeded_default_bodies_carry_no_consumer_specific_tokens(
 def test_operator_curated_rdc_internal_content_survives_supersede(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """Operator-authored content under rdc-internal slugs survives 0025.
+    """Operator-authored content under rdc-internal slugs survives 0028.
 
     Contract:
     * A convention an operator authored under a seeded slug (with their
-      JWT sub, not the seed marker) survives 0025's cleanup.
+      JWT sub, not the seed marker) survives 0028's cleanup.
     * A history row the operator wrote against a seeded convention
-      (with their JWT sub) survives 0025's cleanup.
+      (with their JWT sub) survives 0028's cleanup.
     """
     cfg, sync_url = alembic_cfg
-    # Stop at 0018 so the rdc-internal seed is present but 0025 has
+    # Stop at 0018 so the rdc-internal seed is present but 0028 has
     # not yet run.
     command.upgrade(cfg, "0018")
 
@@ -425,7 +425,7 @@ def test_operator_curated_rdc_internal_content_survives_supersede(
     legacy_tenant_id = uuid.UUID(legacy_tenant_id_str)
 
     # Inspect a seeded convention (vault-canonical) -- we will write
-    # an operator history row against it that must survive 0025.
+    # an operator history row against it that must survive 0028.
     rows_at_0018 = _fetch_convention_rows(sync_url, legacy_tenant_id_str)
     seeded_target = next(r for r in rows_at_0018 if r["slug"] == "vault-canonical")
     operator_history_id = _insert_history_row(
@@ -437,7 +437,7 @@ def test_operator_curated_rdc_internal_content_survives_supersede(
     )
 
     # An operator-authored convention under a *different* slug (not
-    # one of the seeded eight). 0025's cleanup narrows on the seeded
+    # one of the seeded eight). 0028's cleanup narrows on the seeded
     # slug list; this row carries an unrelated slug and survives.
     operator_only_convention_id = _insert_convention_row(
         sync_url,
@@ -450,10 +450,10 @@ def test_operator_curated_rdc_internal_content_survives_supersede(
     )
 
     # Now run the supersede.
-    command.upgrade(cfg, "0025")
+    command.upgrade(cfg, "0028")
 
     # The operator-authored convention under an unrelated slug
-    # survives. (0025's cleanup narrows on the 8 seeded slugs.)
+    # survives. (0028's cleanup narrows on the 8 seeded slugs.)
     survived_count = _count(
         sync_url,
         "tenant_conventions",
@@ -462,11 +462,11 @@ def test_operator_curated_rdc_internal_content_survives_supersede(
     )
     assert survived_count == 1, (
         "operator-authored convention under an unrelated slug must survive "
-        "the supersede -- 0025's cleanup narrows on the 8 seeded slugs"
+        "the supersede -- 0028's cleanup narrows on the 8 seeded slugs"
     )
 
     # The operator-authored history row against vault-canonical
-    # survives. (0025's cleanup narrows on the seed actor_sub; the
+    # survives. (0028's cleanup narrows on the seed actor_sub; the
     # operator's history row carries a JWT sub.)
     history_survived_count = _count(
         sync_url,
@@ -476,7 +476,7 @@ def test_operator_curated_rdc_internal_content_survives_supersede(
     )
     assert history_survived_count == 1, (
         "operator-authored history row against a seeded convention must "
-        "survive the supersede -- 0025's cleanup narrows on the seed "
+        "survive the supersede -- 0028's cleanup narrows on the seed "
         "actor_sub, the operator's sub does not match"
     )
 
@@ -484,7 +484,7 @@ def test_operator_curated_rdc_internal_content_survives_supersede(
 def test_re_running_supersede_is_idempotent(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """Stamp 0024 + upgrade 0025 twice: no duplicate rows land."""
+    """Stamp 0027 + upgrade 0028 twice: no duplicate rows land."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
 
@@ -493,13 +493,13 @@ def test_re_running_supersede_is_idempotent(
     first_rows = _fetch_convention_rows(sync_url, default_tenant_id)
     assert len(first_rows) == 2
 
-    # Replay -- stamp back to 0024, then upgrade 0025 again.
-    command.stamp(cfg, "0024")
-    command.upgrade(cfg, "0025")
+    # Replay -- stamp back to 0027, then upgrade 0028 again.
+    command.stamp(cfg, "0027")
+    command.upgrade(cfg, "0028")
 
     second_rows = _fetch_convention_rows(sync_url, default_tenant_id)
     assert len(second_rows) == 2, (
-        "re-running 0025 must not duplicate the default conventions -- "
+        "re-running 0028 must not duplicate the default conventions -- "
         "the ON CONFLICT (tenant_id, slug) DO NOTHING shape filters the "
         "second insert"
     )
@@ -508,7 +508,7 @@ def test_re_running_supersede_is_idempotent(
     for row in second_rows:
         history = _fetch_history_rows(sync_url, str(row["id"]))
         assert len(history) == 1, (
-            f"re-running 0025 must not duplicate history rows for slug "
+            f"re-running 0028 must not duplicate history rows for slug "
             f"{row['slug']!r}; got {len(history)}"
         )
 
@@ -516,7 +516,7 @@ def test_re_running_supersede_is_idempotent(
 def test_downgrade_removes_default_seed_keeps_tenant_no_rdc_internal_restore(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``downgrade 0024`` -> default seed gone; tenant kept; rdc-internal NOT restored.
+    """``downgrade 0027`` -> default seed gone; tenant kept; rdc-internal NOT restored.
 
     Contract: the downgrade does NOT restore the rdc-internal seed --
     restoring it would re-leak consumer identity. Operators who need
@@ -529,7 +529,7 @@ def test_downgrade_removes_default_seed_keeps_tenant_no_rdc_internal_restore(
     default_tenant_id_str = _fetch_tenant_id(sync_url, _TENANT_SLUG)
     assert default_tenant_id_str is not None
 
-    command.downgrade(cfg, "0024")
+    command.downgrade(cfg, "0027")
 
     # Default tenant row preserved (mirrors 0018's downgrade discipline).
     survived_tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
@@ -554,8 +554,8 @@ def test_downgrade_removes_default_seed_keeps_tenant_no_rdc_internal_restore(
     # them would re-leak consumer content.
     legacy_tenant_id = _fetch_tenant_id(sync_url, _LEGACY_TENANT_SLUG)
     assert legacy_tenant_id is not None, (
-        "rdc-internal tenant row was preserved by 0025 upgrade and stays "
-        "preserved through 0025 downgrade"
+        "rdc-internal tenant row was preserved by 0028 upgrade and stays "
+        "preserved through 0028 downgrade"
     )
     restored_legacy_count = _count(
         sync_url,
@@ -564,7 +564,7 @@ def test_downgrade_removes_default_seed_keeps_tenant_no_rdc_internal_restore(
         {"tenant_id": legacy_tenant_id, "sub": _LEGACY_SEED_ACTOR_SUB},
     )
     assert restored_legacy_count == 0, (
-        "0025 downgrade must NOT restore the rdc-internal seed -- the seed "
+        "0028 downgrade must NOT restore the rdc-internal seed -- the seed "
         "content is consumer-specific and would re-leak into the public deploy"
     )
 
@@ -572,12 +572,12 @@ def test_downgrade_removes_default_seed_keeps_tenant_no_rdc_internal_restore(
 def test_cleanup_is_noop_on_fresh_db_without_rdc_internal(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """When no rdc-internal tenant exists, 0025's cleanup is a no-op.
+    """When no rdc-internal tenant exists, 0028's cleanup is a no-op.
 
     This guards the cleanup path's early-return: a deploy that ran
     its first ``upgrade head`` against an empty DB sees ``0018`` then
-    ``0025`` in immediate succession. ``0018`` populates the rows,
-    ``0025`` cleans them up + seeds default. The state after head
+    ``0028`` in immediate succession. ``0018`` populates the rows,
+    ``0028`` cleans them up + seeds default. The state after head
     matches a deploy that already had rdc-internal data: both paths
     land on the same head state.
     """

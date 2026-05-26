@@ -535,12 +535,12 @@ class TestSeedRdcInternalConventionsPgIdempotency:
             # runs as the last step of the chain.
             #
             # We intentionally stop at ``0018`` (not ``head``) because
-            # G0.13-T7 (#1137) shipped migration ``0025`` on top of
+            # G0.13-T7 (#1137) shipped migration ``0028`` on top of
             # ``0018`` that cleans up the rdc-internal seed and
             # replaces it with a generic ``default`` tenant for OSS
             # commercialization-readiness. The original 0018-only
             # idempotency contract this test pins predates that
-            # supersede; head-state idempotency for 0025 is covered
+            # supersede; head-state idempotency for 0028 is covered
             # by :class:`TestSupersedeDefaultConventionsPgIdempotency`
             # below.
             monkeypatch.setenv("DATABASE_URL", async_url)
@@ -597,25 +597,25 @@ class TestSeedRdcInternalConventionsPgIdempotency:
 
 
 # ---------------------------------------------------------------------------
-# G0.13-T7 #1137 — supersede migration 0025 PG-side idempotency replay
+# G0.13-T7 #1137 — supersede migration 0028 PG-side idempotency replay
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not _DOCKER_AVAILABLE, reason=_SKIP_REASON)
 class TestSupersedeDefaultConventionsPgIdempotency:
-    """Migration ``0025``'s cleanup + seed shape is idempotent on real PG.
+    """Migration ``0028``'s cleanup + seed shape is idempotent on real PG.
 
     Twin to :class:`TestSeedRdcInternalConventionsPgIdempotency` -- the
     SQLite-side coverage lives in
-    :mod:`tests.test_alembic_seed_0025_supersede`; this class locks in
+    :mod:`tests.test_alembic_seed_0028_supersede`; this class locks in
     the cross-dialect guarantee on real PG.
 
     Asserts:
 
-    * ``upgrade head`` (one shot) reaches the post-0025 state: no
+    * ``upgrade head`` (one shot) reaches the post-0028 state: no
       rdc-internal seeded rows survive, 2 default conventions + 2
       history rows are in place.
-    * Stamp 0024 + upgrade 0025 again is a no-op (the cleanup matches
+    * Stamp 0027 + upgrade 0028 again is a no-op (the cleanup matches
       zero rows on the replay, the seed's ON CONFLICT DO NOTHING shape
       filters duplicate inserts).
     """
@@ -625,7 +625,7 @@ class TestSupersedeDefaultConventionsPgIdempotency:
         env_overrides: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Upgrade head then stamp 0024 + upgrade 0025 again: counts stable."""
+        """Upgrade head then stamp 0027 + upgrade 0028 again: counts stable."""
         from testcontainers.postgres import PostgresContainer
 
         image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
@@ -642,36 +642,36 @@ class TestSupersedeDefaultConventionsPgIdempotency:
             command.upgrade(cfg, "head")
 
             first = asyncio.run(_fetch_default_seed_state(async_url))
-            # Post-0025 state: rdc-internal seeded rows cleaned, default
+            # Post-0028 state: rdc-internal seeded rows cleaned, default
             # tenant + 2 conventions + 2 history rows in place.
             assert first["legacy_convention_count"] == 0, (
-                "0025 must remove every convention 0018 authored; "
+                "0028 must remove every convention 0018 authored; "
                 f"got {first['legacy_convention_count']} survivors"
             )
             assert first["legacy_history_count"] == 0, (
-                "0025 must remove every seed-authored history row 0018 wrote; "
+                "0028 must remove every seed-authored history row 0018 wrote; "
                 f"got {first['legacy_history_count']} survivors"
             )
             assert first["default_tenant_count"] == 1, (
-                "0025 must seed exactly one default tenant row; "
+                "0028 must seed exactly one default tenant row; "
                 f"got {first['default_tenant_count']}"
             )
             assert first["default_convention_count"] == 2, (
-                "0025 must seed 2 illustrative default conventions; "
+                "0028 must seed 2 illustrative default conventions; "
                 f"got {first['default_convention_count']}"
             )
             assert first["default_history_count"] == 2, (
-                "0025 must land one CREATE history row per seeded default "
+                "0028 must land one CREATE history row per seeded default "
                 f"convention; got {first['default_history_count']}"
             )
 
-            # Replay 0025.
-            command.stamp(cfg, "0024")
-            command.upgrade(cfg, "0025")
+            # Replay 0028.
+            command.stamp(cfg, "0027")
+            command.upgrade(cfg, "0028")
 
             second = asyncio.run(_fetch_default_seed_state(async_url))
             assert second == first, (
-                f"re-running 0025 must be a complete no-op on PG -- saw {first} -> {second}"
+                f"re-running 0028 must be a complete no-op on PG -- saw {first} -> {second}"
             )
 
             asyncio.run(dispose_engine())
@@ -679,7 +679,7 @@ class TestSupersedeDefaultConventionsPgIdempotency:
 
 
 async def _fetch_default_seed_state(async_url: str) -> dict[str, int]:
-    """Read post-0025 seed state counts back through a short-lived engine."""
+    """Read post-0028 seed state counts back through a short-lived engine."""
     engine = create_async_engine(async_url)
     try:
         async with engine.connect() as conn:

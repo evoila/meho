@@ -113,7 +113,7 @@ async def test_tenant_round_trip_persists_every_field() -> None:
     where the migration's PG server defaults are no-ops).
 
     The slug here is intentionally NOT ``default``: migration
-    ``0025`` seeds that slug into the per-worker schema template
+    ``0028`` seeds that slug into the per-worker schema template
     (:func:`tests.conftest._schema_template_db`) -- and migration
     ``0018`` had previously seeded ``rdc-internal`` there before
     G0.13-T7 (#1137) generalised the seed -- so this test would

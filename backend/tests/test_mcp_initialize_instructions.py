@@ -233,7 +233,7 @@ async def test_initialize_logs_warning_on_dropped_slugs(
 #: identify content sourced from one specific consumer's ``CLAUDE.md``
 #: (the rdc-internal seed migration ``0018`` shipped). The data-layer
 #: scan lives in
-#: :mod:`tests.test_alembic_seed_0025_supersede`; this scan exercises
+#: :mod:`tests.test_alembic_seed_0028_supersede`; this scan exercises
 #: the same contract end-to-end through the MCP wire surface so a
 #: regression in either the seed or the preamble assembler surfaces
 #: here.
@@ -273,7 +273,7 @@ async def test_initialize_against_default_tenant_carries_no_consumer_tokens(
     client, op = client_with_operator
 
     # Resolve the seeded default tenant id (the schema-template
-    # builder ran ``alembic upgrade head``, so migration 0025 has
+    # builder ran ``alembic upgrade head``, so migration 0028 has
     # seeded the ``default`` row).
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -281,7 +281,7 @@ async def test_initialize_against_default_tenant_carries_no_consumer_tokens(
             select(Tenant.id).where(Tenant.slug == "default"),
         )
     assert default_tenant_id is not None, (
-        "migration 0025 must seed the default tenant for the signal-12 "
+        "migration 0028 must seed the default tenant for the signal-12 "
         "verification to be meaningful"
     )
 

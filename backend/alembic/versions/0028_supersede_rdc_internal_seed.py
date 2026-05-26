@@ -3,8 +3,8 @@
 
 """Supersede the ``rdc-internal`` seed with a generic ``default`` tenant.
 
-Revision ID: 0025
-Revises: 0024
+Revision ID: 0028
+Revises: 0027
 Create Date: 2026-05-26
 
 Initiative #1130 (G0.13 v0.6.0 dogfood hardening), Task #1137 (T7).
@@ -125,7 +125,7 @@ Cross-references
 * Original migration:
   ``backend/alembic/versions/0018_seed_rdc_internal_conventions.py``.
 * Updated docs: ``docs/architecture/conventions-seed.md``.
-* :mod:`tests.test_alembic_seed_0025_supersede` -- behavioural
+* :mod:`tests.test_alembic_seed_0028_supersede` -- behavioural
   coverage (cleanup, new seed, fresh-DB, idempotency, downgrade).
 """
 
@@ -140,8 +140,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0025"
-down_revision: str | None = "0024"
+revision: str = "0028"
+down_revision: str | None = "0027"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -174,7 +174,7 @@ _LEGACY_SEEDED_SLUGS: Final[tuple[str, ...]] = (
 
 #: The synthetic ``sub`` claim recorded on every row this revision
 #: authors. Distinct from the legacy ``0018`` marker so the audit
-#: trail can distinguish "seeded by 0018" from "seeded by 0025" rows
+#: trail can distinguish "seeded by 0018" from "seeded by 0028" rows
 #: (relevant only on test deploys that downgraded past this revision
 #: and replayed).
 _SEED_ACTOR_SUB: Final[str] = "migration:seed-default-conventions"

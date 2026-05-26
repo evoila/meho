@@ -29,12 +29,12 @@ per decision #4. The tests cover the five contracts on the issue body:
 
 These assertions pin the ``0018`` migration's behaviour in isolation
 (``upgrade 0018``, not ``upgrade head``). G0.13-T7 (#1137) ships
-migration ``0025`` on top of ``0018`` that cleans up the
+migration ``0028`` on top of ``0018`` that cleans up the
 ``rdc-internal`` seed and replaces it with a generic ``default``
 tenant for OSS commercialization-readiness -- once ``upgrade head``
 runs, ``rdc-internal`` rows are no longer present. The
-``0018``-only assertions live here; the post-0025 head-state
-assertions live in :mod:`tests.test_alembic_seed_0025_supersede`.
+``0018``-only assertions live here; the post-0028 head-state
+assertions live in :mod:`tests.test_alembic_seed_0028_supersede`.
 
 The tests follow the synchronous pattern established by
 :mod:`tests.test_migration_0011_backfill_when_to_use`:

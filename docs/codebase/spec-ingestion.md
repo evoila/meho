@@ -477,9 +477,29 @@ to the operator-facing HTTP surface. RBAC: read paths (GET /, GET
 (`POST /ingest`, `PATCH /groups`, `PATCH /operations`, `POST
 /enable`, `POST /disable`) require `tenant_admin`. Tenant scoping
 derives from the JWT — there is no body / query parameter that can
-override the operator's tenant. Cross-tenant probes surface as 404
-`ConnectorNotFoundError`, not 403 — same conflation `ReviewService`
-uses to keep the operator-facing failure surface uniform.
+override the operator's tenant.
+
+Both read paths apply the same "operator's-tenant rows + built-ins
+(`tenant_id IS NULL`)" scope: the listing query does it via a
+single `WHERE tenant_id IS NULL OR tenant_id = X` clause, and
+`ReviewService.get_review_payload` mirrors it through a two-pass
+lookup (own-tenant probe first, then built-in fallback when the
+caller's tenant_id matches `operator.tenant_id`). G0.13-T5 (#1135)
+landed the review-route fallback after the v0.6.0 RDC dogfood
+flagged that every global connector in the catalog returned 404
+on review even though the listing surfaced them. Cross-tenant
+probes (`tenant_id` ≠ operator's own) still surface as 404
+`ConnectorNotFoundError` — same conflation `ReviewService` uses
+to keep the operator-facing failure surface uniform and stop
+status-code differential from enumerating other tenants.
+
+The PATCH editing routes (`/groups`, `/operations`) deliberately
+keep their single-pass lookup against the operator's `tenant_id`:
+"do tenant_admins get to edit built-ins?" is a policy choice
+distinct from the read-visibility bug, and the route gate is
+`tenant_admin`-only — built-in writes already have an explicit
+MCP / CLI affordance (`ReviewService` accepts `tenant_id=None`
+under the `TENANT_ADMIN` role).
 
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)

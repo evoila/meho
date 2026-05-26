@@ -153,6 +153,7 @@ from meho_backplane.operations._branches import (
 from meho_backplane.operations._errors import (
     result_ambiguous_connector,
     result_awaiting_approval,
+    result_composite_l2_missing,
     result_connector_error,
     result_denied,
     result_handler_unreachable,
@@ -179,6 +180,7 @@ from meho_backplane.operations._validate import (
     validate_params,
 )
 from meho_backplane.operations.composite import (
+    CompositeL2DependencyMissing,
     CompositeRecursionLimitExceeded,
     DispatchChild,
     get_dispatch_child,
@@ -426,9 +428,9 @@ async def _execute_and_audit(
     Wraps the dispatch's success path (steps 6-9) so the main
     :func:`dispatch` body stays a flat sequence of phase calls.
     Failures inside the branch land as ``handler_unreachable`` /
-    ``connector_error`` :class:`OperationResult` shapes; the audit row
-    still gets written before the return so the operator-visible
-    record is consistent with the dispatcher's reply.
+    ``composite_l2_missing`` / ``connector_error`` :class:`OperationResult`
+    shapes; the audit row still gets written before the return so the
+    operator-visible record is consistent with the dispatcher's reply.
 
     G11.4-T2 (#1071) inserts the connector-boundary redaction
     middleware between the handler's raw return and the JSONFlux
@@ -569,6 +571,12 @@ async def _run_branch_with_error_handling(
     non-callable); every other exception maps to ``connector_error``.
     Both paths write the audit row before returning so the operator-
     visible record is consistent with the structured failure.
+
+    G0.14-T10 (#1151) adds a structured ``composite_l2_missing`` catch
+    ahead of the generic ``except Exception`` so the vmware composite
+    pre-flight signal (the catalog-command remediation step) survives
+    the audit + reduce pipeline rather than collapsing into the
+    opaque ``connector_error`` envelope.
     """
     try:
         return await _run_source_kind_branch(
@@ -592,6 +600,26 @@ async def _run_branch_with_error_handling(
             duration_ms=duration_ms,
         )
         return result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms)
+    except CompositeL2DependencyMissing as l2_exc:
+        # G0.14-T10 (#1151): pre-flight detected missing L2 sub-ops.
+        # Structured ``composite_l2_missing`` per
+        # ``docs/codebase/error-message-shape.md`` rather than the
+        # generic ``connector_error`` below. The catch sits ahead of
+        # the generic ``except Exception`` so the structured shape wins.
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="error",
+            duration_ms=duration_ms,
+        )
+        return result_composite_l2_missing(
+            op_id, l2_exc.missing_op_ids, l2_exc.catalog_command, duration_ms
+        )
     except Exception as exc:
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(

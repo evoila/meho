@@ -35,6 +35,10 @@ Scope:
   ``host.detach_from_vds``, ``cluster.patch``.
 """
 
+from meho_backplane.connectors.vmware_rest.composites._preflight import (
+    preflight_l2_dependencies,
+    reset_preflight_cache,
+)
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -72,7 +76,9 @@ __all__ = [
     "host_evacuate_composite",
     "network_portgroup_audit_composite",
     "performance_summary_composite",
+    "preflight_l2_dependencies",
     "register_vmware_composite_operations",
+    "reset_preflight_cache",
     "vm_clone_composite",
     "vm_create_composite",
     "vm_migrate_composite",

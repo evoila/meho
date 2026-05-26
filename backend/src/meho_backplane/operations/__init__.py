@@ -57,6 +57,7 @@ retrieval helpers in :mod:`meho_backplane.operations.search`
 """
 
 from meho_backplane.operations.composite import (
+    CompositeL2DependencyMissing,
     CompositeRecursionLimitExceeded,
     DispatchChild,
 )
@@ -87,6 +88,7 @@ from meho_backplane.operations.typed_register import (
 )
 
 __all__ = [
+    "CompositeL2DependencyMissing",
     "CompositeOpHandler",
     "CompositeRecursionLimitExceeded",
     "DispatchChild",

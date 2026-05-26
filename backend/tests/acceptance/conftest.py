@@ -197,6 +197,13 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "broadcast_override",
     "documents",
     "endpoint_descriptor",
+    # ``event_outbox.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
+    # migration ``0026`` (G11.3-T3 #824). PG rejects truncating ``tenant``
+    # unless every referencing table is listed in the same statement, so
+    # ``event_outbox`` must appear here or every PG-backed acceptance test
+    # errors at setup with ``cannot truncate a table referenced in a
+    # foreign key constraint`` (the recurring fixture gotcha #1064 / #1065).
+    "event_outbox",
     # ``graph_edge_history`` carries a real FK ``graph_edge(id) ON DELETE
     # SET NULL`` per migration ``0012`` (#856 T1); the same applies to
     # ``graph_node_history``. PG rejects a TRUNCATE on the parent table

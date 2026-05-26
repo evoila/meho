@@ -232,6 +232,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 __all__ = [
+    "EVENT_OUTBOX_NOTIFY_CHANNEL",
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
@@ -240,6 +241,7 @@ __all__ = [
     "BroadcastOverride",
     "Document",
     "EndpointDescriptor",
+    "EventOutbox",
     "GraphEdge",
     "GraphEdgeHistory",
     "GraphEdgeKind",
@@ -253,6 +255,17 @@ __all__ = [
     "TenantConventionHistory",
     "WebSession",
 ]
+
+
+#: PostgreSQL ``LISTEN/NOTIFY`` channel name the event-outbox drain
+#: loop subscribes to, and the same channel the writer ``NOTIFY``s on
+#: after an outbox insert commits. The notification is a **latency
+#: hint** only; the drain loop's durable guarantee comes from the
+#: outbox table (G11.3-T3 #824). A dropped notification is benign --
+#: the next polled tick picks the row up anyway. Channel names in PG
+#: are quoted-lower-case identifiers; lowercase + underscore keeps
+#: the ``LISTEN`` / ``NOTIFY`` statements quoting-free.
+EVENT_OUTBOX_NOTIFY_CHANNEL: str = "event_outbox_new"
 
 
 #: Portable JSON column type — :class:`JSONB` on PostgreSQL (binary
@@ -3712,5 +3725,155 @@ class ApprovalRequest(Base):
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),
             name="ck_approval_request_status",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Event outbox (G11.3-T3 / #824)
+# ---------------------------------------------------------------------------
+
+
+class EventOutbox(Base):
+    """One durable MEHO-internal event ready for subscription dispatch.
+
+    Initiative #804 (G11.3 Scheduler P2), Task #824 (T3). The
+    transactional outbox: producers insert one of these rows in the
+    same DB transaction that writes the event-producing state change
+    (an :class:`AgentRun` transitioning to ``succeeded`` / ``failed`` /
+    ``cancelled``; future kinds: audit predicates, connector alerts).
+    A separate drain loop (:mod:`meho_backplane.events.drain`) scans the
+    outbox via ``SELECT ... FOR UPDATE SKIP LOCKED``, claims unprocessed
+    rows, and dispatches them to subscribed
+    :class:`ScheduledTrigger` rows of kind ``'event'`` once the
+    subscription matcher lands (T5 #826).
+
+    Why a transactional outbox (not raw ``LISTEN/NOTIFY``)
+    ------------------------------------------------------
+
+    Plain PG ``LISTEN/NOTIFY`` loses notifications sent while no
+    listener is connected. For an event-driven agent trigger that must
+    survive process restarts that loss is unacceptable. The
+    transactional outbox is the durable, replica-safe alternative; the
+    drain loop's ``SELECT ... FOR UPDATE SKIP LOCKED`` makes it
+    multi-replica safe (no double-dispatch). ``LISTEN/NOTIFY`` is
+    layered on top as a sub-second wake hint; the drain still ticks
+    on a 5-10s timer so a dropped notification is benign.
+
+    Append-only discipline
+    ----------------------
+
+    Producers only ever ``INSERT`` into this table; the drain loop
+    is the only mutator (stamps ``claimed_at`` / ``claimed_by`` and
+    eventually ``processed_at``). The :class:`AuditLog` append-only
+    recipe (one row per event, indexed by tenant + sequence) shapes
+    this table; the model carries no transition helpers because the
+    drain is the only mutator and lives in its own service module.
+
+    Schema decisions
+    ----------------
+
+    * ``event_id`` -- ``BIGSERIAL`` primary key on PG; ``Integer``
+      autoincrement on SQLite via :data:`_PORTABLE_BIG_SERIAL`. Monotonic
+      so the drain's "scan unprocessed events" query has a natural
+      ordering key without timestamp ties; the drain queries
+      ``WHERE processed_at IS NULL ORDER BY event_id``.
+
+    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES tenant(id)``
+      FK (migration 0026). Same discipline as :attr:`AgentRun.tenant_id`
+      / :attr:`ScheduledTrigger.tenant_id`.
+
+    * ``event_kind`` -- Text NOT NULL. The discriminator the matcher
+      will use once the subscription-junction lands. Free-text (not a
+      closed enum) because event kinds are added per-Initiative
+      without coordinated DB migrations; the matching policy lives in
+      the subscriber. v0.2 values shipped: ``agent_run.completed``.
+
+    * ``payload`` -- portable JSON -> JSONB NOT NULL DEFAULT ``'{}'``.
+      The event-specific payload the subscriber's filter matches
+      against. Not-null with a default keeps a payload-less event
+      insertable without ambiguity at the SQL layer.
+
+    * ``claimed_at`` / ``claimed_by`` -- ``timestamptz`` + Text, both
+      nullable. Stamped by the drain on a successful claim;
+      ``claimed_by`` records a process identifier so an operator can
+      observe which replica is handling a stuck claim.
+
+    * ``processed_at`` -- ``timestamptz`` nullable. Stamped after the
+      event has been dispatched (or marked no-op in v0.2 when no
+      subscriber matches). NULL means "not yet processed"; the partial
+      index keys on this column.
+
+    * ``created_at`` -- ``timestamptz`` NOT NULL DEFAULT ``now()``.
+
+    Indexes
+    -------
+
+    * ``event_outbox_tenant_unprocessed_idx`` -- b-tree on
+      ``(tenant_id, processed_at, event_id)``. Drives the future
+      tenant-scoped scan once the matcher lands.
+    * ``event_outbox_unprocessed_idx`` -- partial b-tree on
+      ``event_id`` ``WHERE processed_at IS NULL`` on PG (plain b-tree
+      on SQLite). Drives the global drain scan; partial keeps the
+      index size flat as processed rows are tombstoned.
+    """
+
+    __tablename__ = "event_outbox"
+
+    event_id: Mapped[int] = mapped_column(
+        _PORTABLE_BIG_SERIAL,
+        primary_key=True,
+        autoincrement=True,
+    )
+    # Real REFERENCES tenant(id) FK -- migration 0026 enforces it at
+    # the DB layer (same discipline AgentRun / ScheduledTrigger follow).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    event_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # NOT NULL with a default of ``{}`` (see class docstring); the
+    # ``none_as_null`` flag stays off because a producer-side ``None``
+    # is a bug, not a NULL-storing intent.
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        default=dict,
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    claimed_by: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "event_outbox_tenant_unprocessed_idx",
+            "tenant_id",
+            "processed_at",
+            "event_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "event_outbox_unprocessed_idx",
+            "event_id",
+            postgresql_using="btree",
+            postgresql_where=sa.text("processed_at IS NULL"),
         ),
     )

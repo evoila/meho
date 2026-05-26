@@ -335,6 +335,7 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
                     scheduler_enabled=False,
+                    event_drain_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -348,9 +349,17 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
             # G11.3-T2 (#823) — scheduler patches; flag off in MagicMock so
             # start_scheduler is never reached, but the symbol must still
-            # exist as a patchable target.
-            patch("meho_backplane.main.start_scheduler"),
-            patch("meho_backplane.main.stop_scheduler", new=AsyncMock()),
+            # exist as a patchable target. Same for G11.3-T3 (#824)'s
+            # event-drain patches -- combined into one ``patch.multiple``
+            # to stay under CPython's "too many statically nested blocks"
+            # limit (20) the parenthesised ``with`` form imposes.
+            patch.multiple(
+                "meho_backplane.main",
+                start_scheduler=MagicMock(),
+                stop_scheduler=AsyncMock(),
+                start_event_drain=MagicMock(),
+                stop_event_drain=AsyncMock(),
+            ),
         ):
             # Manually step through the lifespan async generator.
             gen = lifespan(None)  # type: ignore[arg-type]
@@ -406,6 +415,7 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
                     scheduler_enabled=False,
+                    event_drain_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -419,9 +429,17 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
             # G11.3-T2 (#823) — scheduler patches; flag off in MagicMock so
             # start_scheduler is never reached, but the symbol must still
-            # exist as a patchable target.
-            patch("meho_backplane.main.start_scheduler"),
-            patch("meho_backplane.main.stop_scheduler", new=AsyncMock()),
+            # exist as a patchable target. Same for G11.3-T3 (#824)'s
+            # event-drain patches -- combined into one ``patch.multiple``
+            # to stay under CPython's "too many statically nested blocks"
+            # limit (20) the parenthesised ``with`` form imposes.
+            patch.multiple(
+                "meho_backplane.main",
+                start_scheduler=MagicMock(),
+                stop_scheduler=AsyncMock(),
+                start_event_drain=MagicMock(),
+                stop_event_drain=AsyncMock(),
+            ),
         ):
             gen = lifespan(None)  # type: ignore[arg-type]
             await gen.__aenter__()

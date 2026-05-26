@@ -96,6 +96,7 @@ from meho_backplane.broadcast import (
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
+from meho_backplane.events import start_event_drain, stop_event_drain
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -304,6 +305,7 @@ class _BackgroundTasks:
     topology_history: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
+    event_drain: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -343,12 +345,19 @@ def _start_background_tasks() -> _BackgroundTasks:
     scheduler: asyncio.Task[None] | None = None
     if settings.scheduler_enabled:
         scheduler = start_scheduler()
+    # G11.3-T3 #824 — event-outbox drain loop. Gated on
+    # EVENT_DRAIN_ENABLED so operators using an external orchestrator
+    # (or running the test path without the drain) can opt out.
+    event_drain: asyncio.Task[None] | None = None
+    if settings.event_drain_enabled:
+        event_drain = start_event_drain()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
         topology_history=topology_history,
         grant_expiry=grant_expiry,
         scheduler=scheduler,
+        event_drain=event_drain,
     )
 
 
@@ -360,6 +369,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.event_drain is not None:
+        await stop_event_drain(tasks.event_drain)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
     if tasks.grant_expiry is not None:

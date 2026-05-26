@@ -1,0 +1,17 @@
+# Shadow / detection-only fixture (#1073 acceptance criterion).
+# Pins that ``mode: shadow`` runs the engine's detection walk
+# (manifest is populated) but does NOT mutate the payload --
+# expected.json equals raw.json. This is the safe-rollout
+# primitive for a new rule.
+
+id: roundtrip-shadow-detection
+version: 1
+description: |
+  Detection-only run of the bearer-token rule. The engine emits the
+  manifest entry but the returned payload is unchanged.
+mode: shadow
+rules:
+  - name: detect-bearer-token
+    pattern: bearer_token
+    action: redact
+    reason: "shadow rollout: detect, do not redact"

@@ -38,6 +38,7 @@ from meho_backplane.redaction.middleware import (
 from meho_backplane.redaction.patterns import NAMED_PATTERNS, PATTERN_NAMES, get_pattern
 from meho_backplane.redaction.policy import (
     RedactionAction,
+    RedactionMode,
     RedactionPolicy,
     RedactionPolicyError,
     RedactionRule,
@@ -62,6 +63,7 @@ __all__ = [
     "RedactionAction",
     "RedactionManifestEntry",
     "RedactionMiddlewareResult",
+    "RedactionMode",
     "RedactionPolicy",
     "RedactionPolicyError",
     "RedactionResult",

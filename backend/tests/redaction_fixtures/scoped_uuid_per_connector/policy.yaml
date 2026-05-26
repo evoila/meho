@@ -1,0 +1,17 @@
+# Scope-predicate fixture: a UUID rule limited to the ``github``
+# connector. Pins that the scope label (connector_id) gates the
+# rule -- the same payload run under a different connector_id (or
+# with no labels) must not see the rule fire.
+
+id: roundtrip-scoped-uuid
+version: 1
+description: |
+  Round-trip fixture: a uuid rule scoped to connector_id=github
+  fires only when the engine is called with that label.
+rules:
+  - name: mask-github-uuid
+    pattern: uuid
+    action: mask
+    scope:
+      connector_id: github
+    reason: "github correlator uuid; mask preserves shape"

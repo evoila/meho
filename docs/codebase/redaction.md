@@ -2,7 +2,7 @@
 
 Initiative [#805](https://github.com/evoila/meho/issues/805) (G11.4 Safety,
 C1) ships a sanitization middleware that redacts every connector response
-before it reaches a caller or LLM. This document covers two landed
+before it reaches a caller or LLM. This document covers three landed
 slices:
 
 * The foundation
@@ -13,11 +13,13 @@ slices:
   ([#1071](https://github.com/evoila/meho/issues/1071)): the
   middleware that sits in `dispatcher._reduce_or_error` and runs
   capture-raw → audit-raw → redact → reduce on every dispatch.
+* The round-trip CI gate + shadow mode
+  ([#1073](https://github.com/evoila/meho/issues/1073)): fixture-pair
+  enforcement of policy correctness in CI, plus a policy-level
+  `mode: shadow` flag for safe new-rule rollout.
 
 Pending sibling tickets: the Tier-2 Microsoft Presidio NER adapter
-(C1-c, [#1072](https://github.com/evoila/meho/issues/1072)), the
-round-trip CI gate (C1-d,
-[#1073](https://github.com/evoila/meho/issues/1073)), and the
+(C1-c, [#1072](https://github.com/evoila/meho/issues/1072)) and the
 agent-invocation audit row (C2-b,
 [#1074](https://github.com/evoila/meho/issues/1074)).
 
@@ -56,9 +58,10 @@ All types are Pydantic v2 frozen models, defined in
 | Type | Module | Role |
 | --- | --- | --- |
 | `RedactionAction` | `policy.py` | `Literal["redact", "mask", "hash"]` |
+| `RedactionMode` | `policy.py` | `Literal["enforce", "shadow"]` (default `enforce`) |
 | `RedactionScope` | `policy.py` | Optional connector_id/tenant/op predicate |
 | `RedactionRule` | `policy.py` | One named-pattern → action binding |
-| `RedactionPolicy` | `policy.py` | Versioned bundle of rules |
+| `RedactionPolicy` | `policy.py` | Versioned bundle of rules + a `mode` |
 | `RedactionPolicyError` | `policy.py` | One typed exception for any parse / validation failure |
 | `RedactionManifestEntry` | `engine.py` | One manifest row (rule, pattern, action, count, span, reason, path) |
 | `RedactionResult` | `engine.py` | Engine return value: `redacted` + `manifest` |
@@ -249,6 +252,102 @@ keep the redaction artefacts: the middleware ran successfully
 before the reducer crashed, so the raw + manifest are still
 recovery-grade evidence.
 
+## Shadow / detection-only mode (#1073)
+
+A policy can declare `mode: shadow` at the top level. The engine
+still walks every payload and emits the full manifest (so an
+operator can watch detection counts in audit + dashboards), but
+returns the **input payload unmodified** as `redacted`. This is
+the safe-rollout primitive for a new rule:
+
+```yaml
+id: new-rule-rollout
+version: 1
+mode: shadow   # detection only -- do not yet rewrite payloads
+rules:
+  - name: detect-new-shape
+    pattern: api_key
+    action: redact
+    reason: "monitoring new credential format; not enforcing yet"
+```
+
+Once the operator confirms the manifest counts are sane (no
+over-detection on production traffic), the same YAML is
+re-published with `mode: enforce` (or with the `mode:` line
+removed -- enforce is the default) and the rule starts mutating
+payloads.
+
+Implementation contract (load-bearing):
+
+- **Policy-level, not call-level.** The flag travels with the
+  policy YAML; there is no `mode=` argument threaded through the
+  middleware, the resolver, or `redact()`. A future "monitor"
+  mode would extend the `RedactionMode` `Literal` union with the
+  same architectural shape.
+- **Detection identical to enforce.** A `shadow` policy and the
+  same-rules `enforce` policy produce **identical manifests**
+  (`rule`, `pattern`, `action`, `count`, `path`); only
+  `redacted` differs. The C1-d round-trip fixture suite uses this
+  invariant to prove the mode flag is wired correctly.
+- **No middleware re-plumbing.** `apply_connector_boundary_redaction`
+  reads the policy's mode via the engine; the dispatcher,
+  audit-write path, and broadcast path are unchanged.
+
+## Round-trip CI gate (#1073)
+
+The redaction policy round-trips (capture raw → re-run policy →
+diff against the agent's view is empty) are enforced by the
+fixture suite at `backend/tests/redaction_fixtures/` and the
+harness at `backend/tests/test_redaction_roundtrip_fixtures.py`.
+
+Each fixture is a sub-directory:
+
+```
+backend/tests/redaction_fixtures/<fixture-name>/
+  policy.yaml          # required: policy under test
+  raw.json             # required: captured raw payload
+  expected.json        # required: expected redacted view (or raw, in shadow mode)
+  manifest.json        # optional: expected manifest projection
+  labels.json          # optional: { connector_id, tenant, op }
+```
+
+The harness runs the engine for every fixture and asserts the
+output equals `expected.json` -- both senses, in one `==`:
+
+- **Leak / under-redaction:** raw secret survives into the
+  engine's output but `expected.json` shows it redacted →
+  equality fails → CI red.
+- **Over-redaction:** engine touches a value `expected.json`
+  shows untouched → equality fails → CI red.
+
+Both failure modes are equally load-bearing per Initiative #805's
+DoD: under-redaction is the safety failure (the parent goal #800
+hinges on it); over-redaction is the usability failure (operators
+stop trusting the system when their summaries blank out).
+
+**Meta-tests:**
+`backend/tests/test_redaction_roundtrip_meta.py` proves the gate
+*would* fail if either failure mode is injected. The file
+constructs in-memory fixture pairs with tampered `expected`
+payloads (one for leak, one for over-redaction) and asserts the
+comparator fires `AssertionError`. The meta-tests exist because
+"the gate caught nothing this PR" looks the same on the CI dashboard
+as "the gate is broken" -- the meta-tests rule out the second case.
+
+**Where the gate runs.** The harness is a standard pytest file
+under `backend/tests/`, so it is picked up by the existing
+`python-lint-test` job in `.github/workflows/ci.yml`. That job
+is in the branch-protection required-status-checks set, so a
+round-trip mismatch blocks merge by configuration -- no new
+workflow step needed. Adding new fixture pairs only requires
+dropping them into the fixtures directory; the harness
+auto-discovers them.
+
+**Adding a fixture.** See
+`backend/tests/redaction_fixtures/README.md` for the per-fixture
+layout and the dummy-secret-shape convention (replace real
+secrets with regex-equivalent fakes).
+
 ## Dependencies
 
 - **PyYAML** (`yaml.safe_load`) — already a transitive dep; matches
@@ -258,7 +357,7 @@ recovery-grade evidence.
   `collections.abc`, `threading` (resolver lock). No third-party
   regex / NER libraries here; Tier-2 (#1072) adds Microsoft Presidio.
 
-No new runtime dependencies were added by Task #1070 or #1071.
+No new runtime dependencies were added by Task #1070, #1071, or #1073.
 
 ## Known issues / future work
 
@@ -299,7 +398,9 @@ No new runtime dependencies were added by Task #1070 or #1071.
   (G11 Agentic ops runtime) §"trust boundary has to be the API".
 - Parent initiative: [#805](https://github.com/evoila/meho/issues/805)
   (G11.4 Safety) §Approach for the tiered design.
-- Task: [#1070](https://github.com/evoila/meho/issues/1070).
+- Tasks: [#1070](https://github.com/evoila/meho/issues/1070),
+  [#1071](https://github.com/evoila/meho/issues/1071),
+  [#1073](https://github.com/evoila/meho/issues/1073).
 - Seam: `dispatcher._reduce_or_error`
   (`backend/src/meho_backplane/operations/dispatcher.py`) — the
   C1-b middleware (#1071) sits here.

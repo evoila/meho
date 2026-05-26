@@ -1,0 +1,3 @@
+[
+  {"rule": "detect-bearer-token", "pattern": "bearer_token", "action": "redact", "count": 1, "path": "log"}
+]

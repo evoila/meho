@@ -138,6 +138,16 @@ def redact(
     Rule ordering: rules apply in policy order. Each rule walks the
     full payload before the next rule runs; later rules see the
     already-redacted output of earlier ones (see module docstring).
+
+    **Shadow / detection-only mode (G11.4-T4 #1073).** When
+    ``policy.mode == "shadow"`` the engine still walks the payload
+    and emits the full manifest of what *would* have been redacted,
+    but returns the unmodified payload as ``redacted``. This is the
+    safe-rollout primitive: an operator can deploy a new rule, watch
+    the manifest counts in audit, then flip the policy to ``enforce``
+    once confident the rule does not over-redact production traffic.
+    Shadow mode does not skip detection -- it skips only the
+    in-payload substitution.
     """
     # Pre-filter rules by scope so the inner walk does not re-evaluate
     # the predicate per leaf. The remaining rules ``apply`` unconditionally
@@ -150,8 +160,16 @@ def redact(
 
     manifest: list[RedactionManifestEntry] = []
     current = payload
+    # Shadow / detection-only: the walk still runs (so the manifest
+    # is identical to the enforce-mode manifest, which is the whole
+    # point of the mode) but the in-leaf substitution is suppressed.
+    # The structure-normalisation half of the walk's contract still
+    # fires -- ``OrderedDict`` flattens to ``dict``, ``tuple``
+    # flattens to ``list`` -- so the JSON-shape guarantee the
+    # JSONFlux reducer relies on is preserved in both modes.
+    mutate = policy.mode != "shadow"
     for rule in applicable_rules:
-        current = _walk_and_apply(current, rule, manifest, path="")
+        current = _walk_and_apply(current, rule, manifest, path="", mutate=mutate)
 
     return RedactionResult(redacted=current, manifest=tuple(manifest))
 
@@ -167,6 +185,7 @@ def _walk_and_apply(
     manifest: list[RedactionManifestEntry],
     *,
     path: str,
+    mutate: bool,
 ) -> object:
     """Recurse through *node*, applying *rule* at every string leaf.
 
@@ -179,9 +198,13 @@ def _walk_and_apply(
     boundary downstream relies on. The Pydantic schema validates
     payloads only at the connector boundary, not here -- the engine
     is duck-typed against ``Mapping`` and ``Sequence``.
+
+    *mutate* gates the in-string substitution step (``False`` for
+    shadow / detection-only mode). The manifest is appended either
+    way -- the gate only changes what the returned string is.
     """
     if isinstance(node, str):
-        return _apply_to_str(node, rule, manifest, path=path)
+        return _apply_to_str(node, rule, manifest, path=path, mutate=mutate)
     if isinstance(node, Mapping):
         return {
             key: _walk_and_apply(
@@ -189,6 +212,7 @@ def _walk_and_apply(
                 rule,
                 manifest,
                 path=_join_path(path, str(key)),
+                mutate=mutate,
             )
             for key, value in node.items()
         }
@@ -199,6 +223,7 @@ def _walk_and_apply(
                 rule,
                 manifest,
                 path=_join_path(path, str(index)),
+                mutate=mutate,
             )
             for index, item in enumerate(node)
         ]
@@ -214,6 +239,7 @@ def _apply_to_str(
     manifest: list[RedactionManifestEntry],
     *,
     path: str,
+    mutate: bool,
 ) -> str:
     """Match *rule* against *leaf*; emit manifest + return new string.
 
@@ -222,16 +248,17 @@ def _apply_to_str(
     so that branch is unreachable in production. Defensively, an
     unknown name here would crash policy load before any traffic, not
     a request mid-flight.
+
+    When *mutate* is ``False`` (shadow / detection-only mode), the
+    manifest is still appended on a match but the returned string
+    is the original *leaf*. The detection signal is identical to
+    enforce mode; only the in-payload substitution is suppressed.
     """
     pattern = get_pattern(rule.pattern)
     matches = list(pattern.finditer(leaf))
     if not matches:
         return leaf
 
-    redacted = pattern.sub(
-        lambda m: _replacement_for(rule, m),
-        leaf,
-    )
     first = matches[0]
     manifest.append(
         RedactionManifestEntry(
@@ -244,7 +271,12 @@ def _apply_to_str(
             path=path,
         ),
     )
-    return redacted
+    if not mutate:
+        return leaf
+    return pattern.sub(
+        lambda m: _replacement_for(rule, m),
+        leaf,
+    )
 
 
 def _replacement_for(rule: RedactionRule, match: re.Match[str]) -> str:

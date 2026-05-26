@@ -34,6 +34,7 @@ from meho_backplane.ui.auth.middleware import (
     STATIC_PREFIX,
     UISessionContext,
     UISessionMiddleware,
+    require_ui_admin,
     require_ui_session,
 )
 from meho_backplane.ui.auth.routes import (
@@ -50,5 +51,6 @@ __all__ = [
     "UISessionContext",
     "UISessionMiddleware",
     "build_router",
+    "require_ui_admin",
     "require_ui_session",
 ]

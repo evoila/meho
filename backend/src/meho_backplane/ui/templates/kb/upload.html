@@ -1,0 +1,264 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  KB upload page: single + bulk drag-and-drop upload of .md files.
+
+  Initiative #339 (G10.2 Knowledge base UI), Task #871 (T2).
+
+  Alpine.js component (``x-data="kbUpload()"``) handles:
+    * Drag-and-drop: ``@dragover.prevent`` + ``@drop.prevent``
+      intercept native drag events; ``files`` array is populated
+      from ``event.dataTransfer.files``.
+    * Click-to-browse: the hidden ``<input type="file">`` is triggered
+      by the button's ``@click``. ``multiple`` is set so bulk pick
+      works from the browse dialog too.
+    * Preview before submit: for single-file mode the filename + derived
+      slug are shown in a read-only preview row before the operator
+      submits. The slug field is editable for the single-file path.
+
+  HTMX wiring:
+    * Single file: ``hx-post="/ui/kb/upload"`` on the single-file form.
+    * Bulk: ``hx-post="/ui/kb/upload/bulk"`` on the multi-file form.
+    * Both use ``hx-target="#upload-results"`` and
+      ``hx-swap="innerHTML"`` so the ``_upload_progress.html`` partial
+      replaces the results area.
+    * ``hx-encoding="multipart/form-data"`` is required for file uploads.
+    * ``X-CSRF-Token`` is injected via the page-level
+      ``hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'`` on the
+      wrapping section.
+
+  Template blocks:
+    * ``page_title`` — overrides ``<title>`` suffix.
+    * ``content`` — overrides the base.html main pane.
+    * ``scripts`` — no extra JS (Alpine is loaded by base.html vendor).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Upload · Knowledge &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <nav aria-label="Breadcrumb" class="mb-1">
+        <a href="/ui/kb" class="btn btn-ghost btn-xs gap-1">
+          <span aria-hidden="true">&larr;</span>
+          Knowledge
+        </a>
+      </nav>
+      <h1 class="text-2xl font-semibold">Upload Knowledge Entries</h1>
+      <p class="text-sm opacity-70">
+        Drag-and-drop or browse to upload <code>.md</code> files.
+        Duplicate content (same body hash) is silently ignored.
+      </p>
+    </div>
+    <div>
+      <a href="/ui/kb" class="btn btn-ghost btn-sm">
+        View all entries
+      </a>
+    </div>
+  </header>
+
+  {# ---------- Shared Alpine upload component ---------- #}
+  <div
+    x-data='{
+      files: [],
+      dragOver: false,
+      slugOverride: "",
+      clearFiles() { this.files = []; this.slugOverride = ""; },
+      handleDrop(ev) {
+        this.dragOver = false;
+        const dropped = Array.from(ev.dataTransfer.files).filter(f => f.name.endsWith(".md"));
+        this.files = dropped;
+        if (dropped.length === 1) {
+          const stem = dropped[0].name.replace(/\.md$/i, "");
+          this.slugOverride = stem.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        }
+      },
+      openBrowse() { document.getElementById("kb-file-input").click(); },
+      handleBrowse(ev) {
+        const picked = Array.from(ev.target.files).filter(f => f.name.endsWith(".md"));
+        this.files = picked;
+        if (picked.length === 1) {
+          const stem = picked[0].name.replace(/\.md$/i, "");
+          this.slugOverride = stem.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+        }
+      }
+    }'
+    class="space-y-4"
+  >
+    {# --- Drop zone --- #}
+    <div
+      class="card border-2 border-dashed transition-colors"
+      :class="dragOver ? 'border-primary bg-primary/5' : 'border-base-300 bg-base-100'"
+      @dragover.prevent="dragOver = true"
+      @dragleave.prevent="dragOver = false"
+      @drop.prevent="handleDrop($event)"
+      role="region"
+      aria-label="Drag and drop .md files here"
+    >
+      <div class="card-body items-center text-center py-10 gap-3">
+        <div class="text-4xl opacity-40" aria-hidden="true">&#x1F4C1;</div>
+        <p class="text-base font-medium">
+          Drop <code>.md</code> files here
+        </p>
+        <p class="text-sm opacity-60">or</p>
+        <button
+          type="button"
+          class="btn btn-primary btn-sm"
+          @click="openBrowse()"
+          aria-label="Browse files to upload"
+        >
+          Browse files
+        </button>
+        {# Hidden file input driven by the Browse button #}
+        <input
+          id="kb-file-input"
+          type="file"
+          accept=".md"
+          multiple
+          class="sr-only"
+          @change="handleBrowse($event)"
+          aria-hidden="true"
+          tabindex="-1"
+        />
+        <p class="text-xs opacity-40" aria-live="polite">
+          <span x-show="files.length === 0">No files selected</span>
+          <span x-show="files.length === 1" x-text="`1 file selected: ${files[0].name}`"></span>
+          <span x-show="files.length > 1" x-text="`${files.length} files selected`"></span>
+        </p>
+      </div>
+    </div>
+
+    {# --- Single-file form (shown when exactly 1 file is staged) --- #}
+    <div x-show="files.length === 1" x-cloak>
+      <form
+        id="kb-single-upload-form"
+        hx-post="/ui/kb/upload"
+        hx-target="#upload-results"
+        hx-swap="innerHTML"
+        hx-encoding="multipart/form-data"
+        hx-indicator="#upload-spinner"
+        class="card bg-base-100 border-base-300 border shadow-sm"
+      >
+        <div class="card-body space-y-4">
+          <h2 class="card-title text-base">Single file upload</h2>
+
+          {# The hidden file input value is wired via Alpine's @change above;
+             HTMX picks it up from #kb-file-input on submit via hx-include. #}
+          <div class="form-control">
+            <label class="label" for="single-slug">
+              <span class="label-text">Slug</span>
+              <span class="label-text-alt opacity-60">override filename-derived value</span>
+            </label>
+            <input
+              id="single-slug"
+              type="text"
+              name="slug"
+              class="input input-bordered w-full font-mono"
+              x-model="slugOverride"
+              placeholder="kebab-case-slug"
+              pattern="[a-z][a-z0-9.\-]*[a-z0-9]?"
+              aria-label="Slug for the uploaded entry"
+            />
+            <div class="label">
+              <span class="label-text-alt opacity-50">
+                Must start with [a-z], may contain hyphens + dots.
+              </span>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-2">
+            <button
+              type="submit"
+              class="btn btn-primary btn-sm"
+              hx-include="#kb-file-input"
+              aria-label="Upload the selected file"
+            >
+              Upload
+            </button>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              @click="clearFiles()"
+              aria-label="Clear selection"
+            >
+              Clear
+            </button>
+            <span
+              id="upload-spinner"
+              class="htmx-indicator loading loading-spinner loading-sm text-primary"
+              aria-label="Upload in progress"
+            ></span>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    {# --- Bulk form (shown when 2+ files are staged) --- #}
+    <div x-show="files.length > 1" x-cloak>
+      <form
+        id="kb-bulk-upload-form"
+        hx-post="/ui/kb/upload/bulk"
+        hx-target="#upload-results"
+        hx-swap="innerHTML"
+        hx-encoding="multipart/form-data"
+        hx-indicator="#bulk-upload-spinner"
+        class="card bg-base-100 border-base-300 border shadow-sm"
+      >
+        <div class="card-body space-y-4">
+          <h2 class="card-title text-base">
+            Bulk upload
+            <span class="badge badge-primary badge-outline" x-text="`${files.length} files`"></span>
+          </h2>
+
+          {# File list preview #}
+          <ul class="space-y-1 text-sm max-h-48 overflow-y-auto" role="list" aria-label="Files to upload">
+            <template x-for="(f, i) in files" :key="i">
+              <li class="flex items-center gap-2 opacity-80">
+                <span aria-hidden="true" class="text-xs">&#x1F4C4;</span>
+                <span class="font-mono" x-text="f.name"></span>
+              </li>
+            </template>
+          </ul>
+
+          <p class="text-xs opacity-50">
+            Slugs are derived from filenames. Re-uploading unchanged content is a no-op.
+          </p>
+
+          <div class="flex flex-wrap gap-2">
+            <button
+              type="submit"
+              class="btn btn-primary btn-sm"
+              hx-include="#kb-file-input"
+              aria-label="Upload all selected files"
+            >
+              Upload all
+            </button>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              @click="clearFiles()"
+              aria-label="Clear selection"
+            >
+              Clear
+            </button>
+            <span
+              id="bulk-upload-spinner"
+              class="htmx-indicator loading loading-spinner loading-sm text-primary"
+              aria-label="Bulk upload in progress"
+            ></span>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    {# --- Results area --- #}
+    <div id="upload-results" aria-live="polite"></div>
+  </div>
+</section>
+{% endblock %}

@@ -136,7 +136,7 @@
               <th scope="col" class="sr-only">Actions</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="kb-results-body">
             {% for entry in entries %}
               <tr>
                 <td class="font-mono">
@@ -200,7 +200,8 @@
           <p class="text-lg opacity-60">No knowledge entries yet</p>
           <p class="text-sm opacity-40">
             The knowledge base is empty. Use <code>meho kb ingest &lt;dir&gt;</code>
-            to add entries, or wait for the upload UI (coming in T2).
+            to add entries via CLI, or
+            <a href="/ui/kb/upload" class="link">upload a .md file</a>.
           </p>
         </div>
       </div>

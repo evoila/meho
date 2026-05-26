@@ -1,0 +1,170 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  KB upload progress partial.
+
+  Initiative #339 (G10.2 Knowledge base UI), Task #871 (T2). Returned by
+  ``POST /ui/kb/upload`` and ``POST /ui/kb/upload/bulk``. Swapped into
+  ``#upload-results`` via ``hx-target`` + ``hx-swap="innerHTML"``.
+
+  On success entries, an ``hx-swap-oob`` attribute on the injected table
+  row causes HTMX to also insert the new entry into ``#kb-results`` (the
+  KB index list) so the operator sees the entry immediately without a
+  page reload.
+
+  Context variables:
+    rows   -- list[dict]: per-file result rows. Each dict has:
+                filename  str   -- original filename
+                slug      str   -- effective slug (derived or overridden)
+                status    str   -- "success" | "error"
+                message   str   -- human-readable detail
+                entry     KbEntry | None -- on success only
+    bulk   -- bool: True for bulk (multi-file) path
+
+  Design:
+    * DaisyUI ``alert`` for single-file outcome (success = green, error = red).
+    * Table of per-file rows for bulk outcome (DaisyUI table-sm).
+    * For each success row, an OOB ``<tr>`` is emitted targeting a
+      ``<tbody id="kb-results-body">`` in the main KB list, so HTMX
+      performs the swap-oob insertion. If the KB list is not rendered (e.g.
+      the operator navigated directly to /ui/kb/upload), the OOB swap is
+      a no-op (HTMX silently ignores a missing OOB target by default).
+-#}
+
+{# ---- Single-file response (bulk=False, exactly one row) ---- #}
+{% if not bulk and rows|length == 1 %}
+  {% set row = rows[0] %}
+  {% if row.status == "success" %}
+    <div
+      role="alert"
+      class="alert alert-success"
+      aria-live="assertive"
+    >
+      <span>
+        Uploaded <strong class="font-mono">{{ row.slug }}</strong> successfully.
+        <a href="/ui/kb/{{ row.slug }}" class="link link-primary ml-2">View entry &rarr;</a>
+      </span>
+    </div>
+    {# OOB: insert the new entry into the KB list table body, if visible. #}
+    {% if row.entry %}
+      <tr
+        hx-swap-oob="afterbegin:#kb-results-body"
+        class="bg-success/10"
+      >
+        <td class="font-mono">
+          <a href="/ui/kb/{{ row.entry.slug }}" class="link link-primary">{{ row.entry.slug }}</a>
+        </td>
+        <td class="hidden sm:table-cell opacity-70">
+          {{ row.entry.metadata.get("kind", "kb-entry") }}
+        </td>
+        <td class="hidden md:table-cell opacity-70 text-xs">
+          {{ row.entry.updated_at.strftime("%Y-%m-%d %H:%M") }}
+        </td>
+        <td>
+          <a
+            href="/ui/kb/{{ row.entry.slug }}"
+            class="btn btn-ghost btn-xs"
+            aria-label="View entry {{ row.entry.slug }}"
+          >
+            View
+          </a>
+        </td>
+      </tr>
+    {% endif %}
+  {% else %}
+    <div
+      role="alert"
+      class="alert alert-error"
+      aria-live="assertive"
+    >
+      <span>
+        Upload failed for <strong class="font-mono">{{ row.filename }}</strong>:
+        {{ row.message }}
+      </span>
+    </div>
+  {% endif %}
+
+{# ---- Bulk response (bulk=True or multiple rows) ---- #}
+{% else %}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body">
+      {% set success_count = rows | selectattr("status", "eq", "success") | list | length %}
+      {% set error_count = rows | selectattr("status", "eq", "error") | list | length %}
+      <div class="flex items-center gap-3 mb-2">
+        <h3 class="card-title text-sm">Upload results</h3>
+        {% if success_count > 0 %}
+          <span class="badge badge-success badge-outline">{{ success_count }} succeeded</span>
+        {% endif %}
+        {% if error_count > 0 %}
+          <span class="badge badge-error badge-outline">{{ error_count }} failed</span>
+        {% endif %}
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="table table-sm" aria-label="Bulk upload results">
+          <thead>
+            <tr>
+              <th scope="col">File</th>
+              <th scope="col">Slug</th>
+              <th scope="col">Result</th>
+            </tr>
+          </thead>
+          <tbody id="upload-results-body">
+            {% for row in rows %}
+              <tr class="{{ 'bg-success/10' if row.status == 'success' else 'bg-error/10' }}">
+                <td class="font-mono text-xs break-all">{{ row.filename }}</td>
+                <td class="font-mono text-xs">
+                  {% if row.status == "success" %}
+                    <a href="/ui/kb/{{ row.slug }}" class="link link-primary">{{ row.slug }}</a>
+                  {% else %}
+                    {{ row.slug or "—" }}
+                  {% endif %}
+                </td>
+                <td>
+                  {% if row.status == "success" %}
+                    <span class="badge badge-success badge-sm" aria-label="Success">&#x2713; OK</span>
+                  {% else %}
+                    <span class="badge badge-error badge-sm" title="{{ row.message }}" aria-label="Error: {{ row.message }}">
+                      &#x2717; {{ row.message | truncate(40) }}
+                    </span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {# OOB: insert all success rows into the KB list table body, if visible. #}
+      {% for row in rows %}
+        {% if row.status == "success" and row.entry %}
+          <tr
+            hx-swap-oob="afterbegin:#kb-results-body"
+            class="bg-success/10"
+            aria-label="Newly uploaded entry {{ row.entry.slug }}"
+          >
+            <td class="font-mono">
+              <a href="/ui/kb/{{ row.entry.slug }}" class="link link-primary">{{ row.entry.slug }}</a>
+            </td>
+            <td class="hidden sm:table-cell opacity-70">
+              {{ row.entry.metadata.get("kind", "kb-entry") }}
+            </td>
+            <td class="hidden md:table-cell opacity-70 text-xs">
+              {{ row.entry.updated_at.strftime("%Y-%m-%d %H:%M") }}
+            </td>
+            <td>
+              <a
+                href="/ui/kb/{{ row.entry.slug }}"
+                class="btn btn-ghost btn-xs"
+                aria-label="View entry {{ row.entry.slug }}"
+              >
+                View
+              </a>
+            </td>
+          </tr>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+{% endif %}

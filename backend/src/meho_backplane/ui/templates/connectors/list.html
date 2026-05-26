@@ -45,7 +45,26 @@
         fingerprint, recent operations, and available verbs.
       </p>
     </div>
+    {# "Create target" button -- tenant_admin only. The route re-checks
+       the role server-side via ``resolve_operator_or_403`` (403 for a
+       non-admin); this hide is the UX affordance, not the gate. #}
+    {% if is_tenant_admin %}
+      <button
+        type="button"
+        class="btn btn-primary btn-sm"
+        hx-get="/ui/connectors/create"
+        hx-target="#connectors-modal-container"
+        hx-swap="innerHTML"
+        aria-label="Create target"
+      >
+        Create target
+      </button>
+    {% endif %}
   </header>
+
+  {# HTMX modal mount point -- the create modal fragment is swapped in
+     here; the inserted ``<dialog class="modal-open">`` shows itself. #}
+  <div id="connectors-modal-container"></div>
 
   {# ---------- Filter bar ---------- #}
   <form

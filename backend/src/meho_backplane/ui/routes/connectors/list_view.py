@@ -72,6 +72,10 @@ from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.connectors.operator import (
+    OperatorRoleProbe,
+    resolve_role_probe,
+)
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_list_router"]
@@ -234,6 +238,7 @@ def _next_direction_factory(
 #: function calls in default argument positions).
 _require_ui_session_dep = Depends(require_ui_session)
 _get_raw_session_dep = Depends(get_raw_session)
+_role_probe_dep = Depends(resolve_role_probe)
 
 
 async def _list_targets(
@@ -337,6 +342,7 @@ async def _render(
     product_filter: str | None,
     session_ctx: UISessionContext,
     db_session: AsyncSession,
+    is_tenant_admin: bool,
 ) -> HTMLResponse:
     """Render the list page or the table-rows fragment.
 
@@ -373,6 +379,14 @@ async def _render(
         "direction": direction,
         "next_direction_for": _next_direction_factory(sort, direction),
         "csrf_token": csrf_token,
+        # tenant_admin gate for the "Create target" button (T2 #874).
+        # The create / edit routes re-check the role server-side via
+        # ``resolve_operator_or_403``; the template hides the affordance
+        # from operators who can't use it so the button only surfaces to
+        # tenant_admins. Fails soft to ``False`` (button hidden) on a
+        # transient JWT-validation hiccup -- the write routes remain the
+        # security authority.
+        "is_tenant_admin": is_tenant_admin,
         # The footer in ``base.html`` reads ``ready`` to colour the
         # readiness pill; the connectors surface doesn't poll readiness
         # (the dashboard owns that), so ship ``False`` here so Jinja's
@@ -412,6 +426,7 @@ def build_list_router() -> APIRouter:
         product: str | None = Query(default=None, max_length=100),
         session_ctx: UISessionContext = _require_ui_session_dep,
         db_session: AsyncSession = _get_raw_session_dep,
+        role_probe: OperatorRoleProbe = _role_probe_dep,
     ) -> HTMLResponse:
         """Serve ``GET /ui/connectors``. See module docstring for the
         URL contract.
@@ -428,6 +443,7 @@ def build_list_router() -> APIRouter:
             product_filter=product,
             session_ctx=session_ctx,
             db_session=db_session,
+            is_tenant_admin=role_probe.is_tenant_admin,
         )
 
     router.add_api_route(

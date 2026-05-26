@@ -1,0 +1,58 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded edit-target modal for the Connectors surface
+  (Initiative #340 Task #874 work item #4). Loaded into
+  ``#connectors-modal-container`` on the detail page by the "Edit"
+  button's ``hx-get`` to ``/ui/connectors/<name>/edit``. Fields are
+  pre-populated server-side from the resolved target.
+
+  Submit contract: the form ``hx-patch``es to ``/ui/connectors/<name>``
+  targeting itself.
+    * Success -> 204 + ``HX-Redirect: /ui/connectors`` (back to the
+      list with the edited row).
+    * Validation failure -> 422 + this modal re-rendered with
+      ``errors`` + echoed ``values``.
+
+  The ``name`` field renders read-only -- ``name`` is immutable per the
+  G0.3 contract (rename = delete + create), and the PATCH route
+  addresses the target by the path segment, not the form body. CSRF
+  posture matches the create modal.
+-#}
+<dialog id="connectors-edit-modal" class="modal modal-open">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg" id="connectors-edit-modal-title">
+      Edit target <span class="font-mono">{{ target.name }}</span>
+    </h3>
+
+    <form
+      id="connectors-edit-form"
+      hx-patch="/ui/connectors/{{ target.name | urlencode }}"
+      hx-target="this"
+      hx-swap="outerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="connectors-edit-modal-title"
+    >
+      {% include "connectors/_target_form_fields.html" %}
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-edit"
+          onclick="document.getElementById('connectors-edit-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="edit-submit">
+          Save changes
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

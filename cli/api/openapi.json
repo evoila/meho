@@ -7032,6 +7032,153 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/create": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Create Modal",
+        "description": "``GET /ui/connectors/create`` -- HTMX-loaded create modal fragment.",
+        "operationId": "ui_connectors_create_modal_ui_connectors_create_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Create Submit",
+        "description": "``POST /ui/connectors/create`` -- create one target via the REST handler.\n\nAn unchecked ``vpn_required`` checkbox is omitted from the form\nbody entirely (HTML checkbox semantics), so FastAPI's\n``Form(default=False)`` lands the correct ``False``; a checked box\nposts the literal value the template sets and coerces to ``True``.",
+        "operationId": "ui_connectors_create_submit_ui_connectors_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_create_submit_ui_connectors_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}/edit": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Edit Modal",
+        "description": "``GET /ui/connectors/{name}/edit`` -- pre-populated edit modal fragment.",
+        "operationId": "ui_connectors_edit_modal_ui_connectors__name__edit_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -7057,6 +7204,56 @@
       }
     },
     "/ui/connectors/{name}": {
+      "patch": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Edit Submit",
+        "description": "``PATCH /ui/connectors/{name}`` -- update one target via the REST handler.",
+        "operationId": "ui_connectors_edit_submit_ui_connectors__name__patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_edit_submit_ui_connectors__name__patch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "get": {
         "tags": [
           "ui-connectors"
@@ -8337,6 +8534,124 @@
         ],
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
+      },
+      "Body_ui_connectors_create_submit_ui_connectors_create_post": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "title": "Name",
+            "default": ""
+          },
+          "product": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Product",
+            "default": ""
+          },
+          "host": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Host",
+            "default": ""
+          },
+          "port": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Port"
+          },
+          "auth_model": {
+            "type": "string",
+            "title": "Auth Model",
+            "default": "shared_service_account"
+          },
+          "secret_ref": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "vpn_required": {
+            "type": "boolean",
+            "title": "Vpn Required",
+            "default": false
+          },
+          "aliases": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Aliases"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 8192,
+            "nullable": true,
+            "title": "Notes"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_create_submit_ui_connectors_create_post"
+      },
+      "Body_ui_connectors_edit_submit_ui_connectors__name__patch": {
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Product",
+            "default": ""
+          },
+          "host": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Host",
+            "default": ""
+          },
+          "port": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Port"
+          },
+          "auth_model": {
+            "type": "string",
+            "title": "Auth Model",
+            "default": "shared_service_account"
+          },
+          "secret_ref": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "vpn_required": {
+            "type": "boolean",
+            "title": "Vpn Required",
+            "default": false
+          },
+          "aliases": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Aliases"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 8192,
+            "nullable": true,
+            "title": "Notes"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_edit_submit_ui_connectors__name__patch"
       },
       "Body_ui_memory_bulk_ui_memory_bulk_post": {
         "properties": {

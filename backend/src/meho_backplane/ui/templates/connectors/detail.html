@@ -42,7 +42,25 @@
         {% if target.vpn_required %}<span aria-label="VPN required" title="VPN required">&#x1F512;</span>{% endif %}
       </p>
     </div>
+    {# "Edit" button -- tenant_admin only (T2 #874). Same server-side
+       gate as the re-probe button (``resolve_operator_or_403`` on the
+       PATCH route); the hide is the UX affordance. #}
+    {% if is_tenant_admin %}
+      <button
+        type="button"
+        class="btn btn-outline btn-sm"
+        hx-get="/ui/connectors/{{ target.name | urlencode }}/edit"
+        hx-target="#connectors-modal-container"
+        hx-swap="innerHTML"
+        aria-label="Edit {{ target.name }}"
+      >
+        Edit
+      </button>
+    {% endif %}
   </header>
+
+  {# HTMX modal mount point for the edit modal fragment. #}
+  <div id="connectors-modal-container"></div>
 
   <div class="grid gap-4 lg:grid-cols-2">
     {# ---------- Column 1 -- Properties + Fingerprint + Recent ops ---------- #}

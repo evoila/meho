@@ -511,6 +511,12 @@ async def expire_stale_requests(
 
     Returns:
         List of the expired :class:`ApprovalRequest` rows (may be empty).
+        Each row carries the transient ``_audit_id`` attribute (the
+        decision row's primary key) so the caller can publish a
+        fail-open ``approval.expired`` broadcast event **after commit**
+        via :func:`publish_approval_event`. The attribute is set on
+        every returned row — see :func:`approve_request` /
+        :func:`reject_request` for the same pattern.
     """
     # Enforce the operator-role floor the docstring promises, mirroring
     # approve_request / reject_request (CodeRabbit #1086).
@@ -532,9 +538,10 @@ async def expire_stale_requests(
         request.decided_at = cutoff
         await session.flush()
 
+        expire_audit_id = uuid.uuid4()
         await _write_audit_row(
             session,
-            audit_id=uuid.uuid4(),
+            audit_id=expire_audit_id,
             operator=operator,
             request=request,
             path="approval.decision",
@@ -549,6 +556,12 @@ async def expire_stale_requests(
             op_id=request.op_id,
             tenant_id=str(operator.tenant_id),
         )
+        # Expose the audit_id as a transient attr so the caller can
+        # publish the ``approval.expired`` broadcast event AFTER commit.
+        # See create_pending_request / approve_request / reject_request
+        # for the same publish-after-commit invariant: a publish-before-
+        # commit would surface a phantom event if the commit fails.
+        request._audit_id = expire_audit_id  # type: ignore[attr-defined]
 
     return rows
 
@@ -649,9 +662,10 @@ async def publish_approval_event(
 ) -> None:
     """Publish a fail-open broadcast event for an approval lifecycle step.
 
-    *decision* is one of ``"pending"`` (creation), ``"approved"``, or
-    ``"rejected"``. The broadcast ``op_id`` is ``approval.<decision>``
-    so operator watchers can match the family with a simple glob.
+    *decision* is one of ``"pending"`` (creation), ``"approved"``,
+    ``"rejected"``, or ``"expired"`` (sweeper-driven). The broadcast
+    ``op_id`` is ``approval.<decision>`` so operator watchers can match
+    the family with a simple glob (``approval.*``).
     """
     try:
         from meho_backplane.broadcast.events import BroadcastEvent, classify_op

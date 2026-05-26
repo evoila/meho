@@ -384,8 +384,9 @@ def _resolve_self_session_id(arguments: dict[str, Any]) -> uuid.UUID:
        :data:`_MCP_SESSION_CONTEXTVAR` the transport binds from the
        inbound ``Mcp-Session-Id`` header). Any mismatch → -32602 —
        including the case where the request carried no session header at
-       all, since the transport then binds a fresh per-call uuid4 that
-       the client cannot have predicted.
+       all, since the transport then leaves the contextvar unbound
+       (G0.14-T6 #1147 decoupled capture from enforcement; the bound
+       value can only ever be a value the client explicitly sent).
     """
     requested = arguments.get("agent_session_id")
     if requested is None:

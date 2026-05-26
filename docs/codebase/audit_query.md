@@ -276,10 +276,12 @@ the flat path (which already returns other in-tenant principals' rows):
 bound MCP session id — the `mcp_session_id` structlog contextvar the
 transport binds from the inbound `Mcp-Session-Id` header (G8.2-T2
 #1010). Any mismatch — a different session id, an absent
-`agent_session_id`, or no session header at all (the transport then
-binds a fresh uuid4 the client can't predict) — is rejected with
-`-32602`. Cross-session forensic replay is the `tenant_admin`-gated
-`meho.audit.replay` tool, not this path.
+`agent_session_id`, or no session header at all (the transport leaves
+the contextvar unbound after G0.14-T6 #1147 decoupled capture from
+enforcement — there is no synthetic uuid4 fallback for the client to
+match against) — is rejected with `-32602`. Cross-session forensic
+replay is the `tenant_admin`-gated `meho.audit.replay` tool, not this
+path.
 
 ## `meho.audit.replay` admin tool (G8.2-T6 #1014)
 
@@ -368,6 +370,16 @@ Reverse dependencies:
   nullable + indexed); G8.2-T2 writes it from the MCP `Mcp-Session-Id`
   header; G8.2-T3 (#1011) un-gated the filter, surfaced the column on the
   returned row, and added `replay.py` for the per-session tree query.
+  G0.14-T6 (#1147) decoupled capture from enforcement: any
+  `Mcp-Session-Id` the client sends is captured into `agent_session_id`
+  regardless of the `MCP_REQUIRE_SESSION_ID` env var (which now strictly
+  gates the missing-header reject), so the replay-tree filter has data
+  to walk on default deploys. Calls with no header (or a malformed one)
+  land `agent_session_id` as NULL — the recursive CTE filters those out
+  of the session walk naturally (no synthetic per-call uuid4 polluting
+  the search). Operators can confirm the deploy's mode at
+  `GET /api/v1/health`'s `mcp_session_id_capture` field
+  (`"always"` / `"enforced"`).
 
 * **`op_id` / `op_class` glob filtering is JSON-path-based.** On PostgreSQL
   the `payload->>'op_id'` lookup runs over the JSONB column without an index

@@ -58,6 +58,18 @@ Detail payloads land in ``extras``. Codes:
 * ``unknown_op`` -- the natural key didn't resolve a descriptor.
 * ``invalid_params`` -- params failed JSON Schema validation.
 * ``no_connector`` -- resolver couldn't pick a connector for the target.
+  ``extras["exception_message"]`` carries the
+  :exc:`~meho_backplane.connectors.NoMatchingConnector` text when the
+  resolver was the source (G0.14-T1 #1142); pre-#1142 ingested-branch
+  misses pass through the bare ``(product, version)`` form.
+* ``ambiguous_connector`` -- the resolver matched two or more
+  connectors and the tie-break ladder couldn't pick. The
+  :exc:`~meho_backplane.connectors.AmbiguousConnectorResolution`
+  message naming the candidate set + the remediation step lands in
+  ``extras["exception_message"]``. G0.14-T1 (#1142) added this branch
+  to both the ``ingested`` and ``typed``/``composite`` source-kind
+  paths; pre-#1142 the exception bubbled past the dispatcher as a
+  bare 500.
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -109,10 +121,10 @@ from typing import Any
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import (
-    NoMatchingConnector,
     OperationResult,
+    ResolutionLabel,
     ResultHandle,
-    resolve_connector,
+    resolve_connector_or_label,
 )
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
@@ -126,6 +138,7 @@ from meho_backplane.operations._branches import (
     dispatch_typed,
 )
 from meho_backplane.operations._errors import (
+    result_ambiguous_connector,
     result_awaiting_approval,
     result_connector_error,
     result_denied,
@@ -216,34 +229,72 @@ type Dispatcher = Callable[..., Awaitable[OperationResult]]
 async def _resolve_connector_instance(
     descriptor: EndpointDescriptor,
     target: Any,
-) -> tuple[Connector | None, str | None]:
+) -> tuple[Connector | None, ResolutionLabel | None, str | None]:
     """Resolve a connector instance for *target* per ``descriptor.source_kind``.
 
-    Returns ``(instance, error_reason)``:
+    Returns ``(instance, error_reason, exception_message)``:
 
-    * ``(instance, None)`` -- resolver picked a class; instance is the
-      cached singleton.
-    * ``(None, None)`` -- no connector needed (typed/composite with a
-      module-level handler, or no target).
-    * ``(None, "no_connector")`` -- ingested op with no resolver match;
-      the caller surfaces this as the ``no_connector`` error.
+    * ``(instance, None, None)`` -- resolver picked a class; instance is
+      the cached singleton.
+    * ``(None, None, None)`` -- no connector needed (typed/composite
+      with ``target is None`` -- a module-level handler that doesn't
+      consume a target).
+    * ``(None, "no_connector", msg)`` -- resolver miss; the caller
+      surfaces this as the ``no_connector`` error and lands ``msg``
+      (the :exc:`~meho_backplane.connectors.NoMatchingConnector`
+      exception text) under ``extras["exception_message"]`` on the
+      :class:`OperationResult`.
+    * ``(None, "ambiguous_connector", msg)`` -- resolver matched two
+      or more candidates and the tie-break ladder couldn't pick; the
+      caller surfaces this as the ``ambiguous_connector`` error and
+      lands ``msg`` (the
+      :exc:`~meho_backplane.connectors.AmbiguousConnectorResolution`
+      text — already naming the candidates + the remediation step)
+      under ``extras["exception_message"]``.
 
-    Split out so the dispatcher's main body doesn't need three nested
-    branches around resolver semantics.
+    G0.14-T1 (#1142) restructured this helper to:
+
+    1. Mirror the ``ingested`` branch's explicit resolver-miss label on
+       the ``typed``/``composite`` branch. Pre-#1142 the typed branch
+       silently returned ``(None, None)`` on
+       :exc:`NoMatchingConnector`, which let unbound-method handlers
+       proceed to :func:`_maybe_bind_method` (which then left them
+       unbound) and re-surface as the misleading "typed handler
+       reached dispatch still unbound" :exc:`RuntimeError` from
+       :func:`~meho_backplane.operations._branches.dispatch_typed`.
+       The clean ``no_connector`` is the upstream diagnosis.
+    2. Catch :exc:`AmbiguousConnectorResolution` on both branches.
+       Pre-#1142 the exception propagated past the dispatcher into
+       FastAPI, surfacing as a bare HTTP 500 with no JSON body — and
+       the message itself is the most diagnostic single string in the
+       MEHO surface (it names the target's ``(product, version)``,
+       the conflicting candidates, and the remediation step). The
+       label routes through
+       :func:`~meho_backplane.operations._errors.result_ambiguous_connector`
+       so operators see the resolver's diagnostic verbatim.
+
+    Both branches share the
+    :func:`~meho_backplane.connectors.resolve_connector_or_label`
+    helper so the dispatcher and the ``/api/v1/targets/{name}/probe``
+    route reach the same yes/no/ambiguous answer for the same target
+    (consumer feedback signal 19, ``claude-rdc-hetzner-dc#697``).
     """
     if descriptor.source_kind == "ingested":
-        try:
-            connector_cls = resolve_connector(target)
-        except NoMatchingConnector:
-            return None, "no_connector"
-        return get_or_create_connector_instance(connector_cls), None
+        cls, label, exc_message = resolve_connector_or_label(target)
+        if label is not None:
+            return None, label, exc_message
+        # cls is guaranteed non-None here (label is None ⇔ cls is set).
+        assert cls is not None
+        return get_or_create_connector_instance(cls), None, None
     if descriptor.source_kind in ("typed", "composite") and target is not None:
-        try:
-            optional_cls = resolve_connector(target)
-        except NoMatchingConnector:
-            return None, None
-        return get_or_create_connector_instance(optional_cls), None
-    return None, None
+        cls, label, exc_message = resolve_connector_or_label(target)
+        if label is not None:
+            return None, label, exc_message
+        assert cls is not None
+        return get_or_create_connector_instance(cls), None, None
+    # No target → no resolution attempt. Composite/typed module-level
+    # handlers that don't bind to a connector instance land here.
+    return None, None, None
 
 
 def _maybe_bind_method(
@@ -672,9 +723,31 @@ async def dispatch(
             )
 
     # --- Step 5: connector resolution -------------------------------------
-    connector_instance, resolution_error = await _resolve_connector_instance(descriptor, target)
+    connector_instance, resolution_error, exception_message = await _resolve_connector_instance(
+        descriptor, target
+    )
     if resolution_error == "no_connector":
-        return result_no_connector(op_id, product, version, _elapsed_ms(started))
+        return result_no_connector(
+            op_id,
+            product,
+            version,
+            _elapsed_ms(started),
+            exception_message=exception_message,
+        )
+    if resolution_error == "ambiguous_connector":
+        # The exception's message is the single most diagnostic string
+        # the resolver computes (candidate list + remediation step);
+        # surface it verbatim under ``extras["exception_message"]``.
+        # ``exception_message`` is guaranteed non-None for this label
+        # by ``resolve_connector_or_label``'s contract — the empty
+        # string fallback is a defensive type-check guard, never hit.
+        return result_ambiguous_connector(
+            op_id,
+            product,
+            version,
+            exception_message or "",
+            _elapsed_ms(started),
+        )
 
     # --- Steps 6/7/8/9: branch + reduce + audit + broadcast ---------------
     return await _execute_and_audit(

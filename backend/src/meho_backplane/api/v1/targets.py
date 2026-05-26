@@ -47,15 +47,40 @@ via PATCH), and returns the fingerprint to the caller. The G0.6
 resolver (#388) reads the persisted column to pick a connector
 implementation without re-probing the live target.
 
-If no connector is registered for the target's product (connector
-not yet implemented, or G0.2 not fully landed), the route returns 501
-and does **not** touch the DB row — any previously-cached fingerprint
-survives. A connector that raises propagates the exception (the outer
-``session.begin()`` in :func:`~meho_backplane.db.engine.get_session`
-rolls back), again leaving the row untouched. The column therefore
-always reflects the *last successful* probe. The target must exist
-for the probe to fire — a non-existent target returns 404 via
-``resolve_target``.
+The route routes connector lookup through
+:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`
+— the same helper the dispatcher's connector-resolution step
+(:func:`~meho_backplane.operations.dispatcher._resolve_connector_instance`)
+uses. This closes the pre-G0.14 asymmetry where ``/probe`` consulted
+the v1 :func:`~meho_backplane.connectors.registry.get_connector` lookup
+while dispatch consulted v2's
+:func:`~meho_backplane.connectors.resolve_connector`, producing
+disagreeing yes/no answers for the same target (consumer feedback
+signal 19 in ``claude-rdc-hetzner-dc#697`` — ``rdc-vcenter`` got 501
+from ``/probe`` while ``POST /operations/call`` resolved the same
+target's ``vmware-rest-9.0`` connector cleanly).
+
+Resolver outcomes map to HTTP status as follows:
+
+* **resolved** — fingerprint the target and return the
+  :class:`FingerprintResult` (200, current behavior).
+* **no_connector** — no registered impl matches the target's
+  ``(product, version)``. 501 with the resolver's exception message
+  in ``detail`` (which already names ``target.product`` and the
+  absence of a versioned candidate).
+* **ambiguous_connector** — two or more impls remain after the
+  full tie-break ladder. 409 with the resolver's exception message
+  in ``detail`` — the message already names the candidate set and
+  the remediation step (set ``target.preferred_impl_id`` to one of
+  them).
+
+Neither error branch touches the DB row; any previously-cached
+fingerprint survives. A connector that raises propagates the exception
+(the outer ``session.begin()`` in
+:func:`~meho_backplane.db.engine.get_session` rolls back), again
+leaving the row untouched. The column therefore always reflects the
+*last successful* probe. The target must exist for the probe to fire —
+a non-existent target returns 404 via ``resolve_target``.
 """
 
 from __future__ import annotations
@@ -73,7 +98,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.base import Connector
-from meho_backplane.connectors.registry import all_connectors_v2, get_connector
+from meho_backplane.connectors.registry import all_connectors_v2
+from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Target as TargetORM
@@ -321,20 +347,49 @@ async def probe_target(
     *only* writer to the column — :class:`TargetCreate` and
     :class:`TargetUpdate` reject the field with 422.
 
-    Returns 501 when no connector is registered for the target's
-    product slug; in that case the DB row is **not** touched, so the
-    previously-cached fingerprint (if any) survives. A connector that
-    raises propagates the exception (rolling back the outer
-    transaction); the DB row again stays untouched. The column
-    therefore always reflects the *last successful* probe.
+    Connector selection uses
+    :func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`
+    so this route and the dispatcher's connector-resolution step
+    consult the same v2 registry through the same tie-break ladder
+    (G0.14-T1 #1142). Returns:
+
+    * **501** when the resolver reports ``no_connector`` (no registered
+      impl matches the target's ``(product, version)``). ``detail``
+      carries the resolver's exception message naming the target's
+      product slug + the absence of a matching candidate.
+    * **409** when the resolver reports ``ambiguous_connector`` (two
+      or more impls tied through the full ladder). ``detail`` carries
+      the resolver's exception message naming the candidate set and
+      the remediation step — set ``target.preferred_impl_id`` to one
+      of them. 409 mirrors REST's "the request can't be processed due
+      to current resource state" semantics: the operator has to
+      disambiguate the target before this verb can resolve a single
+      connector.
+
+    Neither error branch writes to the DB row; the previously-cached
+    fingerprint (if any) survives. A connector that raises propagates
+    the exception (rolling back the outer transaction); the row again
+    stays untouched. The column therefore always reflects the *last
+    successful* probe.
     """
     t = await resolve_target(session, operator.tenant_id, name)
-    cls = get_connector(t.product)
-    if cls is None:
+    cls, label, exception_message = resolve_connector_or_label(t)
+    if label == "no_connector":
         raise HTTPException(
             status_code=501,
-            detail=f"no connector registered for product={t.product!r}",
+            detail=exception_message or f"no connector registered for product={t.product!r}",
         )
+    if label == "ambiguous_connector":
+        raise HTTPException(
+            status_code=409,
+            detail=exception_message
+            or (
+                f"connector resolution ambiguous for product={t.product!r}; "
+                f"set target.preferred_impl_id to disambiguate"
+            ),
+        )
+    # label is None ⇒ cls is set (contract of resolve_connector_or_label).
+    assert cls is not None
     fp = await cls().fingerprint(t)
     # ``model_dump(mode='json')`` produces a JSONB-safe dict (datetime
     # → ISO string, enum → value, UUID → str). Plain ``model_dump()``

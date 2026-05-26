@@ -49,16 +49,25 @@
        the role server-side via ``resolve_operator_or_403`` (403 for a
        non-admin); this hide is the UX affordance, not the gate. #}
     {% if is_tenant_admin %}
-      <button
-        type="button"
-        class="btn btn-primary btn-sm"
-        hx-get="/ui/connectors/create"
-        hx-target="#connectors-modal-container"
-        hx-swap="innerHTML"
-        aria-label="Create target"
-      >
-        Create target
-      </button>
+      <div class="flex items-center gap-2">
+        <a
+          href="/ui/connectors/import"
+          class="btn btn-outline btn-sm"
+          aria-label="Bulk import targets"
+        >
+          Bulk import
+        </a>
+        <button
+          type="button"
+          class="btn btn-primary btn-sm"
+          hx-get="/ui/connectors/create"
+          hx-target="#connectors-modal-container"
+          hx-swap="innerHTML"
+          aria-label="Create target"
+        >
+          Create target
+        </button>
+      </div>
     {% endif %}
   </header>
 

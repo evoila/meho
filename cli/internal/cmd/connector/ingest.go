@@ -26,20 +26,32 @@ type SpecSource struct {
 }
 
 // IngestRequest mirrors the backend IngestRequest Pydantic model.
-// product / version / impl_id are the connector_id triple stored on
-// the endpoint_descriptor row; specs is the list of (method, path)
-// providers that merge under that one connector_id (vSphere is the
-// canonical multi-spec case — vcenter.yaml + vi-json.yaml).
+// Two mutually-exclusive request shapes:
+//
+//   - Explicit-quadruple shape: product / version / impl_id / specs
+//     carry the resolved triple plus the spec sources. The historical
+//     manual-mode --product/--version/--impl/--spec form uses this.
+//   - Catalog-driven shape (G0.14-T9 / #1150): catalog_entry carries a
+//     "<product>/<version>" reference; the backplane resolves the
+//     entry against the packaged catalog and fills in the quadruple
+//     server-side. The --catalog flag uses this shape so REST-native
+//     agent runtimes and the CLI share a single ingest path.
+//
+// Quadruple fields are pointers so the JSON serializer omits them on
+// the catalog-driven shape: an empty string would fail the backend
+// validator's mutual-exclusivity check (the empty quadruple is read
+// as "explicit-quadruple supplied but blank").
 //
 // DryRun=true makes the backplane parse + plan without writing to
 // the DB; the response carries the same IngestionResult shape but
 // the GroupingResult field is null (no LLM call on dry-run).
 type IngestRequest struct {
-	Product string       `json:"product"`
-	Version string       `json:"version"`
-	ImplID  string       `json:"impl_id"`
-	Specs   []SpecSource `json:"specs"`
-	DryRun  bool         `json:"dry_run"`
+	Product      *string      `json:"product,omitempty"`
+	Version      *string      `json:"version,omitempty"`
+	ImplID       *string      `json:"impl_id,omitempty"`
+	Specs        []SpecSource `json:"specs,omitempty"`
+	CatalogEntry *string      `json:"catalog_entry,omitempty"`
+	DryRun       bool         `json:"dry_run"`
 }
 
 // IngestionResult mirrors the canonical backend IngestionResultModel
@@ -201,43 +213,12 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
 
-	var specs []SpecSource
-	if opts.Catalog != "" {
-		entry, rerr := resolveCatalogEntry(cmd.Context(), backplaneURL, opts.Catalog)
-		if rerr != nil {
-			// Local resolution failures (bad ref, no entry, typed
-			// connector, templated upstream) carry errCatalogResolve and
-			// render as `unexpected`; transport/auth errors from the GET
-			// route through renderRequestError.
-			if errors.Is(rerr, errCatalogResolve) {
-				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(rerr.Error()), opts.JSONOut)
-			}
-			return renderRequestError(cmd, backplaneURL, rerr, opts.JSONOut)
-		}
-		// Adopt the catalog's recommended triple so the summary + the
-		// posted body carry it (the catalog flag supplies no triple).
-		opts.Product, opts.Version, opts.ImplID = entry.Product, entry.Version, entry.ImplID
-		specs = upstreamSpecs(entry.Upstream)
-	} else {
-		// Manual mode: resolve each --spec URI locally so the operator
-		// gets a fast hint on a typo'd scheme rather than a backplane 422.
-		specs = make([]SpecSource, 0, len(opts.Specs))
-		for _, raw := range opts.Specs {
-			uri, uerr := resolveSpecURI(raw)
-			if uerr != nil {
-				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(uerr.Error()), opts.JSONOut)
-			}
-			specs = append(specs, SpecSource{URI: uri})
-		}
+	body, err := buildIngestRequest(opts)
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
 	}
 
-	result, err := postIngest(cmd.Context(), backplaneURL, IngestRequest{
-		Product: opts.Product,
-		Version: opts.Version,
-		ImplID:  opts.ImplID,
-		Specs:   specs,
-		DryRun:  opts.DryRun,
-	})
+	result, err := postIngest(cmd.Context(), backplaneURL, body)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
@@ -246,6 +227,41 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 	}
 	printIngestSummary(cmd.OutOrStdout(), opts, result)
 	return nil
+}
+
+// buildIngestRequest assembles the POST body for either of the two
+// mutually-exclusive request shapes (catalog-driven or explicit
+// quadruple). Catalog mode (G0.14-T9 / #1150) ships the
+// "<product>/<version>" reference verbatim — the backplane resolves
+// the entry against the packaged catalog so REST-native clients and
+// the CLI share the resolution path. Manual mode resolves each spec
+// URI locally to give the operator a fast hint on a typo'd scheme.
+func buildIngestRequest(opts ingestOptions) (IngestRequest, error) {
+	if opts.Catalog != "" {
+		catalog := opts.Catalog
+		return IngestRequest{
+			CatalogEntry: &catalog,
+			DryRun:       opts.DryRun,
+		}, nil
+	}
+	specs := make([]SpecSource, 0, len(opts.Specs))
+	for _, raw := range opts.Specs {
+		uri, uerr := resolveSpecURI(raw)
+		if uerr != nil {
+			return IngestRequest{}, uerr
+		}
+		specs = append(specs, SpecSource{URI: uri})
+	}
+	product := opts.Product
+	version := opts.Version
+	implID := opts.ImplID
+	return IngestRequest{
+		Product: &product,
+		Version: &version,
+		ImplID:  &implID,
+		Specs:   specs,
+		DryRun:  opts.DryRun,
+	}, nil
 }
 
 // validateIngestMode enforces the catalog/manual split: exactly one
@@ -316,15 +332,22 @@ func postIngest(ctx context.Context, backplaneURL string, body IngestRequest) (*
 // breakdown and the embeddings split that the original PR-body
 // contract carried are not in the wire shape — operators see the
 // aggregate via this rollup and the per-spec story via the audit log.
+//
+// The `<product>/<version>/<impl_id>` heading is derived from the
+// response's `connector_id` rather than `opts.Product/Version/ImplID`
+// because catalog mode (G0.14-T9 / #1150) leaves those opts empty —
+// the backplane resolves the catalog entry server-side and returns
+// the resolved triple via `connector_id`. Deriving from the response
+// keeps the heading correct in both modes and matches the pre-#1150
+// operator-visible output.
 func printIngestSummary(w io.Writer, opts ingestOptions, r *IngestResponse) {
 	totalOps := r.Ingestion.InsertedCount + r.Ingestion.UpdatedCount + r.Ingestion.SkippedCount
+	heading := ingestSummaryHeading(r.Ingestion.ConnectorID)
 	if opts.DryRun {
-		fmt.Fprintf(w, "ingest %s/%s/%s — DRY RUN (no DB writes)\n",
-			opts.Product, opts.Version, opts.ImplID,
-		)
+		fmt.Fprintf(w, "ingest %s — DRY RUN (no DB writes)\n", heading)
 	} else {
-		fmt.Fprintf(w, "ingest %s/%s/%s — connector_id=%s\n",
-			opts.Product, opts.Version, opts.ImplID, r.Ingestion.ConnectorID,
+		fmt.Fprintf(w, "ingest %s — connector_id=%s\n",
+			heading, r.Ingestion.ConnectorID,
 		)
 	}
 	fmt.Fprintf(w, "  operations: %d total (%d inserted / %d updated / %d skipped)\n",
@@ -362,4 +385,45 @@ func printIngestSummary(w io.Writer, opts ingestOptions, r *IngestResponse) {
 			r.Ingestion.ConnectorID, r.Ingestion.ConnectorID,
 		)
 	}
+}
+
+// ingestSummaryHeading derives the `<product>/<version>/<impl_id>`
+// heading from a response connector_id. Both ingest modes route
+// through this helper so the operator-visible output is identical
+// to v0.6.0 regardless of which request shape (catalog or explicit
+// quadruple) the CLI used. The backend resolves the catalog entry
+// server-side, so deriving from the response is what makes the
+// catalog-mode heading carry the resolved triple instead of empty
+// `//` placeholders.
+//
+// Mirrors `parse_connector_id` in
+// `backend/src/meho_backplane/operations/ingest/parser.py` — the
+// operator-facing identifier is `<impl_id>-<version>` where
+// `version` starts with a digit; `product` is the first
+// dash-segment of `impl_id`. If the response carries a
+// non-conforming connector_id (shouldn't happen in practice — the
+// backend builds it from a validated triple) we fall back to
+// echoing the connector_id verbatim so the operator still sees
+// something useful instead of bare slashes.
+func ingestSummaryHeading(connectorID string) string {
+	for i, ch := range connectorID {
+		if ch != '-' || i+1 >= len(connectorID) {
+			continue
+		}
+		next := connectorID[i+1]
+		if next < '0' || next > '9' {
+			continue
+		}
+		implID := connectorID[:i]
+		version := connectorID[i+1:]
+		if implID == "" {
+			return connectorID
+		}
+		product := implID
+		if first := strings.IndexByte(implID, '-'); first != -1 {
+			product = implID[:first]
+		}
+		return fmt.Sprintf("%s/%s/%s", product, version, implID)
+	}
+	return connectorID
 }

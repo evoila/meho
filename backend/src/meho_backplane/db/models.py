@@ -456,6 +456,30 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # Connector-boundary redaction middleware (G11.4-T2 #1071). The
+    # dispatcher captures the raw connector response, hands it to the
+    # redaction engine, and stores the raw payload here verbatim so an
+    # auditor can reconstruct the pre-redaction view (the trust boundary
+    # is the API surface, not the audit log — internal incident response
+    # needs the raw record). ``redaction_manifest`` carries one entry
+    # per rule firing (``rule`` / ``pattern`` / ``action`` / ``count`` /
+    # ``span`` / ``reason`` / ``path``) plus the resolved ``policy_id``;
+    # the C1-d round-trip CI gate (#1073) replays the manifest against
+    # the raw payload to confirm the redactor stays deterministic across
+    # policy revisions. Both columns are nullable: pre-G11.4 audit rows
+    # carry NULL, and error-path rows (handler/connector raised before
+    # producing a response) have no raw payload to redact. Added by
+    # migration ``0030``.
+    raw_payload: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    redaction_manifest: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(

@@ -1,0 +1,87 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Bulk-import preview fragment (Initiative #340 Task #875 work item #5).
+  Swapped into ``#connectors-import-result`` by the import form's
+  ``hx-post`` to ``/ui/connectors/import``.
+
+  Two shapes:
+    * ``error`` set -> an inline DaisyUI alert with the parse error and
+      no confirm button (the response carries HTTP 422; HTMX still swaps
+      the fragment because the form has no ``hx-swap`` status filter).
+    * ``error`` unset -> the CREATE / UPDATE plan table plus a "Confirm
+      import" form that re-posts the same YAML (echoed into a hidden
+      field) to ``/ui/connectors/import/confirm``.
+
+  Context contract (set by
+  :func:`~meho_backplane.ui.routes.connectors.import_view.render_preview`):
+    * ``error``        -- str | None inline parse error.
+    * ``rows``         -- list of {name, action, fields, warnings}.
+    * ``create_count`` / ``update_count`` -- plan tallies.
+    * ``yaml_text``    -- the submitted YAML, echoed for the confirm re-post.
+    * ``csrf_token``   -- the freshly-minted double-submit token.
+-#}
+{% if error %}
+  <div class="alert alert-error" role="alert" data-import-error>
+    <span>{{ error }}</span>
+  </div>
+{% else %}
+  <div class="card bg-base-100 border-base-300 border shadow-sm" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+    <div class="card-body space-y-3">
+      <p class="text-sm" data-import-summary>
+        Plan: <span class="font-semibold">{{ create_count }}</span> to create,
+        <span class="font-semibold">{{ update_count }}</span> to update.
+      </p>
+
+      <div class="overflow-x-auto rounded-box border border-base-300">
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th>Action</th>
+              <th>Name</th>
+              <th>Fields</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr data-import-row data-action="{{ row.action }}" data-name="{{ row.name }}">
+                <td>
+                  {% if row.action == "CREATE" %}
+                    <span class="badge badge-success badge-sm">CREATE</span>
+                  {% else %}
+                    <span class="badge badge-info badge-sm">UPDATE</span>
+                  {% endif %}
+                </td>
+                <td class="font-mono">{{ row.name }}</td>
+                <td class="text-xs opacity-80">
+                  {{ row.fields | join(", ") }}
+                  {% for warning in row.warnings %}
+                    <div class="text-warning mt-1" role="alert" data-import-warning>{{ warning }}</div>
+                  {% endfor %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <form
+        id="connectors-import-confirm-form"
+        hx-post="/ui/connectors/import/confirm"
+        hx-target="#connectors-import-result"
+        hx-swap="innerHTML"
+        hx-disabled-elt="find button[type=submit]"
+        class="flex justify-end"
+      >
+        {# Re-send the previewed YAML so confirm re-parses + re-classifies
+           against the tenant's current target set (server stays the source
+           of truth; no client-held plan). #}
+        <textarea name="pasted" class="hidden" aria-hidden="true">{{ yaml_text }}</textarea>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="import-confirm">
+          Confirm import
+        </button>
+      </form>
+    </div>
+  </div>
+{% endif %}

@@ -38,6 +38,9 @@ from meho_backplane.operations.ingest.exceptions import (
 )
 
 __all__ = [
+    "build_catalog_entry_malformed_detail",
+    "build_catalog_entry_not_found_detail",
+    "build_catalog_entry_typed_connector_detail",
     "build_uncovered_version_label_detail",
     "build_version_mismatch_detail",
 ]
@@ -72,6 +75,101 @@ def build_version_mismatch_detail(exc: VersionMismatchError) -> dict[str, Any]:
             {"spec_uri": uri, "info_version": version} for uri, version in exc.spec_info_versions
         ],
         "message": str(exc),
+    }
+
+
+def build_catalog_entry_not_found_detail(
+    *,
+    catalog_entry: str,
+    available_entries: list[str],
+) -> dict[str, Any]:
+    """Structured 422 detail for ``POST /api/v1/connectors/ingest``
+    when the operator-supplied ``catalog_entry`` is well-formed but
+    not present in the packaged catalog (G0.14-T9 / #1150).
+
+    Body shape (T11 convention, see
+    :doc:`docs/codebase/error-message-shape.md`):
+
+    * ``detail`` — stable ``snake_case`` classifier
+      ``"catalog_entry_not_found"`` so callers can branch without
+      re-parsing the message.
+    * ``catalog_entry`` — the operator-supplied
+      ``"<product>/<version>"`` reference, echoed back so an agent
+      doesn't need to re-thread it from its own prompt.
+    * ``available_entries`` — sorted list of ``"<product>/<version>"``
+      strings the catalog actually contains. An agent picks one and
+      retries; an interactive operator gets the same enumeration the
+      ``meho connector catalog list`` verb prints.
+    * ``message`` — the rendered human-readable detail for clients
+      that ignore the structured fields.
+    """
+    sorted_available = sorted(set(available_entries))
+    return {
+        "detail": "catalog_entry_not_found",
+        "catalog_entry": catalog_entry,
+        "available_entries": sorted_available,
+        "message": (
+            f"catalog_entry_not_found: no catalog entry for {catalog_entry!r}; "
+            f"available: {', '.join(sorted_available) if sorted_available else '<empty catalog>'}. "
+            "Pick one of the available entries or use the explicit-quadruple shape. "
+            "See docs/codebase/error-message-shape.md."
+        ),
+    }
+
+
+def build_catalog_entry_malformed_detail(
+    *,
+    catalog_entry: str,
+) -> dict[str, Any]:
+    """Structured 422 detail when the operator's ``catalog_entry`` does
+    not match the ``"<product>/<version>"`` shape (G0.14-T9 / #1150).
+
+    Distinct from ``catalog_entry_not_found`` so an agent can branch on
+    "the reference itself is malformed" (fix the slash) vs "the
+    reference is well-formed but no entry exists" (fix the value). Per
+    T11 convention.
+    """
+    return {
+        "detail": "catalog_entry_malformed",
+        "catalog_entry": catalog_entry,
+        "message": (
+            f"catalog_entry_malformed: {catalog_entry!r} is not "
+            f"'<product>/<version>' (e.g. 'vmware/9.0'). "
+            "See docs/codebase/error-message-shape.md."
+        ),
+    }
+
+
+def build_catalog_entry_typed_connector_detail(
+    *,
+    catalog_entry: str,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> dict[str, Any]:
+    """Structured 422 detail when the operator's ``catalog_entry``
+    resolves to a typed connector with no ingestable spec
+    (``upstream is None``) — there is nothing to ingest
+    (G0.14-T9 / #1150).
+
+    The detail names the resolved triple so an interactive operator
+    sees that the entry exists in the catalog but is intentionally
+    typed (e.g. ``vault/1.x``, ``k8s/1.x``, ``bind9/9.x``). Per T11
+    convention; the doc reference belongs at the operator's checked-
+    out clone.
+    """
+    return {
+        "detail": "catalog_entry_typed_connector",
+        "catalog_entry": catalog_entry,
+        "product": product,
+        "version": version,
+        "impl_id": impl_id,
+        "message": (
+            f"catalog_entry_typed_connector: {catalog_entry!r} is a typed "
+            f"connector ({product}/{version}/{impl_id}) with no ingestable "
+            "spec; nothing to ingest. See docs/cross-repo/connector-catalog.md. "
+            "See docs/codebase/error-message-shape.md."
+        ),
     }
 
 

@@ -125,6 +125,7 @@ from meho_backplane.operations.ingest import (
     CatalogListResponse,
     ConnectorNotFoundError,
     ConnectorReviewPayload,
+    ConnectorSpecEntry,
     EditGroupBody,
     EditOpBody,
     IngestionPipelineResult,
@@ -139,9 +140,13 @@ from meho_backplane.operations.ingest import (
     LlmOutputInvalid,
     OpIdCollision,
     ReviewService,
+    SpecSource,
     UncoveredVersionLabel,
     UnsupportedSpecError,
     VersionMismatchError,
+    build_catalog_entry_malformed_detail,
+    build_catalog_entry_not_found_detail,
+    build_catalog_entry_typed_connector_detail,
     build_version_mismatch_detail,
     default_llm_client_factory,
     list_ingested_connectors,
@@ -222,6 +227,19 @@ async def ingest_endpoint(
     ingested → run_llm_grouping pipeline serially and returns the
     aggregated counts + grouping result.
 
+    The body accepts two mutually-exclusive request shapes (see
+    :class:`IngestRequest`):
+
+    * **Catalog-driven shape** (G0.14-T9 / #1150) — ``catalog_entry``
+      is a ``"<product>/<version>"`` reference; this handler resolves
+      it against the packaged catalog (:func:`load_catalog`) and
+      dispatches through the same ingest path as if the caller had
+      supplied the resolved quadruple.
+    * **Explicit-quadruple shape** — ``product`` + ``version`` +
+      ``impl_id`` + ``specs[]`` carry the resolved triple plus the
+      spec sources. The MCP admin tool and historical clients use
+      this shape.
+
     Tenant scoping: the operator's tenant_id from the JWT is used
     as the write scope unless the operator is ``tenant_admin``
     (built-in ingest, ``tenant_id=NULL``). For v0.2 the route always
@@ -232,13 +250,146 @@ async def ingest_endpoint(
     by hitting :class:`IngestionPipelineService` directly with
     ``tenant_id=None``.
     """
+    resolved = _resolve_catalog_entry_if_set(body)
     service = IngestionPipelineService(
         operator=operator,
         llm_client_factory=llm_client_factory,
     )
-    result = await _run_ingest_with_http_mapping(service=service, body=body, operator=operator)
+    result = await _run_ingest_with_http_mapping(service=service, body=resolved, operator=operator)
     ingestion_model, grouping_model = result.to_api_models()
     return IngestResponse(ingestion=ingestion_model, grouping=grouping_model)
+
+
+def _resolve_catalog_entry_if_set(body: IngestRequest) -> IngestRequest:
+    """Resolve ``body.catalog_entry`` against the packaged catalog.
+
+    Returns a new :class:`IngestRequest` in the explicit-quadruple
+    shape so the rest of the ingest pipeline doesn't need to branch
+    on which shape the caller used. The catalog-driven shape is
+    G0.14-T9 (#1150): REST-native clients ship
+    ``{"catalog_entry": "vmware/9.0"}`` and the server resolves the
+    triple + spec sources from the package-data catalog.
+
+    Raises :class:`HTTPException` (422) with structured detail bodies
+    per the T11 error-shape convention
+    (:doc:`docs/codebase/error-message-shape.md`) for the four
+    catalog-side validation outcomes:
+
+    * Malformed reference (no slash, blank halves) →
+      ``catalog_entry_malformed``.
+    * Reference well-formed but not in catalog →
+      ``catalog_entry_not_found`` carrying ``available_entries[]``.
+    * Reference resolves to a typed connector (``upstream is None``)
+      with no ingestable spec → ``catalog_entry_typed_connector``.
+    * Reference resolves to a fqdn-templated upstream
+      (placeholder ``<...>`` in the URL — appliance-served NSX) →
+      ``catalog_entry_templated_upstream``. The operator must supply
+      the concrete spec via the explicit-quadruple shape.
+
+    A body with ``catalog_entry=None`` is returned verbatim — the
+    explicit-quadruple shape doesn't need resolution.
+    """
+    if body.catalog_entry is None:
+        return body
+    catalog_entry = body.catalog_entry
+    product, version = _parse_catalog_entry(catalog_entry)
+    catalog = load_catalog()
+    entry = catalog.get(product, version)
+    if entry is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=build_catalog_entry_not_found_detail(
+                catalog_entry=catalog_entry,
+                available_entries=[f"{e.product}/{e.version}" for e in catalog.entries],
+            ),
+        )
+    _reject_unusable_entry(catalog_entry=catalog_entry, entry=entry)
+    # The catalog entry is good — round-trip through the explicit
+    # shape so the downstream pipeline can stay unchanged. The
+    # validator on IngestRequest still passes because catalog_entry
+    # is unset in the round-tripped object.
+    return body.model_copy(
+        update={
+            "catalog_entry": None,
+            "product": entry.product,
+            "version": entry.version,
+            "impl_id": entry.impl_id,
+            "specs": [SpecSource(uri=uri) for uri in (entry.upstream or ())],
+        },
+    )
+
+
+def _parse_catalog_entry(catalog_entry: str) -> tuple[str, str]:
+    """Split a ``"<product>/<version>"`` reference; raise 422 on a
+    malformed shape.
+
+    Mirrors the CLI's ``parseCatalogRef`` validation contract but
+    runs server-side so REST-native clients get the same diagnostic
+    without round-tripping through the CLI. Per T11 convention.
+    """
+    if "/" not in catalog_entry:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=build_catalog_entry_malformed_detail(catalog_entry=catalog_entry),
+        )
+    product_raw, _, version_raw = catalog_entry.partition("/")
+    product = product_raw.strip()
+    version = version_raw.strip()
+    if not product or not version or "/" in version:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=build_catalog_entry_malformed_detail(catalog_entry=catalog_entry),
+        )
+    return product, version
+
+
+def _reject_unusable_entry(
+    *,
+    catalog_entry: str,
+    entry: ConnectorSpecEntry,
+) -> None:
+    """Reject typed-connector and fqdn-templated entries with
+    structured 422s per T11 convention.
+
+    A typed connector (``upstream is None``) has no ingestable spec;
+    a fqdn-templated upstream (placeholder ``<...>`` characters) is
+    appliance-served (NSX manager URL, vCenter FQDN) and the catalog
+    can't dereference it server-side. Both surfaces refuse the catalog-
+    driven shape and point the operator at the explicit-quadruple
+    fallback documented in ``docs/cross-repo/connector-catalog.md``.
+    """
+    if entry.upstream is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=build_catalog_entry_typed_connector_detail(
+                catalog_entry=catalog_entry,
+                product=entry.product,
+                version=entry.version,
+                impl_id=entry.impl_id,
+            ),
+        )
+    templated = [url for url in entry.upstream if "<" in url or ">" in url]
+    if templated:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "detail": "catalog_entry_templated_upstream",
+                "catalog_entry": catalog_entry,
+                "product": entry.product,
+                "version": entry.version,
+                "impl_id": entry.impl_id,
+                "templated_upstream": templated,
+                "message": (
+                    f"catalog_entry_templated_upstream: {catalog_entry!r} "
+                    f"upstream {templated!r} is fqdn-templated and cannot "
+                    "be resolved server-side. Supply the concrete spec via "
+                    "the explicit-quadruple shape "
+                    "(product/version/impl_id/specs). "
+                    "See docs/cross-repo/connector-catalog.md. "
+                    "See docs/codebase/error-message-shape.md."
+                ),
+            },
+        )
 
 
 async def _run_ingest_with_http_mapping(
@@ -253,7 +404,18 @@ async def _run_ingest_with_http_mapping(
     under the code-quality function-size threshold; the mapping
     table itself is the load-bearing contract documented at the top
     of the module.
+
+    Pre-condition: ``body`` is in the explicit-quadruple shape
+    (``product`` / ``version`` / ``impl_id`` / ``specs`` populated).
+    The catalog-driven shape is resolved upstream by
+    :func:`_resolve_catalog_entry_if_set`; the asserts below pin the
+    invariant so a future refactor that bypasses that helper trips
+    at the boundary rather than landing a half-populated ingest
+    against ``product=None`` / ``version=None`` / ``impl_id=None``.
     """
+    assert body.product is not None, "post-resolution invariant: product must be set"
+    assert body.version is not None, "post-resolution invariant: version must be set"
+    assert body.impl_id is not None, "post-resolution invariant: impl_id must be set"
     try:
         return await service.ingest(
             product=body.product,

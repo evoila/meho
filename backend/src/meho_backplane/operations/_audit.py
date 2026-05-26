@@ -112,6 +112,8 @@ def _build_audit_payload(
     descriptor: EndpointDescriptor,
     params_hash: str,
     result_status: str,
+    *,
+    redaction_policy_id: str | None = None,
 ) -> dict[str, Any]:
     """Compose the ``audit_log.payload`` dict for the dispatcher row.
 
@@ -125,6 +127,13 @@ def _build_audit_payload(
     linkage lives in the real ``audit_log.parent_audit_id`` column
     added by migration ``0006`` and written by
     :func:`write_audit_row`.
+
+    *redaction_policy_id* is the connector-boundary redaction
+    middleware's resolved policy id (G11.4-T2 #1071); the manifest
+    itself lands in the dedicated ``redaction_manifest`` column
+    (migration ``0030``), but mirroring the policy id into the
+    JSON payload keeps the broadcast-event surface (which serialises
+    ``payload``, not the dedicated columns) attribution-complete.
     """
     payload: dict[str, Any] = {
         "op_id": descriptor.op_id,
@@ -138,6 +147,8 @@ def _build_audit_payload(
     parent_audit_id = parent_audit_id_var.get()
     if parent_audit_id is not None:
         payload["parent_audit_id"] = str(parent_audit_id)
+    if redaction_policy_id is not None:
+        payload["redaction_policy_id"] = redaction_policy_id
     # Handler-bound extras last so a handler can intentionally override
     # a default (e.g. a future per-op result_status override); the
     # default keys are documented + load-bearing for audit consumers,
@@ -166,6 +177,9 @@ async def write_audit_row(
     params_hash: str,
     result_status: str,
     duration_ms: float,
+    raw_payload: Any | None = None,
+    redaction_manifest: list[dict[str, Any]] | None = None,
+    redaction_policy_id: str | None = None,
 ) -> None:
     """Insert one ``audit_log`` row for this dispatch.
 
@@ -177,9 +191,20 @@ async def write_audit_row(
     structured ``connector_error`` rather than crashing the request).
 
     The payload shape is documented in :func:`_build_audit_payload`.
+    *raw_payload* / *redaction_manifest* / *redaction_policy_id* are
+    the connector-boundary redaction middleware's three artefacts
+    (G11.4-T2 #1071): the raw connector response, the engine's
+    manifest, and the resolved policy id. Error-path rows (handler
+    raised before producing a response) leave them ``None``; the
+    columns are nullable per migration ``0030``.
     """
     sessionmaker = get_sessionmaker()
-    payload = _build_audit_payload(descriptor, params_hash, result_status)
+    payload = _build_audit_payload(
+        descriptor,
+        params_hash,
+        result_status,
+        redaction_policy_id=redaction_policy_id,
+    )
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
     async with sessionmaker() as session:
@@ -197,6 +222,8 @@ async def write_audit_row(
             request_id=None,
             duration_ms=Decimal(str(round(duration_ms, 2))),
             payload=payload,
+            raw_payload=raw_payload,
+            redaction_manifest=redaction_manifest,
         )
         session.add(row)
         await session.commit()
@@ -247,6 +274,9 @@ async def audit_and_broadcast_safe(
     params_hash: str,
     result_status: str,
     duration_ms: float,
+    raw_payload: Any | None = None,
+    redaction_manifest: list[dict[str, Any]] | None = None,
+    redaction_policy_id: str | None = None,
 ) -> None:
     """Write the audit row + publish broadcast; swallow internal failures.
 
@@ -264,6 +294,16 @@ async def audit_and_broadcast_safe(
     A future tightening of the audit-failure handling (e.g. failing the
     operation when audit cannot land) is a v0.2.next consideration and
     would land in this helper.
+
+    *raw_payload* / *redaction_manifest* / *redaction_policy_id* are
+    the connector-boundary redaction artefacts (G11.4-T2 #1071);
+    forwarded to :func:`write_audit_row`. The broadcast event still
+    consumes *params* (request-side) rather than the response-side
+    raw payload: per :func:`publish_broadcast`'s
+    :func:`~meho_backplane.broadcast.events.redact_payload` step, the
+    broadcast surface ships params only -- the response goes nowhere
+    near the broadcast subscribers, who already see redacted outcomes
+    via the broadcast detail policy (G6.3).
     """
     try:
         await write_audit_row(
@@ -274,6 +314,9 @@ async def audit_and_broadcast_safe(
             params_hash=params_hash,
             result_status=result_status,
             duration_ms=duration_ms,
+            raw_payload=raw_payload,
+            redaction_manifest=redaction_manifest,
+            redaction_policy_id=redaction_policy_id,
         )
     except Exception:
         _log.exception(

@@ -43,6 +43,9 @@ from meho_backplane.operations.ingest.connector_registration import (
     ensure_connector_class_registered,
 )
 from meho_backplane.operations.ingest.error_envelopes import (
+    build_catalog_entry_malformed_detail,
+    build_catalog_entry_not_found_detail,
+    build_catalog_entry_typed_connector_detail,
     build_uncovered_version_label_detail,
     build_version_mismatch_detail,
 )
@@ -135,6 +138,9 @@ __all__ = [
     "UncoveredVersionLabel",
     "UnsupportedSpecError",
     "VersionMismatchError",
+    "build_catalog_entry_malformed_detail",
+    "build_catalog_entry_not_found_detail",
+    "build_catalog_entry_typed_connector_detail",
     "build_uncovered_version_label_detail",
     "build_version_mismatch_detail",
     "check_version_covered_by_registered_class",

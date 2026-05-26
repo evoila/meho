@@ -37,8 +37,16 @@ Module layout:
   into the REST ``POST``/``PATCH`` ``/api/v1/targets`` handlers
   in-process so the UI and REST surfaces share one validation +
   product-check + audit code path.
+* :mod:`~meho_backplane.ui.routes.connectors.import_router` -- the
+  T3 (#875) bulk-import routes (``GET``/``POST`` ``/ui/connectors/import``
+  + ``POST /ui/connectors/import/confirm``). Tenant_admin-gated
+  server-side; the operator pastes / uploads a ``targets.yaml`` which
+  is parsed (``yaml.safe_load``), classified CREATE-vs-UPDATE, and on
+  confirm applied **in-process** via ``create_target`` / ``update_target``
+  -- mirroring the client-orchestrated CRUD the ``meho targets import``
+  CLI (#257) performs (there is no ``/api/v1/targets/import`` endpoint).
 
-The umbrella :func:`build_router` aggregates all four. It is mounted
+The umbrella :func:`build_router` aggregates all five. It is mounted
 **before** :func:`~meho_backplane.ui.routes.stubs.build_stubs_router`
 in :func:`~meho_backplane.ui.routes.build_router` so the real
 ``/ui/connectors`` and ``/ui/connectors/{name}`` handlers win the
@@ -61,6 +69,7 @@ from fastapi import APIRouter
 
 from meho_backplane.ui.routes.connectors.detail import build_detail_router
 from meho_backplane.ui.routes.connectors.forms_router import build_forms_router
+from meho_backplane.ui.routes.connectors.import_router import build_import_router
 from meho_backplane.ui.routes.connectors.list_view import build_list_router
 from meho_backplane.ui.routes.connectors.probe import build_probe_router
 
@@ -83,6 +92,10 @@ def build_router() -> APIRouter:
     the detail router for the same reason -- its literal
     ``GET /ui/connectors/create`` route must win the first-match-wins
     lookup over ``GET /ui/connectors/{name}`` (otherwise ``"create"``
+    binds to ``name``). The T3 import router is included for the same
+    reason -- its literal ``/ui/connectors/import`` /
+    ``/ui/connectors/import/confirm`` routes must win the first-match
+    lookup over ``GET /ui/connectors/{name}`` (otherwise ``"import"``
     binds to ``name``). The probe route's path is fully literal
     (``/ui/connectors/{name}/probe``) so the ``POST`` verb plus the
     extra ``/probe`` segment makes it unambiguous regardless of order;
@@ -94,6 +107,7 @@ def build_router() -> APIRouter:
     router = APIRouter()
     router.include_router(build_list_router())
     router.include_router(build_forms_router())
+    router.include_router(build_import_router())
     router.include_router(build_detail_router())
     router.include_router(build_probe_router())
     return router

@@ -110,25 +110,6 @@ def _token(key: Any, *, role: TenantRole, sub: str = "op-test") -> str:
 # be a dict (FastAPI doesn't validate it until the dependency chain
 # clears).
 #
-# Note on ``GET /api/v1/agents/grants`` (list)
-# --------------------------------------------
-# The agent-definitions router (``api/v1/agents.py``) is registered
-# BEFORE the grants router in :mod:`meho_backplane.main`, and its
-# ``GET /{name}`` route matches ``/api/v1/agents/grants`` first
-# (``name="grants"``). FastAPI route precedence is registration
-# order. The shadow is OPERATOR-gated rather than TENANT_ADMIN-gated:
-#
-# * A ``read_only`` request still surfaces as 403
-#   ``insufficient_role`` (from the agents-show gate, not the
-#   grants-list gate) — same observable behaviour from outside, so
-#   the route is covered for the ``read_only`` case at the bottom
-#   of this file via ``test_read_only_list_route_returns_403``.
-# * An ``operator`` request passes the agents-show gate and reaches
-#   the service, returning 404 ``agent_not_found`` rather than the
-#   grants-list 403. The route is excluded from the parametrised
-#   ``operator`` matrix below for that reason; the routing-shadow
-#   itself is an adjacent finding for the orchestrator to file
-#   separately.
 # Fixed UUID literals for path parameters. The role gate fires before
 # any DB lookup, so the value need only parse as a UUID; deterministic
 # literals keep ``pytest-xdist`` test-collection IDs stable across
@@ -138,6 +119,7 @@ _GRANT_ID_SHOW = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _GRANT_ID_REVOKE = uuid.UUID("22222222-2222-2222-2222-222222222222")
 
 _GRANT_ENDPOINTS: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
+    ("GET", "/api/v1/agents/grants", None),
     ("GET", f"/api/v1/agents/grants/{_GRANT_ID_SHOW}", None),
     (
         "POST",
@@ -195,43 +177,15 @@ def test_operator_role_is_rejected_with_insufficient_role(
     """``operator`` JWT → HTTP 403 ``insufficient_role`` on every grants route.
 
     One rank below ``tenant_admin``. This is the load-bearing assertion
-    for the surface: grants show / create / elevate / revoke expose
-    permission topology and must remain ``tenant_admin``-only. A
-    refactor that lowers the gate to ``operator`` (e.g. to align with
-    the approvals surface) trips this test. The list route is covered
-    separately below; see the matrix-level docstring for the routing
-    shadow that excludes it from this parametrised case.
+    for the surface: grants list / show / create / elevate / revoke
+    expose permission topology and must remain ``tenant_admin``-only.
+    A refactor that lowers the gate to ``operator`` (e.g. to align
+    with the approvals surface) trips this test.
     """
     key = make_rsa_keypair("kid-op")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
         response = client.request(method, path, headers=headers, json=body)
-    assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "insufficient_role"}
-
-
-def test_read_only_list_route_returns_403(client: TestClient) -> None:
-    """``read_only`` ``GET /api/v1/agents/grants`` returns 403 ``insufficient_role``.
-
-    The list route is shadowed by ``GET /api/v1/agents/{name}`` (see
-    the matrix-level note), but the shadow's ``_require_operator``
-    gate also rejects a ``read_only`` JWT with the same response
-    shape. The route is therefore covered for ``read_only`` from
-    outside — a refactor that drops the grants-list gate AND the
-    agents-show gate would be required to surface a non-403 here.
-
-    This test is the one in this file whose green status does NOT
-    prove the grants-list-specific gate is wired; it proves the
-    outer-observable behaviour. A separate fix that lands the
-    grants router before the agents router in
-    :mod:`meho_backplane.main` would let this case fold back into
-    the parametrised matrix above.
-    """
-    key = make_rsa_keypair("kid-ro")
-    with respx.mock as r:
-        mock_discovery_and_jwks(r, public_jwks(key))
-        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.READ_ONLY)}"}
-        response = client.get("/api/v1/agents/grants", headers=headers)
     assert response.status_code == 403, response.text
     assert response.json() == {"detail": "insufficient_role"}

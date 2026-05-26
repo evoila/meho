@@ -35,6 +35,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/pfsense"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
+	"github.com/evoila/meho/cli/internal/cmd/scheduler"
 	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
@@ -212,6 +213,15 @@ func newRootCmd() *cobra.Command {
 	// server-side. Registered before registerDynamicSubcommands so the
 	// backplane manifest cannot shadow the built-in `approvals` parent.
 	root.AddCommand(approvals.NewRootCmd())
+
+	// G11.3-T5 (#826) -- scheduled-trigger admin verbs (list / create /
+	// cancel) for Initiative #804. Wraps the T5 REST surface
+	// (/api/v1/scheduler/triggers routes). list is operator-level; create
+	// and cancel require tenant_admin. Tenant scoping is enforced
+	// server-side via the JWT; tenant_admin callers may use --tenant to
+	// act cross-tenant. Registered before registerDynamicSubcommands so
+	// the backplane manifest cannot shadow the built-in `scheduler` parent.
+	root.AddCommand(scheduler.NewRootCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=

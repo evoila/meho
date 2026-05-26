@@ -727,6 +727,14 @@ class Settings(BaseModel):
     scheduler_agent_vault_path_pattern: str = Field(
         default="secret/data/agents/{client_id}/credentials"
     )
+    # G11.3-T3 #824 — event-outbox drain loop cadence. 10 s default
+    # mirrors the consumer doc's accepted-latency target (the
+    # LISTEN/NOTIFY wake hint drops the typical latency to sub-second;
+    # this is the polled fall-back when no listener is connected).
+    # ``enabled`` mirrors SCHEDULER_ENABLED so operators using an
+    # external orchestrator (or running tests without the drain) opt out.
+    event_drain_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    event_drain_enabled: bool = True
     mcp_require_session_id: bool = False
 
     @field_validator("broadcast_redis_url")
@@ -978,6 +986,12 @@ def get_settings() -> Settings:
         scheduler_agent_vault_path_pattern=os.environ.get(
             "SCHEDULER_AGENT_VAULT_PATH_PATTERN",
             "secret/data/agents/{client_id}/credentials",
+        ),
+        event_drain_tick_interval_seconds=int(
+            os.environ.get("EVENT_DRAIN_TICK_INTERVAL_SECONDS", "10"),
+        ),
+        event_drain_enabled=parse_bool_env(
+            os.environ.get("EVENT_DRAIN_ENABLED", "true"),
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),

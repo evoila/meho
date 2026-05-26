@@ -24,7 +24,7 @@
 
   RBAC posture: the legal-targets list is server-filtered by
   :data:`PROMOTE_TARGETS_BY_SOURCE` (the ladder constant lives in
-  ``create_promote.py``). G5.2's :func:`assert_can_promote` re-checks
+  ``promote.py``). G5.2's :func:`assert_can_promote` re-checks
   the role + ladder at submit time; an operator whose role doesn't
   qualify for the chosen target lands a 403 with detail
   ``insufficient_promotion_authority``.

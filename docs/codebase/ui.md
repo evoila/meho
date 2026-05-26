@@ -1260,12 +1260,22 @@ before calling the service.
 
 ### Module layout (additions to T1)
 
-* `backend/src/meho_backplane/ui/routes/memory/create_promote.py` —
-  render helpers + service-call dispatchers for the create + promote
-  routes (`render_create_modal`, `create_entry`, `render_body_preview`,
-  `render_promote_modal`, `promote_entry`, `writable_scopes_for`,
-  `_map_promote_error`). Split out of `views.py` so each module stays
-  under the chassis-wide ~600-line cap.
+* `backend/src/meho_backplane/ui/routes/memory/create.py` —
+  render + submit helpers for the create modal
+  (`render_create_modal`, `render_body_preview`, `create_entry`).
+  Split out of `views.py` so each module stays under the
+  chassis-wide ~600-line cap.
+* `backend/src/meho_backplane/ui/routes/memory/promote.py` —
+  render + submit helpers for the scope-promotion modal
+  (`render_promote_modal`, `promote_entry`, `_map_promote_error`).
+  Sibling of `create.py`; both call into G5.2's `MemoryService`.
+* `backend/src/meho_backplane/ui/routes/memory/_modal_shared.py` —
+  shared helpers + constants for both modals: scope-selector
+  vocabulary (`writable_scopes_for`, `scope_label`), the
+  double-submit CSRF cookie set (`set_csrf_cookie`,
+  `build_common_template_context`), the form-encoded tags parser
+  (`parse_tags`), and the form-field sizing constants
+  (`TAGS_MAX_LENGTH`, etc.).
 * `backend/src/meho_backplane/ui/routes/memory/routes.py` — adds
   `_register_static_prefix_routes` which registers `/ui/memory/create`
   + `/ui/memory/preview` (+ T1's `/ui/memory/tags`) ahead of the

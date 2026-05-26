@@ -9,7 +9,8 @@ scope-promotion on top. The route handlers in this module are thin
 wrappers: parse FastAPI params, resolve the session / operator
 dependency, and hand off to the render functions in
 :mod:`~meho_backplane.ui.routes.memory.views` (T1 routes) or
-:mod:`~meho_backplane.ui.routes.memory.create_promote` (T2 routes).
+:mod:`~meho_backplane.ui.routes.memory.create` +
+:mod:`~meho_backplane.ui.routes.memory.promote` (T2 routes).
 Splitting registration here from render logic keeps each module
 under the chassis-wide ~600-line + ~100-line caps and gives the
 render helpers a unit-testable seam (no FastAPI :class:`Request`

@@ -166,6 +166,27 @@ const (
 	RetireChecklistRequestSurfaceOperations RetireChecklistRequestSurface = "operations"
 )
 
+// Defines values for ScheduledTriggerInFlightPolicy.
+const (
+	FailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
+	Resume        ScheduledTriggerInFlightPolicy = "resume"
+)
+
+// Defines values for ScheduledTriggerKind.
+const (
+	ScheduledTriggerKindCron   ScheduledTriggerKind = "cron"
+	ScheduledTriggerKindEvent  ScheduledTriggerKind = "event"
+	ScheduledTriggerKindOneOff ScheduledTriggerKind = "one_off"
+)
+
+// Defines values for ScheduledTriggerStatus.
+const (
+	ScheduledTriggerStatusActive    ScheduledTriggerStatus = "active"
+	ScheduledTriggerStatusCancelled ScheduledTriggerStatus = "cancelled"
+	ScheduledTriggerStatusFired     ScheduledTriggerStatus = "fired"
+	ScheduledTriggerStatusPaused    ScheduledTriggerStatus = "paused"
+)
+
 // Defines values for SurfaceChecklistSurface.
 const (
 	SurfaceChecklistSurfaceKb         SurfaceChecklistSurface = "kb"
@@ -242,6 +263,21 @@ const (
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceKb         UsageEndpointApiV1RetrieveUsageGetParamsSurface = "kb"
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceMemory     UsageEndpointApiV1RetrieveUsageGetParamsSurface = "memory"
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceOperations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
+)
+
+// Defines values for ListTriggersApiV1SchedulerTriggersGetParamsKind.
+const (
+	ListTriggersApiV1SchedulerTriggersGetParamsKindCron   ListTriggersApiV1SchedulerTriggersGetParamsKind = "cron"
+	ListTriggersApiV1SchedulerTriggersGetParamsKindEvent  ListTriggersApiV1SchedulerTriggersGetParamsKind = "event"
+	ListTriggersApiV1SchedulerTriggersGetParamsKindOneOff ListTriggersApiV1SchedulerTriggersGetParamsKind = "one_off"
+)
+
+// Defines values for ListTriggersApiV1SchedulerTriggersGetParamsStatus.
+const (
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusActive    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "active"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusCancelled ListTriggersApiV1SchedulerTriggersGetParamsStatus = "cancelled"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusFired     ListTriggersApiV1SchedulerTriggersGetParamsStatus = "fired"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusPaused    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "paused"
 )
 
 // AgentDefinitionCreate POST body -- the inputs “create“ consumes. Pydantic v2 strict.
@@ -837,6 +873,22 @@ type BaselineMetricsOverride struct {
 	Kind         *string `json:"kind,omitempty"`
 	Mrr          float32 `json:"mrr"`
 	PrecisionAt5 float32 `json:"precision_at_5"`
+}
+
+// BodyUiMemoryPatchUiMemoryScopeSlugPatch defines model for Body_ui_memory_patch_ui_memory__scope___slug__patch.
+type BodyUiMemoryPatchUiMemoryScopeSlugPatch struct {
+	Body string `json:"body"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.
@@ -2234,6 +2286,287 @@ type RetrieveResponse struct {
 	QueryDurationMs float32        `json:"query_duration_ms"`
 }
 
+// ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
+//
+// Discriminated by *kind*: exactly one of “cron_expr“ / “fire_at“
+// / “event_filter“ must be set, matching the DB-side
+// “ck_scheduled_trigger_kind_fields“ invariant. The
+// :meth:`_validate_discriminated_union` validator enforces this at
+// the wire so a malformed body surfaces as 422 rather than as a
+// flush-time :class:`IntegrityError`.
+//
+// *agent_definition_id* is the existing-definition reference -- the
+// repository's FK check rejects an orphan id with 422 at insert; no
+// validation is duplicated here.
+//
+// *identity_sub* is the OIDC “sub“ the scheduler impersonates when
+// firing the trigger (distinct from *created_by_sub* which the
+// boundary derives from the operator). Defaulted to
+// “"__scheduler__"“ to match the migration-time backstop the
+// ORM-level default sets, so a minimal create body still validates.
+//
+// *in_flight_policy* defaults to “fail_into_audit“ per the consumer
+// doc; operators wanting at-least-once semantics opt into “resume“.
+//
+// *tenant_id* (optional) lets a tenant-admin caller create triggers in
+// another tenant for cross-tenant admin operations; “operator“ role
+// callers leave it “None“ and the boundary pins it to the JWT's
+// tenant id. The boundary enforces the RBAC -- this schema only
+// carries the field.
+type ScheduledTriggerCreate struct {
+	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
+	CronExpr          *string                 `json:"cron_expr"`
+	EventFilter       *map[string]interface{} `json:"event_filter"`
+	FireAt            *time.Time              `json:"fire_at"`
+	IdentitySub       *string                 `json:"identity_sub,omitempty"`
+
+	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+	// T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+	// storage shape and the dispatch behaviour aligned across the
+	// Initiative.
+	//
+	// Members:
+	//
+	// * :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+	//   resume a killed run from its last recorded state. At-least-once
+	//   semantics; the underlying agent run should be idempotent-friendly.
+	// * :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed`` with
+	//   a clean audit row explaining the interruption; the next trigger
+	//   tick fires a fresh run. The consumer doc (``agent-runtime-for-ops-
+	//   spec.md`` §P2) explicitly accepts this outcome as the default
+	//   policy -- which is why Option A (extend roll-our-own) is viable at
+	//   all without DBOS-style automatic resume.
+	//
+	// Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+	// the conservative policy that requires no extra infrastructure (just
+	// audit) and matches the consumer's accepted-outcome statement.
+	// Operators opt into :attr:`RESUME` per definition.
+	InFlightPolicy *ScheduledTriggerInFlightPolicy `json:"in_flight_policy,omitempty"`
+	Inputs         *map[string]interface{}         `json:"inputs"`
+
+	// Kind Closed enum of trigger shapes the G11.3 scheduler dispatches.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+	// :class:`ScheduledTrigger` row carries exactly one of three shapes,
+	// selected by this discriminator; the discriminated-union invariant is
+	// enforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``
+	// that pairs each kind with its mandatory column.
+	//
+	// Members:
+	//
+	// * :attr:`CRON` -- recurring trigger driven by a 5-field cron
+	//   expression (``cron_expr`` column). The dispatcher (T2 #823) reads
+	//   the expression via ``croniter`` and materialises ``next_fire_at``.
+	// * :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+	//   (``fire_at`` column). The dispatcher fires it once then marks
+	//   ``status = 'cancelled'`` (or the row stays inactive via
+	//   ``next_fire_at IS NULL``).
+	// * :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+	//   filter (``event_filter`` column). The transactional outbox (T3
+	//   #824) matches rows against the filter and dispatches.
+	//
+	// Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+	// coordinated DB + model change so the enum and the
+	// :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0020``'s
+	// frozen tuple) cannot drift. The lock-step discipline mirrors
+	// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+	// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+	// unit-test time.
+	Kind     ScheduledTriggerKind `json:"kind"`
+	TenantId *openapi_types.UUID  `json:"tenant_id"`
+	Timezone *string              `json:"timezone,omitempty"`
+}
+
+// ScheduledTriggerInFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
+//
+// Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+// T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+// storage shape and the dispatch behaviour aligned across the
+// Initiative.
+//
+// Members:
+//
+//   - :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+//     resume a killed run from its last recorded state. At-least-once
+//     semantics; the underlying agent run should be idempotent-friendly.
+//   - :attr:`FAIL_INTO_AUDIT` -- the killed run is marked “failed“ with
+//     a clean audit row explaining the interruption; the next trigger
+//     tick fires a fresh run. The consumer doc (“agent-runtime-for-ops-
+//     spec.md“ §P2) explicitly accepts this outcome as the default
+//     policy -- which is why Option A (extend roll-our-own) is viable at
+//     all without DBOS-style automatic resume.
+//
+// Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+// the conservative policy that requires no extra infrastructure (just
+// audit) and matches the consumer's accepted-outcome statement.
+// Operators opt into :attr:`RESUME` per definition.
+type ScheduledTriggerInFlightPolicy string
+
+// ScheduledTriggerKind Closed enum of trigger shapes the G11.3 scheduler dispatches.
+//
+// Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+// :class:`ScheduledTrigger` row carries exactly one of three shapes,
+// selected by this discriminator; the discriminated-union invariant is
+// enforced by the DB-side “ck_scheduled_trigger_kind_fields“ “CHECK“
+// that pairs each kind with its mandatory column.
+//
+// Members:
+//
+//   - :attr:`CRON` -- recurring trigger driven by a 5-field cron
+//     expression (“cron_expr“ column). The dispatcher (T2 #823) reads
+//     the expression via “croniter“ and materialises “next_fire_at“.
+//   - :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+//     (“fire_at“ column). The dispatcher fires it once then marks
+//     “status = 'cancelled'“ (or the row stays inactive via
+//     “next_fire_at IS NULL“).
+//   - :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+//     filter (“event_filter“ column). The transactional outbox (T3
+//     #824) matches rows against the filter and dispatches.
+//
+// Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+// coordinated DB + model change so the enum and the
+// :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration “0020“'s
+// frozen tuple) cannot drift. The lock-step discipline mirrors
+// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+// unit-test time.
+type ScheduledTriggerKind string
+
+// ScheduledTriggerListResponse Response envelope for “GET /api/v1/scheduler/triggers“.
+//
+// Wrapped in “{"triggers": [...]}“ so a future paging / cursor
+// field can land non-breakingly -- the same shape
+// :class:`~meho_backplane.api.v1.agents.AgentDefinitionListResponse`
+// adopted.
+type ScheduledTriggerListResponse struct {
+	Triggers []ScheduledTriggerRead `json:"triggers"`
+}
+
+// ScheduledTriggerRead Response shape for one “scheduled_trigger“ row.
+//
+// Mirrors :class:`~meho_backplane.db.models.ScheduledTrigger`'s column
+// set, projected to the wire types the JSON renderer can serialise.
+// “frozen=True“ matches the :mod:`meho_backplane.agents.schemas`
+// posture so a route handler cannot accidentally mutate the row after
+// returning it.
+type ScheduledTriggerRead struct {
+	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
+	CreatedAt         time.Time               `json:"created_at"`
+	CreatedBySub      string                  `json:"created_by_sub"`
+	CronExpr          *string                 `json:"cron_expr"`
+	EventFilter       *map[string]interface{} `json:"event_filter"`
+	FireAt            *time.Time              `json:"fire_at"`
+	Id                openapi_types.UUID      `json:"id"`
+	IdentitySub       string                  `json:"identity_sub"`
+
+	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+	// T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+	// storage shape and the dispatch behaviour aligned across the
+	// Initiative.
+	//
+	// Members:
+	//
+	// * :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+	//   resume a killed run from its last recorded state. At-least-once
+	//   semantics; the underlying agent run should be idempotent-friendly.
+	// * :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed`` with
+	//   a clean audit row explaining the interruption; the next trigger
+	//   tick fires a fresh run. The consumer doc (``agent-runtime-for-ops-
+	//   spec.md`` §P2) explicitly accepts this outcome as the default
+	//   policy -- which is why Option A (extend roll-our-own) is viable at
+	//   all without DBOS-style automatic resume.
+	//
+	// Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+	// the conservative policy that requires no extra infrastructure (just
+	// audit) and matches the consumer's accepted-outcome statement.
+	// Operators opt into :attr:`RESUME` per definition.
+	InFlightPolicy ScheduledTriggerInFlightPolicy `json:"in_flight_policy"`
+	Inputs         *map[string]interface{}        `json:"inputs"`
+
+	// Kind Closed enum of trigger shapes the G11.3 scheduler dispatches.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+	// :class:`ScheduledTrigger` row carries exactly one of three shapes,
+	// selected by this discriminator; the discriminated-union invariant is
+	// enforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``
+	// that pairs each kind with its mandatory column.
+	//
+	// Members:
+	//
+	// * :attr:`CRON` -- recurring trigger driven by a 5-field cron
+	//   expression (``cron_expr`` column). The dispatcher (T2 #823) reads
+	//   the expression via ``croniter`` and materialises ``next_fire_at``.
+	// * :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+	//   (``fire_at`` column). The dispatcher fires it once then marks
+	//   ``status = 'cancelled'`` (or the row stays inactive via
+	//   ``next_fire_at IS NULL``).
+	// * :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+	//   filter (``event_filter`` column). The transactional outbox (T3
+	//   #824) matches rows against the filter and dispatches.
+	//
+	// Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+	// coordinated DB + model change so the enum and the
+	// :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0020``'s
+	// frozen tuple) cannot drift. The lock-step discipline mirrors
+	// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+	// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+	// unit-test time.
+	Kind        ScheduledTriggerKind `json:"kind"`
+	LastFiredAt *time.Time           `json:"last_fired_at"`
+	NextFireAt  *time.Time           `json:"next_fire_at"`
+
+	// Status Closed lifecycle status of a :class:`ScheduledTrigger`.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1). The admin
+	// surface (T5 #826) walks triggers through this state machine; the
+	// dispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.
+	//
+	// Members:
+	//
+	// * :attr:`ACTIVE` -- the trigger is eligible for dispatch.
+	// * :attr:`PAUSED` -- the trigger is temporarily disabled by an
+	//   operator. ``next_fire_at`` is preserved so resuming reactivates
+	//   without recomputing.
+	// * :attr:`CANCELLED` -- terminal. The trigger row is retained for
+	//   audit purposes but never fires again.
+	// * :attr:`FIRED` -- terminal one-off state. Migration ``0025`` (T2
+	//   #823) widened the enum so a one-off trigger transitions
+	//   ``ACTIVE -> FIRED`` after its single dispatch instead of going
+	//   to ``CANCELLED`` (which carries operator-intent semantics).
+	//   :class:`ScheduledTrigger` rows in this state are retained for
+	//   audit (last-fired-at + identity_sub) but never re-dispatched.
+	Status    ScheduledTriggerStatus `json:"status"`
+	TenantId  openapi_types.UUID     `json:"tenant_id"`
+	Timezone  string                 `json:"timezone"`
+	UpdatedAt time.Time              `json:"updated_at"`
+}
+
+// ScheduledTriggerStatus Closed lifecycle status of a :class:`ScheduledTrigger`.
+//
+// Initiative #804 (G11.3 Scheduler), Task #822 (T1). The admin
+// surface (T5 #826) walks triggers through this state machine; the
+// dispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.
+//
+// Members:
+//
+//   - :attr:`ACTIVE` -- the trigger is eligible for dispatch.
+//   - :attr:`PAUSED` -- the trigger is temporarily disabled by an
+//     operator. “next_fire_at“ is preserved so resuming reactivates
+//     without recomputing.
+//   - :attr:`CANCELLED` -- terminal. The trigger row is retained for
+//     audit purposes but never fires again.
+//   - :attr:`FIRED` -- terminal one-off state. Migration “0025“ (T2
+//     #823) widened the enum so a one-off trigger transitions
+//     “ACTIVE -> FIRED“ after its single dispatch instead of going
+//     to “CANCELLED“ (which carries operator-intent semantics).
+//     :class:`ScheduledTrigger` rows in this state are retained for
+//     audit (last-fired-at + identity_sub) but never re-dispatched.
+type ScheduledTriggerStatus string
+
 // SkippedConnector One connector that did not contribute candidates for a product.
 //
 // “name“ is the connector implementation key (the “impl_id“ from
@@ -2757,6 +3090,21 @@ type TopologyTimelineEntry struct {
 type TopologyTimelineResult struct {
 	NextCursor *string                 `json:"next_cursor"`
 	Rows       []TopologyTimelineEntry `json:"rows"`
+}
+
+// UISessionContext Per-request session identity exposed on “request.state“.
+//
+// Frozen so a route handler that stashes the context on a logger
+// or forwards it to a service layer cannot accidentally mutate
+// fields downstream. The shape mirrors :class:`Operator` for the
+// fields T5 (#866) needs to render an authenticated page header;
+// “raw_jwt“ / “tenant_role“ are intentionally absent because
+// the session-cookie path does not load them today (the encrypted
+// row carries only the access token, not the decoded claims).
+type UISessionContext struct {
+	OperatorSub string             `json:"operator_sub"`
+	SessionId   openapi_types.UUID `json:"session_id"`
+	TenantId    openapi_types.UUID `json:"tenant_id"`
 }
 
 // UsageReport Top-level shape returned by :func:`compute_usage` + the API route.
@@ -3449,6 +3797,33 @@ type UsageEndpointApiV1RetrieveUsageGetParams struct {
 // UsageEndpointApiV1RetrieveUsageGetParamsSurface defines parameters for UsageEndpointApiV1RetrieveUsageGet.
 type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
+// ListTriggersApiV1SchedulerTriggersGetParams defines parameters for ListTriggersApiV1SchedulerTriggersGet.
+type ListTriggersApiV1SchedulerTriggersGetParams struct {
+	Limit         *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int                                               `form:"offset,omitempty" json:"offset,omitempty"`
+	Kind          *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
+	Status        *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TenantFilter  *openapi_types.UUID                                `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string                                            `json:"authorization,omitempty"`
+}
+
+// ListTriggersApiV1SchedulerTriggersGetParamsKind defines parameters for ListTriggersApiV1SchedulerTriggersGet.
+type ListTriggersApiV1SchedulerTriggersGetParamsKind string
+
+// ListTriggersApiV1SchedulerTriggersGetParamsStatus defines parameters for ListTriggersApiV1SchedulerTriggersGet.
+type ListTriggersApiV1SchedulerTriggersGetParamsStatus string
+
+// CreateTriggerApiV1SchedulerTriggersPostParams defines parameters for CreateTriggerApiV1SchedulerTriggersPost.
+type CreateTriggerApiV1SchedulerTriggersPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams defines parameters for CancelTriggerApiV1SchedulerTriggersTriggerIdDelete.
+type CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
 	Product       *string `form:"product,omitempty" json:"product,omitempty"`
@@ -3627,6 +4002,12 @@ type UiBroadcastStreamUiBroadcastStreamGetParams struct {
 	Since *string `form:"since,omitempty" json:"since,omitempty"`
 }
 
+// UiMemoryListUiMemoryGetParams defines parameters for UiMemoryListUiMemoryGet.
+type UiMemoryListUiMemoryGetParams struct {
+	Scope *string `form:"scope,omitempty" json:"scope,omitempty"`
+	Tag   *string `form:"tag,omitempty" json:"tag,omitempty"`
+}
+
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
 	Sort *UnderscoreSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
@@ -3721,6 +4102,9 @@ type EvalEndpointApiV1RetrieveEvalPostJSONRequestBody = EvalRequest
 // RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody defines body for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost for application/json ContentType.
 type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody = RetireChecklistRequest
 
+// CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody defines body for CreateTriggerApiV1SchedulerTriggersPost for application/json ContentType.
+type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCreate
+
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
 
@@ -3732,6 +4116,15 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotate
 
 // BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody defines body for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost for application/json ContentType.
 type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody = UnderscoreBulkImportRequest
+
+// UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody defines body for UiMemoryDeleteUiMemoryScopeSlugDelete for application/json ContentType.
+type UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody = UISessionContext
+
+// UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody defines body for UiMemoryPatchUiMemoryScopeSlugPatch for application/x-www-form-urlencoded ContentType.
+type UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody = BodyUiMemoryPatchUiMemoryScopeSlugPatch
+
+// UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody defines body for UiMemoryEditFormUiMemoryScopeSlugEditGet for application/json ContentType.
+type UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody = UISessionContext
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
 func (t ApproveResponseBody_DispatchResult) AsApproveResponseBodyDispatchResult0() (ApproveResponseBodyDispatchResult0, error) {
@@ -4243,6 +4636,17 @@ type ClientInterface interface {
 	// UsageEndpointApiV1RetrieveUsageGet request
 	UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListTriggersApiV1SchedulerTriggersGet request
+	ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateTriggerApiV1SchedulerTriggersPostWithBody request with any body
+	CreateTriggerApiV1SchedulerTriggersPostWithBody(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateTriggerApiV1SchedulerTriggersPost(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CancelTriggerApiV1SchedulerTriggersTriggerIdDelete request
+	CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -4347,8 +4751,29 @@ type ClientInterface interface {
 	// UiStubKnowledgeUiKnowledgeGet request
 	UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiStubMemoryUiMemoryGet request
-	UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiMemoryListUiMemoryGet request
+	UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryTagsUiMemoryTagsGet request
+	UiMemoryTagsUiMemoryTagsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody request with any body
+	UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryDeleteUiMemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryDetailUiMemoryScopeSlugGet request
+	UiMemoryDetailUiMemoryScopeSlugGet(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryPatchUiMemoryScopeSlugPatchWithBody request with any body
+	UiMemoryPatchUiMemoryScopeSlugPatchWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody request with any body
+	UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryEditFormUiMemoryScopeSlugEditGet(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -5464,6 +5889,54 @@ func (c *Client) UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params 
 	return c.Client.Do(req)
 }
 
+func (c *Client) ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListTriggersApiV1SchedulerTriggersGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateTriggerApiV1SchedulerTriggersPostWithBody(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateTriggerApiV1SchedulerTriggersPost(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateTriggerApiV1SchedulerTriggersPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest(c.Server, triggerId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListTargetsApiV1TargetsGetRequest(c.Server, params)
 	if err != nil {
@@ -5896,8 +6369,104 @@ func (c *Client) UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors .
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiStubMemoryUiMemoryGetRequest(c.Server)
+func (c *Client) UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryListUiMemoryGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryTagsUiMemoryTagsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryTagsUiMemoryTagsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryDeleteUiMemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequest(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryDetailUiMemoryScopeSlugGet(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryDetailUiMemoryScopeSlugGetRequest(c.Server, scope, slug)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPatchUiMemoryScopeSlugPatchWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithFormdataBody(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryEditFormUiMemoryScopeSlugEditGet(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequest(c.Server, scope, slug, body)
 	if err != nil {
 		return nil, err
 	}
@@ -10040,6 +10609,260 @@ func NewUsageEndpointApiV1RetrieveUsageGetRequest(server string, params *UsageEn
 	return req, nil
 }
 
+// NewListTriggersApiV1SchedulerTriggersGetRequest generates requests for ListTriggersApiV1SchedulerTriggersGet
+func NewListTriggersApiV1SchedulerTriggersGetRequest(server string, params *ListTriggersApiV1SchedulerTriggersGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/scheduler/triggers")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateTriggerApiV1SchedulerTriggersPostRequest calls the generic CreateTriggerApiV1SchedulerTriggersPost builder with application/json body
+func NewCreateTriggerApiV1SchedulerTriggersPostRequest(server string, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody generates requests for CreateTriggerApiV1SchedulerTriggersPost with any type of body
+func NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody(server string, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/scheduler/triggers")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest generates requests for CancelTriggerApiV1SchedulerTriggersTriggerIdDelete
+func NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest(server string, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "trigger_id", runtime.ParamLocationPath, triggerId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/scheduler/triggers/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListTargetsApiV1TargetsGetRequest generates requests for ListTargetsApiV1TargetsGet
 func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV1TargetsGetParams) (*http.Request, error) {
 	var err error
@@ -12255,8 +13078,8 @@ func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, erro
 	return req, nil
 }
 
-// NewUiStubMemoryUiMemoryGetRequest generates requests for UiStubMemoryUiMemoryGet
-func NewUiStubMemoryUiMemoryGetRequest(server string) (*http.Request, error) {
+// NewUiMemoryListUiMemoryGetRequest generates requests for UiMemoryListUiMemoryGet
+func NewUiMemoryListUiMemoryGetRequest(server string, params *UiMemoryListUiMemoryGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -12274,10 +13097,278 @@ func NewUiStubMemoryUiMemoryGetRequest(server string) (*http.Request, error) {
 		return nil, err
 	}
 
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Tag != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tag", runtime.ParamLocationQuery, *params.Tag); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewUiMemoryTagsUiMemoryTagsGetRequest generates requests for UiMemoryTagsUiMemoryTagsGet
+func NewUiMemoryTagsUiMemoryTagsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/tags")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequest calls the generic UiMemoryDeleteUiMemoryScopeSlugDelete builder with application/json body
+func NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequest(server string, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody(server, scope, slug, "application/json", bodyReader)
+}
+
+// NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody generates requests for UiMemoryDeleteUiMemoryScopeSlugDelete with any type of body
+func NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryDetailUiMemoryScopeSlugGetRequest generates requests for UiMemoryDetailUiMemoryScopeSlugGet
+func NewUiMemoryDetailUiMemoryScopeSlugGetRequest(server string, scope MemoryScope, slug string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithFormdataBody calls the generic UiMemoryPatchUiMemoryScopeSlugPatch builder with application/x-www-form-urlencoded body
+func NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithFormdataBody(server string, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody(server, scope, slug, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody generates requests for UiMemoryPatchUiMemoryScopeSlugPatch with any type of body
+func NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequest calls the generic UiMemoryEditFormUiMemoryScopeSlugEditGet builder with application/json body
+func NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequest(server string, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody(server, scope, slug, "application/json", bodyReader)
+}
+
+// NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody generates requests for UiMemoryEditFormUiMemoryScopeSlugEditGet with any type of body
+func NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s/edit", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -12878,6 +13969,17 @@ type ClientWithResponsesInterface interface {
 	// UsageEndpointApiV1RetrieveUsageGetWithResponse request
 	UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error)
 
+	// ListTriggersApiV1SchedulerTriggersGetWithResponse request
+	ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error)
+
+	// CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse request with any body
+	CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error)
+
+	CreateTriggerApiV1SchedulerTriggersPostWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error)
+
+	// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse request
+	CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error)
+
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
 
@@ -12982,8 +14084,29 @@ type ClientWithResponsesInterface interface {
 	// UiStubKnowledgeUiKnowledgeGetWithResponse request
 	UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error)
 
-	// UiStubMemoryUiMemoryGetWithResponse request
-	UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error)
+	// UiMemoryListUiMemoryGetWithResponse request
+	UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error)
+
+	// UiMemoryTagsUiMemoryTagsGetWithResponse request
+	UiMemoryTagsUiMemoryTagsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiMemoryTagsUiMemoryTagsGetResponse, error)
+
+	// UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse request with any body
+	UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error)
+
+	UiMemoryDeleteUiMemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error)
+
+	// UiMemoryDetailUiMemoryScopeSlugGetWithResponse request
+	UiMemoryDetailUiMemoryScopeSlugGetWithResponse(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*UiMemoryDetailUiMemoryScopeSlugGetResponse, error)
+
+	// UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse request with any body
+	UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error)
+
+	UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error)
+
+	// UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse request with any body
+	UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error)
+
+	UiMemoryEditFormUiMemoryScopeSlugEditGetWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error)
 
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
@@ -14523,6 +15646,74 @@ func (r UsageEndpointApiV1RetrieveUsageGetResponse) StatusCode() int {
 	return 0
 }
 
+type ListTriggersApiV1SchedulerTriggersGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ScheduledTriggerListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListTriggersApiV1SchedulerTriggersGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListTriggersApiV1SchedulerTriggersGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateTriggerApiV1SchedulerTriggersPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *ScheduledTriggerRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateTriggerApiV1SchedulerTriggersPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateTriggerApiV1SchedulerTriggersPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListTargetsApiV1TargetsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -15262,13 +16453,14 @@ func (r UiStubKnowledgeUiKnowledgeGetResponse) StatusCode() int {
 	return 0
 }
 
-type UiStubMemoryUiMemoryGetResponse struct {
+type UiMemoryListUiMemoryGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
-func (r UiStubMemoryUiMemoryGetResponse) Status() string {
+func (r UiMemoryListUiMemoryGetResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -15276,7 +16468,116 @@ func (r UiStubMemoryUiMemoryGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r UiStubMemoryUiMemoryGetResponse) StatusCode() int {
+func (r UiMemoryListUiMemoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryTagsUiMemoryTagsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryTagsUiMemoryTagsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryTagsUiMemoryTagsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryDeleteUiMemoryScopeSlugDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryDeleteUiMemoryScopeSlugDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryDeleteUiMemoryScopeSlugDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryDetailUiMemoryScopeSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryDetailUiMemoryScopeSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryDetailUiMemoryScopeSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryPatchUiMemoryScopeSlugPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryPatchUiMemoryScopeSlugPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryPatchUiMemoryScopeSlugPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryEditFormUiMemoryScopeSlugEditGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryEditFormUiMemoryScopeSlugEditGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryEditFormUiMemoryScopeSlugEditGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -16152,6 +17453,41 @@ func (c *ClientWithResponses) UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx
 	return ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp)
 }
 
+// ListTriggersApiV1SchedulerTriggersGetWithResponse request returning *ListTriggersApiV1SchedulerTriggersGetResponse
+func (c *ClientWithResponses) ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error) {
+	rsp, err := c.ListTriggersApiV1SchedulerTriggersGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListTriggersApiV1SchedulerTriggersGetResponse(rsp)
+}
+
+// CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse request with arbitrary body returning *CreateTriggerApiV1SchedulerTriggersPostResponse
+func (c *ClientWithResponses) CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	rsp, err := c.CreateTriggerApiV1SchedulerTriggersPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateTriggerApiV1SchedulerTriggersPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateTriggerApiV1SchedulerTriggersPostWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	rsp, err := c.CreateTriggerApiV1SchedulerTriggersPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateTriggerApiV1SchedulerTriggersPostResponse(rsp)
+}
+
+// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse request returning *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse
+func (c *ClientWithResponses) CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error) {
+	rsp, err := c.CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx, triggerId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse(rsp)
+}
+
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
 func (c *ClientWithResponses) ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error) {
 	rsp, err := c.ListTargetsApiV1TargetsGet(ctx, params, reqEditors...)
@@ -16472,13 +17808,82 @@ func (c *ClientWithResponses) UiStubKnowledgeUiKnowledgeGetWithResponse(ctx cont
 	return ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp)
 }
 
-// UiStubMemoryUiMemoryGetWithResponse request returning *UiStubMemoryUiMemoryGetResponse
-func (c *ClientWithResponses) UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error) {
-	rsp, err := c.UiStubMemoryUiMemoryGet(ctx, reqEditors...)
+// UiMemoryListUiMemoryGetWithResponse request returning *UiMemoryListUiMemoryGetResponse
+func (c *ClientWithResponses) UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error) {
+	rsp, err := c.UiMemoryListUiMemoryGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUiStubMemoryUiMemoryGetResponse(rsp)
+	return ParseUiMemoryListUiMemoryGetResponse(rsp)
+}
+
+// UiMemoryTagsUiMemoryTagsGetWithResponse request returning *UiMemoryTagsUiMemoryTagsGetResponse
+func (c *ClientWithResponses) UiMemoryTagsUiMemoryTagsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiMemoryTagsUiMemoryTagsGetResponse, error) {
+	rsp, err := c.UiMemoryTagsUiMemoryTagsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryTagsUiMemoryTagsGetResponse(rsp)
+}
+
+// UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse request with arbitrary body returning *UiMemoryDeleteUiMemoryScopeSlugDeleteResponse
+func (c *ClientWithResponses) UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error) {
+	rsp, err := c.UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryDeleteUiMemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error) {
+	rsp, err := c.UiMemoryDeleteUiMemoryScopeSlugDelete(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse(rsp)
+}
+
+// UiMemoryDetailUiMemoryScopeSlugGetWithResponse request returning *UiMemoryDetailUiMemoryScopeSlugGetResponse
+func (c *ClientWithResponses) UiMemoryDetailUiMemoryScopeSlugGetWithResponse(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*UiMemoryDetailUiMemoryScopeSlugGetResponse, error) {
+	rsp, err := c.UiMemoryDetailUiMemoryScopeSlugGet(ctx, scope, slug, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryDetailUiMemoryScopeSlugGetResponse(rsp)
+}
+
+// UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse request with arbitrary body returning *UiMemoryPatchUiMemoryScopeSlugPatchResponse
+func (c *ClientWithResponses) UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error) {
+	rsp, err := c.UiMemoryPatchUiMemoryScopeSlugPatchWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error) {
+	rsp, err := c.UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBody(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse(rsp)
+}
+
+// UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse request with arbitrary body returning *UiMemoryEditFormUiMemoryScopeSlugEditGetResponse
+func (c *ClientWithResponses) UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error) {
+	rsp, err := c.UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryEditFormUiMemoryScopeSlugEditGetWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error) {
+	rsp, err := c.UiMemoryEditFormUiMemoryScopeSlugEditGet(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse(rsp)
 }
 
 // UiTopologyTableUiTopologyGetWithResponse request returning *UiTopologyTableUiTopologyGetResponse
@@ -18628,6 +20033,98 @@ func ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp *http.Response) (*Usage
 	return response, nil
 }
 
+// ParseListTriggersApiV1SchedulerTriggersGetResponse parses an HTTP response from a ListTriggersApiV1SchedulerTriggersGetWithResponse call
+func ParseListTriggersApiV1SchedulerTriggersGetResponse(rsp *http.Response) (*ListTriggersApiV1SchedulerTriggersGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListTriggersApiV1SchedulerTriggersGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ScheduledTriggerListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateTriggerApiV1SchedulerTriggersPostResponse parses an HTTP response from a CreateTriggerApiV1SchedulerTriggersPostWithResponse call
+func ParseCreateTriggerApiV1SchedulerTriggersPostResponse(rsp *http.Response) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateTriggerApiV1SchedulerTriggersPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest ScheduledTriggerRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse parses an HTTP response from a CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse call
+func ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse(rsp *http.Response) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListTargetsApiV1TargetsGetResponse parses an HTTP response from a ListTargetsApiV1TargetsGetWithResponse call
 func ParseListTargetsApiV1TargetsGetResponse(rsp *http.Response) (*ListTargetsApiV1TargetsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -19567,17 +21064,147 @@ func ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp *http.Response) (*UiStubKnow
 	return response, nil
 }
 
-// ParseUiStubMemoryUiMemoryGetResponse parses an HTTP response from a UiStubMemoryUiMemoryGetWithResponse call
-func ParseUiStubMemoryUiMemoryGetResponse(rsp *http.Response) (*UiStubMemoryUiMemoryGetResponse, error) {
+// ParseUiMemoryListUiMemoryGetResponse parses an HTTP response from a UiMemoryListUiMemoryGetWithResponse call
+func ParseUiMemoryListUiMemoryGetResponse(rsp *http.Response) (*UiMemoryListUiMemoryGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiStubMemoryUiMemoryGetResponse{
+	response := &UiMemoryListUiMemoryGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryTagsUiMemoryTagsGetResponse parses an HTTP response from a UiMemoryTagsUiMemoryTagsGetWithResponse call
+func ParseUiMemoryTagsUiMemoryTagsGetResponse(rsp *http.Response) (*UiMemoryTagsUiMemoryTagsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryTagsUiMemoryTagsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse parses an HTTP response from a UiMemoryDeleteUiMemoryScopeSlugDeleteWithResponse call
+func ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse(rsp *http.Response) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryDeleteUiMemoryScopeSlugDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryDetailUiMemoryScopeSlugGetResponse parses an HTTP response from a UiMemoryDetailUiMemoryScopeSlugGetWithResponse call
+func ParseUiMemoryDetailUiMemoryScopeSlugGetResponse(rsp *http.Response) (*UiMemoryDetailUiMemoryScopeSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryDetailUiMemoryScopeSlugGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse parses an HTTP response from a UiMemoryPatchUiMemoryScopeSlugPatchWithResponse call
+func ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse(rsp *http.Response) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryPatchUiMemoryScopeSlugPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse parses an HTTP response from a UiMemoryEditFormUiMemoryScopeSlugEditGetWithResponse call
+func ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse(rsp *http.Response) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryEditFormUiMemoryScopeSlugEditGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

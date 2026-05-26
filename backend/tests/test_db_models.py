@@ -112,13 +112,15 @@ async def test_tenant_round_trip_persists_every_field() -> None:
     machinery fires correctly under SQLite (the dev/test dialect
     where the migration's PG server defaults are no-ops).
 
-    The slug here is intentionally NOT ``rdc-internal``: migration
-    ``0018`` seeds that slug into the per-worker schema template
-    (:func:`tests.conftest._schema_template_db`), so this test would
+    The slug here is intentionally NOT ``default``: migration
+    ``0028`` seeds that slug into the per-worker schema template
+    (:func:`tests.conftest._schema_template_db`) -- and migration
+    ``0018`` had previously seeded ``rdc-internal`` there before
+    G0.13-T7 (#1137) generalised the seed -- so this test would
     trip ``UNIQUE constraint failed: tenant.slug`` if it tried to
-    insert a fresh tenant under that exact handle. A throwaway
-    fixture slug exercises the ORM contract this test owns without
-    coupling to a slug the seed migration claims.
+    insert a fresh tenant under either handle. A throwaway fixture
+    slug exercises the ORM contract this test owns without coupling
+    to a slug the seed migrations claim.
     """
     sessionmaker = get_sessionmaker()
     tenant_id = uuid.uuid4()
@@ -163,7 +165,7 @@ async def test_tenant_slug_uniqueness_enforced() -> None:
     proves the constraint is enforced at the DB layer (not just by
     a UI-side validator). Without this assertion, a future migration
     that accidentally dropped the unique flag would silently allow
-    duplicate slugs, and the operator-facing ``rdc-internal``
+    duplicate slugs, and the operator-facing ``default``
     handle would no longer be a primary key for the human eye.
     """
     from sqlalchemy.exc import IntegrityError

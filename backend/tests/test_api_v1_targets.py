@@ -276,6 +276,145 @@ def test_probe_target_not_found_returns_404(client: TestClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_probe_ambiguous_connector_returns_409(client: TestClient) -> None:
+    """Two registered impls for the same product → 409 ``ambiguous_connector``.
+
+    G0.14-T1 (#1142) acceptance criterion: ``/probe`` and dispatch
+    agree on whether a target resolves. Pre-#1142 ``/probe`` consulted
+    the v1 :func:`get_connector` registry only (which can hold at most
+    one impl per product, so ambiguity was *unrepresentable* there);
+    after #1142 it routes through
+    :func:`resolve_connector_or_label` so the v2 tie-break ladder's
+    ambiguous outcome surfaces as a structured 409 with the
+    resolver's exception message naming the candidate set + the
+    remediation step. This is the live ``rdc-rke2-infra-k8s`` shape
+    from ``claude-rdc-hetzner-dc#697`` signal 19 — pre-fix the
+    operator saw bare 500; post-fix they see the resolver's
+    diagnostic.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _ImplA(Connector):
+        product = "kclash"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    class _ImplB(Connector):
+        product = "kclash"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector_v2(product="kclash", version="", impl_id="a", cls=_ImplA)
+    register_connector_v2(product="kclash", version="", impl_id="b", cls=_ImplB)
+
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="rdc-clash",
+        product="kclash",
+        host="10.0.0.7",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets/rdc-clash/probe",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    # Resolver's diagnostic text rides verbatim — names the candidates
+    # and the remediation step.
+    assert "preferred_impl_id" in detail
+    assert "kclash" in detail
+
+
+@pytest.mark.asyncio
+async def test_probe_resolves_v2_only_registration(client: TestClient) -> None:
+    """A v2-only connector (no v1 entry) resolves via the shared helper.
+
+    Pre-#1142 ``/probe`` used :func:`get_connector` (v1 only), so a
+    target whose product was registered solely via
+    :func:`register_connector_v2` (e.g. ``vmware-rest-9.0`` — has no
+    v1 :func:`register_connector` entry) got 501 from probe even
+    though the dispatcher resolved it cleanly via the v2 ladder.
+    This test pins the after-fix behavior: a v2-only registration
+    reaches the connector's :meth:`fingerprint` through ``/probe``.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    fp = FingerprintResult(
+        vendor="vmware",
+        product="vmware",
+        version="9.0.2",
+        reachable=True,
+        probed_at=datetime.now(UTC),
+        probe_method="version-endpoint",
+    )
+
+    class _V2OnlyConnector(Connector):
+        product = "vmware-like"
+        # No supported_version_range → matches any target_version
+        # including the no-fingerprint case (matches the resolver's
+        # "v1-style + no range" pathway used by the test).
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            return fp
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    # v2-only registration — no register_connector("vmware-like", ...)
+    # call. The pre-#1142 /probe path would 501 on this shape.
+    register_connector_v2(
+        product="vmware-like",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_V2OnlyConnector,
+    )
+
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="rdc-vcenter",
+        product="vmware-like",
+        host="vcenter.corp.internal",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets/rdc-vcenter/probe",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["vendor"] == "vmware"
+    assert body["version"] == "9.0.2"
+
+
+@pytest.mark.asyncio
 async def test_probe_invokes_connector(client: TestClient) -> None:
     """When a connector is registered, probe returns the FingerprintResult.
 

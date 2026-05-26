@@ -108,6 +108,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
+import structlog
+
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -117,6 +119,18 @@ from meho_backplane.memory.service import MemoryService
 from meho_backplane.memory.ttl import resolve_default_expires_at
 
 __all__: list[str] = []
+
+# NOTE: structlog logger is resolved per-call inside ``_add_to_memory_handler``
+# rather than held as a module-level proxy. Production sets
+# ``cache_logger_on_first_use=True`` in
+# ``meho_backplane.logging.configure_logging``; a cached BoundLogger
+# pins a reference to the processor chain it was built with, and later
+# ``structlog.configure(...)`` calls *replace* (not mutate) that
+# reference -- so test fixtures using ``structlog.testing.capture_logs``
+# cannot observe events written through the orphaned cached proxy.
+# Same precedent + rationale as :mod:`meho_backplane.auth.jwt` (see
+# ``docs/codebase/backend.md``). Per-call cost is microseconds;
+# acceptable on the ``add_to_memory`` path which is not latency-critical.
 
 
 #: Op-class strings keep parity with :mod:`meho_backplane.broadcast.classify`'s
@@ -264,14 +278,56 @@ async def _search_memory_handler(
     }
 
 
+def _resolve_body_with_content_shim(arguments: dict[str, Any]) -> str:
+    """Resolve the body string from ``body`` (canonical) or ``content`` (deprecated).
+
+    v0.6.x ships a one-cycle deprecation shim for the v0.3.2 ``content`` ->
+    v0.6.0 ``body`` rename. ``body`` wins when both are supplied; ``content``
+    is accepted as an alias and emits a structured
+    ``add_to_memory_field_deprecated`` warning log line with
+    ``replacement="body"`` so an operator scanning logs sees the migration
+    breadcrumb directly (the ai-engineering anchor for agent-facing schema
+    changes). The shim is dropped in v0.7 -- see ``docs/RELEASING.md``
+    v0.7 follow-ups.
+
+    The dispatcher's JSON-Schema gate ensures at least one of the two
+    is supplied via the schema's ``anyOf`` clause; the ``else`` branch
+    below is the fail-closed answer to a schema regression rather than a
+    real run-time path.
+    """
+    body_arg: str | None = arguments.get("body")
+    content_arg: str | None = arguments.get("content")
+    if content_arg is not None:
+        structlog.get_logger(__name__).warning(
+            "add_to_memory_field_deprecated",
+            replacement="body",
+            removal_version="0.7",
+            body_supplied=body_arg is not None,
+        )
+    if body_arg is not None:
+        return body_arg
+    if content_arg is not None:
+        return content_arg
+    # Unreachable in practice -- the schema's ``anyOf`` gate makes
+    # this branch impossible without a schema regression. Surface the
+    # contract violation as INVALID_PARAMS rather than the opaque
+    # ``KeyError`` of the pre-shim code path.
+    raise McpInvalidParamsError(
+        "add_to_memory: one of 'body' or 'content' must be supplied",
+    )
+
+
 async def _add_to_memory_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """Create one memory entry under the operator's tenant.
 
-    Three things this handler is responsible for:
+    Four things this handler is responsible for:
 
+    * Resolving the body string from one of two accepted fields via
+      :func:`_resolve_body_with_content_shim` (v0.6.x one-cycle
+      ``content`` -> ``body`` deprecation shim; G0.13-T4 #1134).
     * Translating the ``scope`` argument from its wire string into the
       typed :class:`MemoryScope` before reaching the service. The
       tool's ``inputSchema`` enum gates the values, so a bad scope
@@ -298,7 +354,7 @@ async def _add_to_memory_handler(
     verify the write landed without a follow-up
     ``resources/read meho://memory/{scope}/{slug}`` round-trip.
     """
-    body: str = arguments["body"]
+    body = _resolve_body_with_content_shim(arguments)
     scope = MemoryScope(arguments["scope"])
     slug = arguments.get("slug")
     target_name = arguments.get("target_name")
@@ -460,6 +516,10 @@ register_mcp_tool(
             "MEMORY_USER_DEFAULT_TTL_DAYS); pass explicit null to "
             "persist forever; tenant- and target-scope writes default "
             "to no expiry. "
+            "Compatibility shim (v0.6.x only): the body field is also "
+            "accepted under its pre-v0.6 name `content`. Prefer `body`; "
+            "`content` emits a deprecation log line and is removed in "
+            "v0.7. If both are supplied, `body` wins. "
             "Do NOT use this for durable, generalizable team knowledge — "
             "that belongs in `add_to_knowledge`. Memory is for shorter-"
             "lived, operator/tenant/target-scoped state."
@@ -477,6 +537,19 @@ register_mcp_tool(
                         "for cosine). Field name aligned with "
                         "`add_to_knowledge` and the REST `POST /api/v1/memory` "
                         "body schema (G0.9.1-T7, #779)."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "DEPRECATED v0.6.x alias for `body`; removed in "
+                        "v0.7. Provided so v0.3.x clients pinned to the "
+                        "pre-rename field continue to work for one cycle. "
+                        "Prefer `body`; `body` wins if both are supplied. "
+                        "Supplying `content` emits a structured "
+                        "`add_to_memory_field_deprecated` warning log "
+                        'with `replacement="body"`.'
                     ),
                 },
                 "scope": {
@@ -532,7 +605,24 @@ register_mcp_tool(
                     ),
                 },
             },
-            "required": ["body", "scope"],
+            "required": ["scope"],
+            # The body field is required, but for the v0.6.x deprecation
+            # window it is accepted under either of two names -- ``body``
+            # (canonical) or ``content`` (pre-v0.6 alias, dropped v0.7).
+            # ``anyOf`` is stripped from the wire ``inputSchema`` by
+            # :func:`_wire_safe_input_schema` (Anthropic Messages API
+            # rejects top-level combinators), so the wire ``required``
+            # only lists ``scope``; the description prose carries the
+            # body-or-content contract to agents. Server-side
+            # ``jsonschema.validate`` in
+            # :mod:`~meho_backplane.mcp.handlers` still enforces the
+            # combinator before the handler runs, so a call supplying
+            # neither field fails ``-32602`` rather than hitting
+            # ``KeyError`` in the handler.
+            "anyOf": [
+                {"required": ["body"]},
+                {"required": ["content"]},
+            ],
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,

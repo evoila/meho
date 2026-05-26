@@ -35,6 +35,9 @@ dependencies = [
     "tabulate>=0.9.0",
     "pydantic-ai-slim[anthropic]>=1.102.0",
     "croniter>=6.2.2",
+    "markdown-it-py[linkify]>=3.0",
+    "pygments>=2.18",
+    "python-multipart>=0.0.12",
 ]
 
 [dependency-groups]
@@ -246,6 +249,17 @@ ignore_missing_imports = true
 # upstream ships stubs.
 [[tool.mypy.overrides]]
 module = ["asyncssh.*"]
+ignore_missing_imports = true
+
+# pygments (G10.4-T1 #877) ships no ``py.typed`` marker as of 2.20.
+# Used by :mod:`meho_backplane.ui.routes.memory.render` for the
+# server-side Markdown code-block syntax highlighter; the call sites
+# are scoped to one module so the untyped surface stays narrow.
+# ``markdown-it-py`` itself ships ``py.typed``, no override needed.
+# Drop this override if upstream ships stubs (``types-Pygments`` is
+# available on PyPI but would add a build-time dep).
+[[tool.mypy.overrides]]
+module = ["pygments", "pygments.*"]
 ignore_missing_imports = true
 
 # defusedxml (G3.7-T2 #847) ships no ``py.typed`` marker as of 0.7.1.

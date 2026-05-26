@@ -1,0 +1,113 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Memory list surface (Initiative #341 Task
+  #877). Extends ``base.html`` so the chrome (navbar, sidebar, footer)
+  matches the rest of the operator console.
+
+  Layout (top-down):
+    * Scope tabs -- one tab per memory scope plus an "All visible" tab.
+      Each tab is an HTMX-bound link that re-renders the card-list
+      partial in place (``#memory-cards``).
+    * Tag filter -- free-text input bound to a datalist sourced from
+      ``/ui/memory/tags``. HTMX-debounced; keystrokes that don't change
+      the value don't fire a request.
+    * Card grid (``#memory-cards``) -- one DaisyUI card per memory:
+      slug, scope badge, expiry timestamp, tag chips, 200-char preview.
+      Click on the card heading navigates to the detail page.
+
+  HTMX wiring:
+    * Scope tabs: ``hx-get`` with ``hx-target="#memory-cards"``,
+      ``hx-swap="outerHTML"``, ``hx-push-url="true"`` so the browser
+      URL stays in sync with the active scope (copy/paste reproduces).
+    * Tag filter: same target, debounced 300ms.
+    * The page-level ``hx-headers`` directive echoes the CSRF token
+      for any state-changing request triggered from this page
+      (delete-from-detail, for example).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Memory &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Memory</h1>
+      <p class="text-sm opacity-70">
+        Operator + tenant + target memories across the 5 scopes.
+      </p>
+    </div>
+    <div class="text-sm opacity-70">
+      <span aria-live="polite">{{ entry_count }} memor{{ "y" if entry_count == 1 else "ies" }}</span>
+    </div>
+  </header>
+
+  {# ---------- Scope tabs ---------- #}
+  <nav
+    class="tabs tabs-boxed"
+    role="tablist"
+    aria-label="Memory scope filter"
+  >
+    {% for tab_label, tab_value in scope_tabs %}
+      <a
+        role="tab"
+        class="tab{% if tab_value == active_scope %} tab-active{% endif %}"
+        href="/ui/memory?scope={{ tab_value | urlencode }}{% if active_tag %}&tag={{ active_tag | urlencode }}{% endif %}"
+        hx-get="/ui/memory?scope={{ tab_value | urlencode }}{% if active_tag %}&tag={{ active_tag | urlencode }}{% endif %}"
+        hx-target="#memory-cards"
+        hx-swap="outerHTML"
+        hx-push-url="true"
+        {% if tab_value == active_scope %}aria-selected="true"{% else %}aria-selected="false"{% endif %}
+      >
+        {{ tab_label }}
+      </a>
+    {% endfor %}
+  </nav>
+
+  {# ---------- Tag filter ---------- #}
+  <form
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    hx-get="/ui/memory"
+    hx-target="#memory-cards"
+    hx-swap="outerHTML"
+    hx-trigger="input changed delay:300ms from:find input"
+    hx-include="closest form"
+    hx-push-url="true"
+    role="search"
+    aria-label="Filter memories by tag"
+    onsubmit="return false;"
+  >
+    <div class="card-body grid gap-3 md:grid-cols-3">
+      <label class="form-control md:col-span-2">
+        <span class="label-text">Filter by tag</span>
+        <input
+          type="search"
+          name="tag"
+          value="{{ active_tag }}"
+          list="memory-tag-options"
+          placeholder="Equal-match against the row's tags list"
+          class="input input-bordered input-sm"
+          aria-label="Filter memories by tag"
+        />
+        <datalist
+          id="memory-tag-options"
+          hx-get="/ui/memory/tags"
+          hx-trigger="load"
+          hx-swap="innerHTML"
+        ></datalist>
+      </label>
+      {# Hidden input echoes the active scope so a tag-filter change
+         doesn't drop the scope tab on the next HTMX swap. #}
+      <input type="hidden" name="scope" value="{{ active_scope }}" />
+    </div>
+  </form>
+
+  {# ---------- Card grid ---------- #}
+  {% include "memory/_cards.html" %}
+</section>
+{% endblock %}

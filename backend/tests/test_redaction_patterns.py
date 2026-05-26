@@ -258,6 +258,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("jwt", "a.b.c is not a JWT, neither is foo.bar.baz", False),
     ("api_key", "api_key=AKIAIOSFODNN7EXAMPLE", True),
     ("api_key", "the resource id is 12345-abcdef", False),
+    ("api_key", "password: 's3cr3tValue!'", True),
+    ("api_key", _CLIENT_SECRET_FIXTURE_POS, True),
     ("kubeconfig", "apiVersion: v1\nkind: Config\n", True),
     ("kubeconfig", "apiVersion: v1\nkind: Pod\n", False),
     ("uuid", "tenant_id=12345678-1234-1234-1234-123456789abc", True),

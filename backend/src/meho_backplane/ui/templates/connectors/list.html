@@ -1,0 +1,131 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Connectors targets list (Initiative #340
+  Task #873 work item #1). Extends ``base.html`` so the chrome
+  (navbar, sidebar, footer) matches the rest of the console.
+
+  Layout (top-down):
+    * Filter bar -- product <select> HTMX-bound to ``/ui/connectors``
+      with ``hx-target`` swapping the <tbody> (id="connectors-table-body")
+      so re-renders skip the surrounding chrome.
+    * Sortable column headers -- each header is an <a> whose href
+      flips the sort direction (asc<->desc) via the
+      ``next_direction_for`` Jinja closure the route handler binds
+      into the context.
+    * Table body (``_table_rows.html`` partial) -- one row per target,
+      "View" button drives the detail navigation.
+
+  HTMX wiring:
+    * Filter <select>: ``hx-get`` to ``/ui/connectors`` with
+      ``hx-include="closest form"`` so every filter+sort value rides
+      along on each change, ``hx-target="#connectors-table-body"``
+      to swap only the table body, ``hx-push-url`` so the browser URL
+      reflects the active filter and a copy/paste reproduces it.
+    * Row "View" buttons: plain ``<a href>`` to
+      ``/ui/connectors/{name}`` -- the detail page is a full
+      navigation (not a drawer) because the detail surface carries
+      its own SSE subscription and multiple per-card hx-targets.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Connectors &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Connectors</h1>
+      <p class="text-sm opacity-70">
+        Per-tenant targets registry. Click a row to inspect the target's
+        fingerprint, recent operations, and available verbs.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Filter bar ---------- #}
+  <form
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    hx-get="/ui/connectors"
+    hx-target="#connectors-table-body"
+    hx-swap="outerHTML"
+    hx-trigger="change from:find select"
+    hx-include="closest form"
+    hx-push-url="true"
+    role="search"
+    aria-label="Filter connectors"
+    onsubmit="return false;"
+  >
+    <div class="card-body grid gap-3 md:grid-cols-3">
+      <label class="form-control">
+        <span class="label-text">Product</span>
+        <select
+          name="product"
+          class="select select-bordered select-sm"
+          aria-label="Filter by product"
+        >
+          <option value="">All products</option>
+          {% for option in product_options %}
+            <option value="{{ option }}" {% if option == product_filter %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      {# Hidden inputs carry the active sort + direction across filter
+         submits so the next HTMX swap preserves them on top of the
+         filter change. Without them ``hx-include="closest form"`` +
+         ``hx-push-url="true"`` would drop ``?sort=`` / ``?dir=``
+         from the URL on the first filter change, snapping the sort
+         back to the default. #}
+      <input type="hidden" name="sort" value="{{ sort.value }}" />
+      <input type="hidden" name="dir" value="{{ direction.value }}" />
+    </div>
+  </form>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table class="table table-sm">
+      <thead>
+        <tr>
+          {%- set columns = [
+            ("name", "Name"),
+            ("product", "Product"),
+            ("host", "Host"),
+            ("last_probed_at", "Last probed"),
+            ("status", "Status"),
+          ] -%}
+          {% for col_value, col_label in columns %}
+            {%- set next_dir = next_direction_for(col_value) -%}
+            <th>
+              <a
+                href="/ui/connectors?sort={{ col_value }}&dir={{ next_dir }}{% if product_filter %}&product={{ product_filter | urlencode }}{% endif %}"
+                hx-get="/ui/connectors?sort={{ col_value }}&dir={{ next_dir }}{% if product_filter %}&product={{ product_filter | urlencode }}{% endif %}"
+                hx-target="#connectors-table-body"
+                hx-swap="outerHTML"
+                hx-push-url="true"
+                class="link link-hover"
+                aria-label="Sort by {{ col_label }} {{ next_dir }}ending"
+              >
+                {{ col_label }}
+                {% if sort.value == col_value %}
+                  <span aria-hidden="true">{% if direction.value == "asc" %}&uarr;{% else %}&darr;{% endif %}</span>
+                {% endif %}
+              </a>
+            </th>
+          {% endfor %}
+          <th>Aliases</th>
+          <th>Auth</th>
+          <th>VPN</th>
+          <th class="w-12"></th>
+        </tr>
+      </thead>
+      {% include "connectors/_table_rows.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

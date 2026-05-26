@@ -699,3 +699,399 @@ def test_create_unauthenticated_returns_401(client: TestClient) -> None:
 def test_update_unauthenticated_returns_401(client: TestClient) -> None:
     response = client.patch("/api/v1/targets/any-name", json={"host": "x"})
     assert response.status_code == 401
+
+
+def test_delete_unauthenticated_returns_401(client: TestClient) -> None:
+    response = client.delete("/api/v1/targets/any-name")
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/v1/targets/{name} (G0.14-T4 #1145)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_target_soft_deletes_and_returns_204(client: TestClient) -> None:
+    """DELETE on a live target returns 204 and stamps ``deleted_at``.
+
+    Subsequent GET on the same name resolves to 404 because the
+    resolver filters ``deleted_at IS NULL``; the row stays in the
+    DB so the ``audit_log.target_id`` soft-FK keeps pointing at it.
+    """
+    from sqlalchemy import select as _select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import Target as TargetORM
+
+    tenant_id = DEFAULT_TENANT_ID
+    t = await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="to-delete",
+        product="ssh",
+        host="10.0.0.1",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/to-delete",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 204
+
+    # The row stays in the DB but is now soft-deleted.
+    sm = get_sessionmaker()
+    async with sm() as session:
+        row = (await session.execute(_select(TargetORM).where(TargetORM.id == t.id))).scalar_one()
+    assert row.deleted_at is not None
+
+    # A follow-up GET resolves to 404 because the resolver filters
+    # deleted_at IS NULL.
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        follow_up = client.get(
+            "/api/v1/targets/to-delete",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert follow_up.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_target_excluded_from_list(client: TestClient) -> None:
+    """Soft-deleted targets are excluded from ``GET /api/v1/targets``."""
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="live-one",
+        product="ssh",
+        host="10.0.0.1",
+    )
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="doomed",
+        product="ssh",
+        host="10.0.0.2",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.delete(
+            "/api/v1/targets/doomed",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_id)}"},
+        )
+        listing = client.get(
+            "/api/v1/targets",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert listing.status_code == 200
+    names = {t["name"] for t in listing.json()}
+    assert names == {"live-one"}
+
+
+@pytest.mark.asyncio
+async def test_delete_target_not_found_returns_404(client: TestClient) -> None:
+    """DELETE on a non-existent target returns 404 via resolve_target."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/no-such-name",
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_target_operator_role_returns_403(client: TestClient) -> None:
+    """``operator`` role cannot DELETE a target."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/any",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_delete_target_cross_tenant_returns_404(client: TestClient) -> None:
+    """A target in tenant_a is invisible to a DELETE from tenant_b (404, not 403)."""
+    tenant_a = str(uuid.uuid4())
+    tenant_b = str(uuid.uuid4())
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_a),
+        name="tenant-a-target",
+        product="ssh",
+        host="10.0.0.1",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/tenant-a-target",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_b)}"},
+        )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_target_with_graph_node_refs_returns_409(client: TestClient) -> None:
+    """When the target is referenced by graph_node rows, DELETE returns 409
+    with the count and the ``?force=true`` remediation hint.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _datetime
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import GraphNode, Tenant
+
+    tenant_id = DEFAULT_TENANT_ID
+    tenant_uuid = uuid.UUID(tenant_id)
+    # graph_node.tenant_id is a real FK to tenant.id — seed the tenant
+    # row first so the FK does not block the GraphNode insert. The
+    # _insert_target helper does *not* seed tenant rows (targets.tenant_id
+    # is a soft-FK; chassis-era audit rows have no tenant either).
+    sm = get_sessionmaker()
+    async with sm() as session:
+        existing_tenant = await session.get(Tenant, tenant_uuid)
+        if existing_tenant is None:
+            session.add(
+                Tenant(id=tenant_uuid, slug="default", name="default"),
+            )
+            await session.commit()
+    t = await _insert_target(
+        tenant_id=tenant_uuid,
+        name="has-refs",
+        product="k8s",
+        host="10.0.0.1",
+    )
+    async with sm() as session:
+        session.add(
+            GraphNode(
+                id=uuid.uuid4(),
+                tenant_id=tenant_uuid,
+                kind="target",
+                name="cluster-a",
+                target_id=t.id,
+                properties={},
+                discovered_by="kubernetes",
+                first_seen=_datetime.now(_UTC),
+            ),
+        )
+        await session.commit()
+
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/has-refs",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["kind"] == "target_has_references"
+    assert detail["graph_node_refs"] == 1
+    assert "force=true" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_delete_target_with_graph_node_refs_force_true_succeeds(
+    client: TestClient,
+) -> None:
+    """``?force=true`` proceeds with the soft-delete despite graph_node refs."""
+    from datetime import UTC as _UTC
+    from datetime import datetime as _datetime
+
+    from sqlalchemy import select as _select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import GraphNode, Tenant
+    from meho_backplane.db.models import Target as TargetORM
+
+    tenant_id = DEFAULT_TENANT_ID
+    tenant_uuid = uuid.UUID(tenant_id)
+    sm = get_sessionmaker()
+    async with sm() as session:
+        existing_tenant = await session.get(Tenant, tenant_uuid)
+        if existing_tenant is None:
+            session.add(
+                Tenant(id=tenant_uuid, slug="default", name="default"),
+            )
+            await session.commit()
+    t = await _insert_target(
+        tenant_id=tenant_uuid,
+        name="forced-delete",
+        product="k8s",
+        host="10.0.0.1",
+    )
+    async with sm() as session:
+        session.add(
+            GraphNode(
+                id=uuid.uuid4(),
+                tenant_id=tenant_uuid,
+                kind="target",
+                name="cluster-b",
+                target_id=t.id,
+                properties={},
+                discovered_by="kubernetes",
+                first_seen=_datetime.now(_UTC),
+            ),
+        )
+        await session.commit()
+
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.delete(
+            "/api/v1/targets/forced-delete?force=true",
+            headers={"Authorization": f"Bearer {_admin_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 204
+
+    async with sm() as session:
+        row = (await session.execute(_select(TargetORM).where(TargetORM.id == t.id))).scalar_one()
+    assert row.deleted_at is not None
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/v1/targets/{name} product update (G0.14-T4 #1145)
+# ---------------------------------------------------------------------------
+
+
+def test_patch_product_unknown_returns_422(client: TestClient) -> None:
+    """PATCH with an unknown product yields the structured 422.
+
+    Mirrors the convention codified in T11
+    (``docs/codebase/error-message-shape.md``): a snake_case
+    ``kind``, a human ``message`` naming the offending value and
+    the remediation, a machine-actionable ``valid_products`` list.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+    from meho_backplane.connectors.schemas import ProbeResult as _ProbeResult
+
+    class _K8sConnector(Connector):
+        product = "k8s"
+
+        async def probe(self, target: Any) -> _ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector("k8s", _K8sConnector)
+
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        # Create with valid product first.
+        client.post(
+            "/api/v1/targets",
+            json={"name": "typo-target", "product": "k8s", "host": "10.0.0.1"},
+            headers=headers,
+        )
+        # Now try to PATCH the product to a typo.
+        response = client.patch(
+            "/api/v1/targets/typo-target",
+            json={"product": "kubernetes"},
+            headers=headers,
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "unknown_product"
+    assert detail["product"] == "kubernetes"
+    assert "k8s" in detail["valid_products"]
+
+
+def test_patch_product_valid_succeeds(client: TestClient) -> None:
+    """PATCH with a registered product updates the row and bumps ``updated_at``.
+
+    The recovery flow signal 6 wants: misregistered ``kubernetes``
+    → corrected to ``k8s`` in-place.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+    from meho_backplane.connectors.schemas import ProbeResult as _ProbeResult
+
+    class _K8sConnector(Connector):
+        product = "k8s"
+
+        async def probe(self, target: Any) -> _ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    class _OtherConnector(Connector):
+        product = "ssh"
+
+        async def probe(self, target: Any) -> _ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector("k8s", _K8sConnector)
+    register_connector("ssh", _OtherConnector)
+
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.post(
+            "/api/v1/targets",
+            json={"name": "fix-me", "product": "ssh", "host": "10.0.0.1"},
+            headers=headers,
+        )
+        response = client.patch(
+            "/api/v1/targets/fix-me",
+            json={"product": "k8s"},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.json()["product"] == "k8s"
+
+
+def test_patch_product_same_value_passes_without_validator(client: TestClient) -> None:
+    """A PATCH that re-asserts the existing product passes without registry lookup.
+
+    Edge case: an operator scripts a PATCH that sends every field
+    including ``product=<current value>``. The validator must
+    short-circuit on equality so a PATCH does not break when the
+    connector registry is in a transient unregistered state at
+    request time (e.g. mid-rolling-restart). Only product *changes*
+    are validated against the registry.
+    """
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        # Empty registry -- no connectors registered.
+        client.post(
+            "/api/v1/targets",
+            json={"name": "stable", "product": "legacy", "host": "10.0.0.1"},
+            headers=headers,
+        )
+        # PATCH the host while sending product=legacy (unchanged).
+        response = client.patch(
+            "/api/v1/targets/stable",
+            json={"product": "legacy", "host": "new.host"},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.json()["product"] == "legacy"
+    assert response.json()["host"] == "new.host"

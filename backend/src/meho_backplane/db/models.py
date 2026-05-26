@@ -819,6 +819,20 @@ class Target(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+    # Soft-delete timestamp. NULL → live row; non-NULL → wall-clock
+    # time of the DELETE call. Written by ``DELETE /api/v1/targets/{name}``
+    # (G0.14-T4 #1145); never rewritten. Every read path
+    # (:func:`~meho_backplane.targets.resolver.resolve_target`, the
+    # list endpoint, the dispatcher) filters
+    # ``WHERE deleted_at IS NULL`` so a soft-deleted target is
+    # invisible to the resolver while staying queryable from the
+    # ``audit_log.target_id`` soft-FK (which would otherwise dangle).
+    # Added by migration ``0028``.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         # Unique index matches migration op.create_index(..., unique=True).

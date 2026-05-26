@@ -409,7 +409,7 @@
           "targets"
         ],
         "summary": "List Targets",
-        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.",
+        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.\n\nSoft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)\nare excluded from the list \u2014 the same filter the resolver applies\nso list and dispatch never disagree about which targets are\nvisible to the tenant.",
         "operationId": "list_targets_api_v1_targets_get",
         "parameters": [
           {
@@ -655,7 +655,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` and ``product`` are not patchable \u2014\nrename a target by deleting and re-creating it (v0.2 decision).\n``updated_at`` is always refreshed on a successful write.",
+        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {
@@ -698,6 +698,60 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "targets"
+        ],
+        "summary": "Delete Target",
+        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho.connector.edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nRe-deletes collapse to 404 \u2014 the second DELETE goes through\n:func:`~meho_backplane.targets.resolver.resolve_target`\nwhich filters ``deleted_at IS NULL``, so the row no longer\nresolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE returns\nthe standard 404 conflation that :func:`resolve_target`\nenforces).",
+        "operationId": "delete_target_api_v1_targets__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -10280,6 +10334,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Deleted At"
           }
         },
         "type": "object",
@@ -10433,6 +10493,13 @@
             "nullable": true,
             "title": "Aliases"
           },
+          "product": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Product"
+          },
           "host": {
             "type": "string",
             "maxLength": 512,
@@ -10486,7 +10553,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "TargetUpdate",
-        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` and ``product`` are absent \u2014 rename = delete\n+ create.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable."
+        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` is absent \u2014 rename = delete + create.\n\n``product`` is patchable as of G0.14-T4 (#1145). The original\nG0.3 contract treated ``product`` as immutable after creation\non the theory that the operator should delete + re-create on a\ntypo, but the v0.6.0 dogfood pass (signal 6) showed the\ncombination of \"no DELETE route\" + \"no PATCH on product\" left a\nmisregistered target permanently broken \u2014 name and alias slots\noccupied, ``secret_ref`` pointing at a stranded Vault path. T4\ncloses the gap by adding DELETE *and* allowing PATCH on\n``product``. The route handler validates the new value against\nthe set of registered connector products and rejects unknown\nvalues with a structured 422 mirroring the ``/probe`` 501\nshape \u2014 so a typo at PATCH time produces the same actionable\ndiagnostic as the typo would at probe time, instead of\nsilently breaking the working target.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable."
       },
       "TargetsDiscoverResult": {
         "properties": {

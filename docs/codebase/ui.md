@@ -1082,3 +1082,146 @@ against the SQLite fixture.
 - Cytoscape `cy.pan` / `cy.zoom` — https://js.cytoscape.org/#cy.pan
 - Cytoscape selector classes — https://js.cytoscape.org/#selectors/class
 - FastAPI `StaticFiles` (consumed by T5) — https://fastapi.tiangolo.com/tutorial/static-files/
+- markdown-it-py — https://markdown-it-py.readthedocs.io/en/latest/
+- pygments `HtmlFormatter` — https://pygments.org/docs/formatters/
+
+## Memory surface (Task #877)
+
+Initiative [#341](https://github.com/evoila/meho/issues/341) (G10.4
+Memory UI), Task [#877](https://github.com/evoila/meho/issues/877)
+(G10.4-T1) replaces the chassis stub at `/ui/memory` with the real
+**scope-aware list** + **per-memory detail/edit view** + **delete with
+confirm modal** + **tag autocomplete**. Sibling Tasks T2
+([#878](https://github.com/evoila/meho/issues/878)) and T3
+([#879](https://github.com/evoila/meho/issues/879)) layer create+promote
+and expiry-viz+bulk on top of the same router.
+
+### Routes
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/ui/memory` | List page or HTMX card-list fragment. Accepts `?scope=` (one of the five `MemoryScope` values or `"all"`) and `?tag=` (equal-match against `metadata.tags`). HTMX fragment when `HX-Request: true`. |
+| `GET` | `/ui/memory/tags` | Tag-autocomplete datalist fragment. Returns `<option>` rows for the union of tags the operator can see, sorted, capped at 200. |
+| `GET` | `/ui/memory/<scope>/<slug>` | Detail page (server-rendered Markdown body) or HTMX body fragment. |
+| `GET` | `/ui/memory/<scope>/<slug>/edit` | HTMX edit-form fragment. 403 when RBAC denies the write. |
+| `PATCH` | `/ui/memory/<scope>/<slug>` | Save the edited body (HTMX form post). Returns the re-rendered body view. CSRF-enforced. |
+| `DELETE` | `/ui/memory/<scope>/<slug>` | Delete + re-render the card list with a flash banner. CSRF-enforced. |
+
+### Module layout
+
+* `backend/src/meho_backplane/ui/routes/memory/__init__.py` — exports
+  `build_memory_router`.
+* `backend/src/meho_backplane/ui/routes/memory/routes.py` — thin
+  FastAPI handlers that resolve session + operator deps and delegate
+  to the render helpers in `views`.
+* `backend/src/meho_backplane/ui/routes/memory/views.py` — render
+  functions + projection helpers (`render_index`, `render_detail`,
+  `render_edit_form`, `patch_entry`, `delete_entry`, `render_tags`).
+  Pulled out of `routes` so the render logic is unit-testable
+  without an HTTP fixture and so each module fits the chassis-wide
+  ~600-line cap.
+* `backend/src/meho_backplane/ui/routes/memory/render.py` — Markdown
+  → HTML renderer (`markdown-it-py` commonmark + `pygments`). Mirrors
+  the precedent the KB UI sets in `kb/render.py`
+  (G10.2-T1 #870); the two modules will dedupe once both PRs land on
+  `main`.
+* `backend/src/meho_backplane/ui/routes/memory/operator.py` —
+  `resolve_ui_operator` FastAPI dependency that lifts a full
+  `Operator` (carrying `tenant_role`) from the BFF session by
+  re-verifying the stored access token. Used by every write handler.
+  Read handlers use `build_read_operator` which synthesises an
+  `OPERATOR`-role operator without a JWT round-trip (the read RBAC
+  matrix only consults the per-row `user_sub`, never the role).
+* `backend/src/meho_backplane/ui/templates/memory/` — Jinja2
+  templates: `index.html` (full list page), `_cards.html` (HTMX list
+  fragment), `detail.html` (full detail page), `_body_view.html` /
+  `_body_edit.html` (HTMX swap targets on Edit / Save / Cancel),
+  `_tags_options.html` (autocomplete datalist).
+
+### Markdown rendering
+
+`render_markdown` constructs a process-wide `MarkdownIt("commonmark",
+{"html": False, "linkify": True, "highlight": _highlight_code})` and
+enables `table` + `strikethrough`. The `html=False` override is
+load-bearing — `markdown-it-py` 4.2.0's `commonmark` preset has
+`html` defaulted to `True`, which would render raw `<script>` /
+`<iframe>` in a memory body as live HTML. With `html=False`, raw HTML
+is rendered as escaped text and Markdown structure (headings, links,
+code blocks) still parses.
+
+Code blocks pass through `pygments`'s `HtmlFormatter(nowrap=True,
+cssclass="memory-code")` so each token is a bare `<span>` annotated
+with a class; the highlight callback wraps the spans in
+`<pre class="memory-code"><code class="language-{lang}">`. Unknown
+languages fall back to `TextLexer` (no decoration) rather than
+guessing.
+
+`MarkdownIt.render` mutates internal parser state, so the singleton
+is guarded by a `threading.Lock`. The lock-contention cost is
+negligible compared to the surrounding DB read at realistic UI QPS.
+
+### RBAC posture
+
+Read paths (list / detail / edit-form GET / tags) build a synthesised
+`Operator` with `TenantRole.OPERATOR` and rely on
+`MemoryRbacResolver.can_read`'s per-row `user_sub` gate for cross-user
+isolation. Write paths (edit-form, PATCH, DELETE) re-verify the BFF
+session's access token through the chassis JWT chain
+(`verify_jwt_for_audience`) to produce a fully-validated `Operator`
+carrying the live `tenant_role`. The matrix is re-checked at the
+service layer (`MemoryService.remember` / `forget` call
+`can_write`); the route-side check is for the UX "show / hide Edit
+button" decision and a quick 403 on the edit-form GET so the
+operator doesn't load the textarea for an action the save would
+reject anyway.
+
+The 404-vs-403 collapse on detail / edit-form / PATCH / DELETE for
+non-existent slugs is the info-leak avoidance the `/api/v1/memory`
+surface holds: a caller cannot distinguish "no such memory" from
+"you can't read it" by the response status. PATCH / DELETE on a
+tenant-scoped row by an `operator` role do surface as 403 (the
+matrix mismatch is honest feedback — the alternative would be a
+silent no-op that audits worse).
+
+### HTMX conventions
+
+* `hx-get` for scope tabs + tag filter (idempotent reads).
+* `hx-patch` for the edit-in-place save; the form's
+  `id="memory-body"` is the swap target so Save replaces the form
+  with the rendered body view in place.
+* `hx-delete` for the delete-with-confirm-modal; the modal's
+  Confirm button swaps the full `<body>` with the re-rendered list
+  page (`hx-target="body" hx-push-url="/ui/memory"`) so the
+  operator lands on the list with the deleted row absent.
+* The page-level `hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'`
+  directive on `detail.html` echoes the chassis double-submit token
+  on every HTMX request from that page; the index page sets the
+  same directive so future state-changing actions on the list (T3's
+  bulk delete) inherit the token without per-element wiring.
+
+### Tests
+
+The full suite lives in
+`backend/tests/test_ui_memory_list.py`. It pins:
+
+* the auth boundary (unauthenticated requests 302 to the BFF login),
+* the list view (empty inventory + populated cards with scope badge
+  + 200-char preview + tag chips + scope tab + tag filter +
+  `/ui/memory/tags` autocomplete),
+* the detail view (Markdown → HTML rendering, raw `<script>` stripped
+  to escaped text, 404 on missing slug, cross-user 404 on another
+  operator's user-scoped slug, cross-tenant 404 on another tenant's
+  tenant-scoped slug),
+* the edit-in-place flow (textarea fragment renders for own
+  user-scoped, 403 for tenant-scoped under `operator` role, textarea
+  for tenant-scoped under `tenant_admin`, PATCH save persists +
+  returns the rendered body view, empty body 422),
+* the delete flow (DELETE removes the row + re-renders the empty
+  list with a flash banner, 403 on tenant-scoped under `operator`,
+  404 on missing slug),
+* the stub-retirement (the chassis "Coming soon" stub no longer
+  renders for `/ui/memory`).
+
+The PATCH happy-path mocks `meho_backplane.retrieval.indexer.get_embedding_service`
+because `MemoryService.remember`'s re-index path calls `encode_one`
+on the new body. Read paths bypass embedding entirely.

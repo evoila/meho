@@ -1,0 +1,152 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Memory detail view (Initiative #341 Task
+  #877). Extends ``base.html``. Renders:
+
+    * Slug + scope + expiry + tag chips header.
+    * Body rendered server-side as Markdown (via markdown-it-py + pygments).
+    * Edit / Delete action buttons (visible only when ``entry.can_write``).
+
+  HTMX wiring:
+    * The body slot ``#memory-body`` is the swap target for the
+      ``Edit`` button: ``hx-get /ui/memory/<scope>/<slug>/edit`` returns
+      the edit-form partial which replaces the body slot.
+    * The edit form's Save submits ``hx-patch /ui/memory/<scope>/<slug>``
+      which returns ``_body_view.html`` replacing the slot back with the
+      rendered Markdown view.
+    * The Delete button opens a confirmation modal; the modal's
+      Confirm-Delete button issues ``hx-delete /ui/memory/<scope>/<slug>``
+      which returns the re-rendered card list at the ``/ui/memory``
+      surface (we navigate via ``hx-push-url="true"`` so the operator
+      ends up on the list).
+
+  The pygments CSS for syntax-highlighted code blocks is embedded as
+  a per-page ``<style>`` block. The block lives inside ``{% block
+  content %}`` (rather than ``{% block head %}``) because the chassis
+  ``base.html`` does not expose a per-page head slot; an in-body style
+  block is valid HTML5 and the browser applies the styles to every
+  descendant element identically.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Memory: {{ entry.slug }} &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<style>
+{{ pygments_css }}
+</style>
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <nav class="text-sm" aria-label="Breadcrumb">
+    <a href="/ui/memory" class="link link-hover">Memory</a>
+    <span aria-hidden="true">/</span>
+    <span class="font-mono">{{ entry.scope }}/{{ entry.slug }}</span>
+  </nav>
+
+  <header
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    data-memory-id="{{ entry.id }}"
+    data-memory-scope="{{ entry.scope }}"
+    data-memory-slug="{{ entry.slug }}"
+  >
+    <div class="card-body p-4 space-y-2">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h1 class="text-xl font-semibold font-mono break-all">{{ entry.slug }}</h1>
+          <div class="text-xs opacity-70">
+            <span class="badge badge-outline badge-sm mr-2">{{ entry.scope }}</span>
+            {% if entry.user_sub %}
+              <span>owner: {{ entry.user_sub }}</span>
+            {% endif %}
+            {% if entry.target_name %}
+              <span class="ml-2">target: {{ entry.target_name }}</span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          {% if entry.can_write %}
+            <button
+              type="button"
+              class="btn btn-sm btn-primary"
+              hx-get="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}/edit"
+              hx-target="#memory-body"
+              hx-swap="outerHTML"
+              data-action="edit"
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost"
+              data-action="delete"
+              onclick="document.getElementById('memory-delete-modal').showModal()"
+            >
+              Delete
+            </button>
+          {% endif %}
+        </div>
+      </div>
+      {% if entry.expires_at %}
+        <div
+          class="text-xs opacity-70"
+          data-expires-at="{{ entry.expires_at.isoformat() }}"
+        >
+          Expires {{ entry.expires_at.isoformat() }}
+        </div>
+      {% endif %}
+      {% if entry.tags %}
+        <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
+          {% for tag in entry.tags %}
+            <li>
+              <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+  </header>
+
+  {# Body slot -- HTMX swap target for Edit / Save / Cancel. #}
+  {% include "memory/_body_view.html" %}
+
+  {# Delete-confirm modal -- DaisyUI's ``<dialog>`` element + Alpine
+     for click-outside dismissal. The confirm button issues the
+     HTMX delete which redirects to the list. #}
+  {% if entry.can_write %}
+    <dialog id="memory-delete-modal" class="modal">
+      <div class="modal-box">
+        <h3 class="font-semibold text-lg">Delete this memory?</h3>
+        <p class="text-sm py-2 opacity-80">
+          This action permanently removes
+          <span class="font-mono">{{ entry.scope }}/{{ entry.slug }}</span>.
+          The delete is idempotent: re-clicking on a deleted memory is a no-op.
+        </p>
+        <div class="modal-action">
+          <form method="dialog">
+            <button class="btn btn-sm btn-ghost" type="submit">Cancel</button>
+          </form>
+          <button
+            type="button"
+            class="btn btn-sm btn-error"
+            hx-delete="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}"
+            hx-target="body"
+            hx-swap="outerHTML"
+            hx-push-url="/ui/memory"
+            data-action="confirm-delete"
+            onclick="document.getElementById('memory-delete-modal').close()"
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button>close</button>
+      </form>
+    </dialog>
+  {% endif %}
+</section>
+{% endblock %}

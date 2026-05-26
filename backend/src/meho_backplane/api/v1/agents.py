@@ -71,6 +71,7 @@ from meho_backplane.agents.schemas import (
 from meho_backplane.agents.service import (
     AgentDefinitionExistsError,
     AgentDefinitionService,
+    AgentIdentityRefInvalidError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
@@ -197,6 +198,16 @@ async def create_agent(
             status_code=http_status.HTTP_409_CONFLICT,
             detail="agent_already_exists",
         ) from exc
+    except AgentIdentityRefInvalidError as exc:
+        # 422 -- the payload is well-formed but its identity_ref does
+        # not resolve to a registered, non-revoked agent principal in
+        # this tenant. The reason (unknown vs revoked) is intentionally
+        # collapsed into one body code; the structlog event the service
+        # emits carries the structured reason for operators.
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="identity_ref_unknown",
+        ) from exc
 
 
 @router.patch("/{name}", response_model=AgentDefinitionRead)
@@ -218,7 +229,13 @@ async def edit_agent(
         audit_agent_name=name,
     )
     service = AgentDefinitionService()
-    entry = await service.update(operator.tenant_id, name, body)
+    try:
+        entry = await service.update(operator.tenant_id, name, body)
+    except AgentIdentityRefInvalidError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="identity_ref_unknown",
+        ) from exc
     if entry is None:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

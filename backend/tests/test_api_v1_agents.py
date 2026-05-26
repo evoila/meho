@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import respx
@@ -37,7 +37,7 @@ from sqlalchemy import select
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentDefinition, AuditLog, Tenant
+from meho_backplane.db.models import AgentDefinition, AgentPrincipal, AuditLog, Tenant
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -97,6 +97,62 @@ async def _seed_tenants() -> None:
             existing = await session.execute(select(Tenant).where(Tenant.id == tid))
             if existing.scalar_one_or_none() is None:
                 session.add(Tenant(id=tid, slug=slug, name=f"Tenant {slug}"))
+        # G11.2-T8 (#1099): seed the agent_principal row that
+        # _VALID_BODY's identity_ref refers to so create / update on
+        # this route pass the registry validation. Only seeded for
+        # tenant A -- agent_principal.keycloak_client_id is **globally
+        # unique** (not per-tenant; see migration 0019) so the same
+        # client_id can't exist in both tenants. Tests that need a
+        # tenant-B principal seed one with a distinct name via
+        # :func:`_seed_principal_for_tenant`.
+        existing = await session.execute(
+            select(AgentPrincipal).where(
+                AgentPrincipal.tenant_id == _TENANT_A,
+                AgentPrincipal.keycloak_client_id == "agent:incident-triage",
+            )
+        )
+        if existing.scalar_one_or_none() is None:
+            session.add(
+                AgentPrincipal(
+                    id=uuid4(),
+                    tenant_id=_TENANT_A,
+                    name="incident-triage",
+                    keycloak_client_id="agent:incident-triage",
+                    keycloak_internal_id="kc-internal-a-incident-triage",
+                    owner_sub="op-admin",
+                    revoked=False,
+                    created_by_sub="op-admin",
+                )
+            )
+        await session.commit()
+
+
+async def _seed_principal_for_tenant(
+    tenant_id: UUID,
+    *,
+    name: str,
+) -> None:
+    """Seed an agent_principal with ``keycloak_client_id=agent:<name>`` for *tenant_id*.
+
+    G11.2-T8 (#1099) helper for tests that need a tenant-B-specific
+    principal (the cross-tenant isolation suite). The name passed
+    becomes part of the globally-unique ``keycloak_client_id`` so
+    callers must pick distinct names across tenants.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            AgentPrincipal(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                name=name,
+                keycloak_client_id=f"agent:{name}",
+                keycloak_internal_id=f"kc-internal-{tenant_id}-{name}",
+                owner_sub="op-admin",
+                revoked=False,
+                created_by_sub="op-admin",
+            )
+        )
         await session.commit()
 
 
@@ -297,6 +353,13 @@ async def test_show_missing_returns_404(client: TestClient) -> None:
 async def test_cross_tenant_isolation(client: TestClient) -> None:
     """Tenant B's definition is invisible to tenant A; cross-tenant probes 404."""
     await _seed_tenants()
+    # G11.2-T8 (#1099): tenant B needs its own principal with a globally
+    # distinct keycloak_client_id (the column is unique across all
+    # tenants). The body for tenant B reuses the same agent *name* the
+    # test asserts on but with a tenant-B-scoped identity_ref so the
+    # service's validation accepts the create.
+    await _seed_principal_for_tenant(_TENANT_B, name="incident-triage-b")
+    body_for_b = {**_VALID_BODY, "identity_ref": "agent:incident-triage-b"}
     key = make_rsa_keypair("kid-iso")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
@@ -304,7 +367,7 @@ async def test_cross_tenant_isolation(client: TestClient) -> None:
         b_token = _token(key, sub="op-b", tenant_id=_TENANT_B)
         client.post(
             "/api/v1/agents",
-            json=_VALID_BODY,
+            json=body_for_b,
             headers={"Authorization": f"Bearer {b_token}"},
         )
         # Tenant A sees nothing and cannot reach B's row.
@@ -348,3 +411,56 @@ async def test_create_writes_audit_row_with_agent_name(client: TestClient) -> No
     create_rows = [row for row in rows if row.payload.get("op_id") == "agent.create"]
     assert create_rows, f"no agent.create audit row found in {[r.payload for r in rows]}"
     assert create_rows[-1].payload.get("agent_name") == "incident-triage"
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T8 (#1099) -- identity_ref validation at the REST boundary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_unknown_identity_ref_returns_422(client: TestClient) -> None:
+    """POST with an unknown identity_ref → 422 ``identity_ref_unknown``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-t8-rest")
+    token = _token(key)
+    body = {**_VALID_BODY, "name": "orphan", "identity_ref": "agent:does-not-exist"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agents", json=body, headers={"Authorization": f"Bearer {token}"}
+        )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == "identity_ref_unknown"
+    # Reject must not leave a row.
+    assert await _fetch_defs(_TENANT_A) == []
+
+
+@pytest.mark.asyncio
+async def test_patch_unknown_identity_ref_returns_422(client: TestClient) -> None:
+    """PATCH that swaps identity_ref to an unknown value → 422.
+
+    Pre-condition: create succeeds with the valid seeded identity_ref;
+    only the subsequent PATCH is rejected.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-t8-rest-patch")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {token}"}
+        # Pre-condition.
+        created = client.post("/api/v1/agents", json=_VALID_BODY, headers=headers)
+        assert created.status_code == 201, created.text
+        # PATCH the identity_ref to an unknown value.
+        resp = client.patch(
+            "/api/v1/agents/incident-triage",
+            json={"identity_ref": "agent:nonexistent"},
+            headers=headers,
+        )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == "identity_ref_unknown"
+    # The persisted row's identity_ref must still be the original.
+    rows = await _fetch_defs(_TENANT_A)
+    assert len(rows) == 1
+    assert rows[0].identity_ref == "agent:incident-triage"

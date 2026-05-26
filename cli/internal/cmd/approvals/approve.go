@@ -115,26 +115,39 @@ func runDecision(
 	return nil
 }
 
+// postDecision calls POST /api/v1/approvals/{id}/decide (G11.2-T5
+// operator-decision path: no params required; the backend flips the
+// status, writes the decision audit row, and broadcasts the
+// approval_decided event). After the decision commits, the function
+// fetches GET /api/v1/approvals/{id} so the caller can render the
+// full ApprovalRequestView (status, reviewed_by, decided_at).
 func postDecision(
 	ctx context.Context,
 	backplaneURL, id, verb, reason string,
 ) (*ApprovalDetail, error) {
-	path := fmt.Sprintf("/api/v1/approvals/%s/%s", id, verb)
-	body := decisionBody{}
-	if reason != "" {
-		body.Reason = &reason
+	// verb is "approve" or "reject"; backend wants the past-tense form.
+	decision := "approved"
+	if verb == "reject" {
+		decision = "rejected"
 	}
+	body := decisionBody{Decision: decision, Reason: reason}
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal decision body: %w", err)
 	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST", path, bodyJSON)
+	decidePath := fmt.Sprintf("/api/v1/approvals/%s/decide", id)
+	if _, err := doAuthedRequest(ctx, backplaneURL, "POST", decidePath, bodyJSON); err != nil {
+		return nil, err
+	}
+	// Fetch the full view for rendering.
+	showPath := fmt.Sprintf("/api/v1/approvals/%s", id)
+	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", showPath, nil)
 	if err != nil {
 		return nil, err
 	}
 	var out ApprovalDetail
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode %s response: %w", verb, err)
+		return nil, fmt.Errorf("decode show response after decide: %w", err)
 	}
 	return &out, nil
 }

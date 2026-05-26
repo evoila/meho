@@ -69,6 +69,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     get_request,
     list_pending,
+    publish_approval_event,
     reject_request,
 )
 
@@ -281,6 +282,14 @@ async def _approve_handler(
             raise McpInvalidParamsError(
                 f"approval_unauthorized: role {exc.role!r} cannot approve"
             ) from exc
+    # Publish AFTER commit (fail-open).
+    await publish_approval_event(
+        tenant_id=operator.tenant_id,
+        request=row,
+        decision="approved",
+        principal_sub=operator.sub,
+        audit_id=row._audit_id,  # type: ignore[attr-defined]
+    )
     return _row_to_dict(row)
 
 
@@ -348,6 +357,14 @@ async def _reject_handler(
             raise McpInvalidParamsError(
                 f"approval_unauthorized: role {exc.role!r} cannot reject"
             ) from exc
+    # Publish AFTER commit (fail-open).
+    await publish_approval_event(
+        tenant_id=operator.tenant_id,
+        request=row,
+        decision="rejected",
+        principal_sub=operator.sub,
+        audit_id=row._audit_id,  # type: ignore[attr-defined]
+    )
     return _row_to_dict(row)
 
 

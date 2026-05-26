@@ -68,7 +68,9 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// ApprovalSummary mirrors the backend ApprovalRequestSummary pydantic model.
+// ApprovalSummary mirrors backend ApprovalRequestView for list rendering.
+// (Backend returns the same view shape for list and show; the CLI keeps a
+// trimmed alias for the table view.)
 type ApprovalSummary struct {
 	ID           string  `json:"id"`
 	TenantID     string  `json:"tenant_id"`
@@ -81,13 +83,13 @@ type ApprovalSummary struct {
 	ExpiresAt    *string `json:"expires_at"`
 }
 
-// ApprovalDetail mirrors the backend ApprovalRequestDetail pydantic model.
-// ElicitationURL is the MCP elicitation URL-mode forward wire address.
+// ApprovalDetail mirrors the backend ApprovalRequestView pydantic model
+// returned by GET /api/v1/approvals and GET /api/v1/approvals/{id}.
 type ApprovalDetail struct {
 	ID             string                  `json:"id"`
 	TenantID       string                  `json:"tenant_id"`
 	Status         string                  `json:"status"`
-	AgentRunID     *string                 `json:"agent_run_id"`
+	RunID          *string                 `json:"run_id"`
 	ConnectorID    string                  `json:"connector_id"`
 	OpID           string                  `json:"op_id"`
 	TargetID       *string                 `json:"target_id"`
@@ -99,20 +101,17 @@ type ApprovalDetail struct {
 	DecidedAt      *string                 `json:"decided_at"`
 	ExpiresAt      *string                 `json:"expires_at"`
 	CreatedAt      string                  `json:"created_at"`
-	ElicitationURL *string                 `json:"elicitation_url"`
 }
 
-// ListResponse mirrors the backend ApprovalListResponse envelope.
-type ListResponse struct {
-	Items  []ApprovalSummary `json:"items"`
-	Total  int               `json:"total"`
-	Limit  int               `json:"limit"`
-	Offset int               `json:"offset"`
-}
+// (ListResponse envelope removed — backend GET /api/v1/approvals returns
+// a plain JSON array of ApprovalSummary, mirroring T4's merged surface.)
 
-// decisionBody is the JSON body for approve / reject calls.
+// decisionBody is the JSON body for the POST /api/v1/approvals/{id}/decide
+// route (G11.2-T5 operator-decision path; the agent-side /approve route
+// with params + hash-check stays available for the agent's REST resume).
 type decisionBody struct {
-	Reason *string `json:"reason,omitempty"`
+	Decision string `json:"decision"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // errMissingAccessToken is the sentinel doAuthedRequest returns when the

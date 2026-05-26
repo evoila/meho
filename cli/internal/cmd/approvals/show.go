@@ -90,8 +90,8 @@ func printDetail(cmd *cobra.Command, d *ApprovalDetail) {
 	if d.PrincipalAct != nil {
 		fmt.Fprintf(w, "Acting as:    %s\n", *d.PrincipalAct)
 	}
-	if d.AgentRunID != nil {
-		fmt.Fprintf(w, "Agent run:    %s\n", *d.AgentRunID)
+	if d.RunID != nil {
+		fmt.Fprintf(w, "Agent run:    %s\n", *d.RunID)
 	}
 	fmt.Fprintf(w, "Params hash:  %s\n", d.ParamsHash)
 	fmt.Fprintf(w, "Created:      %s\n", d.CreatedAt)
@@ -107,9 +107,5 @@ func printDetail(cmd *cobra.Command, d *ApprovalDetail) {
 	if d.ProposedEffect != nil {
 		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")
 		fmt.Fprintf(w, "Effect:\n  %s\n", string(b))
-	}
-	if d.ElicitationURL != nil {
-		fmt.Fprintf(w, "\nMCP elicitation URL (POST {decision, reason} here):\n  %s\n",
-			*d.ElicitationURL)
 	}
 }

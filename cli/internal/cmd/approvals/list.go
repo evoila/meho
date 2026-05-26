@@ -39,7 +39,7 @@ func newListCmd() *cobra.Command {
 			"--status pending for the most common query: requests " +
 			"awaiting a decision. --limit caps the page size " +
 			"(1..500, server default 50). --offset advances the page " +
-			"window. --json emits the raw ListResponse envelope for " +
+			"window. --json emits the raw JSON array for " +
 			"jq pipelines.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -61,7 +61,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().IntVar(&offset, "offset", 0,
 		"offset into the result set (default 0)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw ListResponse JSON instead of the human table")
+		"emit raw JSON array instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL from `meho login`)")
 	return cmd
@@ -137,28 +137,28 @@ func buildListPath(opts listOpts) string {
 	return path
 }
 
-func fetchList(ctx context.Context, backplaneURL string, opts listOpts) (*ListResponse, error) {
+func fetchList(ctx context.Context, backplaneURL string, opts listOpts) ([]ApprovalSummary, error) {
 	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
 	if err != nil {
 		return nil, err
 	}
-	var out ListResponse
+	var out []ApprovalSummary
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode approvals list response: %w", err)
 	}
-	return &out, nil
+	return out, nil
 }
 
 // printListTable renders the list as a compact table.
 // Columns: ID (truncated), STATUS, CONNECTOR, OP, PRINCIPAL, CREATED.
-func printListTable(w io.Writer, r *ListResponse) {
-	if r == nil || len(r.Items) == 0 {
+func printListTable(w io.Writer, items []ApprovalSummary) {
+	if len(items) == 0 {
 		fmt.Fprintln(w, "no approval requests in this tenant")
 		return
 	}
 	fmt.Fprintf(w, "%-36s %-9s %-24s %-32s %-20s %s\n",
 		"ID", "STATUS", "CONNECTOR", "OP", "PRINCIPAL", "CREATED")
-	for _, e := range r.Items {
+	for _, e := range items {
 		fmt.Fprintf(w, "%-36s %-9s %-24s %-32s %-20s %s\n",
 			e.ID,
 			e.Status,
@@ -168,7 +168,7 @@ func printListTable(w io.Writer, r *ListResponse) {
 			e.CreatedAt,
 		)
 	}
-	fmt.Fprintf(w, "\nShowing %d of %d total.\n", len(r.Items), r.Total)
+	fmt.Fprintf(w, "\nShowing %d.\n", len(items))
 }
 
 // truncate cuts s to maxLen runes, appending an ellipsis on truncation.

@@ -85,6 +85,7 @@ __all__ = [
     "expire_stale_requests",
     "get_request",
     "list_pending",
+    "publish_approval_event",
     "reject_request",
 ]
 
@@ -292,9 +293,10 @@ async def create_pending_request(
     await session.flush()
 
     # Synchronous "request" audit row -- same transaction.
+    request_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
-        audit_id=uuid.uuid4(),
+        audit_id=request_audit_id,
         operator=operator,
         request=request,
         path="approval.request",
@@ -311,15 +313,11 @@ async def create_pending_request(
         tenant_id=str(operator.tenant_id),
         run_id=str(run_id) if run_id else None,
     )
-    # G11.2-T5 (#818) broadcast: pending_approval announcement so an
-    # operator with a ``broadcast_watch`` session learns of the request
-    # without polling. Fail-open inside the helper.
-    await _publish_approval_event(
-        tenant_id=operator.tenant_id,
-        request=request,
-        decision="pending",
-        principal_sub=operator.sub,
-    )
+    # Expose the audit_id as a transient attr so callers can publish the
+    # ``approval.pending`` broadcast event AFTER they commit the session.
+    # A publish-before-commit would surface a phantom event if the commit
+    # fails. The transient attr does not persist to the DB row.
+    request._audit_id = request_audit_id  # type: ignore[attr-defined]
     return request
 
 
@@ -395,9 +393,10 @@ async def approve_request(
     request.decided_at = now
     await session.flush()
 
+    approve_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
-        audit_id=uuid.uuid4(),
+        audit_id=approve_audit_id,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -413,14 +412,7 @@ async def approve_request(
         reviewed_by=operator.sub,
         tenant_id=str(operator.tenant_id),
     )
-    # G11.2-T5 (#818) broadcast: approval_decided event so the agent /
-    # operator watchers see the decision without polling.
-    await _publish_approval_event(
-        tenant_id=operator.tenant_id,
-        request=request,
-        decision="approved",
-        principal_sub=operator.sub,
-    )
+    request._audit_id = approve_audit_id  # type: ignore[attr-defined]
     return request
 
 
@@ -470,9 +462,10 @@ async def reject_request(
     if reason:
         extra["reason"] = reason
 
+    reject_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
-        audit_id=uuid.uuid4(),
+        audit_id=reject_audit_id,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -489,14 +482,7 @@ async def reject_request(
         tenant_id=str(operator.tenant_id),
         reason=reason or None,
     )
-    # G11.2-T5 (#818) broadcast: approval_decided event so the agent /
-    # operator watchers see the rejection without polling.
-    await _publish_approval_event(
-        tenant_id=operator.tenant_id,
-        request=request,
-        decision="rejected",
-        principal_sub=operator.sub,
-    )
+    request._audit_id = reject_audit_id  # type: ignore[attr-defined]
     return request
 
 
@@ -653,12 +639,13 @@ async def get_request(
 # ---------------------------------------------------------------------------
 
 
-async def _publish_approval_event(
+async def publish_approval_event(
     *,
     tenant_id: uuid.UUID,
     request: ApprovalRequest,
     decision: str,
     principal_sub: str,
+    audit_id: uuid.UUID,
 ) -> None:
     """Publish a fail-open broadcast event for an approval lifecycle step.
 
@@ -679,7 +666,7 @@ async def _publish_approval_event(
             op_id=broadcast_op_id,
             op_class=classify_op(broadcast_op_id),
             result_status="ok",
-            audit_id=uuid.uuid4(),
+            audit_id=audit_id,
             payload={
                 "op_class": classify_op(broadcast_op_id),
                 "result_status": "ok",

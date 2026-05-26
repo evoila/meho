@@ -1249,6 +1249,29 @@ type DbStatus struct {
 	Migrated *bool `json:"migrated"`
 }
 
+// DecideRequestBody POST body for “/decide“ — the operator-decision path.
+//
+// Distinct from :class:`ApproveRequestBody` (which requires the
+// original “params“ for the agent / REST re-dispatch path). The
+// operator-decision path captures the decision durably (status flip +
+// decision audit row + “approval_decided“ broadcast) without
+// re-dispatching — the agent's REST path is what re-dispatches with
+// the params it has.
+type DecideRequestBody struct {
+	// Decision One of 'approved' / 'rejected'.
+	Decision string `json:"decision"`
+
+	// Reason Optional rationale recorded on the decision audit row.
+	Reason *string `json:"reason,omitempty"`
+}
+
+// DecideResponseBody Response for a successful operator decision.
+type DecideResponseBody struct {
+	ApprovalRequestId openapi_types.UUID `json:"approval_request_id"`
+	Decision          string             `json:"decision"`
+	Reason            string             `json:"reason"`
+}
+
 // EditGroupBody PATCH body for “/api/v1/connectors/{id}/groups/{key}“.
 //
 // Both fields optional but at least one must be set; the route
@@ -3026,6 +3049,11 @@ type ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams defines parameters for DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost.
+type DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams defines parameters for RejectApprovalRequestApiV1ApprovalsRequestIdRejectPost.
 type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -3509,6 +3537,9 @@ type RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody = AgentRunRequest
 // ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostJSONRequestBody defines body for ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePost for application/json ContentType.
 type ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostJSONRequestBody = ApproveRequestBody
 
+// DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody defines body for DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost for application/json ContentType.
+type DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody = DecideRequestBody
+
 // RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody defines body for RejectApprovalRequestApiV1ApprovalsRequestIdRejectPost for application/json ContentType.
 type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody = RejectRequestBody
 
@@ -3847,6 +3878,11 @@ type ClientInterface interface {
 	ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostWithBody(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePost(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostParams, body ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithBody request with any body
+	DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithBody(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBody request with any body
 	RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBody(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4479,6 +4515,30 @@ func (c *Client) ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostWithBod
 
 func (c *Client) ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePost(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostParams, body ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostRequest(c.Server, requestId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithBody(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostRequestWithBody(c.Server, requestId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostRequest(c.Server, requestId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6921,6 +6981,68 @@ func NewApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostRequestWithBody(
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/approvals/%s/approve", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostRequest calls the generic DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost builder with application/json body
+func NewDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostRequest(server string, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostRequestWithBody(server, requestId, params, "application/json", bodyReader)
+}
+
+// NewDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostRequestWithBody generates requests for DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost with any type of body
+func NewDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostRequestWithBody(server string, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "request_id", runtime.ParamLocationPath, requestId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/approvals/%s/decide", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -12392,6 +12514,11 @@ type ClientWithResponsesInterface interface {
 
 	ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostParams, body ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostJSONRequestBody, reqEditors ...RequestEditorFn) (*ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostResponse, error)
 
+	// DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithBodyWithResponse request with any body
+	DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, error)
+
+	DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, error)
+
 	// RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse request with any body
 	RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse, error)
 
@@ -13169,6 +13296,29 @@ func (r ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostResponse) Status
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DecideResponseBody
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -15266,6 +15416,23 @@ func (c *ClientWithResponses) ApproveApprovalRequestApiV1ApprovalsRequestIdAppro
 	return ParseApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostResponse(rsp)
 }
 
+// DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithBodyWithResponse request with arbitrary body returning *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse
+func (c *ClientWithResponses) DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, error) {
+	rsp, err := c.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithResponse(ctx context.Context, requestId openapi_types.UUID, params *DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostParams, body DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostJSONRequestBody, reqEditors ...RequestEditorFn) (*DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, error) {
+	rsp, err := c.DecideApprovalRequestApiV1ApprovalsRequestIdDecidePost(ctx, requestId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse(rsp)
+}
+
 // RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse request with arbitrary body returning *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse
 func (c *ClientWithResponses) RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBodyWithResponse(ctx context.Context, requestId openapi_types.UUID, params *RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostResponse, error) {
 	rsp, err := c.RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostWithBody(ctx, requestId, params, contentType, body, reqEditors...)
@@ -16827,6 +16994,39 @@ func ParseApproveApprovalRequestApiV1ApprovalsRequestIdApprovePostResponse(rsp *
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ApproveResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse parses an HTTP response from a DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostWithResponse call
+func ParseDecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse(rsp *http.Response) (*DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DecideApprovalRequestApiV1ApprovalsRequestIdDecidePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DecideResponseBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -50,6 +50,11 @@ from meho_backplane.memory import (
 )
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.memory.bulk import (
+    BULK_EXTEND_DURATIONS,
+    format_countdown,
+    partition_expired,
+)
 from meho_backplane.ui.routes.memory.operator import build_read_operator
 from meho_backplane.ui.routes.memory.render import pygments_css, render_markdown
 from meho_backplane.ui.templating import get_templates
@@ -207,8 +212,18 @@ def _collect_visible_tags(entries: Iterable[MemoryEntry], limit: int) -> list[st
     return sorted(seen)
 
 
-def _entries_with_preview(entries: list[MemoryEntry]) -> list[dict[str, object]]:
-    """Project ``MemoryEntry`` rows into the dict shape the template renders."""
+def _entries_with_preview(
+    entries: list[MemoryEntry],
+    operator: Operator,
+) -> list[dict[str, object]]:
+    """Project ``MemoryEntry`` rows into the dict shape the template renders.
+
+    ``operator`` is consulted to project a per-row ``can_write`` flag
+    used by T3's bulk-select UX: the checkbox renders only when the
+    operator can write the row. The flag is for UX only -- the bulk
+    handler re-checks RBAC server-side per row.
+    """
+    rbac = MemoryRbacResolver()
     return [
         {
             "id": str(entry.id),
@@ -218,8 +233,12 @@ def _entries_with_preview(entries: list[MemoryEntry]) -> list[dict[str, object]]
             "user_sub": entry.user_sub,
             "target_name": entry.target_name,
             "expires_at": entry.expires_at,
+            "countdown": (
+                format_countdown(entry.expires_at) if entry.expires_at is not None else None
+            ),
             "tags": _entry_tags(entry),
             "updated_at": entry.updated_at,
+            "can_write": rbac.can_write(operator, entry.scope, entry.target_name),
         }
         for entry in entries
     ]
@@ -279,13 +298,20 @@ async def _list_for_render(
     scope_filter: MemoryScope | None,
     tag_filter: str | None,
 ) -> list[MemoryEntry]:
-    """Pull the list-view rows for *operator* under the active filters."""
+    """Pull the list-view rows for *operator* under the active filters.
+
+    Includes expired-but-unswept rows so T3's "Recently expired
+    (cleanup pending)" section can render them; the partition split
+    happens at :func:`render_index`. The G5.2 sweeper (#623) bounds
+    the size of the expired bucket -- between expiry and the next
+    sweeper tick, expired rows are still in the documents table.
+    """
     service = MemoryService()
     return await service.list_memories(
         operator=operator,
         scope=scope_filter,
         tag=tag_filter or None,
-        include_expired=False,
+        include_expired=True,
         limit=LIST_LIMIT,
     )
 
@@ -321,24 +347,58 @@ async def render_index(
     tag: str | None = None,
     flash: str | None = None,
 ) -> HTMLResponse:
-    """Render the list page or the HTMX card-list fragment."""
+    """Render the list page or the HTMX card-list fragment.
+
+    T3 (#879) partitions the entries into ``active`` and
+    ``recently_expired`` buckets so the template can render the
+    expired-pending-cleanup section as a greyed sibling list. The
+    ``hx-trigger="every 60s"`` on the cards fragment is what refreshes
+    the countdown badges; the same handler responds to both the full
+    page render and the HTMX poll.
+    """
     scope_filter = resolve_scope_filter(scope)
     operator = build_read_operator(session_ctx)
     entries = await _list_for_render(operator, scope_filter, tag)
+    active, recently_expired = partition_expired(entries)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
+    # The refresh URL preserves the active scope + tag so the HTMX
+    # poll re-renders with the same filter state. T1's tabs already
+    # encode the query string into the request URL; the fragment
+    # carries the same shape so a poll mid-page-stay stays aligned.
+    refresh_url = _build_refresh_url(scope, tag)
     context: dict[str, object] = {
         **_common_template_context(session_ctx, csrf_token),
         "scope_tabs": SCOPE_TABS,
         "active_scope": scope,
         "active_tag": tag or "",
-        "entries": _entries_with_preview(entries),
-        "entry_count": len(entries),
+        "entries": _entries_with_preview(active, operator),
+        "expired_entries": _entries_with_preview(recently_expired, operator),
+        "entry_count": len(active),
+        "expired_count": len(recently_expired),
         "flash": flash or "",
+        "bulk_extend_durations": BULK_EXTEND_DURATIONS,
+        "refresh_url": refresh_url,
     }
     template_name = "memory/_cards.html" if is_htmx_request(request) else "memory/index.html"
     response = get_templates().TemplateResponse(request, template_name, context)
     _set_csrf_cookie(response, csrf_token)
     return response
+
+
+def _build_refresh_url(scope: str, tag: str | None) -> str:
+    """Compose the URL the HTMX cards fragment polls every 60 seconds.
+
+    Preserves the active scope + tag so a refresh while the operator
+    is staring at a filtered list doesn't snap back to "all visible".
+    Pure string composition; no Request dependency so unit tests can
+    pin the output without an HTTP fixture.
+    """
+    from urllib.parse import urlencode
+
+    params: list[tuple[str, str]] = [("scope", scope)]
+    if tag:
+        params.append(("tag", tag))
+    return f"/ui/memory?{urlencode(params)}"
 
 
 async def render_detail(
@@ -532,4 +592,69 @@ async def delete_entry(
     return HTMLResponse(
         status_code=204,
         headers={"HX-Redirect": "/ui/memory"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# T3 (#879) bulk actions
+# ---------------------------------------------------------------------------
+
+
+async def render_bulk_action(
+    request: Request,
+    session_ctx: UISessionContext,
+    operator: Operator,
+    *,
+    action: str,
+    raw_ids: list[str],
+    extend_duration: str | None,
+    scope: str = SCOPE_ALL,
+    tag: str | None = None,
+) -> HTMLResponse:
+    """Apply a bulk action and re-render the cards fragment with a flash banner.
+
+    T3 (#879). The flow:
+
+    1. Validate the form via :func:`parse_bulk_ids` /
+       :func:`parse_extend_duration` (422 on malformed input).
+    2. Dispatch via :func:`apply_bulk_action` -- tenant + RBAC filtered.
+    3. Re-render the list under the active scope/tag so the operator
+       sees the post-bulk state in the same swap target. The flash
+       banner reports the (succeeded / denied / missing) counts.
+
+    Response shape: the ``_cards.html`` partial -- the form's
+    ``hx-target="#memory-cards"`` swaps the cards in place without a
+    full-page nav. This mirrors the scope-tab / tag-filter HTMX swap
+    target so the operator's mental model is consistent.
+    """
+    # Local import keeps the bulk module's dependencies (uuid / datetime
+    # / SQLAlchemy session helpers) from leaking into the read paths.
+    from meho_backplane.ui.routes.memory.bulk import (
+        BULK_ACTIONS,
+        BulkAction,
+        apply_bulk_action,
+        parse_bulk_ids,
+        parse_extend_duration,
+    )
+
+    if action not in BULK_ACTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"bulk_invalid_action: {action!r} (allowed: {list(BULK_ACTIONS)})",
+        )
+    typed_action: BulkAction = "delete" if action == "delete" else "extend"
+    ids = parse_bulk_ids(raw_ids)
+    duration = parse_extend_duration(extend_duration) if typed_action == "extend" else None
+    result = await apply_bulk_action(
+        operator,
+        action=typed_action,
+        ids=ids,
+        extend_duration=duration,
+    )
+    return await render_index(
+        request,
+        session_ctx,
+        scope=scope,
+        tag=tag,
+        flash=result.flash_message,
     )

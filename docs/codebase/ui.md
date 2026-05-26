@@ -1385,3 +1385,79 @@ The create + promote tests stub the embedding service for the same
 reason the T1 PATCH test does — `index_document` (called by both
 `MemoryService.remember` and `MemoryService.promote`) computes a
 new embedding for the inserted row.
+
+### Expiry visualisation + bulk actions (Task #879)
+
+Initiative [#341](https://github.com/evoila/meho/issues/341) (G10.4
+Memory UI), Task [#879](https://github.com/evoila/meho/issues/879)
+(G10.4-T3) layers two surfaces on top of T1's list:
+
+* **Server-rendered countdown badges** — every memory with
+  `expires_at` shows an `"expires in 3d 4h"` cue, formatted by
+  `bulk.format_countdown`. The cards block wrapper carries
+  `hx-trigger="every 60s"` (mirrors topology graph's poll at #882's
+  30-second cadence) so the badge re-renders without a client-side
+  timer. The refresh URL preserves the active scope + tag so a poll
+  mid-page-stay stays aligned with the operator's filter state.
+* **Recently expired section** — expired-but-unswept rows render in a
+  greyed `<ul>` below the active cards. The bucket is naturally
+  bounded by the G5.2 sweeper window
+  ([#623](https://github.com/evoila/meho/issues/623)) — between
+  expiry and the next sweeper tick (default 24 h via
+  `memory_expiry_tick_interval_seconds`), expired rows are still in
+  the documents table. `MemoryService.list_memories` is called with
+  `include_expired=True` and the partition runs in
+  `bulk.partition_expired`.
+* **Bulk select + actions** — writable cards carry a checkbox (form
+  association via the HTML5 `form="memory-bulk-form"` attribute so
+  the checkbox participates in the bulk form regardless of DOM
+  nesting); the toolbar posts the selected `Document.id` UUIDs to
+  `POST /ui/memory/bulk` via HTMX. Two actions: `delete` (calls
+  `MemoryService.forget` per row) and `extend` (calls
+  `MemoryService.remember` with the existing body + a fresh
+  `expires_at = now + duration`; durations are pre-canned at 1d /
+  7d / 30d to prevent "extend by 10 years" footguns).
+
+#### Bulk RBAC posture
+
+The route resolves IDs to entries via a tenant-scoped + `source='memory'`
+filter so an operator can't smuggle a knowledge-base or audit-row UUID
+through the form. Per row, `MemoryRbacResolver.can_write` is re-checked
+before dispatch; the service's own `can_write` re-check still runs
+inside `forget` / `remember`. The route-side check exists so the
+result counts (`succeeded` / `denied` / `missing`) are honest in the
+flash banner.
+
+The flash message follows the shape `"Bulk: N deleted, M denied
+(RBAC), K not found."` with the denied / not-found terms suppressed
+when their count is zero. Cross-tenant IDs fall silently into the
+`missing` bucket — the row is real in another tenant, but invisible
+to this operator.
+
+#### Routes (T3 additions)
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `POST` | `/ui/memory/bulk` | Bulk delete or bulk extend-expiry. Form fields: `action` (`delete` \| `extend`), `ids` (multi-value `Document.id`), `extend_duration` (one of `1d` / `7d` / `30d`, required when `action=extend`), `scope` + `tag` (echoed back so the post-bulk render preserves the operator's filter state). CSRF-enforced. Returns the re-rendered `_cards.html` partial with a flash banner. |
+
+#### Files
+
+* `backend/src/meho_backplane/ui/routes/memory/bulk.py` — countdown
+  formatter, partition helper, form parsers, and `apply_bulk_action`.
+  Pulled out of `views.py` so the T3 code lands in one cohesive
+  module without growing the T1 render file past its cap.
+* `backend/src/meho_backplane/ui/routes/memory/views.py` (extended) —
+  `render_index` partitions the entries and passes the active +
+  recently-expired buckets to the template; `render_bulk_action`
+  dispatches the bulk handler.
+* `backend/src/meho_backplane/ui/routes/memory/routes.py` (extended) —
+  registers `POST /ui/memory/bulk` ahead of the parameterised
+  PATCH/DELETE so the literal path segment is unambiguous.
+* `backend/src/meho_backplane/ui/templates/memory/_cards.html`
+  (extended) — countdown badge, checkbox column on writable rows,
+  bulk-action toolbar, recently-expired section, and the
+  `hx-trigger="every 60s"` poll attribute on the wrapper.
+* `backend/tests/test_ui_memory_expiry_bulk.py` — countdown
+  formatting, partition split, parser guards, badge + recently-
+  expired rendering, bulk delete + extend, RBAC denial path,
+  cross-tenant safety, CSRF gate.

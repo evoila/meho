@@ -36,6 +36,10 @@ T2 (#878) -- create + scope-promotion:
 * ``GET /ui/memory/<scope>/<slug>/promote`` -- HTMX-loaded promote modal fragment.
 * ``POST /ui/memory/<scope>/<slug>/promote`` -- submit handler; calls G5.2 promote.
 
+T3 (#879) -- expiry visualization + bulk:
+
+* ``POST /ui/memory/bulk`` -- HTMX bulk delete / bulk extend-expiry.
+
 Tenant + RBAC + info-leak posture are documented on the render
 functions themselves; this module owns only the path / method /
 dependency wiring.
@@ -76,6 +80,7 @@ from meho_backplane.ui.routes.memory.views import (
     SLUG_MAX_LENGTH,
     delete_entry,
     patch_entry,
+    render_bulk_action,
     render_detail,
     render_edit_form,
     render_index,
@@ -273,6 +278,39 @@ async def _promote_submit_handler(
     )
 
 
+# ---------------------------------------------------------------------------
+# T3 (#879) -- bulk delete / bulk extend-expiry handler
+# ---------------------------------------------------------------------------
+
+
+async def _bulk_handler(
+    request: Request,
+    action: str = Form(..., max_length=16),
+    # The HTMX form posts ``ids`` as a multi-value field (one per
+    # checked checkbox). FastAPI's ``Form(...)`` with a ``list[str]``
+    # annotation collects every same-named entry into the list.
+    ids: list[str] = Form(default_factory=list),
+    extend_duration: str | None = Form(default=None, max_length=8),
+    # Active scope + tag are echoed back as hidden fields so the
+    # post-bulk render preserves the operator's filter state.
+    scope: str = Form(default=SCOPE_ALL, max_length=64),
+    tag: str | None = Form(default=None, max_length=SLUG_MAX_LENGTH),
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _resolve_operator_dep,
+) -> HTMLResponse:
+    """``POST /ui/memory/bulk`` -- T3 (#879) bulk delete / bulk extend-expiry."""
+    return await render_bulk_action(
+        request,
+        session_ctx,
+        operator,
+        action=action,
+        raw_ids=ids,
+        extend_duration=extend_duration,
+        scope=scope,
+        tag=tag,
+    )
+
+
 def _register_static_prefix_routes(router: APIRouter) -> None:
     """Wire the static-prefix routes -- ``/ui/memory/tags``, ``/ui/memory/create``,
     ``/ui/memory/preview`` -- onto *router*.
@@ -364,7 +402,7 @@ def _register_read_routes(router: APIRouter) -> None:
 
 
 def _register_write_routes(router: APIRouter) -> None:
-    """Wire the PATCH + DELETE + promote-submit routes onto *router*.
+    """Wire the PATCH + DELETE + promote-submit + bulk POST routes onto *router*.
 
     Split out of :func:`build_memory_router` for the same reason as
     :func:`_register_read_routes`. The PATCH route shares the
@@ -373,7 +411,21 @@ def _register_write_routes(router: APIRouter) -> None:
     The promote-submit route lives here (not in the create-promote
     group) because its parametrised path means it can register after
     the static-prefix routes without any ordering hazard.
+
+    ``POST /ui/memory/bulk`` (T3 #879) is registered ahead of the
+    parameterised PATCH/DELETE so the literal ``/bulk`` path segment
+    is never mistaken for a scope value (the scope path param is
+    typed as :class:`MemoryScope` so a stray ``bulk`` would 422 from
+    FastAPI's converter, but registering the literal first keeps the
+    OpenAPI surface clean).
     """
+    router.add_api_route(
+        "/ui/memory/bulk",
+        _bulk_handler,
+        methods=["POST"],
+        name="ui_memory_bulk",
+        response_class=HTMLResponse,
+    )
     router.add_api_route(
         "/ui/memory/{scope}/{slug}",
         _patch_handler,

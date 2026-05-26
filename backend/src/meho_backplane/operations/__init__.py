@@ -56,6 +56,11 @@ retrieval helpers in :mod:`meho_backplane.operations.search`
 (G0.6-T6 / T7 territory).
 """
 
+from meho_backplane.operations._audit import (
+    AgentRunAuditMeta,
+    agent_run_audit_meta_var,
+    agent_session_id_var,
+)
 from meho_backplane.operations.composite import (
     CompositeL2DependencyMissing,
     CompositeRecursionLimitExceeded,
@@ -88,6 +93,7 @@ from meho_backplane.operations.typed_register import (
 )
 
 __all__ = [
+    "AgentRunAuditMeta",
     "CompositeL2DependencyMissing",
     "CompositeOpHandler",
     "CompositeRecursionLimitExceeded",
@@ -99,6 +105,8 @@ __all__ = [
     "Reducer",
     "ResultHandle",
     "TypedOpHandler",
+    "agent_run_audit_meta_var",
+    "agent_session_id_var",
     "clear_typed_op_registrars",
     "compute_params_hash",
     "dispatch",

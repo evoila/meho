@@ -8,6 +8,16 @@ The package exposes the consumer-facing surface T2 (REST), T3 (CLI), and T4
 
 * :func:`query_audit` — tenant-scoped paginated query handler.
 * :func:`replay_session` — per-session parent/child replay tree (G8.2-T3).
+  The **reconstruct-sense** replay: rebuild what the agent saw by walking
+  ``agent_session_id`` + ``parent_audit_id`` lineage in chronological order.
+* :func:`replay_policy` — **policy-replay sense** (G11.4-T5 #1074):
+  re-run the recorded :class:`~meho_backplane.redaction.policy.RedactionPolicy`
+  against an audit row's captured ``raw_payload`` and verify it still
+  reproduces the row's stored ``redaction_manifest`` (empty diff). A
+  non-empty diff is the policy-regression signal the C1-d round-trip CI
+  gate (#1073) fires on.
+* :class:`PolicyReplayResult` / :class:`PolicyReplayStatus` — verdict
+  shape of one :func:`replay_policy` call.
 * :class:`AuditQueryFilters` — input filter shape (frozen Pydantic v2).
 * :class:`AuditEntry` — one row of the result (frozen Pydantic v2).
 * :class:`ReplayNode` — one node of a replay tree (``AuditEntry`` + ``depth`` +
@@ -31,6 +41,7 @@ from __future__ import annotations
 
 from .cursor import CursorPosition, InvalidCursorError, decode_cursor, encode_cursor
 from .duration import DurationParseError, parse_duration
+from .policy_replay import PolicyReplayResult, PolicyReplayStatus, replay_policy
 from .query import UnsupportedFilterError, query_audit
 from .replay import replay_session
 from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, ReplayNode
@@ -42,11 +53,14 @@ __all__ = [
     "CursorPosition",
     "DurationParseError",
     "InvalidCursorError",
+    "PolicyReplayResult",
+    "PolicyReplayStatus",
     "ReplayNode",
     "UnsupportedFilterError",
     "decode_cursor",
     "encode_cursor",
     "parse_duration",
     "query_audit",
+    "replay_policy",
     "replay_session",
 ]

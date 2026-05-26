@@ -2,7 +2,7 @@
 
 Initiative [#805](https://github.com/evoila/meho/issues/805) (G11.4 Safety,
 C1) ships a sanitization middleware that redacts every connector response
-before it reaches a caller or LLM. This document covers four landed
+before it reaches a caller or LLM. This document covers five landed
 slices:
 
 * The foundation
@@ -21,9 +21,13 @@ slices:
   ([#1072](https://github.com/evoila/meho/issues/1072)):
   capability-flagged free-text NER over policy-flagged fields,
   merging into the same manifest shape as Tier-1.
-
-Pending sibling ticket: the agent-invocation audit row (C2-b,
-[#1074](https://github.com/evoila/meho/issues/1074)).
+* The agent-invocation audit row + policy-replay sense
+  ([#1074](https://github.com/evoila/meho/issues/1074)): per-tool-call
+  audit rows fired from inside an agent loop are keyed by
+  `agent_session_id`, carry `model` / `provider` / `cost`
+  attribution in the JSON payload, and gain a second replay sense
+  (`replay_policy`) that re-runs the recorded policy against the
+  captured raw to detect regressions.
 
 ## Overview
 
@@ -540,6 +544,80 @@ No new runtime dependencies were added by Task #1070, #1071, or #1073.
   bytes; if a future connector emits binary payloads at the
   redaction boundary, this surface needs revisiting.
 
+## Agent-invocation audit (C2-b, #1074)
+
+The connector-boundary middleware (#1071) already writes
+`raw_payload` + `redaction_manifest` + `redaction_policy_id` on every
+dispatcher-written audit row. #1074 closes the agent-side of the audit
+contract: dispatcher rows fired from inside an agent loop are keyed
+by the run's id on `audit_log.agent_session_id`, and carry the run's
+`model` / `provider` / `cost` snapshot in the JSON payload so a
+consumer reading one row can attribute it without joining
+`agent_run`.
+
+The propagation hook is a pair of contextvars in
+`operations/_audit.py`:
+
+- `agent_session_id_var` — bound by the `AgentInvoker` around the
+  loop; read by `write_audit_row` straight into the real
+  `audit_log.agent_session_id` column (already on the schema via
+  migration `0014`, G8.2-T1 #1009). `None` outside an agent run, so
+  the chassis HTTP / MCP dispatch path is unchanged.
+- `agent_run_audit_meta_var` — carries `AgentRunAuditMeta(model,
+  provider, cost)`. The dispatcher's `_build_audit_payload` writes
+  the three fields into the audit row's JSON payload under
+  `agent_model` / `agent_provider` / `agent_cost`. Decimal costs are
+  string-coerced (mirrors the `audit_log.duration_ms`
+  `Decimal(str(...))` convention) so JSON encoding stays
+  encoder-safe.
+
+The contextvars are bound by `AgentInvoker._run_loop_to_completion`
+(background task) and `AgentInvoker.stream_events` (inline SSE
+coroutine). `asyncio.create_task` snapshots the contextvars, so the
+background task inherits the binds for its whole life; every
+per-tool-call audit row the loop produces shares the same session id
++ meta. The same shape mirrors the MCP wiring
+(`meho_backplane.mcp.server._bind_mcp_session_id` /
+`meho_backplane.mcp.audit`).
+
+### Policy-replay sense
+
+The second audit-replay sense (the first is G8.2-T3 #1011's
+reconstruct-sense `replay_session`, which rebuilds *what the agent
+saw* from the session lineage):
+
+```text
+audit_log row (raw_payload, redaction_manifest, payload.redaction_policy_id)
+                    │
+                    ▼
+       replay_policy(audit_id, tenant_id, session)
+                    │
+                    ├──► find_policy_by_id(payload.redaction_policy_id)
+                    │
+                    ▼
+       redact(raw_payload, policy, connector_id, tenant, op)
+                    │
+                    ▼
+       diff(stored_manifest, replayed_manifest)
+                    │
+                    ▼
+       PolicyReplayResult(status, missing, extra, replayed_redacted)
+```
+
+Verdict statuses:
+
+| Status | Meaning |
+| --- | --- |
+| `MATCH` | The replay re-produced the recorded manifest verbatim; the policy stays deterministic for this row's raw payload. |
+| `DIVERGED` | The replay produced a different manifest; `missing` / `extra` carry the delta. This is the C1-d (#1073) regression signal. |
+| `AUDIT_ROW_NOT_FOUND` | No tenant-scoped row for that id (cross-tenant id is structurally indistinguishable). |
+| `REPLAY_NOT_APPLICABLE` | Row exists but has no `raw_payload` / `redaction_policy_id` (pre-#1071 row, or an error-path row). |
+| `POLICY_NOT_FOUND` | Recorded policy id no longer resolvable -- the policy was retired, distinct from divergence. |
+
+The implementation lives at
+`backend/src/meho_backplane/audit_query/policy_replay.py` and the
+policy-by-id lookup is `meho_backplane.redaction.resolver.find_policy_by_id`.
+
 ## References
 
 - Parent goal: [#800](https://github.com/evoila/meho/issues/800)
@@ -548,12 +626,15 @@ No new runtime dependencies were added by Task #1070, #1071, or #1073.
   (G11.4 Safety) §Approach for the tiered design.
 - Tasks: [#1070](https://github.com/evoila/meho/issues/1070),
   [#1071](https://github.com/evoila/meho/issues/1071),
-  [#1073](https://github.com/evoila/meho/issues/1073).
+  [#1073](https://github.com/evoila/meho/issues/1073),
+  [#1074](https://github.com/evoila/meho/issues/1074).
 - Seam: `dispatcher._reduce_or_error`
   (`backend/src/meho_backplane/operations/dispatcher.py`) — the
   C1-b middleware (#1071) sits here.
 - YAML-as-package-data precedent:
   `backend/src/meho_backplane/operations/ingest/catalog.py` +
   `catalog.yaml`.
+- Reconstruct-sense replay (#1011):
+  `backend/src/meho_backplane/audit_query/replay.py`.
 - Microsoft Presidio (Tier-2; #1072):
   <https://github.com/microsoft/presidio>.

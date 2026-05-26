@@ -73,8 +73,14 @@ import uuid
 import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.agents.identity_ref import (
+    AgentIdentityRefInvalidError,
+)
+from meho_backplane.agents.identity_ref import (
+    validate_identity_ref as _validate_identity_ref,
+)
+from meho_backplane.agents.mapping import apply_changes, build_definition_row
 from meho_backplane.agents.schemas import (
     AgentDefinitionCreate,
     AgentDefinitionRead,
@@ -82,11 +88,16 @@ from meho_backplane.agents.schemas import (
     validate_name,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentDefinition, AgentPrincipal
+from meho_backplane.db.models import AgentDefinition
 
 __all__ = [
     "AgentDefinitionExistsError",
     "AgentDefinitionService",
+    # Re-exported from :mod:`meho_backplane.agents.identity_ref` so existing
+    # callers (REST routes, MCP tools, tests) keep their
+    # ``from meho_backplane.agents.service import AgentIdentityRefInvalidError``
+    # import path; the validator was extracted in G11.2-T9 (#1112) and
+    # ``_validate_identity_ref`` below is the alias internal call sites use.
     "AgentIdentityRefInvalidError",
 ]
 
@@ -110,31 +121,6 @@ class AgentDefinitionExistsError(Exception):
     def __init__(self, name: str) -> None:
         self.name = name
         super().__init__(f"agent definition {name!r} already exists for this tenant")
-
-
-class AgentIdentityRefInvalidError(Exception):
-    """Raised when ``identity_ref`` does not resolve to a tenant-scoped principal.
-
-    The :attr:`identity_ref` attribute carries the rejected value so the
-    boundary layer can echo it back; the *reason* attribute distinguishes
-    the failure mode (``unknown`` -- no row matches; ``revoked`` -- a row
-    matches but its kill switch has been pulled) for the structlog
-    breadcrumb. Both the REST route and the MCP tool map this exception
-    to a structured 4xx with detail ``identity_ref_unknown`` -- a single
-    code is intentional: leaking ``revoked`` vs ``unknown`` to an
-    unauthenticated caller would expose whether a specific Keycloak
-    client id ever existed in the tenant, which is exactly the
-    cross-tenant existence leak ``agent:test-bot`` reconnaissance would
-    exploit. Operators see the structured ``reason`` in the log event.
-    """
-
-    def __init__(self, identity_ref: str, reason: str) -> None:
-        self.identity_ref = identity_ref
-        self.reason = reason
-        super().__init__(
-            f"identity_ref {identity_ref!r} does not resolve to a registered "
-            f"non-revoked agent principal in this tenant (reason={reason})"
-        )
 
 
 def _is_unique_violation(exc: IntegrityError) -> bool:
@@ -170,44 +156,6 @@ class AgentDefinitionService:
     def __init__(self) -> None:
         self._log = structlog.get_logger()
 
-    async def _validate_identity_ref(
-        self,
-        session: AsyncSession,
-        tenant_id: uuid.UUID,
-        identity_ref: str,
-    ) -> None:
-        """Reject *identity_ref* unless it names a non-revoked tenant-scoped principal.
-
-        Matches against :attr:`AgentPrincipal.keycloak_client_id` -- the
-        agent-principal convention from T1 (#815) is that an agent's
-        Keycloak clientId is ``agent:<name>`` and that is the value stored
-        on ``AgentDefinition.identity_ref`` by every existing flow. The
-        match is exact (no wildcards, no case-folding) so two principals
-        with names differing only in case stay distinct.
-
-        Tenant scoping is the first WHERE clause: a cross-tenant probe
-        (a tenant A operator trying to bind a tenant B's principal) is
-        invisible to the query and rejected as ``unknown`` -- the
-        existence of tenant B's principal is never leaked across the
-        tenant boundary. ``revoked`` rows are also rejected with
-        ``reason="revoked"`` (logged; the boundary collapses both reasons
-        into a single ``identity_ref_unknown`` code to avoid leaking
-        whether a specific clientId ever existed). Read-only query
-        running inside the *caller's* session so the validate + write
-        happen in the same transaction.
-        """
-        result = await session.execute(
-            select(AgentPrincipal.revoked).where(
-                AgentPrincipal.tenant_id == tenant_id,
-                AgentPrincipal.keycloak_client_id == identity_ref,
-            )
-        )
-        revoked = result.scalar_one_or_none()
-        if revoked is None:
-            raise AgentIdentityRefInvalidError(identity_ref, reason="unknown")
-        if revoked:
-            raise AgentIdentityRefInvalidError(identity_ref, reason="revoked")
-
     async def create(
         self,
         tenant_id: uuid.UUID,
@@ -234,26 +182,15 @@ class AgentDefinitionService:
             When *name* contains characters outside the safe set.
         """
         validate_name(payload.name)
-        row = AgentDefinition(
-            tenant_id=tenant_id,
-            name=payload.name,
-            identity_ref=payload.identity_ref,
-            model_tier=payload.model_tier.value,
-            system_prompt=payload.system_prompt,
-            toolset=payload.toolset,
-            turn_budget=payload.turn_budget,
-            output_schema=payload.output_schema,
-            enabled=payload.enabled,
-            created_by_sub=created_by_sub,
-        )
+        row = build_definition_row(tenant_id, created_by_sub, payload)
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            # Validate the identity_ref before the INSERT lands. Doing it
-            # inside the same session ensures the FK-like guarantee under
-            # PostgreSQL REPEATABLE READ: a concurrent revoke between
-            # the select and the insert can't make the validation stale
-            # within this transaction's snapshot.
-            await self._validate_identity_ref(session, tenant_id, payload.identity_ref)
+            # Validate identity_ref inside the caller's session so the
+            # SELECT and the write share one transaction. The TOCTOU
+            # window (READ COMMITTED, not REPEATABLE READ) and the
+            # authoritative runtime gate are explained in the new
+            # :mod:`meho_backplane.agents.identity_ref` module docstring.
+            await _validate_identity_ref(session, tenant_id, payload.identity_ref)
             session.add(row)
             try:
                 await session.flush()
@@ -347,25 +284,20 @@ class AgentDefinitionService:
         """Apply a partial update to ``(tenant_id, name)``; ``None`` if absent.
 
         Only fields the caller explicitly set are applied
-        (``model_dump(exclude_unset=True)``), so a PATCH can change one
-        field without clobbering the rest. ``name`` is not updatable (it
-        is the natural key) -- the field is absent from
-        :class:`AgentDefinitionUpdate`. ``model_tier`` is stored as its
-        string value.
-
+        (``model_dump(exclude_unset=True)``); ``name`` is not updatable
+        (it is the natural key, absent from :class:`AgentDefinitionUpdate`).
         Returns ``None`` when no row matches (absent or cross-tenant) so
-        the boundary renders 404. The ``onupdate`` ORM hook bumps
+        the boundary renders 404; the ``onupdate`` ORM hook bumps
         ``updated_at`` on any column change.
 
-        Raises
-        ------
-        AgentIdentityRefInvalidError
-            When the PATCH body includes a new ``identity_ref`` that
-            does not resolve to a registered, non-revoked agent
-            principal in *tenant_id* (G11.2-T8 #1099). Updates that
-            don't touch ``identity_ref`` skip the validation -- the
-            existing value was already validated when the definition
-            was created or last identity-ref'd.
+        Raises :class:`AgentIdentityRefInvalidError` when the PATCH body
+        includes a new ``identity_ref`` that does not resolve to a
+        registered, non-revoked agent principal in *tenant_id*
+        (G11.2-T8 #1099). Updates that don't touch ``identity_ref`` skip
+        the validation -- the existing value was already validated when
+        the definition was created or last identity-ref'd. The runtime
+        check that the principal is still live at invocation time is
+        G11.3's responsibility, not this validator's.
         """
         changes = payload.model_dump(exclude_unset=True)
         sessionmaker = get_sessionmaker()
@@ -380,20 +312,10 @@ class AgentDefinitionService:
             if row is None:
                 return None
             # Re-validate identity_ref only when the PATCH body sets it.
-            # Untouched identity_ref keeps the existing (already-validated)
-            # value. The runtime-time check that the principal is still
-            # live at invocation time is G11.3's responsibility (the
-            # scheduler enforces identity_ref == agent_client_id under
-            # the client_credentials grant).
             new_identity_ref = changes.get("identity_ref")
             if new_identity_ref is not None:
-                await self._validate_identity_ref(session, tenant_id, new_identity_ref)
-            for field, value in changes.items():
-                # model_tier round-trips through the enum's .value so the
-                # column stores the wire string, not "AgentModelTier.X".
-                if field == "model_tier" and value is not None:
-                    value = value.value if hasattr(value, "value") else value
-                setattr(row, field, value)
+                await _validate_identity_ref(session, tenant_id, new_identity_ref)
+            apply_changes(row, changes)
             await session.flush()
             await session.refresh(row)
             entry = AgentDefinitionRead.model_validate(row)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0025_add_agent_run_lease_reaper``.
+"""Behavioural tests for Alembic migration ``0026_add_agent_run_lease_reaper``.
 
 Initiative #804 (G11.3 Scheduler), Task #825 (T4). The migration adds
 three columns (``lease_owner`` / ``lease_expires_at`` / ``in_flight_policy``),
@@ -64,7 +64,7 @@ def alembic_cfg(
     isolated SQLite database; engine + settings caches are reset
     before and after so the alembic env reads *this* DATABASE_URL.
     """
-    db_path = tmp_path / "migration_0025.db"
+    db_path = tmp_path / "migration_0026.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -238,7 +238,7 @@ def test_downgrade_then_upgrade_round_trips(
 ) -> None:
     """``downgrade "0024"`` drops the new columns / index; ``upgrade head`` restores them.
 
-    The reversibility contract -- migration 0025 inherits the explicit
+    The reversibility contract -- migration 0026 inherits the explicit
     drop-then-create symmetry every later migration in this chain follows.
     """
     cfg, sync_url = alembic_cfg

@@ -467,8 +467,8 @@ def test_in_flight_policy_kinds_match_scheduled_trigger_enum() -> None:
     assert set(_AGENT_RUN_IN_FLIGHT_POLICIES) == {p.value for p in ScheduledTriggerInFlightPolicy}
 
 
-def _load_migration_0025() -> object:
-    """Load migration ``0025`` as a module via its file path.
+def _load_migration_0026() -> object:
+    """Load migration ``0026`` as a module via its file path.
 
     Same shape as :func:`_load_migration_0017` -- digit-prefixed
     filename, not importable as a dotted module.
@@ -480,24 +480,24 @@ def _load_migration_0025() -> object:
         Path(__file__).resolve().parent.parent
         / "alembic"
         / "versions"
-        / "0025_add_agent_run_lease_reaper.py"
+        / "0026_add_agent_run_lease_reaper.py"
     )
-    spec = importlib.util.spec_from_file_location("_migration_0025", path)
+    spec = importlib.util.spec_from_file_location("_migration_0026", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def test_migration_0025_in_flight_policy_literals_match_scheduled_trigger_enum() -> None:
-    """Migration ``0025``'s frozen policy tuple matches :class:`ScheduledTriggerInFlightPolicy`.
+def test_migration_0026_in_flight_policy_literals_match_scheduled_trigger_enum() -> None:
+    """Migration ``0026``'s frozen policy tuple matches :class:`ScheduledTriggerInFlightPolicy`.
 
     T4 #825. The migration records the vocabulary as a literal tuple
     (not an import) so its DDL is a frozen snapshot; equality with the
     enum is the drift guard that keeps the CHECK constraint and the
     enum in lock-step.
     """
-    migration = _load_migration_0025()
+    migration = _load_migration_0026()
 
     assert set(migration._AGENT_RUN_IN_FLIGHT_POLICIES) == {  # type: ignore[attr-defined]
         p.value for p in ScheduledTriggerInFlightPolicy

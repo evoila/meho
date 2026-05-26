@@ -747,6 +747,82 @@ async def test_expire_stale_requests_respects_tenant_isolation(
         assert row.status == ApprovalRequestStatus.PENDING.value
 
 
+@pytest.mark.asyncio
+async def test_expire_stale_requests_publishes_approval_expired_broadcast(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller publishes one ``approval.expired`` event per expired row with FK audit_id.
+
+    #1114 follow-up to T4: the fourth lifecycle transition (expiry) now
+    surfaces on the broadcast feed alongside pending / approved /
+    rejected. The function exposes ``request._audit_id`` (the real
+    decision row's primary key) so the caller can publish **after
+    commit** — same publish-after-commit invariant the other three
+    transitions follow. The broadcast event's ``audit_id`` field is
+    documented as the FK to ``audit_log.id``; subscribers that want the
+    full row query audit_log by this id.
+    """
+    captured: list[Any] = []
+
+    async def _capture(event: Any) -> None:
+        captured.append(event)
+
+    monkeypatch.setattr("meho_backplane.broadcast.publisher.publish_event", _capture)
+    from meho_backplane.operations.approval_queue import publish_approval_event
+
+    operator = _make_operator()
+    past = datetime.now(UTC) - timedelta(hours=1)
+
+    pending = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.expire-broadcast",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+        expires_at=past,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        expired = await expire_stale_requests(s2, operator=operator)
+        await s2.commit()
+
+    assert len(expired) == 1
+    assert expired[0].id == pending.id
+    decision_audit_id: uuid.UUID = expired[0]._audit_id  # type: ignore[attr-defined]
+    assert isinstance(decision_audit_id, uuid.UUID)
+
+    # Publish AFTER commit, mirroring the dispatcher / REST / MCP sites.
+    for row in expired:
+        await publish_approval_event(
+            tenant_id=operator.tenant_id,
+            request=row,
+            decision="expired",
+            principal_sub=operator.sub,
+            audit_id=row._audit_id,  # type: ignore[attr-defined]
+        )
+
+    # Exactly one ``approval.expired`` event landed with the FK audit_id.
+    assert len(captured) == 1
+    event = captured[0]
+    assert event.op_id == "approval.expired"
+    assert event.audit_id == decision_audit_id
+    assert event.tenant_id == operator.tenant_id
+    assert event.payload["decision"] == "expired"
+    assert event.payload["approval_request_id"] == str(pending.id)
+
+    # The audit_log row at that id exists and is the expiry decision row.
+    async with get_sessionmaker()() as fresh:
+        audited = await fresh.get(AuditLog, decision_audit_id)
+        assert audited is not None
+        assert audited.path == "approval.decision"
+        assert audited.status_code == 410
+        assert audited.payload["decision"] == "expired"
+
+
 # ---------------------------------------------------------------------------
 # pause → approve → resume → execute (integration-style)
 # ---------------------------------------------------------------------------

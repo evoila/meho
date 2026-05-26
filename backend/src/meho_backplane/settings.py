@@ -693,6 +693,40 @@ class Settings(BaseModel):
     # polls). Bounds how long the surface holds an HTTP connection open
     # for a short interactive run before degrading to the pollable shape.
     agent_sync_timeout_seconds: float = Field(default=30.0, gt=0)
+    # G11.3-T2 #823 — cron + one-off trigger scheduler. ``tick_interval``
+    # bounds how often the loop scans for due triggers; the default
+    # (30 s) is the consumer-doc-accepted granularity for cron triggers
+    # (one minute is the finest cron-expression boundary, so a 30 s
+    # tick guarantees the trigger fires inside its minute window). The
+    # ``enabled`` flag mirrors the MEMORY_EXPIRY / TOPOLOGY_HISTORY_PRUNE
+    # shape so operators using an external scheduler can opt out.
+    scheduler_tick_interval_seconds: int = Field(default=30, ge=1, le=3600)
+    scheduler_enabled: bool = True
+    # G11.3-T2 #823 — autonomous-agent credential sourcing for the
+    # scheduler. ``run_scheduled`` (G11.2-T2 #1096) wants
+    # ``(client_id, client_secret)``; the scheduler resolves
+    # ``client_id`` from the trigger's :class:`AgentDefinition.identity_ref`
+    # and reads the matching secret from an environment variable whose
+    # name is derived from this pattern. ``{client_id}`` is substituted
+    # at fire time and the result is uppercased + non-alphanumeric chars
+    # replaced with underscores so an ``identity_ref`` like ``agent:reporter``
+    # resolves to ``MEHO_AGENT_SECRET_AGENT_REPORTER``.
+    #
+    # Why env-var sourcing rather than Vault: ``vault_client_for_operator``
+    # is JWT/OIDC-bound and the scheduler is operator-less. Until a
+    # scheduler-service-token Vault auth path lands (G11.2 follow-up),
+    # operators wire agent secrets into the backplane pod's env (Helm
+    # secret / external-secrets / sealed-secret) the same way
+    # ``ANTHROPIC_API_KEY`` is wired today. The
+    # ``scheduler_agent_vault_path_pattern`` setting below is reserved
+    # for the future Vault path; it ships configured but unused so the
+    # transition is a code swap, not an env-var rename.
+    scheduler_agent_secret_env_pattern: str = Field(default="MEHO_AGENT_SECRET_{client_id}")
+    # Forward-compat: the Vault KVv2 path the scheduler will read once
+    # service-token auth lands. Configured but unused in v0.2.
+    scheduler_agent_vault_path_pattern: str = Field(
+        default="secret/data/agents/{client_id}/credentials"
+    )
     mcp_require_session_id: bool = False
 
     @field_validator("broadcast_redis_url")
@@ -737,6 +771,47 @@ class Settings(BaseModel):
                 f"DATABASE_URL must use an async driver scheme; "
                 f"supported: {supported}. Got: {value!r}",
             )
+        return value
+
+    @field_validator("scheduler_agent_secret_env_pattern")
+    @classmethod
+    def _scheduler_secret_pattern_must_substitute_client_id(cls, value: str) -> str:
+        """Reject env-var patterns that don't substitute ``{client_id}``.
+
+        Pulled up to :class:`Settings` construction so three otherwise-
+        silent failure shapes surface at pod startup rather than at
+        first scheduled fire:
+
+        * **Pattern lacks ``{client_id}``** (typo / copy-paste error):
+          ``str.format`` returns the literal pattern, every agent
+          resolves to the same env-var key, all scheduled runs share
+          one secret. Cross-tenant principal-credential bleed.
+        * **Pattern uses positional ``{0}`` instead of named
+          ``{client_id}``**: ``str.format(client_id=...)`` raises
+          :class:`KeyError` on first fire. The precondition gate logs
+          ``scheduler_credentials_unresolved`` and skips forever.
+        * **Pattern has unbalanced braces**: ``str.format`` raises
+          :class:`ValueError` on first fire. Same skip-forever path.
+
+        Same fail-closed-at-startup discipline as
+        :meth:`_broadcast_url_must_use_supported_scheme` and
+        :meth:`_database_url_must_be_async` -- a misconfigured env var
+        should fail the import chain immediately with an actionable
+        message, not days later under load.
+        """
+        if "{client_id}" not in value:
+            raise ValueError(
+                f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must include "
+                f"'{{client_id}}' so each agent resolves to its own env var; "
+                f"got: {value!r}"
+            )
+        try:
+            value.format(client_id="TEST_CLIENT_ID")
+        except (IndexError, KeyError, ValueError) as exc:
+            raise ValueError(
+                f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must be a valid "
+                f"str.format pattern; got: {value!r}"
+            ) from exc
         return value
 
 
@@ -889,6 +964,20 @@ def get_settings() -> Settings:
         ),
         agent_sync_timeout_seconds=float(
             os.environ.get("AGENT_SYNC_TIMEOUT_SECONDS", "30.0"),
+        ),
+        scheduler_tick_interval_seconds=int(
+            os.environ.get("SCHEDULER_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        scheduler_enabled=parse_bool_env(
+            os.environ.get("SCHEDULER_ENABLED", "true"),
+        ),
+        scheduler_agent_secret_env_pattern=os.environ.get(
+            "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
+            "MEHO_AGENT_SECRET_{client_id}",
+        ),
+        scheduler_agent_vault_path_pattern=os.environ.get(
+            "SCHEDULER_AGENT_VAULT_PATH_PATTERN",
+            "secret/data/agents/{client_id}/credentials",
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),

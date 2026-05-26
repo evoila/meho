@@ -368,7 +368,14 @@ async def _run_one_tick() -> None:
             # ``select ... where status='running' AND lease_expires_at < now``
             # -- the partial index drives this on PG. The LIMIT bounds
             # the per-tick work; a backlog is drained across multiple
-            # ticks rather than pinning one backend.
+            # ticks rather than pinning one backend. ``FOR UPDATE SKIP
+            # LOCKED`` is the load-bearing race guard: a concurrent
+            # ``heartbeat()`` UPDATE for one of these rows blocks until
+            # we commit, so the row's lease metadata cannot drift
+            # between the claim and the policy application.
+            # ``skip_locked=True`` lets a parallel reaper instance (the
+            # advisory-lock guard is best-effort, not a hard mutex)
+            # pick up rows we don't hold rather than waiting on us.
             stmt = (
                 select(AgentRun)
                 .where(
@@ -378,6 +385,7 @@ async def _run_one_tick() -> None:
                 )
                 .order_by(AgentRun.lease_expires_at.asc())
                 .limit(settings.agent_run_reaper_max_per_tick)
+                .with_for_update(skip_locked=True)
             )
             result = await session.execute(stmt)
             expired_rows = list(result.scalars().all())
@@ -387,8 +395,17 @@ async def _run_one_tick() -> None:
 
             outcomes: dict[str, int] = {"failed": 0, "cleared": 0}
             for row in expired_rows:
+                # Per-row savepoint -- a DB-level error in one row's
+                # reap (a stray ``IntegrityError`` from the audit
+                # insert, a deadlock with a concurrent writer) would
+                # otherwise leave the outer session in an invalid
+                # state and the tick-level commit below would fail,
+                # dropping every row's transition. The savepoint
+                # contains the damage to one row; the surviving rows
+                # still commit at the end of the tick.
                 try:
-                    _policy, outcome = await _reap_one_row(session, row, now=now)
+                    async with session.begin_nested():
+                        _policy, outcome = await _reap_one_row(session, row, now=now)
                     outcomes[outcome] = outcomes.get(outcome, 0) + 1
                 except IllegalTransitionError:
                     # The row's status changed between the claim query
@@ -396,13 +413,17 @@ async def _run_one_tick() -> None:
                     # reaper instance that bypassed the advisory lock,
                     # etc.). Skip this row -- the new status is
                     # already terminal and another writer owns the
-                    # audit row for it.
+                    # audit row for it. The ``begin_nested`` savepoint
+                    # has already rolled back; nothing to clean up.
                     _log.info(
                         "agent_run_reaper_row_skipped_status_changed",
                         run_id=str(row.id),
                     )
                 except Exception:
                     # Per-row failure isolation -- log loud, continue.
+                    # The ``begin_nested`` savepoint rolled back on
+                    # the raise, so the outer session is still valid
+                    # and the tick's commit below proceeds normally.
                     _log.exception(
                         "agent_run_reaper_row_failed",
                         run_id=str(row.id),

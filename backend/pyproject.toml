@@ -34,6 +34,7 @@ dependencies = [
     "msgspec>=0.20.0",
     "tabulate>=0.9.0",
     "pydantic-ai-slim[anthropic]>=1.102.0",
+    "croniter>=6.2.2",
 ]
 
 [dependency-groups]
@@ -302,6 +303,16 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["meho_backplane.jsonflux.*"]
 disable_error_code = ["type-arg", "attr-defined"]
+
+# ``croniter`` ships without type stubs (no ``types-croniter`` exists
+# at the version we pin, 6.2.2+). The scheduler loop / cron module
+# imports it for cron-expression parsing; under the repo's strict
+# mypy config (no ``--ignore-missing-imports`` flag), the bare import
+# fails with ``Library stubs not installed for "croniter"``. Match
+# the pattern the ``tabulate`` / ``asyncssh`` overrides above use.
+[[tool.mypy.overrides]]
+module = ["croniter.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

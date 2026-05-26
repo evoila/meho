@@ -31,7 +31,7 @@ Two pieces shipped in T6:
 
 T4 (#825) extends both with the in-flight-reclaim contract:
 
-- **Three columns** added to `AgentRun` via migration `0025_add_agent_run_lease_reaper`:
+- **Three columns** added to `AgentRun` via migration `0026_add_agent_run_lease_reaper`:
   `lease_owner` (nullable Text — the worker holding the run),
   `lease_expires_at` (nullable `timestamptz` — the heartbeat deadline),
   `in_flight_policy` (NOT NULL Text with a `CHECK` constraint backed
@@ -299,9 +299,9 @@ Settings (all in `Settings`, all opt-out via env):
   is the agent runtime's idempotency-friendly tool calls (G11.1's
   design constraint) — T4 does not enforce idempotency at the
   substrate, it is the agent author's contract.
-- Migration `0025_add_agent_run_lease_reaper` collides numerically
+- Migration `0026_add_agent_run_lease_reaper` collides numerically
   with PR #1065 (G11.3-T2, cron + one-off triggers) which also numbers
-  its migration `0025`. Both PRs are in-flight in parallel; whichever
+  its migration `0026`. Both PRs are in-flight in parallel; whichever
   lands second rebases its migration to `0026`.
 
 ## References
@@ -311,7 +311,7 @@ Settings (all in `Settings`, all opt-out via env):
 - Initiative #804 (G11.3 Scheduler), Task #825 (T4 — lease/heartbeat
   + reaper).
 - Migration `0017_create_agent_run.py` (T6 — table) +
-  `0025_add_agent_run_lease_reaper.py` (T4 — lease columns); model
+  `0026_add_agent_run_lease_reaper.py` (T4 — lease columns); model
   `AgentRun` in `backend/src/meho_backplane/db/models.py`; service
   `backend/src/meho_backplane/operations/agent_run.py`; reaper
   `backend/src/meho_backplane/agent/reaper.py`.
@@ -325,5 +325,5 @@ Settings (all in `Settings`, all opt-out via env):
 - Tests: `tests/test_db_agent_run.py`,
   `tests/test_migration_0017_agent_run.py`,
   `tests/test_agent_run_lifecycle.py`,
-  `tests/test_migration_0025_agent_run_lease_reaper.py`,
+  `tests/test_migration_0026_agent_run_lease_reaper.py`,
   `tests/test_agent_run_reaper.py`.

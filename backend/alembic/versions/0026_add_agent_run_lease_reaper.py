@@ -3,8 +3,8 @@
 
 """Add lease / heartbeat / in_flight_policy columns to ``agent_run``.
 
-Revision ID: 0025
-Revises: 0024
+Revision ID: 0026
+Revises: 0025
 Create Date: 2026-05-26
 
 Initiative #804 (G11.3 Scheduler), Task #825 (T4). T1 (#822, 0020)
@@ -109,8 +109,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0025"
-down_revision: str | None = "0024"
+revision: str = "0026"
+down_revision: str | None = "0025"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

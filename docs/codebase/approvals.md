@@ -99,12 +99,22 @@ support elicitation URL-mode can open this URL in the operator's
 decision UI; until that lands, the operator approves/rejects via the
 explicit `meho.approvals.{approve,reject}` tools.
 
-## Known gaps
+## Agent-runtime resume on `approval.{approved,rejected}` (T9 #1117)
 
-- Operator-decision approve via MCP/CLI does **not** re-dispatch the op
-  (only the REST path with params does, because the params-hash check
-  is the swap defence). After an operator approves via MCP/CLI, the
-  agent picks up execution via the REST resume path with its own params.
+The operator/agent split: operator paths capture the decision durably and
+publish a broadcast event; the agent runtime subscribes and resumes (or
+surfaces the rejection) from its own side. Each path:
+
+| Path | Decision capture | Re-dispatch |
+|---|---|---|
+| REST `/approve` with `params` | inline | inline — the human operator's call re-dispatches with `_approved=True` (the human-driven express lane). |
+| REST `/decide`, MCP, CLI | durable row + broadcast | **agent runtime**: the wrapped `call_operation` in `meho_backplane/agent/toolset.py` + `meho_backplane/agent/run.py` blocks on `meho_backplane.agent.approval_wait.wait_for_approval_decision` and re-invokes the dispatcher via `call_operation_with_approval` on approval, or surfaces the rejection to the model. |
+
+See [agent-runtime.md § Awaiting-approval resume](agent-runtime.md#awaiting-approval-resume-t9-1117)
+for the substrate's full shape, including the wait timeout
+(`Settings.agent_approval_wait_timeout_seconds`, default 30 min), the
+fail-open semantics on broadcast outage, and the security tradeoff that
+keeps `params` off the approval row.
 
 ## References
 
@@ -113,3 +123,5 @@ explicit `meho.approvals.{approve,reject}` tools.
 - `backend/src/meho_backplane/mcp/tools/approvals.py` — MCP tools.
 - `cli/internal/cmd/approvals/` — CLI verbs.
 - `backend/alembic/versions/0023_create_approval_request.py` — schema.
+- `backend/src/meho_backplane/agent/approval_wait.py` — agent-runtime resume substrate (T9 #1117): broadcast subscription + re-dispatch on approval.
+- `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the gate-bypass re-dispatch entry point).

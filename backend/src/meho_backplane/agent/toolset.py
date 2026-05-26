@@ -78,6 +78,7 @@ from typing import Any
 import structlog
 from pydantic_ai import ModelRetry, RunContext, Tool
 
+from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import role_at_least
 from meho_backplane.operations.meta_tools import (
@@ -85,6 +86,7 @@ from meho_backplane.operations.meta_tools import (
     list_operation_groups,
     search_operations,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "META_TOOL_NAMES",
@@ -289,8 +291,20 @@ def _make_meta_tool(
     For ``call_operation`` with a connector allow-list, the wrapper performs
     a pre-dispatch connector check and raises :class:`ModelRetry` — an
     agent-reasonable structured error, not a crash — when the requested
-    connector is outside the spec's ``connectors`` list. Every other path
-    (and every other meta-tool) flows straight through to the handler.
+    connector is outside the spec's ``connectors`` list.
+
+    For ``call_operation`` specifically the wrapper also threads the G11.1-T9
+    (#1117) approval-resume substrate: when the dispatch returns
+    ``status="awaiting_approval"``, the wrapper blocks on
+    :func:`~meho_backplane.agent.approval_wait.wait_for_approval_decision`
+    (subscribing to the per-tenant broadcast feed for an
+    ``approval.{approved,rejected}`` event keyed on the request id) and
+    either re-dispatches with ``_approved=True`` (approved) or surfaces the
+    decision to the model (rejected / timeout). This implements the
+    operator/agent split: the operator's decision flows through the durable
+    approval queue + broadcast, the agent's resume flows through the
+    re-dispatch substrate here. Every other path (and every other meta-tool)
+    flows straight through to the handler.
     """
 
     handler = meta.handler
@@ -315,7 +329,17 @@ def _make_meta_tool(
                     f"allowed connectors {sorted(allowed_connectors)!r}. Pick "
                     f"an allowed connector or stop."
                 )
-        return await handler(ctx.deps, dict(arguments))
+        call_arguments = dict(arguments)
+        result = await handler(ctx.deps, call_arguments)
+        if is_call_operation and result.get("status") == "awaiting_approval":
+            settings = get_settings()
+            return await resume_or_surface_awaiting_approval(
+                operator=ctx.deps,
+                call_arguments=call_arguments,
+                awaiting_envelope=result,
+                timeout_seconds=settings.agent_approval_wait_timeout_seconds,
+            )
+        return result
 
     return Tool.from_schema(
         _tool,

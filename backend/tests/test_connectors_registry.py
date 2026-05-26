@@ -337,7 +337,6 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     grant_expiry_enabled=False,
                     scheduler_enabled=False,
                     agent_run_reaper_enabled=False,
-                    event_drain_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -349,19 +348,18 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             ),
             patch("meho_backplane.main.start_grant_expiry_sweeper"),
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
-            # G11.3-T2 (#823) scheduler + G11.3-T4 (#825) agent_run-reaper
-            # + G11.3-T3 (#824) event-drain patches combined via
-            # ``patch.multiple`` to stay under CPython's "too many
-            # statically nested blocks" limit (20) the parenthesised
-            # ``with`` form imposes.
+            # G11.3-T2 (#823) — scheduler patches; flag off in MagicMock so
+            # start_scheduler is never reached, but the symbol must still
+            # exist as a patchable target. Same for G11.3-T4 (#825)'s
+            # agent_run reaper patches -- combined into one ``patch.multiple``
+            # to stay under CPython's "too many statically nested blocks"
+            # limit (20) the parenthesised ``with`` form imposes.
             patch.multiple(
                 "meho_backplane.main",
                 start_scheduler=MagicMock(),
                 stop_scheduler=AsyncMock(),
                 start_agent_run_reaper=MagicMock(),
                 stop_agent_run_reaper=AsyncMock(),
-                start_event_drain=MagicMock(),
-                stop_event_drain=AsyncMock(),
             ),
         ):
             # Manually step through the lifespan async generator.
@@ -419,7 +417,6 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     grant_expiry_enabled=False,
                     scheduler_enabled=False,
                     agent_run_reaper_enabled=False,
-                    event_drain_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -432,18 +429,15 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             patch("meho_backplane.main.start_grant_expiry_sweeper"),
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
             # G11.3-T2 (#823) scheduler + G11.3-T4 (#825) agent_run-reaper
-            # + G11.3-T3 (#824) event-drain patches combined via
-            # ``patch.multiple`` to stay under CPython's "too many
-            # statically nested blocks" limit (20) the parenthesised
-            # ``with`` form imposes.
+            # patches combined via ``patch.multiple`` to stay under
+            # CPython's "too many statically nested blocks" limit (20) the
+            # parenthesised ``with`` form imposes.
             patch.multiple(
                 "meho_backplane.main",
                 start_scheduler=MagicMock(),
                 stop_scheduler=AsyncMock(),
                 start_agent_run_reaper=MagicMock(),
                 stop_agent_run_reaper=AsyncMock(),
-                start_event_drain=MagicMock(),
-                stop_event_drain=AsyncMock(),
             ),
         ):
             gen = lifespan(None)  # type: ignore[arg-type]

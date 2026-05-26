@@ -15,11 +15,9 @@ Two of the three G11.3 trigger shapes ship in T2 (this task, issue #823):
 - **One-off** — fires once at a stored instant, then transitions to a
   terminal `fired` state.
 
-The third shape (event-subscription, T3 #824) lives in a sibling
-substrate (`event_outbox` table + drain loop in
-`backend/src/meho_backplane/events/`) because events arrive
-asynchronously rather than on a clock boundary. See [events.md](events.md)
-for that surface.
+The third shape (event-subscription, T3 #824) lands as a separate
+transactional-outbox table; its substrate decision is different because
+events arrive asynchronously rather than on a clock boundary.
 
 T1 (#822) is an in-flight spike that may settle the durable-execution
 layer as DBOS Transact. T2 ships on the codebase's twice-stated

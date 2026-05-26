@@ -100,7 +100,6 @@ from meho_backplane.broadcast import (
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
-from meho_backplane.events import start_event_drain, stop_event_drain
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -310,7 +309,6 @@ class _BackgroundTasks:
     grant_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
-    event_drain: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -357,12 +355,6 @@ def _start_background_tasks() -> _BackgroundTasks:
     agent_run_reaper: asyncio.Task[None] | None = None
     if settings.agent_run_reaper_enabled:
         agent_run_reaper = start_agent_run_reaper()
-    # G11.3-T3 #824 — event-outbox drain loop. Gated on
-    # EVENT_DRAIN_ENABLED so operators using an external orchestrator
-    # (or running the test path without the drain) can opt out.
-    event_drain: asyncio.Task[None] | None = None
-    if settings.event_drain_enabled:
-        event_drain = start_event_drain()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
@@ -370,7 +362,6 @@ def _start_background_tasks() -> _BackgroundTasks:
         grant_expiry=grant_expiry,
         scheduler=scheduler,
         agent_run_reaper=agent_run_reaper,
-        event_drain=event_drain,
     )
 
 
@@ -382,8 +373,6 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
-    if tasks.event_drain is not None:
-        await stop_event_drain(tasks.event_drain)
     if tasks.agent_run_reaper is not None:
         await stop_agent_run_reaper(tasks.agent_run_reaper)
     if tasks.scheduler is not None:

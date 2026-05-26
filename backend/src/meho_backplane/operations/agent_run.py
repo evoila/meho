@@ -77,17 +77,8 @@ from meho_backplane.db.models import (
     AgentRunTrigger,
     ScheduledTriggerInFlightPolicy,
 )
-from meho_backplane.events.outbox import publish as publish_event
-
-#: Event kind the agent-run terminal-transition emits onto the outbox.
-#: Subscribers (``scheduled_trigger`` rows of ``kind='event'``) match
-#: against this discriminator. v0.2 ships the producer; the
-#: subscription matcher follows in T5 #826's admin surface. The
-#: ``<resource>.<action>`` shape mirrors the audit-trail convention.
-AGENT_RUN_COMPLETED_EVENT_KIND: Final[str] = "agent_run.completed"
 
 __all__ = [
-    "AGENT_RUN_COMPLETED_EVENT_KIND",
     "ALLOWED_TRANSITIONS",
     "TERMINAL_STATUSES",
     "AgentRunError",
@@ -401,35 +392,6 @@ async def transition(
 
     row.status = to_status.value
     await session.flush()
-
-    # G11.3-T3 #824: emit ``agent_run.completed`` onto the transactional
-    # outbox in the same session as the status write. The outbox row
-    # commits with the status change so a producer rollback discards
-    # both. Subscribers (``scheduled_trigger`` rows of ``kind='event'``)
-    # consume the event via the drain loop; v0.2 ships the producer
-    # only -- the subscription matcher lands in T5 #826's admin
-    # surface follow-up. The payload carries the fields a subscriber's
-    # JSONB filter needs to match against: the run id (so a
-    # cheap-to-deep escalation pattern can fire the next agent against
-    # a specific prior run), the tenant id (subscribers are
-    # tenant-scoped), the terminal status (subscribers filter on
-    # success / failure), and the agent definition id (subscribers
-    # can target a specific upstream agent).
-    if to_status in TERMINAL_STATUSES:
-        await publish_event(
-            session,
-            tenant_id=row.tenant_id,
-            event_kind=AGENT_RUN_COMPLETED_EVENT_KIND,
-            payload={
-                "run_id": str(row.id),
-                "tenant_id": str(row.tenant_id),
-                "status": to_status.value,
-                "agent_definition_id": (
-                    str(row.agent_definition_id) if row.agent_definition_id is not None else None
-                ),
-            },
-        )
-
     return row
 
 

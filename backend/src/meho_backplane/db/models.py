@@ -2601,6 +2601,32 @@ _AGENT_RUN_STATUSES: tuple[str, ...] = tuple(s.value for s in AgentRunStatus)
 #: discipline as :data:`_AGENT_RUN_STATUSES`.
 _AGENT_RUN_TRIGGERS: tuple[str, ...] = tuple(t.value for t in AgentRunTrigger)
 
+#: Closed enum of :attr:`AgentRun.in_flight_policy` -- the per-run
+#: snapshot of the firing trigger's :class:`ScheduledTriggerInFlightPolicy`
+#: copied at run-start so a mid-flight definition edit cannot flip
+#: behavior on a run that's already executing (T4 #825). Frozen literal
+#: tuple here (not derived from the enum class) because
+#: :class:`ScheduledTriggerInFlightPolicy` is defined further down in
+#: the module file -- reshuffling the file to import-order matters less
+#: than keeping the closed-vocab snapshot self-contained and the
+#: file-order grouping (agent-runtime models together, scheduler models
+#: together) intact. The drift guard
+#: :func:`tests.test_db_agent_run.test_in_flight_policy_check_matches_scheduled_trigger_enum`
+#: asserts this tuple matches :class:`ScheduledTriggerInFlightPolicy`
+#: at unit-test time so the two cannot silently drift.
+_AGENT_RUN_IN_FLIGHT_POLICIES: tuple[str, ...] = (
+    "resume",
+    "fail_into_audit",
+)
+
+#: Per-run default for :attr:`AgentRun.in_flight_policy`. Mirrors
+#: :class:`ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT` -- the
+#: conservative outcome the consumer doc (``agent-runtime-for-ops-spec.md``
+#: §P2) explicitly accepts. Operators opt into ``resume`` per agent
+#: definition; the scheduler then copies the value into the run row
+#: at run-start.
+_AGENT_RUN_IN_FLIGHT_POLICY_DEFAULT: str = "fail_into_audit"
+
 
 class AgentRun(Base):
     """One row per LLM-agent invocation hosted in MEHO's process.
@@ -2719,6 +2745,37 @@ class AgentRun(Base):
       Both NULL until those transitions fire -- the lifecycle service
       stamps them.
 
+    * ``lease_owner`` -- Text nullable. Initiative #804 (G11.3
+      Scheduler), Task #825 (T4). The worker process / replica
+      identifier that holds the lease on this run while it executes.
+      NULL when no worker is executing the run (``pending`` /
+      ``awaiting_approval`` after a release / any terminal state). A
+      non-NULL value means "this worker is responsible for advancing
+      the run". The reaper consults it for diagnostics; the *expiry*
+      column drives reclaim.
+
+    * ``lease_expires_at`` -- ``timestamptz`` nullable. The wall-clock
+      after which the lease is considered abandoned (the worker died,
+      a pod was OOM-killed, the network partitioned). The reaper
+      (``meho_backplane.scheduler.reaper``) scans
+      ``status='running' AND lease_expires_at < now()`` and applies
+      :attr:`in_flight_policy`. The healthy worker bumps this
+      forward periodically via the lifecycle service's
+      ``heartbeat`` -- as long as heartbeats land, the reaper never
+      sees the run. NULL whenever ``lease_owner`` is NULL; the
+      lifecycle service keeps both columns in lock-step.
+
+    * ``in_flight_policy`` -- Text NOT NULL with a DB-layer ``CHECK
+      in_flight_policy IN (...)`` constraint enforcing the closed
+      :class:`ScheduledTriggerInFlightPolicy` vocabulary. Per-run
+      snapshot of the trigger's policy copied at run-start (T4 #825),
+      so a definition edit mid-flight cannot flip behavior on a run
+      that's already executing. Defaults to ``fail_into_audit`` --
+      the conservative outcome the consumer doc explicitly accepts.
+      ``direct`` and ``agent-invoked`` runs (no scheduler trigger)
+      take the default; they cannot resume regardless because nothing
+      will re-fire them.
+
     Indexes
     -------
 
@@ -2731,6 +2788,10 @@ class AgentRun(Base):
     * ``agent_run_parent_run_id_idx`` -- b-tree on ``parent_run_id``.
       Drives the composition-tree walk (children of a parent run,
       G11.1-T5).
+    * ``agent_run_lease_expires_at_idx`` -- partial b-tree on
+      ``lease_expires_at`` (PG ``WHERE status='running'``). Drives
+      the reaper's "what leases have expired" query without
+      scanning the table. T4 #825.
     """
 
     __tablename__ = "agent_run"
@@ -2806,6 +2867,28 @@ class AgentRun(Base):
         nullable=True,
         default=None,
     )
+    # Initiative #804 (G11.3 Scheduler), Task #825 (T4) -- lease /
+    # heartbeat / per-run in-flight-policy snapshot. ``lease_owner`` +
+    # ``lease_expires_at`` are kept in lock-step by the lifecycle
+    # service (both set together at claim, both cleared together at
+    # release). ``in_flight_policy`` is the per-run snapshot of the
+    # firing trigger's policy; defaults to ``fail_into_audit`` (the
+    # conservative outcome the consumer doc accepts).
+    lease_owner: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    in_flight_policy: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=_AGENT_RUN_IN_FLIGHT_POLICY_DEFAULT,
+    )
 
     __table_args__ = (
         Index(
@@ -2824,6 +2907,19 @@ class AgentRun(Base):
             "parent_run_id",
             postgresql_using="btree",
         ),
+        # T4 #825 -- the reaper's claim query is
+        # ``WHERE status='running' AND lease_expires_at < now()``.
+        # The full index drives the lookup on SQLite (which ignores
+        # the postgresql_where); the partial index on PG keeps the
+        # index narrow (terminal-state and ``pending`` rows are
+        # excluded since they have ``lease_expires_at IS NULL`` and
+        # the partial predicate filters them anyway).
+        Index(
+            "agent_run_lease_expires_at_idx",
+            "lease_expires_at",
+            postgresql_using="btree",
+            postgresql_where=sa.text("status = 'running'"),
+        ),
         sa.CheckConstraint(
             _ck_in("status", _AGENT_RUN_STATUSES),
             name="ck_agent_run_status",
@@ -2831,6 +2927,10 @@ class AgentRun(Base):
         sa.CheckConstraint(
             _ck_in("trigger", _AGENT_RUN_TRIGGERS),
             name="ck_agent_run_trigger",
+        ),
+        sa.CheckConstraint(
+            _ck_in("in_flight_policy", _AGENT_RUN_IN_FLIGHT_POLICIES),
+            name="ck_agent_run_in_flight_policy",
         ),
     )
 
@@ -3780,7 +3880,7 @@ class EventOutbox(Base):
       ``WHERE processed_at IS NULL ORDER BY event_id``.
 
     * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES tenant(id)``
-      FK (migration 0026). Same discipline as :attr:`AgentRun.tenant_id`
+      FK (migration 0027). Same discipline as :attr:`AgentRun.tenant_id`
       / :attr:`ScheduledTrigger.tenant_id`.
 
     * ``event_kind`` -- Text NOT NULL. The discriminator the matcher
@@ -3825,7 +3925,7 @@ class EventOutbox(Base):
         primary_key=True,
         autoincrement=True,
     )
-    # Real REFERENCES tenant(id) FK -- migration 0026 enforces it at
+    # Real REFERENCES tenant(id) FK -- migration 0027 enforces it at
     # the DB layer (same discipline AgentRun / ScheduledTrigger follow).
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),

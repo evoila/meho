@@ -62,18 +62,23 @@ verbs that hit the REST surface via the generated typed client.
 
 ## Broadcast events (T5)
 
-`approval_queue._publish_approval_event` publishes one event per
+`approval_queue.publish_approval_event` publishes one event per
 lifecycle step, fail-open (a broadcast outage never blocks the durable
-decision):
+decision). Each call site lifts the decision row's
+`request._audit_id` and publishes **after** the transaction commits, so
+a phantom event cannot outlive a failed transaction:
 
-| Stage | `op_id` | When |
-|---|---|---|
-| Create | `approval.pending` | `create_pending_request` (dispatcher parks a `needs-approval` verdict). |
-| Approve | `approval.approved` | `approve_request` succeeds. |
-| Reject | `approval.rejected` | `reject_request` succeeds. |
+| Stage | `op_id` | When | Call site |
+|---|---|---|---|
+| Create | `approval.pending` | `create_pending_request` (dispatcher parks a `needs-approval` verdict). | `operations/dispatcher.py::_handle_needs_approval` |
+| Approve | `approval.approved` | `approve_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
+| Reject | `approval.rejected` | `reject_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
+| Expire | `approval.expired` | `expire_stale_requests` (sweeper / CLI sweep) per expired row. | sweeper caller (commits then publishes per returned row's `_audit_id`) |
 
 Payload: `approval_request_id`, `decision`, `connector_id`,
-`approval_op_id`.
+`approval_op_id`. The event's `audit_id` field is the decision row's
+primary key (FK to `audit_log.id`); subscribers that want the full row
+query `audit_log` by this id.
 
 ## Audit rows
 
@@ -100,9 +105,6 @@ explicit `meho.approvals.{approve,reject}` tools.
   (only the REST path with params does, because the params-hash check
   is the swap defence). After an operator approves via MCP/CLI, the
   agent picks up execution via the REST resume path with its own params.
-- `expire_stale_requests` writes the decision row but does not (yet)
-  publish a broadcast event — the sweeper is internal; surfacing
-  expiry on broadcast can be a follow-up.
 
 ## References
 

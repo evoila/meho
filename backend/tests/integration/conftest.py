@@ -388,7 +388,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   a foreign key constraint``.
         # * ``scheduled_trigger`` — migration 0020 (G11.3-T1 #822) carries
         #   real FKs to ``tenant(id)`` and ``agent_definition(id)``; same rule.
-        # * ``event_outbox`` — migration 0026 (G11.3-T3 #824) carries a real
+        # * ``event_outbox`` — migration 0027 (G11.3-T3 #824) carries a real
         #   FK to ``tenant(id)``; omitting it causes PG to reject the
         #   TRUNCATE with ``cannot truncate a table referenced in a foreign
         #   key constraint`` (the recurring fixture gotcha #1064 / #1065 hit).

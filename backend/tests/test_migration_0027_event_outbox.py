@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0026_create_event_outbox``.
+"""Behavioural tests for Alembic migration ``0027_create_event_outbox``.
 
 Initiative #804 (G11.3 Scheduler P2), Task #824 (T3). The migration
 adds the ``event_outbox`` table -- the durable substrate for the
@@ -13,20 +13,20 @@ notifications when no listener is connected).
 Test matrix
 -----------
 
-* **Upgrade creates the table + columns + indexes.** ``upgrade 0026``
+* **Upgrade creates the table + columns + indexes.** ``upgrade 0027``
   from a clean DB leaves ``event_outbox`` present with every documented
   column and its two named indexes.
 * **Column nullability.** The NOT NULL columns (``tenant_id`` /
   ``event_kind`` / ``payload`` / ``created_at``) reject NULL; the
   drain-managed columns (``claimed_at`` / ``claimed_by`` /
   ``processed_at``) permit NULL.
-* **Reversibility round-trip.** ``downgrade "0025"`` drops the table;
-  a subsequent ``upgrade 0026`` re-creates it.
+* **Reversibility round-trip.** ``downgrade "0026"`` drops the table;
+  a subsequent ``upgrade 0027`` re-creates it.
 
 Mirrors the structure of
 :mod:`tests.test_migration_0020_scheduled_trigger`: synchronous test
 functions, SQLite test driver, head-revision target pinned to
-``"0026"`` so the column matrix stays the 0026 snapshot regardless of
+``"0027"`` so the column matrix stays the 0027 snapshot regardless of
 how many later migrations land.
 """
 
@@ -52,7 +52,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0026.db"
+    db_path = tmp_path / "migration_0027.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -142,12 +142,12 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
 def test_upgrade_creates_event_outbox_table_columns_indexes(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``upgrade 0026`` lands ``event_outbox`` with the documented schema."""
+    """``upgrade 0027`` lands ``event_outbox`` with the documented schema."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0026")
+    command.upgrade(cfg, "0027")
 
     assert "event_outbox" in _table_names(sync_url), (
-        "migration 0026 must create the event_outbox table on upgrade"
+        "migration 0027 must create the event_outbox table on upgrade"
     )
 
     columns = _table_columns(sync_url, "event_outbox")
@@ -158,13 +158,13 @@ def test_upgrade_creates_event_outbox_table_columns_indexes(
 
     indexes = _table_indexes(sync_url, "event_outbox")
     for expected in _EXPECTED_INDEXES:
-        assert expected in indexes, f"migration 0026 must create index {expected!r}"
+        assert expected in indexes, f"migration 0027 must create index {expected!r}"
 
 
 def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
     """NOT NULL columns reject NULL; drain-managed columns permit it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0026")
+    command.upgrade(cfg, "0027")
 
     not_null = (
         "tenant_id",
@@ -187,20 +187,20 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``downgrade "0025"`` drops the table; ``upgrade 0026`` restores it."""
+    """``downgrade "0026"`` drops the table; ``upgrade 0027`` restores it."""
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "0026")
+    command.upgrade(cfg, "0027")
     assert "event_outbox" in _table_names(sync_url)
 
-    command.downgrade(cfg, "0025")
+    command.downgrade(cfg, "0026")
     assert "event_outbox" not in _table_names(sync_url), (
         "downgrade must drop the event_outbox table"
     )
 
-    command.upgrade(cfg, "0026")
+    command.upgrade(cfg, "0027")
     assert "event_outbox" in _table_names(sync_url), (
         "re-upgrade must restore the event_outbox table"
     )
     assert _table_columns(sync_url, "event_outbox") == _EXPECTED_COLUMNS, (
-        "post-round-trip columns must match the 0026 snapshot"
+        "post-round-trip columns must match the 0027 snapshot"
     )

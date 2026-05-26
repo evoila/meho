@@ -55,9 +55,8 @@ Plus the persistence shape in
 - `EVENT_OUTBOX_NOTIFY_CHANNEL` — the PG channel name the producer
   side `NOTIFY`s on and the drain side `LISTEN`s on.
 
-Migration: `backend/alembic/versions/0026_create_event_outbox.py`
-(revises `0025`, which is #1065's scheduler dispatcher-columns
-extension).
+Migration: `backend/alembic/versions/0027_create_event_outbox.py`
+(revises `0026`, which is #1125's agent-run lease/reaper columns).
 
 ## The producer side — `publish()`
 

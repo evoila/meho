@@ -50,6 +50,10 @@ from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
+from meho_backplane.agent.reaper import (
+    start_agent_run_reaper,
+    stop_agent_run_reaper,
+)
 from meho_backplane.agents import (
     start_grant_expiry_sweeper,
     stop_grant_expiry_sweeper,
@@ -305,6 +309,7 @@ class _BackgroundTasks:
     topology_history: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
+    agent_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
 
 
@@ -345,6 +350,13 @@ def _start_background_tasks() -> _BackgroundTasks:
     scheduler: asyncio.Task[None] | None = None
     if settings.scheduler_enabled:
         scheduler = start_scheduler()
+    # G11.3-T4 #825 — gated on AGENT_RUN_REAPER_ENABLED so operators
+    # running an external lease-reclaim mechanism (DBOS Transact, a
+    # workflow engine) can disable the in-tree reaper without
+    # patching code.
+    agent_run_reaper: asyncio.Task[None] | None = None
+    if settings.agent_run_reaper_enabled:
+        agent_run_reaper = start_agent_run_reaper()
     # G11.3-T3 #824 — event-outbox drain loop. Gated on
     # EVENT_DRAIN_ENABLED so operators using an external orchestrator
     # (or running the test path without the drain) can opt out.
@@ -357,6 +369,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         topology_history=topology_history,
         grant_expiry=grant_expiry,
         scheduler=scheduler,
+        agent_run_reaper=agent_run_reaper,
         event_drain=event_drain,
     )
 
@@ -371,6 +384,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     """
     if tasks.event_drain is not None:
         await stop_event_drain(tasks.event_drain)
+    if tasks.agent_run_reaper is not None:
+        await stop_agent_run_reaper(tasks.agent_run_reaper)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
     if tasks.grant_expiry is not None:

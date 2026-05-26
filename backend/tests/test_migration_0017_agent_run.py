@@ -169,13 +169,19 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
 def test_upgrade_creates_agent_run_table_columns_indexes(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``upgrade head`` lands the ``agent_run`` table with all columns + indexes."""
-    cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    """``upgrade "0017"`` lands the ``agent_run`` table with all columns + indexes.
 
-    assert "agent_run" in _table_names(sync_url), (
-        "migration 0017 must create the agent_run table on upgrade head"
-    )
+    The upgrade target is pinned to ``"0017"`` (not ``"head"``) so that
+    later migrations touching the ``agent_run`` table (e.g. T4 #825's
+    0025 lease/heartbeat columns) do not silently invalidate this
+    drift guard: ``_EXPECTED_COLUMNS`` documents the shape *0017
+    landed*, not whatever ``head`` happens to be today. Migrations
+    that add columns own their own drift assertions.
+    """
+    cfg, sync_url = alembic_cfg
+    command.upgrade(cfg, "0017")
+
+    assert "agent_run" in _table_names(sync_url), "migration 0017 must create the agent_run table"
 
     columns = _table_columns(sync_url, "agent_run")
     assert columns == _EXPECTED_COLUMNS, (
@@ -224,17 +230,17 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``downgrade "0016"`` drops the table; ``upgrade head`` restores it.
+    """``downgrade "0016"`` drops the table; ``upgrade "0017"`` restores it.
 
     The reversibility contract migration 0017 inherits from 0007 / 0012 /
-    0013. The downgrade target is the explicit revision ``"0016"``
-    (0017's ``down_revision``) rather than head-relative ``"-1"``, so the
-    moment a later migration (0018+) lands it would not silently stop
-    exercising 0017's reverse -- anchoring to ``"0016"`` keeps this test
-    pinned to 0017.
+    0013. Both upgrade targets are pinned to ``"0017"`` (not ``"head"``)
+    for the same reason as
+    :func:`test_upgrade_creates_agent_run_table_columns_indexes` --
+    the strict ``_EXPECTED_COLUMNS`` shape is 0017's, not whatever
+    later migrations layer on top.
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0017")
 
     # Sanity -- the upgrade landed the table before we reverse it.
     assert "agent_run" in _table_names(sync_url)
@@ -243,7 +249,7 @@ def test_downgrade_then_upgrade_round_trips(
     assert "agent_run" not in _table_names(sync_url), "downgrade must drop the agent_run table"
 
     # Re-upgrade -- the table comes back, proving the round-trip.
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0017")
     assert "agent_run" in _table_names(sync_url)
     assert _table_columns(sync_url, "agent_run") == _EXPECTED_COLUMNS
 

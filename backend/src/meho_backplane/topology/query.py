@@ -632,10 +632,14 @@ _MAX_EDGE_LIMIT = 1000
 # set deterministically and a two-page sweep reassembles to the unpaged
 # set with no gaps or duplicates.
 #
-# Soft-deleted edges (``e.last_seen IS NULL``) are excluded by default —
-# same default as traversal, which filters them out implicitly via the
-# ``last_seen`` column not appearing in its projection. Including them
-# would surface stale relationships in an inventory view.
+# Soft-deleted edges (``e.last_seen IS NULL``) are excluded from this
+# listing by the ``e.last_seen IS NOT NULL`` predicate below — surfacing
+# them would clutter an inventory view with stale relationships. This is
+# the *opposite* of the traversal verbs (``find_dependents`` /
+# ``find_dependencies`` / ``find_path``), which do not filter
+# ``last_seen`` at all, so a soft-deleted node stays reachable
+# (last-refresh-wins); see ``docs/architecture/topology.md``
+# §Soft-delete semantics.
 #
 # The ``conflicts_only`` predicate guards against the
 # ``jsonb_array_length`` non-array raise: the

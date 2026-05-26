@@ -16,6 +16,7 @@ import (
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/cmd/admin"
 	"github.com/evoila/meho/cli/internal/cmd/agent"
+	agentprincipal "github.com/evoila/meho/cli/internal/cmd/agent-principal"
 	"github.com/evoila/meho/cli/internal/cmd/approvals"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
@@ -194,12 +195,22 @@ func newRootCmd() *cobra.Command {
 	// cannot shadow the built-in `agent` parent.
 	root.AddCommand(agent.NewRootCmd())
 
+	// G11.2-T1 (#815) -- agent-principal lifecycle verbs (list /
+	// register / revoke) for Initiative #803. Wraps the three
+	// /api/v1/agent-principals routes. Creates a Keycloak client
+	// tagged kind=agent and a DB row on register; revoke disables
+	// the Keycloak client (kill switch). Read verbs are
+	// operator-level; write verbs require tenant_admin. Registered
+	// before registerDynamicSubcommands so the backplane manifest
+	// cannot shadow the built-in `agent-principal` parent.
+	root.AddCommand(agentprincipal.NewRootCmd())
+
 	// G11.2-T5 (#818) -- approval surfacing channel verbs (list / show /
-	// approve / reject) for Initiative #803. Wraps the T5 REST surface
-	// (/api/v1/approvals routes). Both read and write verbs require the
-	// operator role minimum; tenant scoping is enforced server-side.
-	// Registered before registerDynamicSubcommands so the backplane
-	// manifest cannot shadow the built-in `approvals` parent.
+	// approve / reject) for Initiative #803. Wraps the merged T4/T5 REST
+	// surface (/api/v1/approvals routes). Both read and write verbs
+	// require the operator role minimum; tenant scoping is enforced
+	// server-side. Registered before registerDynamicSubcommands so the
+	// backplane manifest cannot shadow the built-in `approvals` parent.
 	root.AddCommand(approvals.NewRootCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for

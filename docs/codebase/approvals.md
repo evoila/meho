@@ -1,192 +1,113 @@
-# Approval Surfacing Channel (G11.2-T5)
+# Approvals (G11.2-T4 + T5)
 
-**Initiative:** #803 — G11.2 Agent identity + RBAC + approval  
-**Task:** #818 — T5 approval surfacing channel
+**Initiative:** #803 — G11.2 Agent identity + RBAC + approval
+**Tasks:** #817 (T4 — durable approval queue) + #818 (T5 — operator surfacing channel)
 
 ## Overview
 
-The approval surfacing channel is the operator-facing layer for **pending
-approval requests**: the mechanism by which a paused agent run communicates
-"I need a human decision before I can proceed."
+The approval substrate parks `requires_approval` / `caution` / `dangerous`
+agent dispatches durably and lets an operator approve or reject them
+across **REST, MCP, and CLI** transports. Two layers, one source of
+truth:
 
-When the policy gate (G11.2-T3, `policy_gate` in
-`operations/_validate.py`) issues a `needs-approval` verdict on an operation,
-the T4 component (#817) writes a durable `approval_request` row and
-pauses the agent run (`agent_run.status = awaiting_approval`). T5 (this
-document) is the delivery channel: how the operator learns of pending
-requests, inspects the proposed effect, and posts approve / reject decisions.
+- **T4 owns the queue lifecycle** (`backend/src/meho_backplane/operations/approval_queue.py`):
+  `create_pending_request`, `approve_request`, `reject_request`,
+  `expire_stale_requests`. Every mutation writes a synchronous audit
+  row in the same transaction (the "request" row on create; the
+  "decision" row on approve/reject/expire).
+- **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
+  (inspect), `meho.approvals.{list,get,approve,reject}` MCP tools, and
+  `meho approvals {list,show,approve,reject}` CLI verbs. T5 also adds
+  the broadcast notifications: each `create_pending_request` /
+  `approve_request` / `reject_request` publishes an
+  `approval.{pending,approved,rejected}` event via
+  `broadcast.publisher.publish_event` so a `broadcast_watch` operator
+  session learns of pending requests without polling.
 
-## Architecture
+The durable state is one `approval_request` row (table created by
+`backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
 
-```
-policy_gate (T3)
-    │  needs-approval verdict
-    ▼
-T4 approval queue (pending row + awaiting_approval run status)
-    │  approval_request row visible
-    ▼
-T5 surfacing layer (REST + MCP + CLI + broadcast)
-    │  operator decision
-    ▼
-T4 resume API (run continues or aborts)
-```
+## Transports
 
-T5 provides a **read-only + decision surface** over T4's table — it does
-not own the queue semantics or the resume mechanics.
+### REST (`backend/src/meho_backplane/api/v1/approvals.py`)
 
-## Key Types
-
-### `ApprovalStatus` (ORM enum, `db/models.py`)
-
-| Value | Meaning |
-|---|---|
-| `pending` | Request created, awaiting decision. Initial state. |
-| `approved` | Operator approved; T4 resume path called. |
-| `rejected` | Operator rejected; T4 abort path called. |
-| `expired` | Not acted on before `expires_at`; expiry sweep closed it. |
-
-### `ApprovalRequest` (ORM model, `db/models.py`)
-
-One row per approval gate pause. Key fields:
-
-- `id` — UUID primary key; used as the `elicitation_url` path segment.
-- `tenant_id` — real FK to `tenant.id` (tenant-scoped, no cross-tenant leaks).
-- `agent_run_id` — soft-FK to `agent_run.id` (NULL for direct REST-created rows).
-- `principal_sub` / `principal_act` — RFC 8693 delegation pair (who triggered it).
-- `connector_id` / `op_id` / `target_id` / `params_hash` — the proposed operation.
-- `proposed_effect` — JSONB; human-readable operation preview for the decision UI.
-- `status` — closed enum; CHECK-constrained.
-- `reviewed_by` / `decided_at` — stamped on decision.
-- `expires_at` — optional expiry deadline.
-- `request_audit_id` / `decision_audit_id` — soft-FKs to `audit_log.id`
-  (the two synchronous audit rows the T4 approval invariant requires).
-
-### `ApprovalRequestService` (`approvals/service.py`)
-
-Stateless, method-scoped service. The single code path REST routes, MCP
-tools, and CLI verbs dispatch through:
-
-- `list_()` — paginated list, optional status filter, newest-first.
-- `get()` — single row; raises `ApprovalNotFoundError` for absent/cross-tenant.
-- `approve()` — flips to `approved`, stamps reviewer, calls T4 resume stub,
-  publishes `approval.approved` broadcast event.
-- `reject()` — flips to `rejected`, stamps reviewer, calls T4 resume stub,
-  publishes `approval.rejected` broadcast event.
-
-## REST Routes (`api/v1/approvals.py`)
-
-| Verb | Path | Role | Description |
+| Verb | Path | Role | Purpose |
 |---|---|---|---|
-| `GET` | `/api/v1/approvals` | operator | List (with `?status=pending` filter) |
-| `GET` | `/api/v1/approvals/{id}` | operator | Show detail + `elicitation_url` |
-| `POST` | `/api/v1/approvals/{id}/approve` | operator | Approve |
-| `POST` | `/api/v1/approvals/{id}/reject` | operator | Reject |
-| `POST` | `/api/v1/approvals/{id}/decide` | operator | MCP elicitation URL-mode endpoint |
+| `GET` | `/api/v1/approvals` | operator | List, filtered by `status` (default: `pending`). |
+| `GET` | `/api/v1/approvals/{id}` | operator | **Inspect one request** (T5). 404 on cross-tenant. |
+| `POST` | `/api/v1/approvals/{id}/approve` | operator | Approve. Requires `params` (hash-verified) → re-dispatches the approved op with `dispatch(..., _approved=True)`. |
+| `POST` | `/api/v1/approvals/{id}/reject` | operator | Reject. The op never executes. |
 
-## MCP Tools (`mcp/tools/approvals.py`)
+### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
 
-| Tool | Op class | Description |
+Four `meho.approvals.*` tools (all `TenantRole.OPERATOR`-gated):
+
+- `meho.approvals.list` — `status` filter (`pending` default), `limit`/`offset`.
+- `meho.approvals.get` — full detail by id.
+- `meho.approvals.approve` — operator-decision path (status flip + audit +
+  `approval.approved` broadcast; **no `params` required** —
+  `approve_request` skips the hash check when called without params, because
+  the operator decision path does not have the agent's params). The
+  agent's REST path retains the hash check and is what re-dispatches.
+- `meho.approvals.reject` — same shape; optional `reason`.
+
+RBAC is enforced at two layers: the MCP registry filter hides write
+tools from non-admins in `tools/list`, and the dispatcher re-checks
+`required_role` at `tools/call`.
+
+### CLI (`cli/internal/cmd/approvals/`)
+
+`meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
+verbs that hit the REST surface via the generated typed client.
+
+## Broadcast events (T5)
+
+`approval_queue._publish_approval_event` publishes one event per
+lifecycle step, fail-open (a broadcast outage never blocks the durable
+decision):
+
+| Stage | `op_id` | When |
 |---|---|---|
-| `meho.approvals.list` | read | List pending requests |
-| `meho.approvals.get` | read | Inspect one request |
-| `meho.approvals.approve` | write | Approve |
-| `meho.approvals.reject` | write | Reject |
+| Create | `approval.pending` | `create_pending_request` (dispatcher parks a `needs-approval` verdict). |
+| Approve | `approval.approved` | `approve_request` succeeds. |
+| Reject | `approval.rejected` | `reject_request` succeeds. |
 
-All tools mirror the REST routes and drive the same
-`ApprovalRequestService`.
-
-## CLI Verbs (`cli/internal/cmd/approvals/`)
-
-```
-meho approvals list [--status pending] [--limit N] [--offset N] [--json]
-meho approvals show <id> [--json]
-meho approvals approve <id> [--reason TEXT] [--json]
-meho approvals reject <id> [--reason TEXT] [--json]
-```
-
-Role: operator for all verbs. Tenant scoping enforced server-side.
-
-## MCP Elicitation URL-Mode (Forward Format)
-
-Per the MCP 2025-11-25 specification
-([workos.com/blog/mcp-elicitation](https://workos.com/blog/mcp-elicitation)),
-when an in-loop agent encounters a `needs-approval` pause it can surface
-the approval request to the MCP host application using
-**elicitation URL mode**:
-
-```json
-{
-  "method": "elicitation/create",
-  "params": {
-    "message": "Approval required: vmware-rest-9.0 / vcenter.vm.delete",
-    "requestedSchema": {
-      "type": "object",
-      "properties": {
-        "decision": {
-          "type": "string",
-          "enum": ["approve", "reject"],
-          "description": "Your decision on the proposed operation."
-        },
-        "reason": {
-          "type": "string",
-          "description": "Optional rationale."
-        }
-      },
-      "required": ["decision"]
-    }
-  }
-}
-```
-
-The **elicitation URL** is `<backplane_base>/api/v1/approvals/{id}/decide`.
-It is exposed on every `GET /api/v1/approvals/{id}` response in the
-`elicitation_url` field, and returned by the `meho.approvals.get` MCP
-tool. An MCP host that supports elicitation URL mode can open the
-operator's browser / decision UI to this address, or the operator can
-`curl`/`meho approvals approve` directly.
-
-Why URL mode (not form mode): the decision is simple (approve/reject +
-optional reason), the payload is structured, and the URL-mode approach
-lets MCP clients with a browser-capable host skip building a custom form.
-
-## Broadcast Notification
-
-On approve or reject, `ApprovalRequestService` publishes a fail-open
-broadcast event (`approval.approved` / `approval.rejected`) to the
-tenant's Valkey stream so an operator's `broadcast_watch` session or the
-G10 wall monitor learns of decisions without polling. The event payload
-includes `approval_request_id`, `decision`, `connector_id`, and
+Payload: `approval_request_id`, `decision`, `connector_id`,
 `approval_op_id`.
 
-Pending requests are also announced through broadcast when T4 creates them
-(T4's responsibility, not T5's). The R4 local-Claude pattern described in
-the initiative uses `meho approvals list --status pending` as the polling
-channel.
+## Audit rows
 
-## Dependencies
+Two rows per request lifecycle (the synchronous-audit invariant):
 
-- **T4 (#817):** The `approval_request` table and the resume API. This doc
-  was written while T4 is in-flight; the `_resume_run` stub in
-  `approvals/service.py` is clearly marked for wiring once T4's
-  `AgentRunResumeService` is importable.
-- **G11.2-T3 (#820):** The `policy_gate` verdict resolution that issues
-  `needs-approval` — T5 operates on rows T3 routes to T4 to create.
+| Row | `path` | `status_code` | Written by |
+|---|---|---|---|
+| Request | `approval.request` | `202` | `create_pending_request` |
+| Decision | `approval.decision` | `200` (approved) / `403` (rejected) / `410` (expired) | `approve_request` / `reject_request` / `expire_stale_requests` |
 
-## Known Issues
+## MCP elicitation URL-mode (forward-looking)
 
-- `_resume_run` in `approvals/service.py` is a stub (logs only). Full
-  integration with T4's resume path activates when #817 merges.
-- `decision_audit_id` is pre-allocated on the REST path but the `audit_log`
-  row is written by the audit middleware, not by the service. The service
-  passes the pre-allocated UUID so the two stay in sync via the
-  `preallocated_audit_id` contextvar. The MCP and CLI paths do not
-  pre-allocate; their audit rows land under the middleware's default UUID.
+When an in-loop agent hits a `needs-approval` verdict, the agent
+runtime can use the row's `id` (returned from `meho.approvals.get`) to
+construct an elicitation URL of the form
+`meho://approvals/{request_id}/decide`. MCP-2025-11-25 hosts that
+support elicitation URL-mode can open this URL in the operator's
+decision UI; until that lands, the operator approves/rejects via the
+explicit `meho.approvals.{approve,reject}` tools.
+
+## Known gaps
+
+- Operator-decision approve via MCP/CLI does **not** re-dispatch the op
+  (only the REST path with params does, because the params-hash check
+  is the swap defence). After an operator approves via MCP/CLI, the
+  agent picks up execution via the REST resume path with its own params.
+- `expire_stale_requests` writes the decision row but does not (yet)
+  publish a broadcast event — the sweeper is internal; surfacing
+  expiry on broadcast can be a follow-up.
 
 ## References
 
-- MCP elicitation URL mode spec: https://workos.com/blog/mcp-elicitation
-- T4 durable approval queue: issue #817
-- T3 policy gate / verdict resolution: issue #820
-- `operations/_validate.py` — the `policy_gate` seam T5 operates downstream of
-- `db/models.py` — `ApprovalRequest`, `ApprovalStatus`
-- `alembic/versions/0021_create_approval_request.py` — DB migration
+- `backend/src/meho_backplane/operations/approval_queue.py` — queue lifecycle (T4) + read helpers + broadcast (T5).
+- `backend/src/meho_backplane/api/v1/approvals.py` — REST routes.
+- `backend/src/meho_backplane/mcp/tools/approvals.py` — MCP tools.
+- `cli/internal/cmd/approvals/` — CLI verbs.
+- `backend/alembic/versions/0023_create_approval_request.py` — schema.

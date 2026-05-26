@@ -111,6 +111,14 @@ async def test_tenant_round_trip_persists_every_field() -> None:
     slug, name, created_at — is what proves the ORM ``default=``
     machinery fires correctly under SQLite (the dev/test dialect
     where the migration's PG server defaults are no-ops).
+
+    The slug here is intentionally NOT ``rdc-internal``: migration
+    ``0018`` seeds that slug into the per-worker schema template
+    (:func:`tests.conftest._schema_template_db`), so this test would
+    trip ``UNIQUE constraint failed: tenant.slug`` if it tried to
+    insert a fresh tenant under that exact handle. A throwaway
+    fixture slug exercises the ORM contract this test owns without
+    coupling to a slug the seed migration claims.
     """
     sessionmaker = get_sessionmaker()
     tenant_id = uuid.uuid4()
@@ -119,8 +127,8 @@ async def test_tenant_round_trip_persists_every_field() -> None:
         session.add(
             Tenant(
                 id=tenant_id,
-                slug="rdc-internal",
-                name="RDC Internal Tenancy",
+                slug="round-trip-fixture",
+                name="Round Trip Tenant",
                 created_at=created_at,
             )
         )
@@ -131,8 +139,8 @@ async def test_tenant_round_trip_persists_every_field() -> None:
         row = result.scalar_one()
 
     assert row.id == tenant_id
-    assert row.slug == "rdc-internal"
-    assert row.name == "RDC Internal Tenancy"
+    assert row.slug == "round-trip-fixture"
+    assert row.name == "Round Trip Tenant"
     # SQLite stores datetimes as ISO-8601 strings without timezone
     # information; SQLAlchemy round-trips them as **naive**
     # ``datetime`` even when the column is declared

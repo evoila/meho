@@ -113,7 +113,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> uuid.UUID:
-    """Insert a tenant row and return its UUID.
+    """Return the tenant row's id, inserting it on the first call.
 
     Every :class:`GraphNode` / :class:`GraphEdge` carries a real FK to
     :class:`Tenant`, so the per-test setup needs a parent tenant to
@@ -121,7 +121,18 @@ async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> 
     or NULL-violation traps from a stale FK target. The slug is
     parameterised so the cross-tenant tests can seed two distinct
     parents.
+
+    The look-up-then-insert shape is load-bearing: migration ``0018``
+    seeds the ``rdc-internal`` tenant into the per-worker schema
+    template (:func:`tests.conftest._schema_template_db`), so a plain
+    ``session.add(Tenant(slug='rdc-internal', ...))`` would trip
+    ``UNIQUE constraint failed: tenant.slug``.
     """
+    existing: uuid.UUID | None = await session.scalar(
+        select(Tenant.id).where(Tenant.slug == slug),
+    )
+    if existing is not None:
+        return existing
     tenant_id = uuid.uuid4()
     session.add(Tenant(id=tenant_id, slug=slug, name=f"Tenant {slug}"))
     await session.commit()

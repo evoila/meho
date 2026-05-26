@@ -175,13 +175,19 @@ async def test_ensure_tenant_does_not_overwrite_existing_row() -> None:
     human-chosen slug / name. ``ensure_tenant`` must no-op on the
     conflict, never clobber the operator's values back to the derived
     placeholder.
+
+    A throwaway slug (not ``rdc-internal``) keeps this test independent
+    of migration ``0018``'s seeded row in the per-worker schema template
+    (:func:`tests.conftest._schema_template_db`); the contract under
+    test -- that an operator-named row survives -- is the same
+    regardless of which slug carries the human label.
     """
     tenant_id = uuid.uuid4()
     sessionmaker = get_sessionmaker()
 
     async with sessionmaker() as session, session.begin():
         session.add(
-            Tenant(id=tenant_id, slug="rdc-internal", name="RDC Internal"),
+            Tenant(id=tenant_id, slug="operator-named", name="Operator Named"),
         )
 
     async with sessionmaker() as session, session.begin():
@@ -189,5 +195,5 @@ async def test_ensure_tenant_does_not_overwrite_existing_row() -> None:
 
     async with sessionmaker() as session:
         row = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalars().one()
-    assert row.slug == "rdc-internal"
-    assert row.name == "RDC Internal"
+    assert row.slug == "operator-named"
+    assert row.name == "Operator Named"

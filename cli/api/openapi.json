@@ -3972,6 +3972,535 @@
         }
       }
     },
+    "/api/v1/agents/grants": {
+      "get": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "List Grants",
+        "description": "List permission grants for the operator's tenant.\n\n``principal_sub`` filters to one agent's grants. ``include_expired``\nincludes past elevations (useful for audit inspection). Tenant-scoped\nto the operator's JWT \u2014 no cross-tenant access.",
+        "operationId": "list_grants_api_v1_agents_grants_get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Principal Sub"
+            }
+          },
+          {
+            "name": "include_expired",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Expired"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrantListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "Create Grant",
+        "description": "Create a permission grant (permanent or time-bounded).\n\nA grant with ``expires_at`` is a time-bounded elevation. The grant\nis audited automatically via :class:`~meho_backplane.audit.AuditMiddleware`.\nReturns HTTP 422 when ``expires_at`` is in the past or\n``target_scope`` is an invalid UUID.",
+        "operationId": "create_grant_api_v1_agents_grants_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentGrantCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/grants/{grant_id}": {
+      "get": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "Show Grant",
+        "description": "Return one grant by id.\n\nCross-tenant probes return 404 ``grant_not_found`` (never 403).",
+        "operationId": "show_grant_api_v1_agents_grants__grant_id__get",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "Revoke Grant",
+        "description": "Revoke (delete) a permission grant.\n\nReturns 204 on success; 404 when the grant is absent or belongs to\nanother tenant. The revocation is audited via the audit middleware.",
+        "operationId": "revoke_grant_api_v1_agents_grants__grant_id__delete",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/grants/elevate": {
+      "post": {
+        "tags": [
+          "agent-grants"
+        ],
+        "summary": "Elevate Grant",
+        "description": "Create a time-bounded elevation grant (``expires_at`` required).\n\nShorthand route for change windows. The grant-expiry sweeper\nremoves the row automatically after ``expires_at``, reverting the\nagent to its baseline permissions.",
+        "operationId": "elevate_grant_api_v1_agents_grants_elevate_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentElevationCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-principals": {
+      "get": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "List Agent Principals",
+        "description": "List agent principals for the operator's tenant.",
+        "operationId": "list_agent_principals_api_v1_agent_principals_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Revoked"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "Register Agent Principal",
+        "description": "Register a new agent principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.\nReturns 503 when Keycloak admin is not configured.",
+        "operationId": "register_agent_principal_api_v1_agent_principals_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentPrincipalCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-principals/{name}": {
+      "get": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "Show Agent Principal",
+        "description": "Return one agent principal by name.",
+        "operationId": "show_agent_principal_api_v1_agent_principals__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-principals/{name}/revoke": {
+      "delete": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "Revoke Agent Principal",
+        "description": "Revoke an agent principal (kill switch).\n\nDisables the Keycloak client (blocks new token grants) and marks\nthe DB row ``revoked=true``. Returns the updated row.\n``tenant_admin`` only. Returns 404 when absent or already revoked.",
+        "operationId": "revoke_agent_principal_api_v1_agent_principals__name__revoke_delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{name}/run": {
       "post": {
         "tags": [
@@ -4156,7 +4685,7 @@
           "approvals"
         ],
         "summary": "List Approvals",
-        "description": "List approval requests for the operator's tenant.\n\nReturns newest-first, paginated. The ``status=pending`` query is the\nmost common operator pattern: \"show me what I need to decide on\".",
+        "description": "List approval requests for the operator's tenant.\n\nDefaults to listing only ``pending`` requests. Supports filtering\nby status via ``?status=approved`` / ``?status=rejected`` /\n``?status=expired``. Returns newest-first (``created_at DESC``).",
         "operationId": "list_approvals_api_v1_approvals_get",
         "parameters": [
           {
@@ -4165,34 +4694,11 @@
             "required": false,
             "schema": {
               "type": "string",
-              "nullable": true,
-              "description": "Filter by status (pending|approved|rejected|expired).",
+              "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'.",
+              "default": "pending",
               "title": "Status"
             },
-            "description": "Filter by status (pending|approved|rejected|expired)."
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 500,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "offset",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 0,
-              "title": "Offset"
-            }
+            "description": "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
           },
           {
             "name": "authorization",
@@ -4211,7 +4717,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApprovalListResponse"
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApprovalRequestView"
+                  },
+                  "title": "Response List Approvals Api V1 Approvals Get"
                 }
               }
             }
@@ -4234,9 +4744,9 @@
         "tags": [
           "approvals"
         ],
-        "summary": "Get Approval",
-        "description": "Inspect a single approval request.\n\nReturns the full detail including ``proposed_effect`` and the\n``elicitation_url`` for MCP elicitation URL-mode integration.\nCross-tenant requests and absent ids both 404.",
-        "operationId": "get_approval_api_v1_approvals__request_id__get",
+        "summary": "Get Approval Request",
+        "description": "Inspect a single approval request by id (G11.2-T5 / #818).\n\nReturns the full :class:`ApprovalRequestView` including\n``proposed_effect`` so an operator can decide before approving.\nCross-tenant requests and absent ids both return 404 (the two cases\nare indistinguishable to callers \u2014 same tenant-isolation discipline\nas :func:`get_request`).",
+        "operationId": "get_approval_request_api_v1_approvals__request_id__get",
         "parameters": [
           {
             "name": "request_id",
@@ -4265,7 +4775,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApprovalRequestDetail"
+                  "$ref": "#/components/schemas/ApprovalRequestView"
                 }
               }
             }
@@ -4288,9 +4798,9 @@
         "tags": [
           "approvals"
         ],
-        "summary": "Approve Approval",
-        "description": "Approve a pending approval request.\n\nFlips the request to ``approved``, calls the T4 resume path to\ncontinue the paused agent run, and publishes a ``approval.approved``\nbroadcast event. Only ``pending`` requests may be approved; any other\nstatus yields 409.",
-        "operationId": "approve_approval_api_v1_approvals__request_id__approve_post",
+        "summary": "Approve Approval Request",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully.\n* 403 \u2014 operator lacks ``operator`` role.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch.",
+        "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {
             "name": "request_id",
@@ -4318,7 +4828,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ApprovalDecision"
+                "$ref": "#/components/schemas/ApproveRequestBody"
               }
             }
           }
@@ -4329,7 +4839,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApprovalRequestDetail"
+                  "$ref": "#/components/schemas/ApproveResponseBody"
                 }
               }
             }
@@ -4352,9 +4862,9 @@
         "tags": [
           "approvals"
         ],
-        "summary": "Reject Approval",
-        "description": "Reject a pending approval request.\n\nFlips the request to ``rejected``, calls the T4 resume path to\nabort the paused agent run, and publishes a ``approval.rejected``\nbroadcast event. Only ``pending`` requests may be rejected; any other\nstatus yields 409.",
-        "operationId": "reject_approval_api_v1_approvals__request_id__reject_post",
+        "summary": "Reject Approval Request",
+        "description": "Reject a pending request; the original operation is not executed.\n\nHTTP status codes:\n\n* 200 \u2014 rejected successfully.\n* 403 \u2014 operator lacks ``operator`` role.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.",
+        "operationId": "reject_approval_request_api_v1_approvals__request_id__reject_post",
         "parameters": [
           {
             "name": "request_id",
@@ -4382,7 +4892,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ApprovalDecision"
+                "$ref": "#/components/schemas/RejectRequestBody"
               }
             }
           }
@@ -4393,71 +4903,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApprovalRequestDetail"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/approvals/{request_id}/decide": {
-      "post": {
-        "tags": [
-          "approvals"
-        ],
-        "summary": "Decide Approval",
-        "description": "MCP elicitation URL-mode decision endpoint.\n\nAccepts ``{\"decision\": \"approve\"|\"reject\", \"reason\": \"...\"}`` from\nan MCP elicitation UI. Routes to :func:`approve_approval` or\n:func:`reject_approval` based on the ``decision`` field.\n\nThis endpoint is the ``elicitation_url`` value the ``GET /{id}``\nresponse carries; an MCP client that received this URL via an\n``elicitation/create`` response can POST the operator's structured\nanswer here.\n\nSee https://workos.com/blog/mcp-elicitation for the MCP elicitation\nURL-mode specification.",
-        "operationId": "decide_approval_api_v1_approvals__request_id__decide_post",
-        "parameters": [
-          {
-            "name": "request_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "Request Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/_DecideBody"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApprovalRequestDetail"
+                  "$ref": "#/components/schemas/RejectResponseBody"
                 }
               }
             }
@@ -5340,7 +5786,7 @@
           "ui-topology"
         ],
         "summary": "Ui Topology Table",
-        "description": "``GET /ui/topology[?view=table&sort=...&direction=...&kind=...&q=...]``.\n\n``view`` is accepted but unused in T1 (the only mode is the\ntable); T2 (#881) will branch on ``view`` to render the\nCytoscape graph instead. Documenting the param in the\nsignature now keeps the URL contract forward-compatible.",
+        "description": "Serve the topology UI, branching on ``?view=``. See module\ndocstring for the URL contract + dual-purpose ``direction``\nsemantics (table sort vs graph overlay).",
         "operationId": "ui_topology_table_ui_topology_get",
         "parameters": [
           {
@@ -5357,9 +5803,14 @@
             "in": "query",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/_SortDirection",
-              "default": "asc"
-            }
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^(asc|desc|dependents|dependencies)$",
+              "description": "Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``).",
+              "default": "asc",
+              "title": "Direction"
+            },
+            "description": "Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``)."
           },
           {
             "name": "kind",
@@ -5400,10 +5851,87 @@
             "in": "query",
             "required": false,
             "schema": {
+              "$ref": "#/components/schemas/_ViewMode",
+              "default": "table"
+            }
+          },
+          {
+            "name": "selected",
+            "in": "query",
+            "required": false,
+            "schema": {
               "type": "string",
-              "maxLength": 16,
+              "format": "uuid",
               "nullable": true,
-              "title": "View"
+              "title": "Selected"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "From"
+            }
+          },
+          {
+            "name": "from_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "From Kind"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "To"
+            }
+          },
+          {
+            "name": "to_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "To Kind"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 16,
+              "minimum": 1,
+              "nullable": true,
+              "title": "Depth"
+            }
+          },
+          {
+            "name": "max_hops",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 16,
+              "minimum": 1,
+              "nullable": true,
+              "title": "Max Hops"
             }
           }
         ],
@@ -5416,6 +5944,18 @@
                   "type": "string"
                 }
               }
+            }
+          },
+          "404": {
+            "description": "Overlay anchor (``?from=<name>``) or path endpoint (``?from=&to=``) does not resolve in the caller's tenant. Returns the overlay-error fragment.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Overlay anchor or path endpoint is a bare name that resolves to multiple kinds in the caller's tenant (``kind=`` disambiguation required). Returns the overlay-error fragment with the candidate kinds.",
+            "content": {
+              "text/html": {}
             }
           },
           "422": {
@@ -5792,6 +6332,177 @@
         "title": "AgentDefinitionUpdate",
         "description": "PATCH body -- every field optional; only supplied fields change.\n\n``extra=\"forbid\"`` for the same reason as\n:class:`AgentDefinitionCreate`. A field left ``None`` (its default)\nis *not* applied -- the service distinguishes \"field omitted\" from\n\"field set to a value\" via :meth:`pydantic.BaseModel.model_dump`\nwith ``exclude_unset=True``, so a PATCH can change a single field\nwithout clobbering the rest.\n\n``name`` is *not* updatable here: it is the per-tenant natural key\n(the URL path segment + unique index). Renaming an agent is a\ndelete + recreate, which keeps the natural-key invariant simple and\navoids a name-collision race inside the update path.\n\n``output_schema`` cannot be cleared through this shape (``None`` is\nindistinguishable from \"omitted\" under ``exclude_unset``); clearing\na structured-output schema is a delete + recreate in v0.2. This is\nan accepted v0.2 limitation, not a silent bug -- documented so a\nfuture shape (a sentinel / ``JsonValue`` discriminator) can lift it."
       },
+      "AgentElevationCreate": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Principal Sub",
+            "description": "JWT sub of the principal being granted the permission."
+          },
+          "op_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Op Pattern",
+            "description": "fnmatch glob matching operation IDs. '*' = all ops."
+          },
+          "target_scope": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Scope",
+            "description": "Target UUID, '*', or null (null = any target). A non-null non-wildcard value must be a valid UUID string."
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/PermissionVerdict",
+            "description": "One of auto-execute | needs-approval | deny."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At",
+            "description": "Required UTC expiry timestamp for the elevation. Must be a future datetime."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "principal_sub",
+          "op_pattern",
+          "verdict",
+          "expires_at"
+        ],
+        "title": "AgentElevationCreate",
+        "description": "Convenience alias for time-bounded elevations.\n\nIdentical to :class:`AgentGrantCreate` but ``expires_at`` is\nrequired. The REST surface accepts both; the MCP surface exposes\na dedicated ``meho.agents.grant.elevate`` tool that uses this schema\nso the field-level validation message is specific:\n\"expires_at is required for elevations\"."
+      },
+      "AgentGrantCreate": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Principal Sub",
+            "description": "JWT sub of the principal being granted the permission."
+          },
+          "op_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Op Pattern",
+            "description": "fnmatch glob matching operation IDs. '*' = all ops."
+          },
+          "target_scope": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Scope",
+            "description": "Target UUID, '*', or null (null = any target). A non-null non-wildcard value must be a valid UUID string."
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/PermissionVerdict",
+            "description": "One of auto-execute | needs-approval | deny."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At",
+            "description": "UTC expiry timestamp for time-bounded elevations. Null = permanent grant. Must be in the future."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "principal_sub",
+          "op_pattern",
+          "verdict"
+        ],
+        "title": "AgentGrantCreate",
+        "description": "Body for creating a permission grant (permanent or time-bounded).\n\n``extra=\"forbid\"`` rejects unknown fields with 422. ``expires_at``\nis optional \u2014 omit it for a permanent grant, supply a future UTC\ndatetime for a time-bounded elevation."
+      },
+      "AgentGrantListResponse": {
+        "properties": {
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/AgentGrantRead"
+            },
+            "type": "array",
+            "title": "Grants"
+          }
+        },
+        "type": "object",
+        "required": [
+          "grants"
+        ],
+        "title": "AgentGrantListResponse",
+        "description": "Response envelope for ``GET /api/v1/agents/grants``."
+      },
+      "AgentGrantRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "op_pattern": {
+            "type": "string",
+            "title": "Op Pattern"
+          },
+          "target_scope": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Scope"
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "principal_sub",
+          "op_pattern",
+          "target_scope",
+          "verdict",
+          "created_by_sub",
+          "expires_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentGrantRead",
+        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM\nrow. Exposes ``expires_at`` so callers can distinguish permanent\ngrants from elevations."
+      },
       "AgentModelTier": {
         "type": "string",
         "enum": [
@@ -5801,6 +6512,106 @@
         ],
         "title": "AgentModelTier",
         "description": "Logical model tier an agent definition runs against.\n\nThe tier is *logical* -- G11.5's multi-provider resolver maps it to\na concrete model backend at run time. T2 stores the tier verbatim;\nit does not resolve it. ``StrEnum`` (PEP 663, stdlib 3.11+) gives\nthe members ``str`` semantics so ``f\"tier={AgentModelTier.STANDARD}\"``\nrenders as ``\"tier=standard\"``, matching the\n:class:`~meho_backplane.auth.operator.TenantRole` /\n:class:`~meho_backplane.memory.schemas.MemoryScope` convention.\n\nThree tiers in v0.2:\n\n* ``standard`` -- the default general-purpose tier.\n* ``fast`` -- a cheaper / lower-latency tier for simple loops.\n* ``deep`` -- a more capable tier for harder reasoning."
+      },
+      "AgentPrincipalCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "owner_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Owner Sub"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "AgentPrincipalCreate",
+        "description": "Input shape for :meth:`AgentPrincipalService.register`."
+      },
+      "AgentPrincipalListResponse": {
+        "properties": {
+          "principals": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPrincipalRead"
+            },
+            "type": "array",
+            "title": "Principals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "principals"
+        ],
+        "title": "AgentPrincipalListResponse",
+        "description": "Response envelope for ``GET /api/v1/agent-principals``."
+      },
+      "AgentPrincipalRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "keycloak_client_id": {
+            "type": "string",
+            "title": "Keycloak Client Id"
+          },
+          "keycloak_internal_id": {
+            "type": "string",
+            "title": "Keycloak Internal Id"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "keycloak_client_id",
+          "keycloak_internal_id",
+          "owner_sub",
+          "revoked",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentPrincipalRead",
+        "description": "Row representation returned by every accessor."
       },
       "AgentRunRequest": {
         "properties": {
@@ -5887,53 +6698,18 @@
         "title": "AgentRunStatusResponse",
         "description": "Poll response for ``GET /agents/runs/{handle}``."
       },
-      "ApprovalDecision": {
-        "properties": {
-          "reason": {
-            "type": "string",
-            "nullable": true,
-            "title": "Reason",
-            "description": "Optional human-readable rationale for the decision."
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "title": "ApprovalDecision",
-        "description": "Approve or reject decision body.\n\nPosted to ``POST /api/v1/approvals/{id}/approve`` (or ``/reject``)\nand to the MCP elicitation URL-mode endpoint\n``POST /api/v1/approvals/{id}/decide``."
-      },
-      "ApprovalListResponse": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/ApprovalRequestSummary"
-            },
-            "type": "array",
-            "title": "Items"
-          },
-          "total": {
-            "type": "integer",
-            "title": "Total"
-          },
-          "limit": {
-            "type": "integer",
-            "title": "Limit"
-          },
-          "offset": {
-            "type": "integer",
-            "title": "Offset"
-          }
-        },
-        "type": "object",
-        "required": [
-          "items",
-          "total",
-          "limit",
-          "offset"
+      "ApprovalRequestStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "approved",
+          "rejected",
+          "expired"
         ],
-        "title": "ApprovalListResponse",
-        "description": "Paginated list of approval requests."
+        "title": "ApprovalRequestStatus",
+        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent permission model), Task #817 (T4). The\napproval queue parks a ``requires_approval`` dispatch durably; the\nrow walks a simple four-state lifecycle enforced by the service\n(:mod:`meho_backplane.operations.approval_queue`).\n\nMembers:\n\n* :attr:`PENDING` -- the request was written but no decision has\n  been made (initial state on insert). The associated agent run (if\n  any) is in ``awaiting_approval``.\n* :attr:`APPROVED` -- an authorized operator approved the request;\n  the dispatcher has re-executed the original call. Terminal.\n* :attr:`REJECTED` -- an authorized operator rejected the request;\n  the original call was not executed. Terminal.\n* :attr:`EXPIRED` -- the ``expires_at`` deadline passed without a\n  decision; the expiry sweep transitioned the row and wrote the\n  decision audit row. Terminal.\n\nThe enum and the ``CHECK (status IN (...))`` constraint on the DB\ntable move in lock-step (migration ``0023``); the drift guard\n:func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`\nasserts equality at unit-test time."
       },
-      "ApprovalRequestDetail": {
+      "ApprovalRequestView": {
         "properties": {
           "id": {
             "type": "string",
@@ -5945,22 +6721,28 @@
             "format": "uuid",
             "title": "Tenant Id"
           },
-          "status": {
-            "$ref": "#/components/schemas/ApprovalStatus"
-          },
-          "agent_run_id": {
+          "run_id": {
             "type": "string",
             "format": "uuid",
             "nullable": true,
-            "title": "Agent Run Id"
+            "title": "Run Id"
           },
-          "connector_id": {
+          "principal_sub": {
             "type": "string",
-            "title": "Connector Id"
+            "title": "Principal Sub"
+          },
+          "principal_act": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Act"
           },
           "op_id": {
             "type": "string",
             "title": "Op Id"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
           },
           "target_id": {
             "type": "string",
@@ -5975,17 +6757,10 @@
           "proposed_effect": {
             "additionalProperties": true,
             "type": "object",
-            "nullable": true,
             "title": "Proposed Effect"
           },
-          "principal_sub": {
-            "type": "string",
-            "title": "Principal Sub"
-          },
-          "principal_act": {
-            "type": "string",
-            "nullable": true,
-            "title": "Principal Act"
+          "status": {
+            "$ref": "#/components/schemas/ApprovalRequestStatus"
           },
           "reviewed_by": {
             "type": "string",
@@ -5994,132 +6769,104 @@
           },
           "decided_at": {
             "type": "string",
-            "format": "date-time",
             "nullable": true,
             "title": "Decided At"
           },
-          "expires_at": {
-            "type": "string",
-            "format": "date-time",
-            "nullable": true,
-            "title": "Expires At"
-          },
           "created_at": {
             "type": "string",
-            "format": "date-time",
             "title": "Created At"
           },
-          "request_audit_id": {
-            "type": "string",
-            "format": "uuid",
-            "nullable": true,
-            "title": "Request Audit Id"
-          },
-          "decision_audit_id": {
-            "type": "string",
-            "format": "uuid",
-            "nullable": true,
-            "title": "Decision Audit Id"
-          },
-          "elicitation_url": {
+          "expires_at": {
             "type": "string",
             "nullable": true,
-            "title": "Elicitation Url",
-            "description": "MCP elicitation URL-mode address for this request. POST a decision payload ({decision: 'approve'|'reject', reason?: string}) here to resolve the approval inline. See https://workos.com/blog/mcp-elicitation for the wire format."
+            "title": "Expires At"
           }
         },
         "type": "object",
         "required": [
           "id",
           "tenant_id",
-          "status",
-          "agent_run_id",
-          "connector_id",
+          "run_id",
+          "principal_sub",
+          "principal_act",
           "op_id",
+          "connector_id",
           "target_id",
           "params_hash",
           "proposed_effect",
-          "principal_sub",
-          "principal_act",
+          "status",
           "reviewed_by",
           "decided_at",
-          "expires_at",
           "created_at",
-          "request_audit_id",
-          "decision_audit_id"
+          "expires_at"
         ],
-        "title": "ApprovalRequestDetail",
-        "description": "Full detail for show/inspect responses.\n\n``elicitation_url`` is the MCP elicitation URL-mode forward wire\naddress: ``<backplane_base>/api/v1/approvals/{id}/decide``. Clients\nthat support MCP elicitation can POST the operator's structured\ndecision directly to this URL."
+        "title": "ApprovalRequestView",
+        "description": "Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."
       },
-      "ApprovalRequestSummary": {
+      "ApproveRequestBody": {
         "properties": {
-          "id": {
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params",
+            "description": "The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ApproveRequestBody",
+        "description": "POST body for ``\u2026/approve``."
+      },
+      "ApproveResponseBody": {
+        "properties": {
+          "approval_request_id": {
             "type": "string",
             "format": "uuid",
-            "title": "Id"
+            "title": "Approval Request Id"
           },
-          "tenant_id": {
+          "decision": {
             "type": "string",
-            "format": "uuid",
-            "title": "Tenant Id"
+            "title": "Decision"
           },
-          "status": {
-            "$ref": "#/components/schemas/ApprovalStatus"
-          },
-          "connector_id": {
+          "dispatch_status": {
             "type": "string",
-            "title": "Connector Id"
+            "title": "Dispatch Status"
           },
-          "op_id": {
+          "dispatch_op_id": {
             "type": "string",
-            "title": "Op Id"
+            "title": "Dispatch Op Id"
           },
-          "principal_sub": {
-            "type": "string",
-            "title": "Principal Sub"
+          "dispatch_result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "nullable": true,
+            "title": "Dispatch Result"
           },
-          "principal_act": {
+          "dispatch_error": {
             "type": "string",
             "nullable": true,
-            "title": "Principal Act"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          },
-          "expires_at": {
-            "type": "string",
-            "format": "date-time",
-            "nullable": true,
-            "title": "Expires At"
+            "title": "Dispatch Error"
           }
         },
         "type": "object",
         "required": [
-          "id",
-          "tenant_id",
-          "status",
-          "connector_id",
-          "op_id",
-          "principal_sub",
-          "principal_act",
-          "created_at",
-          "expires_at"
+          "approval_request_id",
+          "decision",
+          "dispatch_status",
+          "dispatch_op_id",
+          "dispatch_result",
+          "dispatch_error"
         ],
-        "title": "ApprovalRequestSummary",
-        "description": "Compact row for list responses \u2014 enough to triage without the full detail."
-      },
-      "ApprovalStatus": {
-        "type": "string",
-        "enum": [
-          "pending",
-          "approved",
-          "rejected",
-          "expired"
-        ],
-        "title": "ApprovalStatus",
-        "description": "Closed lifecycle status of an :class:`ApprovalRequest`.\n\nInitiative #803 (G11.2 Agent identity + RBAC + approval), Task #818\n(T5 \u2014 approval surfacing channel). Four terminal/non-terminal states:\n\n* :attr:`PENDING` \u2014 the request was created and is awaiting a\n  human decision. Initial state on insert.\n* :attr:`APPROVED` \u2014 an authorised operator approved the request.\n  The T4 resume API has been called (or will be called); the\n  paused agent run continues.\n* :attr:`REJECTED` \u2014 an authorised operator rejected the request.\n  The T4 resume API has been called with ``reject=true``; the\n  paused run aborts.\n* :attr:`EXPIRED` \u2014 the request was not acted on before\n  ``expires_at`` and the expiry sweep closed it. The paused run\n  is also aborted by the sweep.\n\nThe enum and the DB ``CHECK (status IN (...))`` constraint move in\nlock-step via migration ``0021``; a drift guard in\n:mod:`tests.test_db_approval_request` enforces equality at test time."
+        "title": "ApproveResponseBody",
+        "description": "Response for a successful approve + re-dispatch."
       },
       "AuditEntry": {
         "properties": {
@@ -8069,6 +8816,16 @@
         "title": "OperatorIdentity",
         "description": "Operator identity surface exposed to the CLI.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only."
       },
+      "PermissionVerdict": {
+        "type": "string",
+        "enum": [
+          "auto-execute",
+          "needs-approval",
+          "deny"
+        ],
+        "title": "PermissionVerdict",
+        "description": "Three-state verdict returned by the permission resolver.\n\n:attr:`AUTO_EXECUTE` \u2014 the op proceeds without human review.\n:attr:`NEEDS_APPROVAL` \u2014 the op is parked pending an operator\ndecision; the approval queue (G11.2-T4) handles the resume path.\n:attr:`DENY` \u2014 the op is refused immediately with a structured,\nagent-reasonable error.\n\nThe vocabulary is intentionally closed: a fourth verdict would\nrequire a code + migration change, which is the cheapest way to\nprevent drift between the DB layer and the policy engine."
+      },
       "PromoteBody": {
         "properties": {
           "to": {
@@ -8211,6 +8968,45 @@
         ],
         "title": "RefreshResult",
         "description": "Per-target reconcile outcome returned by :func:`refresh_target_topology`.\n\nCounts are disjoint per object class: a node is counted in exactly\none of added / updated / removed (or none, when unchanged). The same\nholds for edges. ``duration_ms`` is wall-clock for the whole\nresolve + discover + reconcile + commit cycle."
+      },
+      "RejectRequestBody": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Optional human-readable rejection reason (recorded in the audit row).",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RejectRequestBody",
+        "description": "POST body for ``\u2026/reject``."
+      },
+      "RejectResponseBody": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "decision",
+          "reason"
+        ],
+        "title": "RejectResponseBody",
+        "description": "Response for a successful rejection."
       },
       "RememberBody": {
         "properties": {
@@ -9845,27 +10641,6 @@
         "title": "_BulkImportRowResponse",
         "description": "One row's outcome in the ``POST /edges/bulk`` response.\n\nMirrors :class:`~meho_backplane.topology.bulk_import.BulkEdgeResult`\non the wire. ``edge_id`` is null in dry-run mode (no row exists)\nand on the apply-pass ``create`` rows where the service hasn't\nbeen called yet at validation time \u2014 the apply path always\npopulates it."
       },
-      "_DecideBody": {
-        "properties": {
-          "reason": {
-            "type": "string",
-            "nullable": true,
-            "title": "Reason",
-            "description": "Optional human-readable rationale for the decision."
-          },
-          "decision": {
-            "type": "string",
-            "title": "Decision"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "decision"
-        ],
-        "title": "_DecideBody",
-        "description": "Extended body for the MCP elicitation URL-mode decide endpoint.\n\nThe MCP elicitation spec requires a ``decision`` field in the submitted\ncontent. The REST approve/reject verbs encode the decision in the URL\npath; the elicitation URL-mode endpoint uses a single path + a body\nfield so MCP clients that construct the elicitation form dynamically\nhave one stable URL to point at."
-      },
       "_EdgeEndpoint": {
         "properties": {
           "name": {
@@ -9899,14 +10674,14 @@
         "title": "_SortColumn",
         "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
       },
-      "_SortDirection": {
+      "_ViewMode": {
         "type": "string",
         "enum": [
-          "asc",
-          "desc"
+          "table",
+          "graph"
         ],
-        "title": "_SortDirection",
-        "description": "Sort direction enum -- ``asc`` (default) or ``desc``."
+        "title": "_ViewMode",
+        "description": "Closed enum of view modes exposed on ``GET /ui/topology``.\n\n``table`` is the default (T1 / #880); ``graph`` switches to the\nCytoscape.js surface (T2 / #881). The enum's ``str`` mixin keeps\ntemplate URL building stable -- ``str(_ViewMode.GRAPH)`` is\n``\"graph\"`` (not ``\"_ViewMode.GRAPH\"``). An out-of-range value\nfails Pydantic validation (422) at the HTTP boundary so the route\nbody never sees an unknown mode."
       }
     }
   }

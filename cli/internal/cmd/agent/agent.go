@@ -93,6 +93,9 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newRunStatusCmd())
 	cmd.AddCommand(newRunEventsCmd())
+	// G11.2-T6 (#819): permission grant management sub-tree — grant list /
+	// show / create / elevate / revoke. All verbs require tenant_admin.
+	cmd.AddCommand(NewGrantRootCmd())
 	return cmd
 }
 

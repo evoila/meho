@@ -196,6 +196,31 @@ class Settings(BaseModel):
         ``tenant_role`` matches the same protocol-mapper recipe.
         Override only when the realm exposes the role under a
         different attribute.
+    jwt_principal_kind_claim_name:
+        Name of the JWT claim that carries the principal-kind
+        discriminator (``user`` / ``service`` / ``agent``) added by
+        G11.2-T1 (#815). Default ``principal_kind`` matches the agent-
+        client protocol-mapper recipe in
+        ``docs/cross-repo/keycloak-agent-client.md``. The claim is
+        **optional** — tokens that carry no claim resolve to ``user``
+        (graceful fallback for all pre-G11.2 human-operator tokens).
+    keycloak_admin_url:
+        Base URL of the Keycloak Admin REST API for the realm managing
+        MEHO principals, e.g.
+        ``https://keycloak.evba.lab/admin/realms/meho``. Used by the
+        agent-principal lifecycle service (G11.2-T1) to register /
+        list / revoke agent Keycloak clients. Default ``""`` (unset)
+        leaves the admin surface inoperative (register/revoke return
+        503) but does not prevent the backplane from starting.
+    keycloak_admin_client_id:
+        ``client_id`` of the confidential Keycloak client that the
+        backplane authenticates against the Admin REST API. Must hold
+        the ``manage-clients`` service-account role on the realm.
+        Default ``""`` (unset). See
+        ``docs/cross-repo/keycloak-agent-client.md`` §Admin-client setup.
+    keycloak_admin_client_secret:
+        Client secret for :attr:`keycloak_admin_client_id`. Default
+        ``""`` (unset). Never logged; never surfaced in API responses.
     enable_rbac_test_route:
         When ``True``, mounts the ``/api/v1/rbac-test/*`` stub routes
         from :mod:`meho_backplane.api.v1.rbac_test` for end-to-end
@@ -546,6 +571,10 @@ class Settings(BaseModel):
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
+    jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
+    keycloak_admin_url: str = ""
+    keycloak_admin_client_id: str = ""
+    keycloak_admin_client_secret: str = Field(default="", repr=False)
     enable_rbac_test_route: bool = False
     #: Test-only: when True, ``encode_endpoint_text`` returns a zero
     #: vector instead of computing the real fastembed embedding for a
@@ -603,6 +632,14 @@ class Settings(BaseModel):
     memory_user_default_ttl_days: int = Field(default=7, ge=1, le=365)
     memory_expiry_tick_interval_seconds: int = Field(default=86400, ge=60, le=86400)
     memory_expiry_enabled: bool = True
+    # G11.2-T6 #819 — grant-expiry sweeper knobs. ``GRANT_EXPIRY_ENABLED``
+    # follows the same opt-out shape as ``MEMORY_EXPIRY_ENABLED``.
+    # ``GRANT_EXPIRY_TICK_INTERVAL_SECONDS`` defaults to 300 (5 minutes)
+    # so a change-window elevation expires within one tick of its nominal
+    # end time — much tighter than the 24-hour memory-expiry cadence because
+    # elevation windows are typically hours, not days.
+    grant_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
+    grant_expiry_enabled: bool = True
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -723,6 +760,13 @@ def get_settings() -> Settings:
             "JWT_TENANT_ROLE_CLAIM_NAME",
             "tenant_role",
         ),
+        jwt_principal_kind_claim_name=os.environ.get(
+            "JWT_PRINCIPAL_KIND_CLAIM_NAME",
+            "principal_kind",
+        ),
+        keycloak_admin_url=os.environ.get("KEYCLOAK_ADMIN_URL", "").strip(),
+        keycloak_admin_client_id=os.environ.get("KEYCLOAK_ADMIN_CLIENT_ID", "").strip(),
+        keycloak_admin_client_secret=os.environ.get("KEYCLOAK_ADMIN_CLIENT_SECRET", "").strip(),
         enable_rbac_test_route=parse_bool_env(
             os.environ.get("MEHO_ENABLE_RBAC_TEST_ROUTE"),
         ),
@@ -785,6 +829,12 @@ def get_settings() -> Settings:
         ),
         memory_expiry_enabled=parse_bool_env(
             os.environ.get("MEMORY_EXPIRY_ENABLED", "true"),
+        ),
+        grant_expiry_tick_interval_seconds=int(
+            os.environ.get("GRANT_EXPIRY_TICK_INTERVAL_SECONDS", "300"),
+        ),
+        grant_expiry_enabled=parse_bool_env(
+            os.environ.get("GRANT_EXPIRY_ENABLED", "true"),
         ),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),

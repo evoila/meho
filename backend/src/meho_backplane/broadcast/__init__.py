@@ -9,6 +9,10 @@ MCP resource, and the ``meho status --watch`` CLI on top of this
 foundation.
 """
 
+from meho_backplane.broadcast.agent_events import (
+    ACTIVITY_MAX_CHARS,
+    AgentAnnouncementEvent,
+)
 from meho_backplane.broadcast.client import (
     dispose_broadcast_client,
     get_broadcast_client,
@@ -27,16 +31,21 @@ from meho_backplane.broadcast.overrides import (
 )
 from meho_backplane.broadcast.probe import broadcast_readiness_probe
 from meho_backplane.broadcast.publisher import (
+    BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL,
     BROADCAST_EVENTS_PUBLISHED_TOTAL,
     BROADCAST_MAXLEN,
     BROADCAST_PUBLISH_ERRORS_TOTAL,
+    publish_agent_announcement,
     publish_event,
 )
 
 __all__ = [
+    "ACTIVITY_MAX_CHARS",
+    "BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL",
     "BROADCAST_EVENTS_PUBLISHED_TOTAL",
     "BROADCAST_MAXLEN",
     "BROADCAST_PUBLISH_ERRORS_TOTAL",
+    "AgentAnnouncementEvent",
     "BroadcastEvent",
     "broadcast_readiness_probe",
     "classify_op",
@@ -44,6 +53,7 @@ __all__ = [
     "dispose_broadcast_client",
     "get_broadcast_client",
     "invalidate_tenant_cache",
+    "publish_agent_announcement",
     "publish_event",
     "read_request_override",
     "redact_payload",

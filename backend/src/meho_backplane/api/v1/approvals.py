@@ -1,328 +1,414 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``/api/v1/approvals`` — approval surfacing channel REST routes.
+"""``/api/v1/approvals/*`` — approval queue REST surface.
 
-Initiative #803 (G11.2 Agent identity + RBAC + approval), Task #818
-(T5). The REST surface operators and automated tooling use to list
-pending approval requests, inspect the proposed effect, and post an
-approve / reject decision.
+Initiative #803 (G11.2 Agent permission model), Task #817 (T4). Three
+routes that let operators review, approve, or reject durable
+:class:`~meho_backplane.db.models.ApprovalRequest` rows written by the
+dispatcher when a ``requires_approval`` op is dispatched.
 
 Route inventory
 ---------------
 
-* ``GET  /api/v1/approvals`` — list approval requests (``?status=pending``,
-  ``?limit=N``, ``?offset=N``). Role: ``operator``.
-* ``GET  /api/v1/approvals/{id}`` — inspect one request. Role: ``operator``.
-* ``POST /api/v1/approvals/{id}/approve`` — approve a pending request.
-  Body: :class:`~meho_backplane.approvals.schemas.ApprovalDecision`.
-  Role: ``operator``.
-* ``POST /api/v1/approvals/{id}/reject`` — reject a pending request.
-  Body: :class:`~meho_backplane.approvals.schemas.ApprovalDecision`.
-  Role: ``operator``.
-* ``POST /api/v1/approvals/{id}/decide`` — MCP elicitation URL-mode
-  endpoint. Accepts ``{"decision": "approve"|"reject", "reason": "..."}``
-  so MCP clients that support elicitation URL-mode can POST a structured
-  decision directly. Role: ``operator``.
+* ``GET /api/v1/approvals`` — list pending requests for the operator's
+  tenant. Optional ``?status=`` filter (default ``pending``). Role:
+  ``operator``.
+* ``POST /api/v1/approvals/{request_id}/approve`` — approve a pending
+  request and re-dispatch the original call with the original params.
+  Body: :class:`ApproveRequestBody` (``params`` dict). Role:
+  ``operator``.
+* ``POST /api/v1/approvals/{request_id}/reject`` — reject a pending
+  request; the original dispatch is not executed. Body:
+  :class:`RejectRequestBody` (optional ``reason`` string). Role:
+  ``operator``.
 
-RBAC + tenant scoping
----------------------
+Tenant scoping
+--------------
 
-Every route derives ``tenant_id`` from the validated JWT
-(:class:`~meho_backplane.auth.operator.Operator`) and requires the
-``operator`` role minimum. Read-only operators are blocked on write
-routes (approve/reject/decide). Cross-tenant requests 404 — existence
-is never leaked across tenants.
+Every route derives ``tenant_id`` from the JWT-validated
+:class:`~meho_backplane.auth.operator.Operator`; cross-tenant access to
+an approval request is indistinguishable from a missing request (404).
 
-MCP elicitation URL-mode
--------------------------
+Audit trail
+-----------
 
-The ``/decide`` endpoint is the MCP elicitation URL-mode wire target.
-Per the 2025-11-25 MCP spec (https://workos.com/blog/mcp-elicitation),
-an MCP server can surface this URL in its ``elicitation/create`` call
-so the host application can open the operator's browser / UI to the
-decision form. The endpoint accepts the same structured body an
-in-browser form would POST.
+:func:`~meho_backplane.operations.approval_queue.approve_request` and
+:func:`~meho_backplane.operations.approval_queue.reject_request` write
+their "decision" audit rows synchronously inside the same transaction as
+the row update. The routes commit only after the audit row flushes, so
+the two always land together.
 
-Audit rows
-----------
+Resume-then-dispatch
+--------------------
 
-Approve/reject/decide bind ``audit_op_id`` / ``audit_op_class``
-contextvars before the DB call so the :class:`~meho_backplane.audit.AuditMiddleware`
-classifies each decision correctly. The request-row's ``decision_audit_id``
-is pre-allocated and injected so the middleware and the service row stay
-in sync (the same discipline :mod:`meho_backplane.api.v1.conventions`
-uses for history rows).
+After the ``approve`` route commits the decision, it calls
+:func:`~meho_backplane.operations.dispatcher.dispatch` with the stored
+``connector_id`` / ``op_id`` / ``target_id`` / and the reviewer-supplied
+``params``. The re-dispatch result is returned in the response body so
+the reviewing operator sees the actual execution outcome.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Final
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi import status as http_status
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
-from meho_backplane.approvals.schemas import (
-    ApprovalDecision,
-    ApprovalListResponse,
-    ApprovalRequestDetail,
-)
-from meho_backplane.approvals.service import (
-    ApprovalDecisionError,
-    ApprovalNotFoundError,
-    ApprovalRequestService,
-)
-from meho_backplane.audit import bind_preallocated_audit_id
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.db.models import ApprovalStatus
-from meho_backplane.settings import get_settings
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.operations.approval_queue import (
+    ApprovalNotFoundError,
+    ApprovalRequestAlreadyDecidedError,
+    ParamsMismatchError,
+    UnauthorizedApprovalError,
+    approve_request,
+    get_request,
+    reject_request,
+)
 
 __all__ = ["router"]
 
-router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
-
 _log = structlog.get_logger(__name__)
 
-#: Operator-minimum gate (ruff B008: no call in default-arg position).
+router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
+
+#: Module-level Depends closures -- avoids ruff B008 (mutable call in
+#: default-argument position). Same pattern as
+#: :mod:`meho_backplane.api.v1.operations`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 
-#: Canonical op ids bound into ``audit_op_id`` per route.
-_OP_IDS: Final[dict[str, str]] = {
-    "list": "approval.list",
-    "get": "approval.get",
-    "approve": "approval.approve",
-    "reject": "approval.reject",
-    "decide": "approval.decide",
-}
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
 
 
-def _get_service(operator: Operator) -> ApprovalRequestService:
-    """Build a service instance scoped to the operator's request."""
-    settings = get_settings()
-    base_url = settings.backplane_url or None
-    return ApprovalRequestService(base_url=base_url)
+class ApprovalRequestView(BaseModel):
+    """Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    run_id: uuid.UUID | None
+    principal_sub: str
+    principal_act: str | None
+    op_id: str
+    connector_id: str
+    target_id: uuid.UUID | None
+    params_hash: str
+    proposed_effect: dict[str, Any]
+    status: ApprovalRequestStatus
+    reviewed_by: str | None
+    decided_at: str | None
+    created_at: str
+    expires_at: str | None
 
 
-@router.get("", response_model=ApprovalListResponse)
+class ApproveRequestBody(BaseModel):
+    """POST body for ``…/approve``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "The original dispatch params, unchanged. The hash must match "
+            "the stored params_hash on the approval request."
+        ),
+    )
+
+
+class RejectRequestBody(BaseModel):
+    """POST body for ``…/reject``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(
+        default="",
+        description="Optional human-readable rejection reason (recorded in the audit row).",
+    )
+
+
+class ApproveResponseBody(BaseModel):
+    """Response for a successful approve + re-dispatch."""
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_request_id: uuid.UUID
+    decision: str  # "approved"
+    dispatch_status: str
+    dispatch_op_id: str
+    dispatch_result: dict[str, Any] | list[Any] | None
+    dispatch_error: str | None
+
+
+class RejectResponseBody(BaseModel):
+    """Response for a successful rejection."""
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_request_id: uuid.UUID
+    decision: str  # "rejected"
+    reason: str
+
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+
+def _view(row: ApprovalRequest) -> ApprovalRequestView:
+    """Convert an ORM row to a response view."""
+    return ApprovalRequestView(
+        id=row.id,
+        tenant_id=row.tenant_id,
+        run_id=row.run_id,
+        principal_sub=row.principal_sub,
+        principal_act=row.principal_act,
+        op_id=row.op_id,
+        connector_id=row.connector_id,
+        target_id=row.target_id,
+        params_hash=row.params_hash,
+        proposed_effect=row.proposed_effect,
+        status=ApprovalRequestStatus(row.status),
+        reviewed_by=row.reviewed_by,
+        decided_at=row.decided_at.isoformat() if row.decided_at else None,
+        created_at=row.created_at.isoformat(),
+        expires_at=row.expires_at.isoformat() if row.expires_at else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+@router.get("", response_model=list[ApprovalRequestView])
 async def list_approvals(
-    operator: Annotated[Operator, _require_operator],
-    status: Annotated[
-        str | None,
-        Query(description="Filter by status (pending|approved|rejected|expired)."),
-    ] = None,
-    limit: Annotated[int, Query(ge=1, le=500)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> ApprovalListResponse:
+    status: str = Query(
+        default="pending",
+        description=(
+            "Filter by status. One of: pending, approved, rejected, expired. Defaults to 'pending'."
+        ),
+    ),
+    operator: Operator = _require_operator,
+) -> list[ApprovalRequestView]:
     """List approval requests for the operator's tenant.
 
-    Returns newest-first, paginated. The ``status=pending`` query is the
-    most common operator pattern: "show me what I need to decide on".
+    Defaults to listing only ``pending`` requests. Supports filtering
+    by status via ``?status=approved`` / ``?status=rejected`` /
+    ``?status=expired``. Returns newest-first (``created_at DESC``).
     """
     structlog.contextvars.bind_contextvars(
-        audit_op_id=_OP_IDS["list"],
+        audit_op_id="approval.list",
         audit_op_class="read",
     )
-    svc = _get_service(operator)
-    status_filter: ApprovalStatus | None = None
-    if status is not None:
-        try:
-            status_filter = ApprovalStatus(status)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"unknown status {status!r}; valid: pending, approved, rejected, expired",
-            ) from exc
-    return await svc.list_(
-        tenant_id=operator.tenant_id,
-        status=status_filter,
-        limit=limit,
-        offset=offset,
-    )
-
-
-@router.get("/{request_id}", response_model=ApprovalRequestDetail)
-async def get_approval(
-    request_id: Annotated[uuid.UUID, Path()],
-    operator: Annotated[Operator, _require_operator],
-) -> ApprovalRequestDetail:
-    """Inspect a single approval request.
-
-    Returns the full detail including ``proposed_effect`` and the
-    ``elicitation_url`` for MCP elicitation URL-mode integration.
-    Cross-tenant requests and absent ids both 404.
-    """
-    structlog.contextvars.bind_contextvars(
-        audit_op_id=_OP_IDS["get"],
-        audit_op_class="read",
-        audit_approval_request_id=str(request_id),
-    )
-    svc = _get_service(operator)
+    # Validate status value against the closed enum.
     try:
-        return await svc.get(tenant_id=operator.tenant_id, request_id=request_id)
-    except ApprovalNotFoundError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="approval_request_not_found",
-        ) from exc
-
-
-@router.post("/{request_id}/approve", response_model=ApprovalRequestDetail)
-async def approve_approval(
-    request_id: Annotated[uuid.UUID, Path()],
-    body: ApprovalDecision,
-    operator: Annotated[Operator, _require_operator],
-) -> ApprovalRequestDetail:
-    """Approve a pending approval request.
-
-    Flips the request to ``approved``, calls the T4 resume path to
-    continue the paused agent run, and publishes a ``approval.approved``
-    broadcast event. Only ``pending`` requests may be approved; any other
-    status yields 409.
-    """
-    structlog.contextvars.bind_contextvars(
-        audit_op_id=_OP_IDS["approve"],
-        audit_op_class="write",
-        audit_approval_request_id=str(request_id),
-    )
-    decision_audit_id = uuid.uuid4()
-    bind_preallocated_audit_id(decision_audit_id)
-    svc = _get_service(operator)
-    try:
-        return await svc.approve(
-            tenant_id=operator.tenant_id,
-            request_id=request_id,
-            reviewer_sub=operator.sub,
-            body=body,
-            decision_audit_id=decision_audit_id,
-        )
-    except ApprovalNotFoundError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="approval_request_not_found",
-        ) from exc
-    except ApprovalDecisionError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_409_CONFLICT,
-            detail=f"approval_request_not_pending: current status is {exc.current_status!r}",
-        ) from exc
-
-
-@router.post("/{request_id}/reject", response_model=ApprovalRequestDetail)
-async def reject_approval(
-    request_id: Annotated[uuid.UUID, Path()],
-    body: ApprovalDecision,
-    operator: Annotated[Operator, _require_operator],
-) -> ApprovalRequestDetail:
-    """Reject a pending approval request.
-
-    Flips the request to ``rejected``, calls the T4 resume path to
-    abort the paused agent run, and publishes a ``approval.rejected``
-    broadcast event. Only ``pending`` requests may be rejected; any other
-    status yields 409.
-    """
-    structlog.contextvars.bind_contextvars(
-        audit_op_id=_OP_IDS["reject"],
-        audit_op_class="write",
-        audit_approval_request_id=str(request_id),
-    )
-    decision_audit_id = uuid.uuid4()
-    bind_preallocated_audit_id(decision_audit_id)
-    svc = _get_service(operator)
-    try:
-        return await svc.reject(
-            tenant_id=operator.tenant_id,
-            request_id=request_id,
-            reviewer_sub=operator.sub,
-            body=body,
-            decision_audit_id=decision_audit_id,
-        )
-    except ApprovalNotFoundError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="approval_request_not_found",
-        ) from exc
-    except ApprovalDecisionError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_409_CONFLICT,
-            detail=f"approval_request_not_pending: current status is {exc.current_status!r}",
-        ) from exc
-
-
-class _DecideBody(ApprovalDecision):
-    """Extended body for the MCP elicitation URL-mode decide endpoint.
-
-    The MCP elicitation spec requires a ``decision`` field in the submitted
-    content. The REST approve/reject verbs encode the decision in the URL
-    path; the elicitation URL-mode endpoint uses a single path + a body
-    field so MCP clients that construct the elicitation form dynamically
-    have one stable URL to point at.
-    """
-
-    decision: str  # "approve" | "reject"
-
-
-@router.post("/{request_id}/decide", response_model=ApprovalRequestDetail)
-async def decide_approval(
-    request_id: Annotated[uuid.UUID, Path()],
-    body: _DecideBody,
-    operator: Annotated[Operator, _require_operator],
-) -> ApprovalRequestDetail:
-    """MCP elicitation URL-mode decision endpoint.
-
-    Accepts ``{"decision": "approve"|"reject", "reason": "..."}`` from
-    an MCP elicitation UI. Routes to :func:`approve_approval` or
-    :func:`reject_approval` based on the ``decision`` field.
-
-    This endpoint is the ``elicitation_url`` value the ``GET /{id}``
-    response carries; an MCP client that received this URL via an
-    ``elicitation/create`` response can POST the operator's structured
-    answer here.
-
-    See https://workos.com/blog/mcp-elicitation for the MCP elicitation
-    URL-mode specification.
-    """
-    structlog.contextvars.bind_contextvars(
-        audit_op_id=_OP_IDS["decide"],
-        audit_op_class="write",
-        audit_approval_request_id=str(request_id),
-        audit_decision=body.decision,
-    )
-    if body.decision not in {"approve", "reject"}:
+        status_filter = ApprovalRequestStatus(status)
+    except ValueError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="decision must be 'approve' or 'reject'",
+            detail=f"unknown status {status!r}; choose from: pending, approved, rejected, expired",
+        ) from exc
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        stmt = (
+            select(ApprovalRequest)
+            .where(ApprovalRequest.tenant_id == operator.tenant_id)
+            .where(ApprovalRequest.status == status_filter.value)
+            .order_by(ApprovalRequest.created_at.desc())
         )
-    decision_audit_id = uuid.uuid4()
-    bind_preallocated_audit_id(decision_audit_id)
-    svc = _get_service(operator)
-    base_body = ApprovalDecision(reason=body.reason)
+        result = await session.execute(stmt)
+        rows = list(result.scalars().all())
+
+    return [_view(r) for r in rows]
+
+
+@router.get("/{request_id}", response_model=ApprovalRequestView)
+async def get_approval_request(
+    request_id: Annotated[uuid.UUID, Path()],
+    operator: Operator = _require_operator,
+) -> ApprovalRequestView:
+    """Inspect a single approval request by id (G11.2-T5 / #818).
+
+    Returns the full :class:`ApprovalRequestView` including
+    ``proposed_effect`` so an operator can decide before approving.
+    Cross-tenant requests and absent ids both return 404 (the two cases
+    are indistinguishable to callers — same tenant-isolation discipline
+    as :func:`get_request`).
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        try:
+            row = await get_request(
+                session,
+                tenant_id=operator.tenant_id,
+                request_id=request_id,
+            )
+        except ApprovalNotFoundError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail="approval_request_not_found",
+            ) from exc
+    return _view(row)
+
+
+@router.post(
+    "/{request_id}/approve",
+    response_model=ApproveResponseBody,
+)
+async def approve_approval_request(
+    request_id: Annotated[uuid.UUID, Path()],
+    body: ApproveRequestBody,
+    operator: Operator = _require_operator,
+) -> ApproveResponseBody:
+    """Approve a pending request and re-dispatch the original operation.
+
+    The ``params`` body must be the original params unchanged; the service
+    re-hashes them and rejects with 422 on a mismatch. On a successful
+    approval the original dispatch is re-executed and the result returned.
+
+    HTTP status codes:
+
+    * 200 — approved + re-dispatched successfully.
+    * 403 — operator lacks ``operator`` role.
+    * 404 — request not found (or belongs to another tenant).
+    * 409 — request is already decided.
+    * 422 — params hash mismatch.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.approve",
+        audit_op_class="write",
+        audit_approval_request_id=str(request_id),
+    )
+    sessionmaker = get_sessionmaker()
     try:
-        if body.decision == "approve":
-            return await svc.approve(
-                tenant_id=operator.tenant_id,
-                request_id=request_id,
-                reviewer_sub=operator.sub,
-                body=base_body,
-                decision_audit_id=decision_audit_id,
+        async with sessionmaker() as session:
+            request = await approve_request(
+                session,
+                request_id,
+                operator=operator,
+                params=body.params,
             )
-        else:
-            return await svc.reject(
-                tenant_id=operator.tenant_id,
-                request_id=request_id,
-                reviewer_sub=operator.sub,
-                body=base_body,
-                decision_audit_id=decision_audit_id,
-            )
+            await session.commit()
     except ApprovalNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="approval_request_not_found",
         ) from exc
-    except ApprovalDecisionError as exc:
+    except UnauthorizedApprovalError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="insufficient_role",
+        ) from exc
+    except ApprovalRequestAlreadyDecidedError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
-            detail=f"approval_request_not_pending: current status is {exc.current_status!r}",
+            detail=f"approval_request_already_{exc.status}",
         ) from exc
+    except ParamsMismatchError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="params_hash_mismatch",
+        ) from exc
+
+    # Re-dispatch the original op with the approved params, bypassing the
+    # policy gate (``_approved=True``): the human approval recorded above is
+    # the authorization. Without the bypass the re-dispatch would be
+    # hard-denied (the reviewer is a human, denied on requires_approval) or
+    # re-queued (an agent re-hits needs-approval), so the approved op would
+    # never execute (#817 DoD: "approval runs the original dispatch").
+    from meho_backplane.operations.dispatcher import dispatch
+
+    dispatch_result = await dispatch(
+        operator=operator,
+        connector_id=request.connector_id,
+        op_id=request.op_id,
+        target=None,  # target resolved from connector_id; target_id in params if needed
+        params=body.params,
+        _approved=True,
+    )
+
+    _log.info(
+        "approval_request_redispatched",
+        approval_request_id=str(request_id),
+        op_id=request.op_id,
+        dispatch_status=dispatch_result.status,
+        operator_sub=operator.sub,
+    )
+
+    return ApproveResponseBody(
+        approval_request_id=request_id,
+        decision="approved",
+        dispatch_status=dispatch_result.status,
+        dispatch_op_id=dispatch_result.op_id,
+        dispatch_result=dispatch_result.result,
+        dispatch_error=dispatch_result.error,
+    )
+
+
+@router.post(
+    "/{request_id}/reject",
+    response_model=RejectResponseBody,
+)
+async def reject_approval_request(
+    request_id: Annotated[uuid.UUID, Path()],
+    body: RejectRequestBody,
+    operator: Operator = _require_operator,
+) -> RejectResponseBody:
+    """Reject a pending request; the original operation is not executed.
+
+    HTTP status codes:
+
+    * 200 — rejected successfully.
+    * 403 — operator lacks ``operator`` role.
+    * 404 — request not found (or belongs to another tenant).
+    * 409 — request is already decided.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.reject",
+        audit_op_class="write",
+        audit_approval_request_id=str(request_id),
+    )
+    sessionmaker = get_sessionmaker()
+    try:
+        async with sessionmaker() as session:
+            await reject_request(
+                session,
+                request_id,
+                operator=operator,
+                reason=body.reason,
+            )
+            await session.commit()
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="approval_request_not_found",
+        ) from exc
+    except UnauthorizedApprovalError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="insufficient_role",
+        ) from exc
+    except ApprovalRequestAlreadyDecidedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=f"approval_request_already_{exc.status}",
+        ) from exc
+
+    return RejectResponseBody(
+        approval_request_id=request_id,
+        decision="rejected",
+        reason=body.reason,
+    )

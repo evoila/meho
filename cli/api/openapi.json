@@ -7939,8 +7939,15 @@
             "title": "Op Id"
           },
           "target": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
             "nullable": true,
             "title": "Target"
           },
@@ -7957,7 +7964,7 @@
           "op_id"
         ],
         "title": "CallOperationBody",
-        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` is a partial\ndescriptor (``{\"name\": \"rdc-vcenter\"}``) the handler resolves via\n:func:`~meho_backplane.targets.resolver.resolve_target`; ``None``\nmeans the operation does not need a target (typed handlers that\ndon't read it; composite handlers that do their own resolution).\n\nRecognised keys on the ``target`` dict:\n\n* ``name`` (required when ``target`` is supplied) -- the slug or\n  alias the resolver looks up in the targets registry.\n* ``fqdn`` (optional) -- per-call override for the resolved\n  target's ``fqdn`` column. Honoured by connectors that read\n  ``target.fqdn`` for vhost routing (G3.6 VCF Automation:\n  the appliance enforces strict ``Host:`` matching and returns\n  404 with empty body when reached by IP without the correct\n  vhost set). The override mutates the resolved Target in\n  memory only; the database row is not modified. Any other key\n  in the dict is silently ignored, mirroring the documented\n  forward-compatibility posture in the MCP tool schema.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` -- a v0.2.1 client still sending ``target:\nstr`` (the pre-rename single-name shape) or a typo in\n``connector_id`` now fails loud at the framework boundary instead\nof silently dispatching with the defaults. ``params`` itself is a\nfree-form ``dict`` because per-op parameter shape is enforced by\nthe descriptor's ``parameter_schema`` further down the dispatch\npath; only the meta-tool body's own fields are constrained here."
+        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` accepts either\nshape and ``None``:\n\n* **Bare string** -- ``target: \"rdc-vcenter\"``. The forward-preferred\n  shape; matches ``query_topology`` / ``query_audit`` so an agent\n  can carry a target name across the read and the write surfaces\n  without reshape. G0.13-T2 (#1132) widening of #780.\n* **Dict** -- ``target: {\"name\": \"rdc-vcenter\"}``. The original\n  shape; the handler resolves the ``name`` field and (optionally)\n  reads ``fqdn`` for vhost routing. Still accepted unchanged.\n* **None** -- the operation does not need a target (typed handlers\n  that don't read it; composite handlers that do their own\n  resolution).\n\nBoth shapes normalise to the same dict before dispatch, so the\nresolver and the connectors see one canonical form. A bare-string\n``target`` is equivalent to ``{\"name\": <string>}`` -- no ``fqdn``\noverride can be passed via the string shape; callers that need\nthe override stay on the dict.\n\nRecognised keys on the ``target`` dict:\n\n* ``name`` (required when ``target`` is supplied as a dict) -- the\n  slug or alias the resolver looks up in the targets registry.\n* ``fqdn`` (optional) -- per-call override for the resolved\n  target's ``fqdn`` column. Honoured by connectors that read\n  ``target.fqdn`` for vhost routing (G3.6 VCF Automation:\n  the appliance enforces strict ``Host:`` matching and returns\n  404 with empty body when reached by IP without the correct\n  vhost set). The override mutates the resolved Target in\n  memory only; the database row is not modified. Any other key\n  in the dict is silently ignored, mirroring the documented\n  forward-compatibility posture in the MCP tool schema.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown *body* fields\nwith 422 ``extra_forbidden`` -- a typo in ``connector_id`` or an\nunknown sibling field still fails loud. The ``target`` field's\nown union widening is orthogonal: bare-string is now a first-class\nvalid value, not an unknown field. ``params`` itself is a\nfree-form ``dict`` because per-op parameter shape is enforced by\nthe descriptor's ``parameter_schema`` further down the dispatch\npath; only the meta-tool body's own fields are constrained here."
       },
       "CandidateHint": {
         "properties": {

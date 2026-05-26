@@ -227,3 +227,92 @@ def test_tools_call_call_operation_rejects_additional_properties(
     )
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_call_operation_input_schema_accepts_both_target_shapes(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """G0.13-T2 #1132: the ``target`` JSON Schema accepts string + object + null.
+
+    The published ``inputSchema`` for ``call_operation`` is the contract
+    every MCP client validates against. The G0.13-T2 additive widening
+    must surface in the wire schema (bare string is a valid value) so
+    consumers see the contract from ``tools/list`` without trial and
+    error. Asserts the wire shape directly -- the schema enum on
+    ``target.type`` must be ``["string", "object", "null"]`` in that
+    order (or any order; we sort before comparing).
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 7, "method": "tools/list"},
+    )
+    tools = {t["name"]: t for t in response.json()["result"]["tools"]}
+    target_schema = tools["call_operation"]["inputSchema"]["properties"]["target"]
+    assert sorted(target_schema["type"]) == sorted(["string", "object", "null"])
+    # The dict-shape ``name`` / ``fqdn`` inner properties stay declared
+    # so dict callers still see the inner contract.
+    assert "name" in target_schema["properties"]
+    assert "fqdn" in target_schema["properties"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_call_operation_accepts_bare_string_target(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """G0.13-T2 #1132: schema-level acceptance of bare-string ``target``.
+
+    Asserts the MCP dispatcher's JSON-Schema 2020-12 validation does
+    NOT reject the bare-string ``target`` shape with a ``-32602``
+    invalid_params error. The
+    :func:`test_call_operation_input_schema_accepts_both_target_shapes`
+    test pins the union shape on the wire schema; this test pins the
+    runtime side -- a real ``tools/call`` with a bare-string target
+    is not rejected pre-handler.
+
+    The full dispatch path (target resolution, registry lookup, op
+    invocation) is not exercised here; those happen further downstream
+    and depend on per-fixture target / connector seeding. The
+    behavioural round-trip for both shapes lives in
+    :mod:`tests.test_operations_meta_tools` (the
+    ``test_call_operation_with_bare_string_target_resolves_and_dispatches``
+    test against the same in-process handler the MCP dispatcher calls).
+    """
+    from meho_backplane.mcp.schemas import INVALID_PARAMS
+
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "call_operation",
+                "arguments": {
+                    # Bare-string ``target`` is the contract under
+                    # test. ``op_id`` is deliberately fake; we only
+                    # assert "the schema layer accepted bare-string",
+                    # not that the dispatch completed cleanly.
+                    "connector_id": "vault-1.x",
+                    "op_id": "vault.does.not.exist",
+                    "target": "rdc-vault",
+                },
+            },
+        },
+    )
+    body = response.json()
+    if "error" in body:
+        # Other failure shapes (internal-error from the resolver, etc.)
+        # are fine here; the contract under test is "the schema did not
+        # reject pre-handler with INVALID_PARAMS".
+        assert body["error"]["code"] != INVALID_PARAMS, body

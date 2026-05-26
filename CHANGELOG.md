@@ -92,6 +92,19 @@ connector-related release-notes line.
 
 ### Changed
 
+- **`call_operation` accepts bare-string `target` alongside dict —
+  additive convergence with `query_topology` / `query_audit`
+  (G0.13-T2 #1132 / #780 follow-up).** The `call_operation` MCP tool
+  and `POST /api/v1/operations/call` REST route now accept the target
+  reference in either shape: bare string `"rdc-vault"` (the preferred
+  forward shape, matching the read tools) or the existing dict
+  `{"name": "rdc-vault"}` (still works, unchanged for callers pinned
+  to it). Both reduce to the same dispatch via an internal normaliser.
+  The dict shape remains the only one that opens the `fqdn` per-call
+  vhost override field. Resolves the "most-cited daily-driver sharp
+  edge" `target-shape-inconsistency-across-tools` signal from the
+  RDC v0.6.0 closed-loop dogfood (`claude-rdc-hetzner-dc#697`).
+  Non-breaking: agents pinned to the dict shape are not affected.
 - Generalise the `tenant_conventions` seed migration: the previously
   shipped `rdc-internal` tenant + 8 consumer-specific operational
   conventions (extracted from one consumer's `CLAUDE.md`) are

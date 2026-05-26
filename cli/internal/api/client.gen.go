@@ -989,16 +989,30 @@ type BudgetStatus struct {
 // CallOperationBody Request body for the “POST /api/v1/operations/call“ route.
 //
 // Mirrors the :func:`call_operation` “arguments“ shape so the route
-// and the MCP handler share validation. “target“ is a partial
-// descriptor (“{"name": "rdc-vcenter"}“) the handler resolves via
-// :func:`~meho_backplane.targets.resolver.resolve_target`; “None“
-// means the operation does not need a target (typed handlers that
-// don't read it; composite handlers that do their own resolution).
+// and the MCP handler share validation. “target“ accepts either
+// shape and “None“:
+//
+//   - **Bare string** -- “target: "rdc-vcenter"“. The forward-preferred
+//     shape; matches “query_topology“ / “query_audit“ so an agent
+//     can carry a target name across the read and the write surfaces
+//     without reshape. G0.13-T2 (#1132) widening of #780.
+//   - **Dict** -- “target: {"name": "rdc-vcenter"}“. The original
+//     shape; the handler resolves the “name“ field and (optionally)
+//     reads “fqdn“ for vhost routing. Still accepted unchanged.
+//   - **None** -- the operation does not need a target (typed handlers
+//     that don't read it; composite handlers that do their own
+//     resolution).
+//
+// Both shapes normalise to the same dict before dispatch, so the
+// resolver and the connectors see one canonical form. A bare-string
+// “target“ is equivalent to “{"name": <string>}“ -- no “fqdn“
+// override can be passed via the string shape; callers that need
+// the override stay on the dict.
 //
 // Recognised keys on the “target“ dict:
 //
-//   - “name“ (required when “target“ is supplied) -- the slug or
-//     alias the resolver looks up in the targets registry.
+//   - “name“ (required when “target“ is supplied as a dict) -- the
+//     slug or alias the resolver looks up in the targets registry.
 //   - “fqdn“ (optional) -- per-call override for the resolved
 //     target's “fqdn“ column. Honoured by connectors that read
 //     “target.fqdn“ for vhost routing (G3.6 VCF Automation:
@@ -1009,19 +1023,30 @@ type BudgetStatus struct {
 //     in the dict is silently ignored, mirroring the documented
 //     forward-compatibility posture in the MCP tool schema.
 //
-// “extra="forbid"“ (G0.9-T2 / #729) rejects unknown fields with
-// 422 “extra_forbidden“ -- a v0.2.1 client still sending “target:
-// str“ (the pre-rename single-name shape) or a typo in
-// “connector_id“ now fails loud at the framework boundary instead
-// of silently dispatching with the defaults. “params“ itself is a
+// “extra="forbid"“ (G0.9-T2 / #729) rejects unknown *body* fields
+// with 422 “extra_forbidden“ -- a typo in “connector_id“ or an
+// unknown sibling field still fails loud. The “target“ field's
+// own union widening is orthogonal: bare-string is now a first-class
+// valid value, not an unknown field. “params“ itself is a
 // free-form “dict“ because per-op parameter shape is enforced by
 // the descriptor's “parameter_schema“ further down the dispatch
 // path; only the meta-tool body's own fields are constrained here.
 type CallOperationBody struct {
-	ConnectorId string                  `json:"connector_id"`
-	OpId        string                  `json:"op_id"`
-	Params      *map[string]interface{} `json:"params,omitempty"`
-	Target      *map[string]interface{} `json:"target"`
+	ConnectorId string                    `json:"connector_id"`
+	OpId        string                    `json:"op_id"`
+	Params      *map[string]interface{}   `json:"params,omitempty"`
+	Target      *CallOperationBody_Target `json:"target"`
+}
+
+// CallOperationBodyTarget0 defines model for .
+type CallOperationBodyTarget0 = string
+
+// CallOperationBodyTarget1 defines model for .
+type CallOperationBodyTarget1 map[string]interface{}
+
+// CallOperationBody_Target defines model for CallOperationBody.Target.
+type CallOperationBody_Target struct {
+	union json.RawMessage
 }
 
 // CandidateHint One candidate target a connector's :meth:`Connector.list_candidates` returns.
@@ -4159,6 +4184,68 @@ func (t ApproveResponseBody_DispatchResult) MarshalJSON() ([]byte, error) {
 }
 
 func (t *ApproveResponseBody_DispatchResult) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsCallOperationBodyTarget0 returns the union data inside the CallOperationBody_Target as a CallOperationBodyTarget0
+func (t CallOperationBody_Target) AsCallOperationBodyTarget0() (CallOperationBodyTarget0, error) {
+	var body CallOperationBodyTarget0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCallOperationBodyTarget0 overwrites any union data inside the CallOperationBody_Target as the provided CallOperationBodyTarget0
+func (t *CallOperationBody_Target) FromCallOperationBodyTarget0(v CallOperationBodyTarget0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCallOperationBodyTarget0 performs a merge with any union data inside the CallOperationBody_Target, using the provided CallOperationBodyTarget0
+func (t *CallOperationBody_Target) MergeCallOperationBodyTarget0(v CallOperationBodyTarget0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCallOperationBodyTarget1 returns the union data inside the CallOperationBody_Target as a CallOperationBodyTarget1
+func (t CallOperationBody_Target) AsCallOperationBodyTarget1() (CallOperationBodyTarget1, error) {
+	var body CallOperationBodyTarget1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCallOperationBodyTarget1 overwrites any union data inside the CallOperationBody_Target as the provided CallOperationBodyTarget1
+func (t *CallOperationBody_Target) FromCallOperationBodyTarget1(v CallOperationBodyTarget1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCallOperationBodyTarget1 performs a merge with any union data inside the CallOperationBody_Target, using the provided CallOperationBodyTarget1
+func (t *CallOperationBody_Target) MergeCallOperationBodyTarget1(v CallOperationBodyTarget1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t CallOperationBody_Target) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *CallOperationBody_Target) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }

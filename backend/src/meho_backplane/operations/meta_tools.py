@@ -217,16 +217,30 @@ class CallOperationBody(BaseModel):
     """Request body for the ``POST /api/v1/operations/call`` route.
 
     Mirrors the :func:`call_operation` ``arguments`` shape so the route
-    and the MCP handler share validation. ``target`` is a partial
-    descriptor (``{"name": "rdc-vcenter"}``) the handler resolves via
-    :func:`~meho_backplane.targets.resolver.resolve_target`; ``None``
-    means the operation does not need a target (typed handlers that
-    don't read it; composite handlers that do their own resolution).
+    and the MCP handler share validation. ``target`` accepts either
+    shape and ``None``:
+
+    * **Bare string** -- ``target: "rdc-vcenter"``. The forward-preferred
+      shape; matches ``query_topology`` / ``query_audit`` so an agent
+      can carry a target name across the read and the write surfaces
+      without reshape. G0.13-T2 (#1132) widening of #780.
+    * **Dict** -- ``target: {"name": "rdc-vcenter"}``. The original
+      shape; the handler resolves the ``name`` field and (optionally)
+      reads ``fqdn`` for vhost routing. Still accepted unchanged.
+    * **None** -- the operation does not need a target (typed handlers
+      that don't read it; composite handlers that do their own
+      resolution).
+
+    Both shapes normalise to the same dict before dispatch, so the
+    resolver and the connectors see one canonical form. A bare-string
+    ``target`` is equivalent to ``{"name": <string>}`` -- no ``fqdn``
+    override can be passed via the string shape; callers that need
+    the override stay on the dict.
 
     Recognised keys on the ``target`` dict:
 
-    * ``name`` (required when ``target`` is supplied) -- the slug or
-      alias the resolver looks up in the targets registry.
+    * ``name`` (required when ``target`` is supplied as a dict) -- the
+      slug or alias the resolver looks up in the targets registry.
     * ``fqdn`` (optional) -- per-call override for the resolved
       target's ``fqdn`` column. Honoured by connectors that read
       ``target.fqdn`` for vhost routing (G3.6 VCF Automation:
@@ -237,11 +251,11 @@ class CallOperationBody(BaseModel):
       in the dict is silently ignored, mirroring the documented
       forward-compatibility posture in the MCP tool schema.
 
-    ``extra="forbid"`` (G0.9-T2 / #729) rejects unknown fields with
-    422 ``extra_forbidden`` -- a v0.2.1 client still sending ``target:
-    str`` (the pre-rename single-name shape) or a typo in
-    ``connector_id`` now fails loud at the framework boundary instead
-    of silently dispatching with the defaults. ``params`` itself is a
+    ``extra="forbid"`` (G0.9-T2 / #729) rejects unknown *body* fields
+    with 422 ``extra_forbidden`` -- a typo in ``connector_id`` or an
+    unknown sibling field still fails loud. The ``target`` field's
+    own union widening is orthogonal: bare-string is now a first-class
+    valid value, not an unknown field. ``params`` itself is a
     free-form ``dict`` because per-op parameter shape is enforced by
     the descriptor's ``parameter_schema`` further down the dispatch
     path; only the meta-tool body's own fields are constrained here.
@@ -251,7 +265,7 @@ class CallOperationBody(BaseModel):
 
     connector_id: str = Field(min_length=1)
     op_id: str = Field(min_length=1)
-    target: dict[str, Any] | None = None
+    target: str | dict[str, Any] | None = None
     params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -452,6 +466,43 @@ async def search_operations(
     }
 
 
+def _normalize_target_arg(
+    target_arg: str | dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Normalise ``call_operation``'s ``target`` to the canonical dict shape.
+
+    G0.13-T2 (#1132) additive widening: ``call_operation`` accepts either
+    a bare string ``"rdc-vault"`` (matches ``query_topology`` /
+    ``query_audit``) or the existing dict ``{"name": "rdc-vault"}``.
+    Both reduce to the same dict before dispatch so downstream code
+    (resolver, connectors, audit) sees one canonical form.
+
+    Validation rules:
+
+    * ``None`` → ``None`` (operation does not need a target).
+    * ``str`` (non-empty) → ``{"name": <string>}``. No ``fqdn`` override
+      can be supplied via the string shape; callers that need the
+      override stay on the dict.
+    * ``dict`` with a non-empty ``name`` key → returned as-is.
+    * Any other shape (empty string, dict without ``name`` /
+      with empty ``name``) → ``ValueError`` with the same message the
+      pre-widening handler raised, so existing 400 callers see the
+      same surface.
+    """
+    if target_arg is None:
+        return None
+    if isinstance(target_arg, str):
+        if not target_arg:
+            raise ValueError("target must include a 'name' field when supplied")
+        return {"name": target_arg}
+    # ``dict``-typed branch. The Pydantic union validates the type; we
+    # only enforce the "name is set" contract here.
+    name = target_arg.get("name")
+    if not name:
+        raise ValueError("target must include a 'name' field when supplied")
+    return target_arg
+
+
 async def call_operation(
     operator: Operator,
     arguments: dict[str, Any],
@@ -459,14 +510,18 @@ async def call_operation(
     """Invoke :func:`~meho_backplane.operations.dispatch` for ``op_id``.
 
     ``arguments`` shape: ``{"connector_id": str, "op_id": str,
-    "target": dict | None, "params": dict}``.
+    "target": str | dict | None, "params": dict}``.
 
-    The handler resolves a partial ``target`` descriptor (e.g.
-    ``{"name": "rdc-vcenter"}``) into a full :class:`Target` ORM row via
-    :func:`~meho_backplane.targets.resolver.resolve_target` before
-    calling :func:`dispatch`. Passing ``target=None`` is valid for typed
-    operations whose handler does not consume a target (the dispatcher
-    accepts ``None`` through to the branch handler).
+    The handler accepts a ``target`` value in either of two equivalent
+    shapes -- bare string ``"rdc-vcenter"`` (forward-preferred; matches
+    ``query_topology`` / ``query_audit``) or partial dict
+    ``{"name": "rdc-vcenter"}`` (original; still works). Both are
+    normalised by :func:`_normalize_target_arg` to the dict form before
+    :func:`~meho_backplane.targets.resolver.resolve_target` is called,
+    so downstream code sees one canonical shape. Passing ``target=None``
+    is valid for typed operations whose handler does not consume a
+    target (the dispatcher accepts ``None`` through to the branch
+    handler).
 
     Returns the :class:`~meho_backplane.connectors.schemas.OperationResult`
     serialised via ``model_dump(mode="json")``. Errors surface inside
@@ -478,14 +533,15 @@ async def call_operation(
     """
     connector_id = arguments["connector_id"]
     op_id = arguments["op_id"]
-    target_arg: dict[str, Any] | None = arguments.get("target")
+    target_arg = _normalize_target_arg(arguments.get("target"))
     params: dict[str, Any] = arguments.get("params") or {}
 
     resolved_target: Any = None
     if target_arg is not None:
-        name = target_arg.get("name")
-        if not name:
-            raise ValueError("target must include a 'name' field when supplied")
+        # ``name`` is guaranteed present + non-empty by
+        # ``_normalize_target_arg``; the cast keeps mypy happy at the
+        # resolver-call site.
+        name = target_arg["name"]
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             resolved_target = await resolve_target(session, operator.tenant_id, name)
@@ -498,7 +554,10 @@ async def call_operation(
         # honour vhost routing (G3.6 VCF Automation). Non-string / empty
         # values fall through silently rather than overriding with a bad
         # value; an explicit ``None`` override is not supported (use a
-        # fresh ``meho targets update`` to clear the column).
+        # fresh ``meho targets update`` to clear the column). Bare-string
+        # ``target`` callers can't reach this branch (the normaliser
+        # produces a ``name``-only dict); they must switch to the dict
+        # shape to opt into vhost override.
         fqdn_override = target_arg.get("fqdn")
         if isinstance(fqdn_override, str) and fqdn_override:
             resolved_target.fqdn = fqdn_override

@@ -198,6 +198,16 @@ async def _ingest_handler(
         base_url=arguments.get("base_url"),
         dry_run=bool(arguments.get("dry_run", False)),
     )
+    # Post-validator invariant: the MCP path always constructs the
+    # explicit-quadruple shape (the JSON-Schema layer doesn't expose
+    # ``catalog_entry`` — that lives only on the REST surface today),
+    # so product/version/impl_id are guaranteed non-None. The asserts
+    # pin the invariant for mypy after the schema's optional typing
+    # widened to support the REST ``catalog_entry`` shape
+    # (G0.14-T9 / #1150).
+    assert request.product is not None
+    assert request.version is not None
+    assert request.impl_id is not None
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
     service = IngestionPipelineService(
         operator,

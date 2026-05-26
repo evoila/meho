@@ -5,10 +5,8 @@ package connector
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -40,13 +38,6 @@ type CatalogEntry struct {
 type CatalogResponse struct {
 	Catalog []CatalogEntry `json:"catalog"`
 }
-
-// errCatalogResolve tags the local (non-transport) failures of
-// resolveCatalogEntry — entry-not-found, typed-connector, templated
-// upstream — so the ingest verb renders them as `unexpected` (a clear
-// operator message) rather than routing them through the transport
-// error classifier.
-var errCatalogResolve = errors.New("catalog resolve")
 
 // newCatalogCmd returns the `meho connector catalog` parent command.
 // The catalog is the curated map of (product, version) -> recommended
@@ -217,84 +208,12 @@ func pluralY(n int) string {
 	return "ies"
 }
 
-// resolveCatalogEntry fetches the catalog and resolves a
-// "<product>/<version>" reference to its entry, validating that the
-// entry is generic-ingestable. Local (non-transport) failures are
-// wrapped in errCatalogResolve so the caller can render them as
-// `unexpected`; transport/auth errors from the GET propagate
-// unwrapped for renderRequestError.
-func resolveCatalogEntry(ctx context.Context, backplaneURL, ref string) (*CatalogEntry, error) {
-	product, version, err := parseCatalogRef(ref)
-	if err != nil {
-		return nil, err
-	}
-	catalog, err := getCatalog(ctx, backplaneURL)
-	if err != nil {
-		return nil, err // transport/auth — caller routes via renderRequestError
-	}
-	var entry *CatalogEntry
-	available := make([]string, 0, len(catalog.Catalog))
-	for i := range catalog.Catalog {
-		e := catalog.Catalog[i]
-		available = append(available, e.Product+"/"+e.Version)
-		if e.Product == product && e.Version == version {
-			// The backend model enforces (product, version) uniqueness,
-			// but don't trust the response blindly — a second match means
-			// duplicated catalog data, and silently taking the last would
-			// ingest an ambiguous impl_id.
-			if entry != nil {
-				return nil, fmt.Errorf(
-					"%w: catalog has multiple entries for %q; disambiguate catalog data before ingest",
-					errCatalogResolve, ref)
-			}
-			entry = &catalog.Catalog[i]
-		}
-	}
-	if entry == nil {
-		return nil, fmt.Errorf("%w: no catalog entry for %q; available: %s",
-			errCatalogResolve, ref, strings.Join(available, ", "))
-	}
-	if len(entry.Upstream) == 0 {
-		return nil, fmt.Errorf(
-			"%w: %q is a typed connector with no ingestable spec; nothing to ingest",
-			errCatalogResolve, ref)
-	}
-	for i, u := range entry.Upstream {
-		u = strings.TrimSpace(u)
-		if u == "" {
-			return nil, fmt.Errorf("%w: %q has an empty upstream URL entry",
-				errCatalogResolve, ref)
-		}
-		entry.Upstream[i] = u
-		if strings.ContainsAny(u, "<>") {
-			return nil, fmt.Errorf(
-				"%w: %q upstream URL %q is fqdn-templated; supply the concrete spec via "+
-					"`meho connector ingest --product %s --version %s --impl %s --spec <url>`",
-				errCatalogResolve, ref, u, entry.Product, entry.Version, entry.ImplID)
-		}
-	}
-	return entry, nil
-}
-
-// parseCatalogRef splits a "<product>/<version>" reference. Both
-// halves must be non-empty; the version may itself contain no slash.
-func parseCatalogRef(ref string) (product, version string, err error) {
-	parts := strings.SplitN(ref, "/", 2)
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-		return "", "", fmt.Errorf(
-			"%w: --catalog value %q must be <product>/<version> (e.g. vmware/9.0)",
-			errCatalogResolve, ref)
-	}
-	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
-}
-
-// upstreamSpecs turns a catalog entry's upstream URLs into the
-// SpecSource list the backplane's IngestRequest expects. The backend
-// parser fetches each URL; the CLI does not download.
-func upstreamSpecs(upstream []string) []SpecSource {
-	specs := make([]SpecSource, 0, len(upstream))
-	for _, u := range upstream {
-		specs = append(specs, SpecSource{URI: u})
-	}
-	return specs
-}
+// Catalog resolution moved to the backplane in G0.14-T9 (#1150).
+// The CLI's `--catalog <product>/<version>` flag is now a thin shell
+// that POSTs `{"catalog_entry": "<product>/<version>"}` directly; the
+// backplane validates the reference, resolves the entry against the
+// packaged catalog, and surfaces structured 422 envelopes per the
+// T11 error-shape convention for the four failure modes
+// (`catalog_entry_malformed`, `catalog_entry_not_found`,
+// `catalog_entry_typed_connector`, `catalog_entry_templated_upstream`).
+// See docs/cross-repo/connector-catalog.md.

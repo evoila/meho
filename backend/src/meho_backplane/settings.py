@@ -705,9 +705,7 @@ class Settings(BaseModel):
     # ``scheduler_agent_vault_path_pattern`` setting below is reserved
     # for the future Vault path; it ships configured but unused so the
     # transition is a code swap, not an env-var rename.
-    scheduler_agent_secret_env_pattern: str = Field(
-        default="MEHO_AGENT_SECRET_{client_id}"
-    )
+    scheduler_agent_secret_env_pattern: str = Field(default="MEHO_AGENT_SECRET_{client_id}")
     # Forward-compat: the Vault KVv2 path the scheduler will read once
     # service-token auth lands. Configured but unused in v0.2.
     scheduler_agent_vault_path_pattern: str = Field(

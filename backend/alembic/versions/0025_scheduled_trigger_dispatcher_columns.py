@@ -3,9 +3,9 @@
 
 """Extend ``scheduled_trigger`` with the dispatcher columns + ``fired`` status.
 
-Revision ID: 0021
-Revises: 0020
-Create Date: 2026-05-25
+Revision ID: 0025
+Revises: 0024
+Create Date: 2026-05-26
 
 Initiative #804 (G11.3 Scheduler), Task #823 (T2 -- cron + one-off
 dispatcher loop). Migration ``0020`` (T1, PR #1064) settled the storage
@@ -83,8 +83,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0021"
-down_revision: str | None = "0020"
+revision: str = "0025"
+down_revision: str | None = "0024"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -180,7 +180,7 @@ def downgrade() -> None:
     than silently corrupting; the same shape migration 0010
     (``ck_graph_edge_kind`` narrowing) follows. Failing fast before
     touching any DDL is intentional -- a refused downgrade leaves the
-    schema unchanged at 0021 rather than half-applied.
+    schema unchanged at 0025 rather than half-applied.
     """
     # Block before touching DDL: count one-off rows that the v1 CHECK
     # would orphan. The narrow IN-predicate keeps the count cheap even
@@ -199,7 +199,7 @@ def downgrade() -> None:
     blocking_count: int = bind.execute(blocking_stmt).scalar_one()
     if blocking_count:
         raise RuntimeError(
-            f"Cannot downgrade migration 0021: scheduled_trigger contains "
+            f"Cannot downgrade migration 0025: scheduled_trigger contains "
             f"{blocking_count} row(s) with status='fired' that would be "
             "orphaned by the narrowed v1 CHECK constraint. Cancel or "
             "re-classify them ("

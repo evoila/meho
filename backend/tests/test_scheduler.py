@@ -40,6 +40,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
@@ -50,6 +51,7 @@ from meho_backplane.agent.invocation import AgentInvoker
 from meho_backplane.agent.run import PydanticAgentRun
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
 from meho_backplane.agents.service import AgentDefinitionService
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentRun,
@@ -76,13 +78,59 @@ _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
 @pytest.fixture(autouse=True)
 def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin :class:`Settings` env vars; clear the lru cache."""
+    """Pin :class:`Settings` env vars; clear the lru cache.
+
+    The autonomous-agent credential env var
+    (``MEHO_AGENT_SECRET_AGENT_REPORTER``) is what the scheduler reads
+    via :func:`scheduler.credentials.resolve_agent_credentials` for the
+    seeded ``identity_ref=agent:reporter`` definition. Setting it
+    here keeps the credential-resolution path live without leaking
+    into other tests.
+    """
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    # Default seed identity_ref is ``agent:reporter`` -- sanitised by
+    # ``agent_client_id_from_identity_ref`` to ``AGENT_REPORTER``.
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _stub_autonomous_auth(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Stub ``run_scheduled``'s Keycloak + JWT-verify seams.
+
+    The scheduler calls :meth:`AgentInvoker.run_scheduled` (G11.2-T2
+    #1096) which expects to (1) obtain a ``client_credentials`` token
+    via :func:`get_client_credentials_token` and (2) verify the
+    returned JWT via :func:`verify_jwt_for_audience` -- both real-
+    network calls in production. Unit tests can't reach Keycloak, so
+    these seams are stubbed at module level: the token returns a
+    synthetic string and the verify returns a fake :class:`Operator`
+    bound to the seeded tenant. The downstream definition-binding
+    guard (the identity_ref==client_id check inside ``run_scheduled``)
+    then runs against the actual definition row the test seeded.
+    """
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.get_client_credentials_token",
+        AsyncMock(return_value="agent-token"),
+    )
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(
+            return_value=Operator(
+                sub=f"agent-{_TENANT_A.hex[:8]}",
+                name=None,
+                email=None,
+                raw_jwt="agent-token",
+                tenant_id=_TENANT_A,
+                tenant_role=TenantRole.OPERATOR,
+            ),
+        ),
+    )
+    yield
 
 
 def _final_text(text: str) -> FunctionModel:
@@ -517,17 +565,17 @@ def test_scheduled_trigger_kind_check_matches_enum() -> None:
 def test_scheduled_trigger_status_check_matches_enum() -> None:
     """``ScheduledTriggerStatus`` agrees with the effective migration history.
 
-    0020 shipped ``{active, paused, cancelled}``; 0021 widened the
+    0020 shipped ``{active, paused, cancelled}``; 0025 widened the
     ``CHECK`` to add ``fired`` (the terminal one-off state the
     dispatcher transitions to after a successful single-fire). The
-    effective vocabulary is therefore the 0021 ``_V2`` literal; the
+    effective vocabulary is therefore the 0025 ``_V2`` literal; the
     model's :class:`ScheduledTriggerStatus` enum must agree.
     """
     from meho_backplane.db.models import _SCHEDULED_TRIGGER_STATUSES
 
-    m_0021 = _load_migration_by_name("0021_scheduled_trigger_dispatcher_columns")
+    m_0025 = _load_migration_by_name("0025_scheduled_trigger_dispatcher_columns")
     assert set(_SCHEDULED_TRIGGER_STATUSES) == {s.value for s in ScheduledTriggerStatus}
-    assert set(_SCHEDULED_TRIGGER_STATUSES) == set(m_0021._SCHEDULED_TRIGGER_STATUSES_V2)
+    assert set(_SCHEDULED_TRIGGER_STATUSES) == set(m_0025._SCHEDULED_TRIGGER_STATUSES_V2)
 
 
 # ---------------------------------------------------------------------------

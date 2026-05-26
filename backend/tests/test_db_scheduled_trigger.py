@@ -550,15 +550,15 @@ def test_migration_kind_literals_match_model_enum() -> None:
 
 
 def test_migration_status_literals_match_model_enum() -> None:
-    """0021's widened status tuple matches the model enum.
+    """0025's widened status tuple matches the model enum.
 
-    0020 originated the CHECK with three values; 0021 (T2) added
+    0020 originated the CHECK with three values; 0025 (T2) added
     ``'fired'`` as a fourth terminal value for the one-off finalisation
-    path. The effective vocabulary is therefore 0021's ``_V2`` literal;
+    path. The effective vocabulary is therefore 0025's ``_V2`` literal;
     the model enum must agree.
     """
-    m_0021 = _load_migration_by_name("0021_scheduled_trigger_dispatcher_columns")
-    assert set(m_0021._SCHEDULED_TRIGGER_STATUSES_V2) == {  # type: ignore[attr-defined]
+    m_0025 = _load_migration_by_name("0025_scheduled_trigger_dispatcher_columns")
+    assert set(m_0025._SCHEDULED_TRIGGER_STATUSES_V2) == {  # type: ignore[attr-defined]
         s.value for s in ScheduledTriggerStatus
     }
 

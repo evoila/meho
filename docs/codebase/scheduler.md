@@ -45,7 +45,7 @@ DBOS rebase swaps only the loop module.
     input string).
 - `ScheduledTriggerKind`, `ScheduledTriggerStatus` — closed StrEnums
   kept in lock-step with the DB-layer `CHECK (... IN (...))` constraints
-  via migrations `0020` (T1 substrate) and `0021` (T2 dispatcher
+  via migrations `0020` (T1 substrate) and `0025` (T2 dispatcher
   columns + widened `status` CHECK).
 - Scheduler package
   ([scheduler/](../../backend/src/meho_backplane/scheduler)):
@@ -91,11 +91,41 @@ DBOS rebase swaps only the loop module.
                                                  |
                                                  v
                               +------------------------------------------+
-                              | AgentInvoker.run(operator, name, inputs, |
-                              |     async_mode=True,                     |
-                              |     trigger=AgentRunTrigger.SCHEDULED)   |
+                              | resolve_agent_credentials(identity_ref)  |
+                              |   -> (client_id, client_secret)          |
+                              | AgentInvoker.run_scheduled(name, inputs, |
+                              |     agent_client_id=..,                  |
+                              |     agent_client_secret=..)              |
                               +------------------------------------------+
 ```
+
+### Autonomous-agent credentials
+
+The scheduler is operator-less (no JWT to forward), so it sources the
+``client_credentials`` grant identity from the backplane pod's env
+vars rather than Vault. The lookup chain:
+
+1. The trigger's `agent_definition_id` resolves to an
+   `AgentDefinition.identity_ref` (e.g. `agent:reporter`).
+2. `resolve_agent_credentials(identity_ref)` (in
+   [scheduler/credentials.py](../../backend/src/meho_backplane/scheduler/credentials.py))
+   sanitises the ref (non-alphanumeric chars to `_`, upper-case) and
+   substitutes it into `SCHEDULER_AGENT_SECRET_ENV_PATTERN`
+   (default `MEHO_AGENT_SECRET_{client_id}`). For
+   `agent:reporter` the resolved env var is
+   `MEHO_AGENT_SECRET_AGENT_REPORTER`.
+3. The env-var value becomes the `client_secret`; the `client_id`
+   passed to `run_scheduled` is the `identity_ref` verbatim
+   (Keycloak's namespace tolerates the `:` separator).
+4. An unset / empty env var raises `AgentCredentialsUnresolvedError`;
+   the loop logs `scheduler_credentials_unresolved` and skips the
+   fire. The trigger stays `active` so an operator who wires the
+   secret unblocks the schedule on the next tick — no parking.
+
+The `SCHEDULER_AGENT_VAULT_PATH_PATTERN` setting is reserved for a
+future G11.2 follow-up that will swap the env-var path for a
+scheduler-service-token Vault read; ships configured but unused in
+v0.2.
 
 ### Cron fire path (`_fire_cron`)
 
@@ -110,8 +140,11 @@ DBOS rebase swaps only the loop module.
 2. Commit the advance.
 3. `_invoke_agent()` resolves the agent definition (FK lookup —
    `agent_definition_id` is a real FK, so this `SELECT` is by primary
-   key under the definition-NOT-NULL invariant), kicks off the agent
-   run in async mode, returns.
+   key under the definition-NOT-NULL invariant), resolves the agent's
+   `client_credentials` pair, then calls
+   `AgentInvoker.run_scheduled` (G11.2-T2 #1096) which obtains a
+   Keycloak token, verifies it, and kicks off the agent run with
+   `AgentRunTrigger.SCHEDULED` provenance.
 
 ### One-off fire path (`_fire_one_off`)
 
@@ -217,11 +250,12 @@ scheduled instant by the time the agent run starts.
   - `alembic/versions/0020_create_scheduled_trigger.py` — T1 #1064
     storage substrate (table, indexes, kind / status / in_flight_policy
     CHECKs, discriminated-union kind-fields CHECK).
-  - `alembic/versions/0021_scheduled_trigger_dispatcher_columns.py` —
+  - `alembic/versions/0025_scheduled_trigger_dispatcher_columns.py` —
     T2 this PR (`identity_sub`, `inputs`, `timezone` columns;
     `status` CHECK widened to admit `fired`).
 - Tests:
   [tests/test_scheduler.py](../../backend/tests/test_scheduler.py),
+  [tests/test_scheduler_credentials.py](../../backend/tests/test_scheduler_credentials.py),
   [tests/test_migration_0020_scheduled_trigger.py](../../backend/tests/test_migration_0020_scheduled_trigger.py),
-  [tests/test_migration_0021_scheduled_trigger.py](../../backend/tests/test_migration_0021_scheduled_trigger.py),
+  [tests/test_migration_0025_scheduled_trigger.py](../../backend/tests/test_migration_0025_scheduled_trigger.py),
   [tests/test_db_scheduled_trigger.py](../../backend/tests/test_db_scheduled_trigger.py)

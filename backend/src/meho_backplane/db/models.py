@@ -3180,7 +3180,7 @@ class ScheduledTriggerStatus(StrEnum):
       without recomputing.
     * :attr:`CANCELLED` -- terminal. The trigger row is retained for
       audit purposes but never fires again.
-    * :attr:`FIRED` -- terminal one-off state. Migration ``0021`` (T2
+    * :attr:`FIRED` -- terminal one-off state. Migration ``0025`` (T2
       #823) widened the enum so a one-off trigger transitions
       ``ACTIVE -> FIRED`` after its single dispatch instead of going
       to ``CANCELLED`` (which carries operator-intent semantics).
@@ -3389,7 +3389,7 @@ class ScheduledTrigger(Base):
     # Per-trigger IANA timezone name. Cron expressions evaluate in this
     # zone via ``zoneinfo.ZoneInfo`` so an operator scheduling
     # ``0 9 * * *`` in ``Europe/Sarajevo`` fires at 09:00 local rather
-    # than 09:00 UTC. Migration ``0021`` adds this column with a server
+    # than 09:00 UTC. Migration ``0025`` adds this column with a server
     # default of ``'UTC'`` for the rows shipped by 0020; the ORM-side
     # default keeps fresh inserts on the same backstop.
     timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC")
@@ -3447,7 +3447,7 @@ class ScheduledTrigger(Base):
     # agent run. Distinct from :attr:`created_by_sub` because the
     # operator who created the trigger is not necessarily the identity
     # the scheduler should fire under at runtime (e.g. a service
-    # principal). Migration ``0021`` adds this column with a server
+    # principal). Migration ``0025`` adds this column with a server
     # default of ``'__scheduler__'`` (a sentinel) so the rows shipped
     # by 0020 remain valid; production triggers should set this
     # explicitly at create time.

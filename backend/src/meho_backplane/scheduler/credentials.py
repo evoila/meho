@@ -118,9 +118,7 @@ def resolve_agent_credentials(identity_ref: str) -> tuple[str, str]:
     """
     settings = get_settings()
     sanitised = agent_client_id_from_identity_ref(identity_ref).upper()
-    env_name = settings.scheduler_agent_secret_env_pattern.format(
-        client_id=sanitised
-    )
+    env_name = settings.scheduler_agent_secret_env_pattern.format(client_id=sanitised)
     secret = os.environ.get(env_name, "").strip()
     if not secret:
         raise AgentCredentialsUnresolvedError(

@@ -1162,18 +1162,20 @@ negligible compared to the surrounding DB read at realistic UI QPS.
 
 ### RBAC posture
 
-Read paths (list / detail / edit-form GET / tags) build a synthesised
-`Operator` with `TenantRole.OPERATOR` and rely on
-`MemoryRbacResolver.can_read`'s per-row `user_sub` gate for cross-user
-isolation. Write paths (edit-form, PATCH, DELETE) re-verify the BFF
-session's access token through the chassis JWT chain
-(`verify_jwt_for_audience`) to produce a fully-validated `Operator`
-carrying the live `tenant_role`. The matrix is re-checked at the
-service layer (`MemoryService.remember` / `forget` call
-`can_write`); the route-side check is for the UX "show / hide Edit
-button" decision and a quick 403 on the edit-form GET so the
-operator doesn't load the textarea for an action the save would
-reject anyway.
+Read paths (list / detail / tags) build a synthesised `Operator` with
+`TenantRole.OPERATOR` and rely on `MemoryRbacResolver.can_read`'s
+per-row `user_sub` gate for cross-user isolation. Write paths
+(edit-form GET, PATCH, DELETE) re-verify the BFF session's access
+token through the chassis JWT chain (`verify_jwt_for_audience`) to
+produce a fully-validated `Operator` carrying the live `tenant_role`.
+The matrix is re-checked at the service layer
+(`MemoryService.remember` / `forget` call `can_write`); the
+route-side check is for the UX "show / hide Edit button" decision
+and a quick 403 on the edit-form GET so the operator doesn't load
+the textarea for an action the save would reject anyway. The
+edit-form GET surfaces RBAC denial as **403** (not 404, the read
+posture) — mirroring `/api/v1/memory`'s write-side posture and
+pinned by `test_edit_form_tenant_scoped_as_operator_returns_403`.
 
 The 404-vs-403 collapse on detail / edit-form / PATCH / DELETE for
 non-existent slugs is the info-leak avoidance the `/api/v1/memory`

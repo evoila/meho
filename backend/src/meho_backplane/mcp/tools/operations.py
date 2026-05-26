@@ -271,9 +271,11 @@ register_mcp_tool(
             "an `invalid_params` error verbatim -- inspect "
             "`extras.validation_errors` and fix the params shape first. "
             "Arguments: `connector_id` (required), `op_id` (required), "
-            '`target` (optional partial descriptor like `{"name": '
-            '"rdc-vcenter"}`; required for ops that act on a target), '
-            "`params` (operation-specific). Returns the full "
+            "`target` (optional, accepts EITHER a bare string "
+            '`"rdc-vcenter"` -- preferred forward shape, matches '
+            "`query_topology` / `query_audit` -- OR a dict "
+            '`{"name": "rdc-vcenter"}`; required for ops that act on a '
+            "target), `params` (operation-specific). Returns the full "
             "OperationResult shape."
         ),
         inputSchema={
@@ -290,29 +292,34 @@ register_mcp_tool(
                     ),
                 },
                 "target": {
-                    "type": ["object", "null"],
+                    "type": ["string", "object", "null"],
                     "description": (
-                        "Partial target descriptor. The dispatcher "
-                        "resolves the `name` field against the targets "
-                        "registry; aliases are accepted. Pass null "
-                        "for operations that do not act on a target. "
-                        "NOTE: this tool's `target` is a dict "
-                        '({"name": "<target-name>"}) because the '
-                        "dispatcher reserves room for additional "
-                        "future fields (e.g. an alias-precedence pin); "
-                        "the topology / audit read tools (`query_topology`, "
-                        "`query_audit`) take a bare-string `target` "
-                        "since they only need the name. See "
-                        "`docs/architecture/mcp.md` ('Target-reference "
-                        "shape convention') for the canonical forward "
-                        "convention any new tool should follow. The "
-                        "optional `fqdn` field is a per-call override "
-                        "for the resolved target's vhost name; honoured "
-                        "by connectors that route by `Host:` header "
-                        "(notably `vcfa-rest-9.0` where reaching the "
-                        "appliance by IP without an `fqdn` returns 404 "
-                        "with empty body)."
+                        "Target reference. Two shapes are accepted; "
+                        "either reduces to the same dispatch:\n"
+                        '  * Bare string -- e.g. `"rdc-vcenter"`. '
+                        "The forward-preferred shape; matches "
+                        "`query_topology` / `query_audit` so a target "
+                        "name carried across read and write surfaces "
+                        "needs no reshape.\n"
+                        '  * Dict -- e.g. `{"name": "rdc-vcenter"}`. '
+                        "The original shape; supports the optional "
+                        "`fqdn` field below for per-call vhost "
+                        "override. Use this form when you need the "
+                        "override.\n"
+                        "Pass null for operations that do not act on "
+                        "a target. The dispatcher resolves `name` "
+                        "against the targets registry; aliases are "
+                        "accepted. See `docs/architecture/mcp.md` "
+                        "('Target-reference shape convention') for "
+                        "the cross-tool convention. The optional "
+                        "`fqdn` field (dict-shape only) is a per-call "
+                        "override for the resolved target's vhost "
+                        "name; honoured by connectors that route by "
+                        "`Host:` header (notably `vcfa-rest-9.0` "
+                        "where reaching the appliance by IP without "
+                        "an `fqdn` returns 404 with empty body)."
                     ),
+                    "minLength": 1,
                     "properties": {
                         "name": {"type": "string", "minLength": 1},
                         "fqdn": {
@@ -322,7 +329,9 @@ register_mcp_tool(
                                 "Per-call override for the resolved "
                                 "target's `fqdn` column. Threaded into "
                                 "the connector for vhost routing; the "
-                                "DB row is not modified."
+                                "DB row is not modified. Dict-shape "
+                                "only -- bare-string callers must "
+                                "switch to the dict to opt in."
                             ),
                         },
                     },

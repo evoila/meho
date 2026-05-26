@@ -425,6 +425,91 @@ def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient
     assert body["error"].startswith("unknown_op:")
 
 
+@pytest.mark.asyncio
+async def test_post_call_accepts_bare_string_target(
+    client: TestClient, stub_embedding_service: AsyncMock
+) -> None:
+    """G0.13-T2 #1132: ``target: "<name>"`` passes Pydantic body validation.
+
+    The REST body's :class:`CallOperationBody` was widened from
+    ``dict | None`` to ``str | dict | None``. A bare-string target must
+    not surface as 422 (Pydantic body rejection). With a real target
+    row seeded under the operator's tenant, the bare-string form
+    reaches the dispatcher and returns the same structured-error
+    envelope the dict form would (``unknown_op`` for the fake op_id).
+    Both shapes round-trip to the same dispatch -- the acceptance
+    criterion for this task.
+    """
+    from meho_backplane.db.models import Target as TargetORM
+
+    sessionmaker = get_sessionmaker()
+    target_id = uuid.uuid4()
+    async with sessionmaker() as s, s.begin():
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+                name="rdc-vault",
+                aliases=[],
+                product="vault",
+                host="vault.example.com",
+                port=8200,
+                fqdn=None,
+                secret_ref=None,
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={},
+                notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vault-1.x",
+                "op_id": "vault.does.not.exist",
+                "target": "rdc-vault",
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    # 200 with a structured-error envelope; the body layer did not 422
+    # and the resolver found the seeded target by name.
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["extras"]["error_code"] == "unknown_op"
+
+
+def test_post_call_empty_string_target_returns_400(client: TestClient) -> None:
+    """G0.13-T2 #1132: an empty string ``target`` is rejected like an empty dict.
+
+    The handler-side ``_normalize_target_arg`` raises ``ValueError`` on
+    an empty string for the same reason it raises on an empty dict --
+    a target was supplied but it carries no name. The REST route
+    surfaces both as 400 uniformly.
+    """
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vault-1.x",
+                "op_id": "vault.kv.read",
+                "target": "",
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # GET /api/v1/operations/{descriptor_id}
 # ---------------------------------------------------------------------------

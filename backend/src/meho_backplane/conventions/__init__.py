@@ -37,8 +37,10 @@ from meho_backplane.conventions.preamble import (
     BLOCK_END,
     BLOCK_START,
     GUARD_PREFIX,
+    PreambleAssembly,
     PreambleResult,
     assemble_preamble,
+    assemble_preamble_detailed,
 )
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
@@ -50,6 +52,7 @@ from meho_backplane.conventions.schemas import (
     ConventionListResponse,
     ConventionSummary,
     ConventionUpdate,
+    PreambleInclusion,
     estimate_tokens,
 )
 
@@ -66,7 +69,10 @@ __all__ = [
     "ConventionListResponse",
     "ConventionSummary",
     "ConventionUpdate",
+    "PreambleAssembly",
+    "PreambleInclusion",
     "PreambleResult",
     "assemble_preamble",
+    "assemble_preamble_detailed",
     "estimate_tokens",
 ]

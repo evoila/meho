@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-write preamble-inclusion feedback on the conventions write
+  surface (G0.14-T8 #1149).** `POST /api/v1/conventions` and
+  `PATCH /api/v1/conventions/{slug}` now attach a `preamble_status`
+  sub-document to the response when the convention is
+  `kind='operational'`. Fields: `included` (whether the slug landed
+  in the assembled preamble), `position` (1-based index in the
+  packed order, `null` when dropped), `token_count` (the convention
+  body's own estimated token cost), and `would_drop_slugs` (the
+  full dropped-slug list from this pack — names other slugs the
+  write displaced, or includes the just-written slug when it was
+  itself dropped). Closes the `claude-rdc-hetzner-dc#697` signal 18
+  failure mode: previously an operator who wrote a convention got a
+  `201` with no indication whether the row would ever reach an
+  agent session; with `preamble_status` the answer arrives in the
+  same round-trip. `preamble_status` is `null` on `GET /{slug}`
+  (the aggregate budget signal lives on the list response's
+  `budget_status`) and `null` for writes against `workflow` /
+  `reference` kinds. (#1149)
+
 ### Changed
 
 - **`call_operation` accepts bare-string `target` alongside dict —

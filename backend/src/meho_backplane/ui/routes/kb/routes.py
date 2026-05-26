@@ -621,6 +621,12 @@ def build_kb_router() -> APIRouter:
                 )
                 continue
 
+            # Bind audit contextvars so AuditMiddleware writes a row with
+            # the correct op_id / op_class for this write operation.
+            structlog.contextvars.bind_contextvars(
+                audit_op_id="kb.ui_upload",
+                audit_op_class="write",
+            )
             try:
                 entry = await kb.create_entry(
                     tenant_id,  # type: ignore[arg-type]

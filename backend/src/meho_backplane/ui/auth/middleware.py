@@ -431,4 +431,12 @@ async def require_ui_admin(
             detail="tenant_admin_required",
         )
 
+    # Bind operator identity into structlog contextvars so AuditMiddleware
+    # can attribute the write operation (reads operator_sub + tenant_id from
+    # contextvars to decide whether to write an audit row).
+    structlog.contextvars.bind_contextvars(
+        operator_sub=session.operator_sub,
+        tenant_id=str(session.tenant_id),
+    )
+
     return session

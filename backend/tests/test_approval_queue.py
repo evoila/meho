@@ -318,6 +318,101 @@ async def test_approve_request_raises_on_hash_mismatch(session: AsyncSession) ->
 
 
 @pytest.mark.asyncio
+async def test_approve_request_params_none_skips_hash_check(
+    session: AsyncSession,
+) -> None:
+    """``params=None`` skips the hash check (G11.2-T5 operator-decision path).
+
+    The MCP/CLI operator does not have the agent's original params and
+    approves by id alone. ``approve_request`` skips the hash verification
+    when ``params is None`` and still flips status + writes the decision
+    audit row. The agent's REST path keeps supplying params (the swap
+    defence stays on the agent branch).
+    """
+    operator = _make_operator()
+    original_params = {"x": 1, "secret": "z"}
+    params_hash = compute_params_hash(original_params)
+    pending = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=original_params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        # No params supplied — must NOT raise ParamsMismatchError.
+        row = await approve_request(s2, pending.id, operator=operator, params=None)
+        await s2.commit()
+        assert row.status == ApprovalRequestStatus.APPROVED.value
+        # The transient audit_id attr is exposed so callers can publish the
+        # broadcast event AFTER commit, with the real audit row's id.
+        assert isinstance(row._audit_id, uuid.UUID)  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_publish_approval_event_audit_id_matches_decision_row(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The broadcast event's ``audit_id`` is the decision row's real id.
+
+    BroadcastEvent.audit_id is documented as the FK to ``audit_log.id``; a
+    subscriber that wants the full row queries audit_log by this id. The
+    helper must therefore receive the audit row's actual id (threaded
+    via ``request._audit_id``) — not a fresh UUID. This test stubs the
+    broadcast publisher, exercises approve_request + the publish call,
+    and asserts the published event's audit_id equals the audit row's
+    primary key.
+    """
+    captured: list[Any] = []
+
+    async def _capture(event: Any) -> None:
+        captured.append(event)
+
+    monkeypatch.setattr("meho_backplane.broadcast.publisher.publish_event", _capture)
+    from meho_backplane.operations.approval_queue import publish_approval_event
+
+    operator = _make_operator()
+    original_params = {"x": 1}
+    params_hash = compute_params_hash(original_params)
+    pending = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params=original_params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        row = await approve_request(s2, pending.id, operator=operator, params=None)
+        await s2.commit()
+        decision_audit_id: uuid.UUID = row._audit_id  # type: ignore[attr-defined]
+        await publish_approval_event(
+            tenant_id=operator.tenant_id,
+            request=row,
+            decision="approved",
+            principal_sub=operator.sub,
+            audit_id=decision_audit_id,
+        )
+
+    # The event's audit_id must be the real decision audit row's id.
+    assert len(captured) == 1
+    assert captured[0].audit_id == decision_audit_id
+    # And the audit_log row at that id must exist.
+    async with get_sessionmaker()() as s3:
+        audited = await s3.get(AuditLog, decision_audit_id)
+        assert audited is not None
+        assert audited.path == "approval.decision"
+
+
+@pytest.mark.asyncio
 async def test_approve_request_raises_on_already_decided(session: AsyncSession) -> None:
     """Approving an already-approved row raises ApprovalRequestAlreadyDecidedError."""
     operator = _make_operator()

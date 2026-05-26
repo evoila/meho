@@ -70,6 +70,8 @@ from meho_backplane.operations.approval_queue import (
     ParamsMismatchError,
     UnauthorizedApprovalError,
     approve_request,
+    get_request,
+    publish_approval_event,
     reject_request,
 )
 
@@ -234,6 +236,35 @@ async def list_approvals(
     return [_view(r) for r in rows]
 
 
+@router.get("/{request_id}", response_model=ApprovalRequestView)
+async def get_approval_request(
+    request_id: Annotated[uuid.UUID, Path()],
+    operator: Operator = _require_operator,
+) -> ApprovalRequestView:
+    """Inspect a single approval request by id (G11.2-T5 / #818).
+
+    Returns the full :class:`ApprovalRequestView` including
+    ``proposed_effect`` so an operator can decide before approving.
+    Cross-tenant requests and absent ids both return 404 (the two cases
+    are indistinguishable to callers — same tenant-isolation discipline
+    as :func:`get_request`).
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        try:
+            row = await get_request(
+                session,
+                tenant_id=operator.tenant_id,
+                request_id=request_id,
+            )
+        except ApprovalNotFoundError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail="approval_request_not_found",
+            ) from exc
+    return _view(row)
+
+
 @router.post(
     "/{request_id}/approve",
     response_model=ApproveResponseBody,
@@ -272,6 +303,15 @@ async def approve_approval_request(
                 params=body.params,
             )
             await session.commit()
+        # Publish AFTER commit (G11.2-T5): a phantom event cannot
+        # outlive a failed transaction; helper is fail-open.
+        await publish_approval_event(
+            tenant_id=operator.tenant_id,
+            request=request,
+            decision="approved",
+            principal_sub=operator.sub,
+            audit_id=request._audit_id,  # type: ignore[attr-defined]
+        )
     except ApprovalNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -354,13 +394,20 @@ async def reject_approval_request(
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as session:
-            await reject_request(
+            request = await reject_request(
                 session,
                 request_id,
                 operator=operator,
                 reason=body.reason,
             )
             await session.commit()
+        await publish_approval_event(
+            tenant_id=operator.tenant_id,
+            request=request,
+            decision="rejected",
+            principal_sub=operator.sub,
+            audit_id=request._audit_id,  # type: ignore[attr-defined]
+        )
     except ApprovalNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -380,5 +427,121 @@ async def reject_approval_request(
     return RejectResponseBody(
         approval_request_id=request_id,
         decision="rejected",
+        reason=body.reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T5 (#818) operator-decision route
+# ---------------------------------------------------------------------------
+
+
+class DecideRequestBody(BaseModel):
+    """POST body for ``/decide`` — the operator-decision path.
+
+    Distinct from :class:`ApproveRequestBody` (which requires the
+    original ``params`` for the agent / REST re-dispatch path). The
+    operator-decision path captures the decision durably (status flip +
+    decision audit row + ``approval_decided`` broadcast) without
+    re-dispatching — the agent's REST path is what re-dispatches with
+    the params it has.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: str = Field(
+        description="One of 'approved' / 'rejected'.",
+    )
+    reason: str = Field(
+        default="",
+        description="Optional rationale recorded on the decision audit row.",
+    )
+
+
+class DecideResponseBody(BaseModel):
+    """Response for a successful operator decision."""
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_request_id: uuid.UUID
+    decision: str
+    reason: str
+
+
+@router.post(
+    "/{request_id}/decide",
+    response_model=DecideResponseBody,
+)
+async def decide_approval_request(
+    request_id: Annotated[uuid.UUID, Path()],
+    body: DecideRequestBody,
+    operator: Operator = _require_operator,
+) -> DecideResponseBody:
+    """Capture an operator decision without re-dispatching (G11.2-T5).
+
+    Flips the request to ``approved`` or ``rejected``, writes the
+    decision audit row, and publishes the ``approval.{approved,rejected}``
+    broadcast event. **Does not** re-dispatch the original op — that is
+    the agent's path (``POST .../approve`` with ``params``, which uses
+    the ``_approved`` gate-bypass). Backs the CLI/MCP operator-decision
+    flow where the operator approves by id alone.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.decide",
+        audit_op_class="write",
+        audit_approval_request_id=str(request_id),
+    )
+    decision = body.decision.strip().lower()
+    if decision not in {"approved", "rejected"}:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"decision must be 'approved' or 'rejected', got {body.decision!r}",
+        )
+
+    sessionmaker = get_sessionmaker()
+    try:
+        async with sessionmaker() as session:
+            if decision == "approved":
+                request = await approve_request(
+                    session,
+                    request_id,
+                    operator=operator,
+                    params=None,
+                )
+            else:
+                request = await reject_request(
+                    session,
+                    request_id,
+                    operator=operator,
+                    reason=body.reason,
+                )
+            await session.commit()
+        # Publish AFTER commit (fail-open).
+        await publish_approval_event(
+            tenant_id=operator.tenant_id,
+            request=request,
+            decision=decision,
+            principal_sub=operator.sub,
+            audit_id=request._audit_id,  # type: ignore[attr-defined]
+        )
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="approval_request_not_found",
+        ) from exc
+    except UnauthorizedApprovalError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="insufficient_role",
+        ) from exc
+    except ApprovalRequestAlreadyDecidedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=f"approval_request_already_{exc.status}",
+        ) from exc
+
+    return DecideResponseBody(
+        approval_request_id=request_id,
+        decision=decision,
         reason=body.reason,
     )

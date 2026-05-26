@@ -17,6 +17,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/admin"
 	"github.com/evoila/meho/cli/internal/cmd/agent"
 	agentprincipal "github.com/evoila/meho/cli/internal/cmd/agent-principal"
+	"github.com/evoila/meho/cli/internal/cmd/approvals"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
@@ -203,6 +204,14 @@ func newRootCmd() *cobra.Command {
 	// before registerDynamicSubcommands so the backplane manifest
 	// cannot shadow the built-in `agent-principal` parent.
 	root.AddCommand(agentprincipal.NewRootCmd())
+
+	// G11.2-T5 (#818) -- approval surfacing channel verbs (list / show /
+	// approve / reject) for Initiative #803. Wraps the merged T4/T5 REST
+	// surface (/api/v1/approvals routes). Both read and write verbs
+	// require the operator role minimum; tenant scoping is enforced
+	// server-side. Registered before registerDynamicSubcommands so the
+	// backplane manifest cannot shadow the built-in `approvals` parent.
+	root.AddCommand(approvals.NewRootCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=

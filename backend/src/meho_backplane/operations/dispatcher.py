@@ -509,7 +509,10 @@ async def _handle_needs_approval(
     # approval request links back to the paused run.
     from meho_backplane.agent.invoke import current_agent_run_id_var
     from meho_backplane.db.engine import get_sessionmaker
-    from meho_backplane.operations.approval_queue import create_pending_request
+    from meho_backplane.operations.approval_queue import (
+        create_pending_request,
+        publish_approval_event,
+    )
 
     run_id = current_agent_run_id_var.get()
 
@@ -527,6 +530,16 @@ async def _handle_needs_approval(
                 run_id=run_id,
             )
             await session.commit()
+        # Publish AFTER commit so a phantom event cannot outlive a failed
+        # transaction (the helper is fail-open: a broadcast outage does
+        # not block the durable decision).
+        await publish_approval_event(
+            tenant_id=operator.tenant_id,
+            request=request,
+            decision="pending",
+            principal_sub=operator.sub,
+            audit_id=request._audit_id,  # type: ignore[attr-defined]
+        )
         return result_awaiting_approval(op_id, request.id, duration_ms)
     except Exception:
         import structlog as _structlog

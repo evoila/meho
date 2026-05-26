@@ -83,6 +83,9 @@ __all__ = [
     "approve_request",
     "create_pending_request",
     "expire_stale_requests",
+    "get_request",
+    "list_pending",
+    "publish_approval_event",
     "reject_request",
 ]
 
@@ -290,9 +293,10 @@ async def create_pending_request(
     await session.flush()
 
     # Synchronous "request" audit row -- same transaction.
+    request_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
-        audit_id=uuid.uuid4(),
+        audit_id=request_audit_id,
         operator=operator,
         request=request,
         path="approval.request",
@@ -309,6 +313,11 @@ async def create_pending_request(
         tenant_id=str(operator.tenant_id),
         run_id=str(run_id) if run_id else None,
     )
+    # Expose the audit_id as a transient attr so callers can publish the
+    # ``approval.pending`` broadcast event AFTER they commit the session.
+    # A publish-before-commit would surface a phantom event if the commit
+    # fails. The transient attr does not persist to the DB row.
+    request._audit_id = request_audit_id  # type: ignore[attr-defined]
     return request
 
 
@@ -317,38 +326,44 @@ async def approve_request(
     request_id: uuid.UUID,
     *,
     operator: Operator,
-    params: dict[str, Any],
+    params: dict[str, Any] | None = None,
 ) -> ApprovalRequest:
-    """Approve a pending request and re-dispatch the original call.
+    """Approve a pending request.
 
     Loads the :class:`ApprovalRequest` row, verifies:
 
     1. The row exists and belongs to ``operator.tenant_id`` (else 404).
     2. The operator holds at least the ``operator`` role (else 403).
     3. The row is still ``pending`` (else 409).
-    4. ``compute_params_hash(params)`` matches the stored
-       ``params_hash`` (else 422, :class:`ParamsMismatchError`).
+    4. If *params* is supplied, ``compute_params_hash(params)`` matches
+       the stored ``params_hash`` (else 422, :class:`ParamsMismatchError`).
+       The hash check is **skipped** when *params* is ``None`` — the
+       operator-decision path (G11.2-T5 MCP/CLI surface) approves by
+       request id alone and does not have the original params. The
+       agent's REST path still supplies them so the swap defence applies
+       on that branch.
 
     Then:
 
     * Flips the row to ``approved``, stamps ``reviewed_by`` + ``decided_at``.
     * Writes a synchronous "decision" audit row in the same transaction.
 
-    The **actual re-dispatch** happens *after* the caller commits this
-    transaction — the ``POST /api/v1/approvals/{id}/approve`` route
-    (:mod:`meho_backplane.api.v1.approvals`) calls
-    :func:`~meho_backplane.operations.dispatcher.dispatch` with
-    ``_approved=True`` (which bypasses the policy gate, since the approval
-    is the authorization). Separating the decision commit from the
-    re-dispatch means the approval is durable even if the re-dispatch
-    fails (the caller can retry the re-dispatch independently).
+    The **re-dispatch** (executing the approved op) happens *after* the
+    caller commits this transaction. The ``POST /api/v1/approvals/{id}/
+    approve`` REST route calls :func:`~meho_backplane.operations.dispatcher.dispatch`
+    with ``_approved=True`` (the gate-bypass: the approval is the
+    authorization). The MCP/CLI operator-decision path commits the
+    decision without re-dispatching — the agent picks up execution
+    separately. Separating the decision commit from the re-dispatch
+    means the approval is durable even if the re-dispatch fails.
 
     Args:
         session: Open :class:`AsyncSession`; flushed, not committed.
         request_id: The pending row's id.
         operator: The authenticated reviewer.
-        params: The **original** dispatch params (un-modified). The hash
-            must match the stored ``params_hash``.
+        params: The **original** dispatch params (un-modified). Required
+            on the REST path so the hash check applies; ``None`` on the
+            MCP/CLI operator-decision path.
 
     Returns:
         The updated, flushed :class:`ApprovalRequest`.
@@ -357,7 +372,8 @@ async def approve_request(
         ApprovalNotFoundError: No row for *request_id* in this tenant.
         UnauthorizedApprovalError: Operator lacks ``operator`` role.
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
-        ParamsMismatchError: Hash of *params* != stored ``params_hash``.
+        ParamsMismatchError: Hash of *params* != stored ``params_hash``
+            (only raised when *params* is supplied).
     """
     _check_reviewer_role(operator)
 
@@ -366,9 +382,10 @@ async def approve_request(
     if request.status != ApprovalRequestStatus.PENDING.value:
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
 
-    incoming_hash = compute_params_hash(params)
-    if incoming_hash != request.params_hash:
-        raise ParamsMismatchError(request_id)
+    if params is not None:
+        incoming_hash = compute_params_hash(params)
+        if incoming_hash != request.params_hash:
+            raise ParamsMismatchError(request_id)
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -376,9 +393,10 @@ async def approve_request(
     request.decided_at = now
     await session.flush()
 
+    approve_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
-        audit_id=uuid.uuid4(),
+        audit_id=approve_audit_id,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -394,6 +412,7 @@ async def approve_request(
         reviewed_by=operator.sub,
         tenant_id=str(operator.tenant_id),
     )
+    request._audit_id = approve_audit_id  # type: ignore[attr-defined]
     return request
 
 
@@ -443,9 +462,10 @@ async def reject_request(
     if reason:
         extra["reason"] = reason
 
+    reject_audit_id = uuid.uuid4()
     await _write_audit_row(
         session,
-        audit_id=uuid.uuid4(),
+        audit_id=reject_audit_id,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -462,6 +482,7 @@ async def reject_request(
         tenant_id=str(operator.tenant_id),
         reason=reason or None,
     )
+    request._audit_id = reject_audit_id  # type: ignore[attr-defined]
     return request
 
 
@@ -563,3 +584,104 @@ async def _load_for_tenant(
     if row is None or row.tenant_id != tenant_id:
         raise ApprovalNotFoundError(request_id)
     return row
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T5 (#818) read helpers for the operator surfaces (REST GET /{id},
+# MCP `meho.approvals.list` / `.get`, CLI `meho approvals list / show`).
+# ---------------------------------------------------------------------------
+
+
+async def list_pending(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    status: str | None = "pending",
+    limit: int = 50,
+    offset: int = 0,
+) -> list[ApprovalRequest]:
+    """Page through approval requests in *tenant_id*.
+
+    G11.2-T5 (#818) read substrate. ``status=None`` returns every state;
+    ``status="pending"`` (the default for the operator UX) returns only
+    requests awaiting a decision. Tenant-isolated by the WHERE clause —
+    cross-tenant ids are invisible.
+    """
+    from sqlalchemy import select
+
+    stmt = select(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id)
+    if status is not None:
+        stmt = stmt.where(ApprovalRequest.status == status)
+    stmt = stmt.order_by(ApprovalRequest.created_at.desc()).limit(limit).offset(offset)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    request_id: uuid.UUID,
+) -> ApprovalRequest:
+    """Fetch one approval request by id, tenant-isolated.
+
+    G11.2-T5 (#818) — drives ``GET /api/v1/approvals/{id}``,
+    ``meho.approvals.get``, and ``meho approvals show``. Raises
+    :class:`ApprovalNotFoundError` for missing rows or cross-tenant
+    access (indistinguishable to the caller).
+    """
+    return await _load_for_tenant(session, request_id, tenant_id)
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T5 (#818) broadcast notifications. Fail-open: a broadcast outage
+# never blocks the durable decision (the row + audit are the truth).
+# ---------------------------------------------------------------------------
+
+
+async def publish_approval_event(
+    *,
+    tenant_id: uuid.UUID,
+    request: ApprovalRequest,
+    decision: str,
+    principal_sub: str,
+    audit_id: uuid.UUID,
+) -> None:
+    """Publish a fail-open broadcast event for an approval lifecycle step.
+
+    *decision* is one of ``"pending"`` (creation), ``"approved"``, or
+    ``"rejected"``. The broadcast ``op_id`` is ``approval.<decision>``
+    so operator watchers can match the family with a simple glob.
+    """
+    try:
+        from meho_backplane.broadcast.events import BroadcastEvent, classify_op
+        from meho_backplane.broadcast.publisher import publish_event
+
+        broadcast_op_id = f"approval.{decision}"
+        event = BroadcastEvent(
+            event_id=uuid.uuid4(),
+            ts=datetime.now(UTC),
+            tenant_id=tenant_id,
+            principal_sub=principal_sub,
+            op_id=broadcast_op_id,
+            op_class=classify_op(broadcast_op_id),
+            result_status="ok",
+            audit_id=audit_id,
+            payload={
+                "op_class": classify_op(broadcast_op_id),
+                "result_status": "ok",
+                "approval_request_id": str(request.id),
+                "decision": decision,
+                "connector_id": request.connector_id,
+                "approval_op_id": request.op_id,
+            },
+        )
+        await publish_event(event)
+    except Exception:
+        # Fail-open: a broadcast outage must not block the durable
+        # decision. The row + audit row remain the source of truth.
+        _log.exception(
+            "approval_broadcast_failed",
+            approval_request_id=str(request.id),
+            decision=decision,
+        )

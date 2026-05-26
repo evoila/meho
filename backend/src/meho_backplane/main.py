@@ -596,11 +596,15 @@ app.include_router(api_v1_agent_principals_router)
 # / final events). Operator-level; tenant-scoped via the JWT; runs only an
 # enabled definition in the operator's tenant.
 app.include_router(api_v1_agent_runs_router)
-# G11.2-T4 (#817) -- approval queue surface: list pending requests,
-# approve (approve + re-dispatch), reject. POST routes write a decision
-# audit row in the same transaction as the status flip; the approve
-# route then re-dispatches the original call and returns the result.
-# Operator-level; tenant-scoped via the JWT's tenant_id claim.
+# G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
+# GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
+# POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``
+# bypass), POST /approvals/{id}/reject. POST routes write the decision
+# audit row in the same transaction as the status flip; approve then
+# re-dispatches the original call with the original params and returns
+# the result. Each create / approve / reject publishes a broadcast event
+# (T5) so a ``broadcast_watch`` operator session learns of pending
+# requests without polling. Operator-level; tenant-scoped via the JWT.
 app.include_router(api_v1_approvals_router)
 # G7.1-T2 (#314) -- tenant-conventions CRUD + history (list / show /
 # create / update / delete / history). Reads gated to operator+;

@@ -4739,6 +4739,60 @@
         }
       }
     },
+    "/api/v1/approvals/{request_id}": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Get Approval Request",
+        "description": "Inspect a single approval request by id (G11.2-T5 / #818).\n\nReturns the full :class:`ApprovalRequestView` including\n``proposed_effect`` so an operator can decide before approving.\nCross-tenant requests and absent ids both return 404 (the two cases\nare indistinguishable to callers \u2014 same tenant-isolation discipline\nas :func:`get_request`).",
+        "operationId": "get_approval_request_api_v1_approvals__request_id__get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalRequestView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals/{request_id}/approve": {
       "post": {
         "tags": [
@@ -4850,6 +4904,70 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RejectResponseBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{request_id}/decide": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Decide Approval Request",
+        "description": "Capture an operator decision without re-dispatching (G11.2-T5).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and publishes the ``approval.{approved,rejected}``\nbroadcast event. **Does not** re-dispatch the original op \u2014 that is\nthe agent's path (``POST .../approve`` with ``params``, which uses\nthe ``_approved`` gate-bypass). Backs the CLI/MCP operator-decision\nflow where the operator approves by id alone.",
+        "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecideRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecideResponseBody"
                 }
               }
             }
@@ -7962,6 +8080,53 @@
         ],
         "title": "DbStatus",
         "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe."
+      },
+      "DecideRequestBody": {
+        "properties": {
+          "decision": {
+            "type": "string",
+            "title": "Decision",
+            "description": "One of 'approved' / 'rejected'."
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Optional rationale recorded on the decision audit row.",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "title": "DecideRequestBody",
+        "description": "POST body for ``/decide`` \u2014 the operator-decision path.\n\nDistinct from :class:`ApproveRequestBody` (which requires the\noriginal ``params`` for the agent / REST re-dispatch path). The\noperator-decision path captures the decision durably (status flip +\ndecision audit row + ``approval_decided`` broadcast) without\nre-dispatching \u2014 the agent's REST path is what re-dispatches with\nthe params it has."
+      },
+      "DecideResponseBody": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "decision",
+          "reason"
+        ],
+        "title": "DecideResponseBody",
+        "description": "Response for a successful operator decision."
       },
       "EditGroupBody": {
         "properties": {

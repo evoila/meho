@@ -539,6 +539,11 @@ def build_kb_router() -> APIRouter:
             )
 
         # Re-render the editor modal with the error message.
+        # A fresh CSRF token is minted here so that the re-rendered modal
+        # carries a valid token in its hx-headers attributes.  The cookie
+        # must also be refreshed: without set_cookie the browser still holds
+        # the token that was consumed by this request, and every subsequent
+        # HTMX POST (editor-preview, retry save) would be rejected with 403.
         csrf_token = mint_csrf_token(str(session.session_id))
         context = {
             "error_message": error_message,
@@ -547,8 +552,17 @@ def build_kb_router() -> APIRouter:
             "tags": tags,
             "csrf_token": csrf_token,
         }
-        return get_templates().TemplateResponse(
+        response = get_templates().TemplateResponse(
             request, "kb/_editor_modal.html", context, status_code=422
         )
+        response.set_cookie(
+            key=CSRF_COOKIE_NAME,
+            value=csrf_token,
+            httponly=False,
+            secure=True,
+            samesite="strict",
+            path="/ui",
+        )
+        return response
 
     return router

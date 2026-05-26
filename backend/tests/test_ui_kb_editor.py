@@ -546,3 +546,130 @@ def test_detail_page_kb_body_class_present() -> None:
 
     assert response.status_code == 200, response.text
     assert 'class="prose prose-sm max-w-none kb-body"' in response.text
+
+
+# ---------------------------------------------------------------------------
+# B1 — CSRF cookie refreshed on 422 re-render (fix verification)
+# ---------------------------------------------------------------------------
+
+
+def test_editor_save_422_sets_fresh_csrf_cookie() -> None:
+    """422 re-render must set a fresh CSRF cookie so subsequent POSTs succeed.
+
+    Without the fix, ``kb_editor_save`` minted a fresh token for the
+    template context but never called ``response.set_cookie``.  The browser
+    continued to send the *old* cookie value, which no longer matched the
+    new token embedded in the re-rendered modal's ``hx-headers``, causing
+    every follow-up HTMX POST to receive 403 from CSRFMiddleware.
+
+    This test asserts:
+    1. The 422 response carries a ``Set-Cookie`` header for ``csrf_token``.
+    2. The cookie value is a non-empty string (a freshly minted token).
+    3. A subsequent ``POST /ui/kb/editor-preview`` using the new token
+       succeeds (200), proving the refreshed cookie round-trips correctly.
+    """
+    from meho_backplane.kb.schemas import InvalidKbSlugError
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+
+        # --- Step 1: trigger a 422 ---
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_jwt_for_audience",
+                new_callable=AsyncMock,
+                return_value=_make_fake_admin_operator(_TENANT_A),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
+                new_callable=AsyncMock,
+                side_effect=InvalidKbSlugError("invalid slug: 'BAD'"),
+            ),
+        ):
+            r422 = client.post(
+                "/ui/kb/new",
+                data={"slug": "BAD", "body": "body text", "tags": ""},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert r422.status_code == 422, r422.text
+
+    # The response must set a fresh CSRF cookie.
+    new_csrf = r422.cookies.get(CSRF_COOKIE_NAME)
+    assert new_csrf is not None, "422 response did not set a fresh CSRF cookie"
+    assert len(new_csrf) > 0
+
+    # --- Step 2: use the new token for a follow-up preview POST ---
+    with respx.mock(assert_all_called=False):
+        client2 = _authenticated_client(session_id)
+        client2.cookies.set(CSRF_COOKIE_NAME, new_csrf)
+        r_preview = client2.post(
+            "/ui/kb/editor-preview",
+            data={"body": "## Hello"},
+            headers={CSRF_HEADER_NAME: new_csrf},
+        )
+
+    assert r_preview.status_code == 200, r_preview.text
+
+
+# ---------------------------------------------------------------------------
+# B2 — Re-rendered modal contains editor anchor and fresh CSRF token
+# ---------------------------------------------------------------------------
+
+
+def test_editor_save_422_rerenders_modal_with_editor_anchor_and_csrf() -> None:
+    """422 fragment must contain ``#kb-editor-cm`` and a non-empty CSRF token.
+
+    This verifies the server side of the B2 fix: after a failed save the
+    re-rendered ``_editor_modal.html`` fragment must include the CodeMirror
+    mount point (``id="kb-editor-cm"``) and a non-empty ``csrf_token`` in
+    the ``hx-headers`` attributes so the JS ``htmx:afterSwap`` handler can
+    destroy the stale view and mount a fresh one.
+    """
+    from meho_backplane.kb.schemas import InvalidKbSlugError
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(
+                "meho_backplane.ui.routes.kb.routes.verify_jwt_for_audience",
+                new_callable=AsyncMock,
+                return_value=_make_fake_admin_operator(_TENANT_A),
+            ),
+            patch(
+                "meho_backplane.ui.routes.kb.routes.KbService.create_entry",
+                new_callable=AsyncMock,
+                side_effect=InvalidKbSlugError("invalid slug: 'BAD'"),
+            ),
+        ):
+            response = client.post(
+                "/ui/kb/new",
+                data={"slug": "BAD", "body": "some body", "tags": ""},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 422, response.text
+    html = response.text
+
+    # Modal root element present (HTMX outerHTML swap target).
+    assert 'id="kb-editor-modal"' in html
+    # CodeMirror mount point present — JS needs this to re-mount the editor.
+    assert 'id="kb-editor-cm"' in html
+    # A non-placeholder CSRF token is embedded in the hx-headers attributes.
+    # The token is rendered by Jinja2 into the two hx-headers strings;
+    # it must be non-empty so the re-mounted editor can POST successfully.
+    new_csrf_cookie = response.cookies.get(CSRF_COOKIE_NAME)
+    assert new_csrf_cookie, "422 fragment must carry a fresh CSRF cookie"
+    assert new_csrf_cookie in html, (
+        "Fresh CSRF token must appear inside the re-rendered modal fragment"
+    )

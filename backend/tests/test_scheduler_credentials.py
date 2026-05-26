@@ -163,6 +163,74 @@ def test_custom_env_pattern_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
     assert secret == "rotating-key"
 
 
+def test_resolve_uppercases_full_env_var_name_even_with_lowercase_pattern(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lower-cased pattern still resolves to the upper-cased env var.
+
+    The module docstring promises "the whole substituted name is
+    upper-cased". An operator who sets a non-upper-cased pattern
+    (e.g. ``meho_agent_secret_{client_id}`` -- common shape if their
+    Helm value template renders that way) must still find their secret
+    at ``MEHO_AGENT_SECRET_AGENT_REPORTER`` rather than at a literal
+    lower-case key. Linux env-var lookup is case-sensitive, so if the
+    code only upper-cased the ``client_id`` substitution this test
+    would fail with :class:`AgentCredentialsUnresolvedError`.
+    """
+    monkeypatch.setenv(
+        "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
+        "meho_agent_secret_{client_id}",
+    )
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "the-secret")
+    get_settings.cache_clear()
+
+    _, secret = resolve_agent_credentials("agent:reporter")
+
+    assert secret == "the-secret"
+
+
+@pytest.mark.parametrize(
+    "bad_pattern",
+    [
+        "MEHO_AGENT_SECRET_PROD",  # no {client_id} placeholder
+        "MEHO_AGENT_SECRET_{0}",  # positional, no client_id key
+        "MEHO_AGENT_SECRET_{client_id",  # unbalanced opening brace
+        "MEHO_AGENT_SECRET_client_id}",  # unbalanced closing brace
+    ],
+)
+def test_settings_rejects_malformed_scheduler_secret_pattern(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_pattern: str,
+) -> None:
+    """The settings validator fails fast at load on malformed patterns.
+
+    Pull-up to :class:`Settings` construction so a typo'd env var
+    surfaces as a startup error with an actionable message rather
+    than at first scheduled fire (when it would either collapse
+    every agent onto one shared secret or raise on every fire).
+    """
+    monkeypatch.setenv("SCHEDULER_AGENT_SECRET_ENV_PATTERN", bad_pattern)
+    get_settings.cache_clear()
+
+    with pytest.raises(ValueError, match="SCHEDULER_AGENT_SECRET_ENV_PATTERN"):
+        get_settings()
+
+
+def test_settings_accepts_valid_scheduler_secret_pattern(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sanity: a valid pattern passes the validator without error."""
+    monkeypatch.setenv(
+        "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
+        "CORP_AGENT_{client_id}_SECRET",
+    )
+    get_settings.cache_clear()
+
+    settings = get_settings()
+
+    assert settings.scheduler_agent_secret_env_pattern == "CORP_AGENT_{client_id}_SECRET"
+
+
 def test_error_message_names_expected_env_var(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

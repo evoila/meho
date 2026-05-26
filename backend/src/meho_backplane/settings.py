@@ -757,6 +757,47 @@ class Settings(BaseModel):
             )
         return value
 
+    @field_validator("scheduler_agent_secret_env_pattern")
+    @classmethod
+    def _scheduler_secret_pattern_must_substitute_client_id(cls, value: str) -> str:
+        """Reject env-var patterns that don't substitute ``{client_id}``.
+
+        Pulled up to :class:`Settings` construction so three otherwise-
+        silent failure shapes surface at pod startup rather than at
+        first scheduled fire:
+
+        * **Pattern lacks ``{client_id}``** (typo / copy-paste error):
+          ``str.format`` returns the literal pattern, every agent
+          resolves to the same env-var key, all scheduled runs share
+          one secret. Cross-tenant principal-credential bleed.
+        * **Pattern uses positional ``{0}`` instead of named
+          ``{client_id}``**: ``str.format(client_id=...)`` raises
+          :class:`KeyError` on first fire. The precondition gate logs
+          ``scheduler_credentials_unresolved`` and skips forever.
+        * **Pattern has unbalanced braces**: ``str.format`` raises
+          :class:`ValueError` on first fire. Same skip-forever path.
+
+        Same fail-closed-at-startup discipline as
+        :meth:`_broadcast_url_must_use_supported_scheme` and
+        :meth:`_database_url_must_be_async` -- a misconfigured env var
+        should fail the import chain immediately with an actionable
+        message, not days later under load.
+        """
+        if "{client_id}" not in value:
+            raise ValueError(
+                f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must include "
+                f"'{{client_id}}' so each agent resolves to its own env var; "
+                f"got: {value!r}"
+            )
+        try:
+            value.format(client_id="TEST_CLIENT_ID")
+        except (IndexError, KeyError, ValueError) as exc:
+            raise ValueError(
+                f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must be a valid "
+                f"str.format pattern; got: {value!r}"
+            ) from exc
+        return value
+
 
 # Flat env-var -> Settings constructor, one kwarg per field: the length is
 # the field count, not branching complexity (McCabe is trivial). Extracting

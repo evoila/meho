@@ -118,7 +118,16 @@ def resolve_agent_credentials(identity_ref: str) -> tuple[str, str]:
     """
     settings = get_settings()
     sanitised = agent_client_id_from_identity_ref(identity_ref).upper()
-    env_name = settings.scheduler_agent_secret_env_pattern.format(client_id=sanitised)
+    # Upper-case the *whole* substituted name, not just the
+    # ``client_id`` token. Operators who set a non-upper-cased pattern
+    # (e.g. ``meho_agent_secret_{client_id}``) otherwise resolve to a
+    # mixed-case env-var name that Linux's case-sensitive lookup would
+    # miss -- the precondition gate would skip every fire with a
+    # ``credentials_unresolved`` warning that points at the secret
+    # rather than the case-mismatch. The contract in this module's
+    # docstring is "the whole substituted name is upper-cased"; this
+    # ``.upper()`` makes the code match it.
+    env_name = settings.scheduler_agent_secret_env_pattern.format(client_id=sanitised).upper()
     secret = os.environ.get(env_name, "").strip()
     if not secret:
         raise AgentCredentialsUnresolvedError(

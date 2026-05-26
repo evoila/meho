@@ -442,6 +442,15 @@ async def _fire_cron(
             row.id,
             reason=f"invalid_cron_expr:{exc.expr!r}",
         )
+        # Commit the park UPDATE so a sibling-row rollback later in
+        # ``run_one_tick`` cannot undo it. Without this commit the
+        # session-level rollback for a sibling row's failure would
+        # revert the park and leave the corrupted-cron row re-tripping
+        # this handler on every tick (CPU + log-spam, no recovery).
+        # Mirrors the post-park commit in the ``unknown_kind`` path
+        # elsewhere in the loop -- the per-row failure-isolation
+        # discipline the module docstring documents.
+        await session.commit()
         return False
     if advanced is None:
         return False

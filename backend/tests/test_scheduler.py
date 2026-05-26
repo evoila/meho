@@ -54,6 +54,7 @@ from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    AgentPrincipal,
     AgentRun,
     AgentRunTrigger,
     ScheduledTrigger,
@@ -151,11 +152,46 @@ def _make_invoker() -> AgentInvoker:
 
 
 async def _seed_tenant_and_agent(name: str = "reporter") -> uuid.UUID:
-    """Insert one Tenant and one enabled AgentDefinition; return def id."""
+    """Insert one Tenant + AgentPrincipal + enabled AgentDefinition; return def id.
+
+    The ``AgentPrincipal`` seed exists to satisfy
+    :meth:`AgentDefinitionService._validate_identity_ref` (G11.2-T8 #1108),
+    which rejects ``identity_ref`` values that don't name a non-revoked
+    principal in the same tenant. The principal's
+    ``keycloak_client_id`` matches the definition's ``identity_ref``
+    (``agent:<name>``) so the validation accepts the create.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         if await session.get(Tenant, _TENANT_A) is None:
             session.add(Tenant(id=_TENANT_A, slug="tenant-a", name="Tenant A"))
+            await session.commit()
+        # G11.2-T8 #1108: AgentDefinitionService.create validates that
+        # identity_ref names a non-revoked AgentPrincipal in the same
+        # tenant. Seed the principal so the validation accepts the
+        # create. Idempotent on re-seed (the principal_tenant_name
+        # unique-index would IntegrityError; the get-or-insert guard
+        # below skips the re-add when a prior _seed call already
+        # created it within the same test process).
+        existing_principal = await session.execute(
+            select(AgentPrincipal).where(
+                AgentPrincipal.tenant_id == _TENANT_A,
+                AgentPrincipal.keycloak_client_id == f"agent:{name}",
+            )
+        )
+        if existing_principal.scalar_one_or_none() is None:
+            session.add(
+                AgentPrincipal(
+                    id=uuid.uuid4(),
+                    tenant_id=_TENANT_A,
+                    name=name,
+                    keycloak_client_id=f"agent:{name}",
+                    keycloak_internal_id=f"kc-internal-{name}",
+                    owner_sub="seed-admin",
+                    revoked=False,
+                    created_by_sub="seed-admin",
+                )
+            )
             await session.commit()
     service = AgentDefinitionService()
     entry = await service.create(

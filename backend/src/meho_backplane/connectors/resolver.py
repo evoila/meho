@@ -38,7 +38,22 @@ Tie-break ladder
 When two or more connectors advertise support for a target's
 ``(product, version)``:
 
-1. **Most-specific-version-match wins.** A connector with
+1. **Versioned beats wildcard.** Some products have a v1 *wildcard*
+   registry entry alongside a v2 *versioned* entry — the K8s connector
+   is the shipped case (Kubernetes registers both
+   ``("k8s", "", "")`` from :func:`register_connector` and
+   ``("k8s", "1.x", "k8s")`` from :func:`register_connector_v2` so
+   ``get_connector("k8s")`` keeps working for the ``/probe`` route
+   while ``connector_id="k8s-1.x"`` resolves through v2). When the
+   v1 wildcard and ≥1 v2 versioned entries share a candidate slot,
+   the wildcard is *demoted* (removed from the candidate list) before
+   the rest of the ladder runs. The wildcard is conceptually "matches
+   any version" and shouldn't compete with a connector that names a
+   specific version triple. The rule is generalized to any future
+   connector that double-registers under the same shape (a v2 entry
+   with empty ``version`` and ``impl_id`` slots), not just K8s.
+
+2. **Most-specific-version-match wins.** A connector with
    ``supported_version_range=">=9.0,<10.0"`` (span = 1.0 minor versions)
    beats ``">=6.5,<10.0"`` (span = 3.5 minor versions) for a target with
    ``version="9.0.2"``. Specificity is measured by the size of the
@@ -47,18 +62,18 @@ When two or more connectors advertise support for a target's
    specific than a half-bounded one; a half-bounded range is more
    specific than an unbounded one (``None`` / no range).
 
-2. **Operator/tenant preference.** When specificity ties, the
+3. **Operator/tenant preference.** When specificity ties, the
    ``target.preferred_impl_id`` (if set) selects the matching
    implementation. Operators set this on the Target row to break ties
    that the version-range ladder cannot resolve (e.g. two vendors
    both advertising the same range for the same product).
 
-3. **Connector class priority.** When operator preference doesn't
+4. **Connector class priority.** When operator preference doesn't
    disambiguate (not set, or the preferred impl isn't a candidate),
    the integer :attr:`Connector.priority` class attribute breaks the
    tie — higher wins.
 
-If after all three steps two or more candidates remain, the resolver
+If after all four steps two or more candidates remain, the resolver
 raises :exc:`AmbiguousConnectorResolution` listing the candidates so the
 operator can set ``preferred_impl_id`` to pick one.
 
@@ -304,25 +319,49 @@ def _run_tie_break_ladder(
     candidates: list[_Candidate],
     preferred_impl_id: str | None,
 ) -> tuple[_Candidate | None, str, list[_Candidate]]:
-    """Apply the three-step tie-break ladder to a non-empty candidate list.
+    """Apply the four-step tie-break ladder to a non-empty candidate list.
 
     Returns ``(winner, reason, remaining)``:
 
     * ``winner`` — the single chosen candidate, or ``None`` if the ladder
       ended with two or more candidates still tied.
-    * ``reason`` — the step that picked the winner (``"specificity"`` /
+    * ``reason`` — the step that picked the winner
+      (``"versioned_over_wildcard"`` / ``"specificity"`` /
       ``"operator_preference"`` / ``"priority"``) or ``"ambiguous"``.
     * ``remaining`` — the post-ladder candidate list. When ``winner`` is
       ``None`` the caller raises ``AmbiguousConnectorResolution`` with
       these as the candidates the operator must disambiguate.
     """
-    # Step 1 — most-specific-version-match.
+    # Step 1 — versioned beats wildcard. When a v1 wildcard entry
+    # (registry key ``(product, "", "")``) and ≥1 v2 versioned entries
+    # share the candidate list, demote the wildcard. The wildcard is the
+    # v1 backward-compat fallback (KubernetesConnector self-registers
+    # under both ``("k8s", "", "")`` and ``("k8s", "1.x", "k8s")`` so
+    # ``get_connector("k8s")`` keeps working for the ``/probe`` route);
+    # it should not compete on equal footing with a connector that
+    # names a concrete ``(version, impl_id)`` pair. Without this step,
+    # an unfingerprinted K8s target (target.fingerprint = None →
+    # target_version = None) leaves both entries in play, both score
+    # ``(_SPECIFICITY_UNBOUNDED, 0.0)`` on supported_version_range,
+    # operator_preference is absent, priorities tie, and
+    # ``AmbiguousConnectorResolution`` propagates as a bare-500 to the
+    # operator (G0.14-T2 / signal 9). The rule generalizes to any
+    # future connector that uses the same double-registration shape.
+    has_versioned = any(c.version != "" or c.impl_id != "" for c in candidates)
+    if has_versioned:
+        non_wildcards = [c for c in candidates if c.version != "" or c.impl_id != ""]
+        if len(non_wildcards) < len(candidates):
+            candidates = non_wildcards
+            if len(candidates) == 1:
+                return candidates[0], "versioned_over_wildcard", candidates
+
+    # Step 2 — most-specific-version-match.
     best_score = min(c.specificity_score for c in candidates)
     candidates = [c for c in candidates if c.specificity_score == best_score]
     if len(candidates) == 1:
         return candidates[0], "specificity", candidates
 
-    # Step 2 — operator/tenant preference. Falls through to priority when
+    # Step 3 — operator/tenant preference. Falls through to priority when
     # the override doesn't disambiguate (zero matches → ignored; multiple
     # matches → corner case where two impls share the preferred id, so
     # let priority break it rather than raising).
@@ -333,7 +372,7 @@ def _run_tie_break_ladder(
         if len(preferred) > 1:
             candidates = preferred
 
-    # Step 3 — connector class priority (higher wins).
+    # Step 4 — connector class priority (higher wins).
     best_priority = max(c.cls.priority for c in candidates)
     candidates = [c for c in candidates if c.cls.priority == best_priority]
     if len(candidates) == 1:

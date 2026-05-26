@@ -370,6 +370,13 @@ def test_upload_page_renders_for_admin() -> None:
     assert CSRF_COOKIE_NAME in response.cookies
     # The upload form's hx-post target is present.
     assert "/ui/kb/upload" in body
+    # name="file" must be present on #kb-file-input so HTMX hx-include
+    # serialises the input into the multipart POST; without it HTMX 2.x's
+    # sn() function skips any element whose .name === "" and no files reach
+    # the server regardless of which upload path (browse or drag-and-drop)
+    # populated the input.
+    assert 'name="file"' in body, "#kb-file-input must carry name='file' for HTMX hx-include"
+    assert 'id="kb-file-input"' in body
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +694,56 @@ def test_upload_drag_drop_files_reach_server() -> None:
     body = response.text
     assert "alert-success" in body
     assert "dragged-entry" in body
+    # OOB swap row confirms entry was created.
+    assert "hx-swap-oob" in body
+
+
+# ---------------------------------------------------------------------------
+# B2 regression: browse-click path must serialise a file in the multipart POST
+# ---------------------------------------------------------------------------
+
+
+def test_upload_browse_click_files_reach_server() -> None:
+    """Files selected via the browse button are processed.
+
+    B2 fix: the hidden ``#kb-file-input`` was missing ``name="file"``.
+    HTMX 2.0.9's ``sn()`` helper skips any element whose ``.name === ""``,
+    so ``hx-include="#kb-file-input"`` produced an empty FormData and
+    FastAPI returned 422 on every upload.  Adding ``name="file"`` fixes
+    both the browse-click path (where the browser serialises the input
+    natively) and the drag-and-drop path (where Alpine assigns files via
+    DataTransfer and the input is then included by HTMX).
+
+    This test simulates the browse-click path: a file is POSTed using the
+    ``"file"`` multipart field name that the corrected input now carries,
+    confirming the server processes it successfully.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_discovery_and_jwks(mock_router, _JWKS)
+        token = _mint_admin_token(_TENANT_A)
+        session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token)
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        csrf = mint_csrf_token(str(session_id))
+
+        with patch(
+            "meho_backplane.retrieval.indexer.get_embedding_service",
+            return_value=_fake_embedding_service(),
+        ):
+            # Simulate the browse-click path: file is submitted under the
+            # "file" field name that name="file" on #kb-file-input provides.
+            response = _upload_single(
+                client,
+                filename="browsed-entry.md",
+                content=b"# Browsed\n\nThis file was selected via the browse button.\n",
+                csrf=csrf,
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "alert-success" in body
+    assert "browsed-entry" in body
     # OOB swap row confirms entry was created.
     assert "hx-swap-oob" in body
 

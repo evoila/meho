@@ -198,15 +198,28 @@ async def _create_handler(
         payload = ScheduledTriggerCreate.model_validate(arguments)
     except ValidationError as exc:
         raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
+    # Cross-tenant admin: when payload.tenant_id is provided, route the
+    # create under that tenant -- but only for tenant_admin callers.
+    # Operator-role callers attempting cross-tenant create surface as
+    # invalid-params (mirrors the REST 403 contract). A silent drop
+    # would mis-place the trigger under the caller's own tenant and
+    # quietly break the cross-tenant admin path on the MCP transport
+    # (review M1 on PR #1128).
+    target_tenant = operator.tenant_id
+    if payload.tenant_id is not None:
+        if operator.tenant_role != TenantRole.TENANT_ADMIN:
+            raise McpInvalidParamsError("tenant_id_requires_tenant_admin")
+        target_tenant = payload.tenant_id
     structlog.contextvars.bind_contextvars(
         audit_op_id=_SCHEDULER_OP_IDS["create"],
         audit_op_class="write",
         audit_trigger_kind=payload.kind.value,
+        audit_tenant_scope=("other" if target_tenant != operator.tenant_id else "self"),
     )
     service = SchedulerAdminService()
     try:
         entry = await service.create(
-            tenant_id=operator.tenant_id,
+            tenant_id=target_tenant,
             created_by_sub=operator.sub,
             payload=payload,
         )
@@ -229,9 +242,11 @@ register_mcp_tool(
             "Optional: timezone (IANA name, default 'UTC'), inputs (JSON "
             "object), identity_sub (default '__scheduler__'), "
             "in_flight_policy ('fail_into_audit'|'resume', default "
-            "'fail_into_audit'). Invalid cron expression -> error with "
+            "'fail_into_audit'), tenant_id (UUID; tenant_admin-only "
+            "cross-tenant target). Invalid cron expression -> error with "
             "detail 'invalid_arguments'; unknown agent_definition_id -> "
-            "'agent_definition_not_found'. Response: {trigger_id, "
+            "'agent_definition_not_found'; non-admin passing tenant_id -> "
+            "'tenant_id_requires_tenant_admin'. Response: {trigger_id, "
             "trigger: {...}}."
         ),
         inputSchema={
@@ -277,6 +292,17 @@ register_mcp_tool(
                     "type": "string",
                     "enum": ["fail_into_audit", "resume"],
                     "description": "Killed-mid-flight policy (default fail_into_audit).",
+                },
+                "tenant_id": {
+                    "type": ["string", "null"],
+                    "format": "uuid",
+                    "description": (
+                        "Target tenant UUID for cross-tenant admin create "
+                        "(tenant_admin only; operator-role callers see "
+                        "'tenant_id_requires_tenant_admin'). When omitted "
+                        "or null, the trigger is created under the "
+                        "caller's tenant."
+                    ),
                 },
             },
             "required": ["kind", "agent_definition_id"],

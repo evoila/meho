@@ -555,3 +555,31 @@ class TestHistoryReplay:
             response = client.get("/ui/broadcast/history")
         assert response.status_code == 302
         assert response.headers["location"].startswith("/ui/auth/login?return_to=")
+
+    def test_history_returns_200_and_empty_when_valkey_unreachable(self) -> None:
+        """A Valkey teardown degrades the pane to its empty state, not a 500.
+
+        Acceptance criterion (G6.4-T4 #1103): the UI history route MUST
+        keep its fail-soft contract -- a transient broadcast-subchart
+        blip degrades the Last-24h pane to its empty state rather than
+        500-ing the fragment. The shared helper's fail-soft wrapper
+        catches :class:`redis.exceptions.RedisError`; this test pins the
+        end-to-end behaviour at the HTTP edge.
+        """
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        session_id = _seed_session_sync(tenant_id=_TENANT_A)
+        broadcast_client = get_broadcast_client()
+        mock = AsyncMock(side_effect=RedisConnectionError("simulated valkey teardown"))
+        with (
+            respx.mock(assert_all_called=False),
+            patch.object(broadcast_client, "xrange", new=mock),
+        ):
+            client = _authenticated_client(session_id)
+            response = client.get("/ui/broadcast/history")
+        # The fragment renders successfully with the empty-state copy --
+        # no 500, no broken HTMX swap target.
+        assert response.status_code == 200, response.text
+        assert "No activity in the last" in response.text
+        # The teardown was actually exercised (sanity).
+        assert mock.await_count == 1

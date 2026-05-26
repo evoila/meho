@@ -55,12 +55,13 @@ from meho_backplane.broadcast import (
     publish_event,
     reset_broadcast_client_for_testing,
 )
-from meho_backplane.mcp.schemas import INVALID_PARAMS
-from meho_backplane.mcp.tools.broadcast import (
+from meho_backplane.broadcast.history import (
+    InvalidSinceError,
     _default_since_ms,
-    _handler_recent,
     _parse_since,
 )
+from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.mcp.tools.broadcast import _handler_recent
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -293,12 +294,44 @@ def test_since_cursor_form_becomes_exclusive_lower_bound(
     assert kwargs["min"] == "(1747800000000-0"
 
 
-def test_since_invalid_iso_rejects_with_invalid_params() -> None:
-    """A garbled ``since`` raises ``McpInvalidParamsError`` at parse time."""
-    from meho_backplane.mcp.server import McpInvalidParamsError
+def test_since_invalid_iso_rejects_with_domain_error() -> None:
+    """A garbled ``since`` raises :class:`InvalidSinceError` at parse time.
 
-    with pytest.raises(McpInvalidParamsError, match="not a valid ISO-8601"):
+    The shared helper raises a domain error rather than the MCP-specific
+    :class:`McpInvalidParamsError` (the MCP handler maps the domain
+    error to ``-32602`` upstream). The end-to-end MCP wire test for the
+    same condition lives at
+    :func:`test_invalid_since_iso_returns_invalid_params_at_wire` below.
+    """
+    with pytest.raises(InvalidSinceError, match="not a valid ISO-8601"):
         _parse_since("not-a-real-timestamp")
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_invalid_since_iso_returns_invalid_params_at_wire(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A garbled ``since`` from a wire client surfaces as JSON-RPC -32602.
+
+    The shared helper raises :class:`InvalidSinceError`; the MCP handler
+    catches that domain error and re-raises it as
+    :class:`McpInvalidParamsError`, which the dispatcher renders as
+    ``-32602``. Locks the contract: the helper's split from MCP error
+    vocabulary doesn't leak Pyhton exception names to wire clients.
+    """
+    client, _op = client_with_operator
+    resp = post_mcp(
+        client,
+        _tools_call("meho.broadcast.recent", {"since": "garbled"}),
+    )
+    body = resp.json()
+    assert "error" in body
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "since" in body["error"]["message"].lower()
 
 
 def test_parse_since_default_is_now_minus_30m() -> None:

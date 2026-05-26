@@ -292,7 +292,7 @@ def test_ready_features_block_reflects_unwired_keycloak_admin(
         "KEYCLOAK_ADMIN_CLIENT_ID",
         "KEYCLOAK_ADMIN_CLIENT_SECRET",
     ]
-    assert agent_runtime["docs"] == "docs/cross-repo/keycloak-admin-client.md"
+    assert agent_runtime["docs"] == "docs/cross-repo/keycloak-agent-client.md"
 
 
 def test_ready_features_block_reflects_wired_keycloak_admin(

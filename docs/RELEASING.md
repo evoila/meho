@@ -215,7 +215,7 @@ Walk the four gates in the order an operator hits them:
   `KEYCLOAK_ADMIN_CLIENT_SECRET`. Provision the confidential
   admin Keycloak client (with `manage-clients` service-account role
   on the realm) per
-  [`docs/cross-repo/keycloak-admin-client.md`](cross-repo/keycloak-admin-client.md).
+  [`docs/cross-repo/keycloak-agent-client.md`](cross-repo/keycloak-agent-client.md).
   Without these, `POST /api/v1/agent-principals` returns 503
   `keycloak_admin_not_configured: KEYCLOAK_ADMIN_URL / KEYCLOAK_ADMIN_CLIENT_ID
   / KEYCLOAK_ADMIN_CLIENT_SECRET are unset.` — the named env vars are

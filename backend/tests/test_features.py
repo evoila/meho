@@ -70,7 +70,7 @@ def test_agent_runtime_unconfigured_lists_all_three_missing_env_vars() -> None:
         "KEYCLOAK_ADMIN_CLIENT_ID",
         "KEYCLOAK_ADMIN_CLIENT_SECRET",
     ]
-    assert agent_runtime["docs"] == "docs/cross-repo/keycloak-admin-client.md"
+    assert agent_runtime["docs"] == "docs/cross-repo/keycloak-agent-client.md"
 
 
 def test_agent_runtime_configured_when_all_three_present() -> None:
@@ -88,7 +88,7 @@ def test_agent_runtime_configured_when_all_three_present() -> None:
     # Doc reference stays in the block on the happy path too: the
     # operator looking at the configured surface still wants the
     # provenance trail to the doc that explains the setup.
-    assert agent_runtime["docs"] == "docs/cross-repo/keycloak-admin-client.md"
+    assert agent_runtime["docs"] == "docs/cross-repo/keycloak-agent-client.md"
 
 
 def test_agent_runtime_partial_lists_only_unset_env_vars() -> None:

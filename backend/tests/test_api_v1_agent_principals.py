@@ -468,7 +468,7 @@ async def test_keycloak_not_configured_returns_503(
     assert "KEYCLOAK_ADMIN_URL" in detail
     assert "KEYCLOAK_ADMIN_CLIENT_ID" in detail
     assert "KEYCLOAK_ADMIN_CLIENT_SECRET" in detail
-    assert "docs/cross-repo/keycloak-admin-client.md" in detail
+    assert "docs/cross-repo/keycloak-agent-client.md" in detail
 
 
 @pytest.mark.asyncio

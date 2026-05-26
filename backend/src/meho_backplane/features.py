@@ -25,9 +25,15 @@ box on my deploy?". Each entry carries:
   the corresponding settings.py field docstring tells the operator
   what the value is for.
 * ``docs`` — relative path inside the repo / rendered docs site
-  explaining how to provision the missing pieces. Omitted on
-  fully-configured entries and on the transitive ``approval_queue``
-  entry (which has a ``depends_on`` field instead).
+  explaining how to provision the missing pieces. Present
+  unconditionally on ``agent_runtime`` and ``ui_surface`` (configured
+  and unconfigured alike, so the operator looking at the happy-path
+  surface still has the provenance trail to the doc that describes
+  the setup). Absent on ``audit_replay`` (capture is feature-coupled
+  to MCP itself, not to an admin-configurable knob — operators have
+  no separate setup doc to read) and on the transitive
+  ``approval_queue`` entry (which surfaces a ``depends_on`` field
+  pointing at ``agent_runtime`` instead).
 
 The audit-replay entry additionally exposes ``capture_mode`` —
 ``"enforced"`` until G0.14-T6 (#1147) decouples capture from
@@ -85,7 +91,7 @@ def _agent_runtime_block(settings: Settings) -> dict[str, Any]:
     return {
         "configured": not missing,
         "missing_env": missing,
-        "docs": "docs/cross-repo/keycloak-admin-client.md",
+        "docs": "docs/cross-repo/keycloak-agent-client.md",
     }
 
 

@@ -84,7 +84,7 @@ KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL: str = (
     "keycloak_admin_not_configured: KEYCLOAK_ADMIN_URL / "
     "KEYCLOAK_ADMIN_CLIENT_ID / KEYCLOAK_ADMIN_CLIENT_SECRET are unset. "
     "Provision the confidential admin client per "
-    "docs/cross-repo/keycloak-admin-client.md before defining agent "
+    "docs/cross-repo/keycloak-agent-client.md before defining agent "
     "principals."
 )
 

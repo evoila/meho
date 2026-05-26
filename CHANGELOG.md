@@ -103,7 +103,7 @@ connector-related release-notes line.
   Keycloak admin client is unwired now carries the symmetric
   `/ui/auth/login` shape (three-clause: domain code +
   `KEYCLOAK_ADMIN_URL / KEYCLOAK_ADMIN_CLIENT_ID /
-  KEYCLOAK_ADMIN_CLIENT_SECRET` + `docs/cross-repo/keycloak-admin-client.md`),
+  KEYCLOAK_ADMIN_CLIENT_SECRET` + `docs/cross-repo/keycloak-agent-client.md`),
   exposed as the new `KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL` constant.
   `docs/RELEASING.md` gains §6a "Post-deploy enablement" walking
   operators through each gate. T11-convention-compliant per

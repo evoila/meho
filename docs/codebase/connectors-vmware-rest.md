@@ -220,6 +220,70 @@ parent row, N `vm.migrate` child rows, each with two grandchild rows
 holds; this connector's recursive composite is the first production
 caller.
 
+### L1/L2 dispatch contract + pre-flight (G0.14-T10 / #1151)
+
+The 13 composites are the **L1** surface: hand-authored aggregators
+each connector ships as `source_kind='composite'` descriptors. Every
+composite's body fans out to **L2** raw-REST primitives
+(`GET:/vcenter/datastore`, `POST:/vcenter/vm/{vm}/power?action=start`,
+etc.) via `dispatch_child(...)`. The L2 layer is the ~3,470 ingested
+descriptor rows derived from `vcenter.yaml` + `vi-json.yaml`.
+
+The L2 surface is **not** registered by default. Operators bring it in
+by running `meho connector ingest --catalog vmware/9.0`, which posts
+the spec sources from
+`backend/src/meho_backplane/operations/ingest/catalog.yaml` through
+the ingest pipeline. Until that ingest runs, the L2 descriptor rows do
+not exist and any composite that tries to dispatch into them would
+crash mid-call with the dispatcher's generic `unknown_op` error.
+
+Each composite handler runs an explicit pre-flight check
+(`preflight_l2_dependencies` in `composites/_preflight.py`) before any
+`dispatch_child(...)` call. The pre-flight walks the composite's
+declared sub-op-ids against `endpoint_descriptor`; if any are missing,
+it raises `CompositeL2DependencyMissing`. The dispatcher catches that
+exception specifically (ahead of the generic exception branch) and
+surfaces it as a structured `composite_l2_missing` error per the
+`docs/codebase/error-message-shape.md` convention (G0.14-T11 #1141).
+The response shape is:
+
+```json
+{
+  "status": "error",
+  "op_id": "vmware.composite.datastore.usage",
+  "error": "composite_l2_missing: composite '...' depends on L2 sub-ops not registered ...",
+  "extras": {
+    "error_code": "composite_l2_missing",
+    "missing_op_ids": ["GET:/vcenter/datastore", ...],
+    "catalog_command": "meho connector ingest --catalog vmware/9.0"
+  }
+}
+```
+
+The first call against a stale catalog pays the DB walk; subsequent
+calls hit a per-process cache and short-circuit. A negative result
+(missing L2) is **not** cached -- the operator's expected next action
+is to run the catalog command and retry, and we want the retry to see
+fresh state from the database.
+
+Composite-to-composite sub-ops (`vmware.composite.*`, today only
+`host.evacuate` -> `vm.migrate`) are deliberately skipped by the
+pre-flight: their registration is guaranteed by the same lifespan
+registrar that brings their parent composite in, so validating them
+would create a startup-order false positive without catching any real
+gap.
+
+Three options were considered for the L2-dependency strategy
+(per #1151's *Desired state*); Option B (lazy pre-resolve on first
+call) was chosen as it (a) closes signal 20's actual gap (a
+remediation-bearing error message) without (b) blocking on
+T9 (#1150)'s server-side catalog-driven ingest landing first, (c)
+disrupting the boot order, or (d) inverting the catalog ingest
+posture (an explicit operator action by design since v0.5.1).
+See `composites/_preflight.py`'s module docstring for the full
+trade-off matrix vs. Options A (eager-at-registration) and C
+(ship-L1+L2-as-unit).
+
 ### Write-composite partial-failure conventions
 
 Write composites return a structured `{"status": ...}` envelope so

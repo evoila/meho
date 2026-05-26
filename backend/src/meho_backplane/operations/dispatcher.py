@@ -140,6 +140,7 @@ from meho_backplane.operations._branches import (
 from meho_backplane.operations._errors import (
     result_ambiguous_connector,
     result_awaiting_approval,
+    result_composite_l2_missing,
     result_connector_error,
     result_denied,
     result_handler_unreachable,
@@ -166,6 +167,7 @@ from meho_backplane.operations._validate import (
     validate_params,
 )
 from meho_backplane.operations.composite import (
+    CompositeL2DependencyMissing,
     CompositeRecursionLimitExceeded,
     DispatchChild,
     get_dispatch_child,
@@ -391,6 +393,36 @@ def _elapsed_ms(started: float) -> float:
     return (time.monotonic() - started) * 1000
 
 
+async def _audit_error_and_return(
+    *,
+    audit_id: uuid.UUID,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    duration_ms: float,
+    result: OperationResult,
+) -> OperationResult:
+    """Write the ``error`` audit row, return the structured *result*.
+
+    Helper extracted from :func:`_execute_and_audit` (G0.14-T10 #1151)
+    so each exception branch is a 2-line audit-then-return rather than
+    8 lines of repeated audit boilerplate.
+    """
+    await audit_and_broadcast_safe(
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        result_status="error",
+        duration_ms=duration_ms,
+    )
+    return result
+
+
 async def _execute_and_audit(
     *,
     op_id: str,
@@ -407,11 +439,19 @@ async def _execute_and_audit(
     Wraps the dispatch's success path (steps 6-9) so the main
     :func:`dispatch` body stays a flat sequence of phase calls.
     Failures inside the branch land as ``handler_unreachable`` /
-    ``connector_error`` :class:`OperationResult` shapes; the audit row
-    still gets written before the return so the operator-visible
-    record is consistent with the dispatcher's reply.
+    ``composite_l2_missing`` / ``connector_error`` :class:`OperationResult`
+    shapes; the audit row still gets written before the return so the
+    operator-visible record is consistent with the dispatcher's reply.
     """
     audit_id = uuid.uuid4()
+    audit_kwargs: dict[str, Any] = {
+        "audit_id": audit_id,
+        "descriptor": descriptor,
+        "operator": operator,
+        "target": target,
+        "params": params,
+        "params_hash": params_hash,
+    }
     try:
         raw = await _run_source_kind_branch(
             descriptor=descriptor,
@@ -424,31 +464,34 @@ async def _execute_and_audit(
     except (ImportError, TypeError) as exc:
         # ImportError -- handler_ref couldn't be resolved.
         # TypeError -- resolved symbol wasn't callable.
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
+        dur = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            **audit_kwargs,
+            duration_ms=dur,
+            result=result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, dur),
         )
-        return result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms)
+    except CompositeL2DependencyMissing as l2_exc:
+        # G0.14-T10 (#1151): pre-flight detected missing L2 sub-ops.
+        # Structured ``composite_l2_missing`` per the
+        # ``docs/codebase/error-message-shape.md`` convention rather
+        # than collapsing into the generic ``connector_error`` below.
+        # The catch sits ahead of the generic ``except Exception`` so
+        # the structured shape wins.
+        dur = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            **audit_kwargs,
+            duration_ms=dur,
+            result=result_composite_l2_missing(
+                op_id, l2_exc.missing_op_ids, l2_exc.catalog_command, dur
+            ),
+        )
     except Exception as exc:
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
+        dur = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            **audit_kwargs,
+            duration_ms=dur,
+            result=result_connector_error(op_id, exc, dur),
         )
-        return result_connector_error(op_id, exc, duration_ms)
 
     reduced = await _reduce_or_error(
         op_id=op_id,

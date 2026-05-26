@@ -62,6 +62,9 @@ from typing import Any
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites._preflight import (
+    preflight_l2_dependencies,
+)
 from meho_backplane.operations.composite import DispatchChild
 
 __all__ = [
@@ -131,6 +134,73 @@ def _host_maintenance_op_id(action: str) -> str:
 
 # Recursive composite sub-op_id (host.evacuate -> vm.migrate).
 _OP_COMPOSITE_VM_MIGRATE = "vmware.composite.vm.migrate"
+
+# Composite op_ids -- used by the preflight cache key. Mirrors the
+# pattern in ``_read.py``.
+_COMPOSITE_OP_ID_VM_CREATE = "vmware.composite.vm.create"
+_COMPOSITE_OP_ID_VM_CLONE = "vmware.composite.vm.clone"
+_COMPOSITE_OP_ID_VM_SNAPSHOT_REVERT = "vmware.composite.vm.snapshot.revert"
+_COMPOSITE_OP_ID_VM_MIGRATE = "vmware.composite.vm.migrate"
+_COMPOSITE_OP_ID_VM_POWER_BULK = "vmware.composite.vm.power.bulk"
+_COMPOSITE_OP_ID_HOST_EVACUATE = "vmware.composite.host.evacuate"
+_COMPOSITE_OP_ID_HOST_DETACH_FROM_VDS = "vmware.composite.host.detach_from_vds"
+_COMPOSITE_OP_ID_CLUSTER_PATCH = "vmware.composite.cluster.patch"
+
+# Per-composite sub-op-id tuples consumed by the L2 pre-flight check
+# (G0.14-T10 / #1151). Each tuple lists every raw-REST L2 sub-op the
+# composite might dispatch against. Composite-to-composite sub-ops
+# (``vmware.composite.*``) are *not* included -- the preflight helper
+# skips them because they are registered by the same lifespan
+# registrar that brought their parent composite in.
+#
+# Action-discriminated endpoints (power start/stop/suspend/reset;
+# maintenance enter/exit) are spelled out per action because each verb
+# is a distinct ``endpoint_descriptor`` row, not a shared base path.
+_POWER_ACTIONS: tuple[str, ...] = ("start", "stop", "suspend", "reset")
+_SUB_OPS_VM_CREATE: tuple[str, ...] = (
+    _OP_LIST_FOLDERS,
+    _OP_CREATE_VM,
+    _OP_DELETE_VM,
+    _OP_ATTACH_VM_NIC,
+    _power_vm_op_id("start"),
+)
+_SUB_OPS_VM_CLONE: tuple[str, ...] = (
+    _OP_GET_VM,
+    _OP_DEPLOY_LIBRARY_VM,
+    _OP_GET_TASK,
+)
+_SUB_OPS_VM_SNAPSHOT_REVERT: tuple[str, ...] = (
+    _OP_LIST_VM_SNAPSHOTS,
+    _OP_REVERT_VM_SNAPSHOT,
+)
+_SUB_OPS_VM_MIGRATE: tuple[str, ...] = (
+    _OP_GET_DRS_RECOMMENDATIONS,
+    _OP_RELOCATE_VM,
+)
+_SUB_OPS_VM_POWER_BULK: tuple[str, ...] = (
+    _OP_LIST_VMS,
+    *(_power_vm_op_id(action) for action in _POWER_ACTIONS),
+)
+# host.evacuate dispatches to vm.migrate (composite -> composite); the
+# preflight helper skips ``vmware.composite.*`` entries. It also calls
+# maintenance enter directly.
+_SUB_OPS_HOST_EVACUATE: tuple[str, ...] = (
+    _OP_LIST_VMS,
+    _OP_COMPOSITE_VM_MIGRATE,
+    _host_maintenance_op_id("enter"),
+)
+_SUB_OPS_HOST_DETACH_FROM_VDS: tuple[str, ...] = (
+    _OP_LIST_PORTGROUPS,
+    _OP_LIST_VMS,
+    _OP_ATTACH_VM_NIC,
+    _OP_REMOVE_DVS_HOST,
+)
+_SUB_OPS_CLUSTER_PATCH: tuple[str, ...] = (
+    _OP_LIST_CLUSTER_HOSTS,
+    _host_maintenance_op_id("enter"),
+    _host_maintenance_op_id("exit"),
+    _OP_HOST_PATCH,
+)
 
 
 def _unwrap_value(payload: Any) -> Any:
@@ -280,6 +350,12 @@ async def vm_create_composite(
     Op-id: ``vmware.composite.vm.create``. See module docstring for the
     sub-op chain and rollback semantics.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_VM_CREATE,
+        sub_op_ids=_SUB_OPS_VM_CREATE,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     folder_name = params["folder_name"]
     name = params["name"]
     guest_os = params["guest_os"]
@@ -432,6 +508,12 @@ async def vm_clone_composite(
     up to ``timeout_seconds`` (default 600) when
     ``wait_for_completion=True``.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_VM_CLONE,
+        sub_op_ids=_SUB_OPS_VM_CLONE,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     source_vm = params["source_vm"]
     target_name = params["target_name"]
     library_item = params["library_item"]
@@ -495,6 +577,12 @@ async def vm_snapshot_revert_composite(
     sharing the name -> ``status='ambiguous'``; missing -> ``not_found``.
     Revert never dispatches on either.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_VM_SNAPSHOT_REVERT,
+        sub_op_ids=_SUB_OPS_VM_SNAPSHOT_REVERT,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     vm_moid = params["vm"]
     snapshot_name = params["snapshot_name"]
 
@@ -585,6 +673,12 @@ async def vm_migrate_composite(
     the DRS lookup. No-recommendation path returns
     ``status='no_recommendation'`` so the caller can re-dispatch.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_VM_MIGRATE,
+        sub_op_ids=_SUB_OPS_VM_MIGRATE,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     vm_moid = params["vm"]
     cluster_moid = params["cluster"]
     explicit_target = params.get("target_host")
@@ -652,6 +746,12 @@ async def vm_power_bulk_composite(
     Op-id: ``vmware.composite.vm.power.bulk``. ``fail_fast=True``
     aborts on first failure; default tolerates per-VM failures.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_VM_POWER_BULK,
+        sub_op_ids=_SUB_OPS_VM_POWER_BULK,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     filter_dict: dict[str, Any] = dict(params.get("filter") or {})
     action = params["action"]
     fail_fast = bool(params.get("fail_fast", False))
@@ -740,6 +840,12 @@ async def host_evacuate_composite(
     Op-id: ``vmware.composite.host.evacuate``. First production
     composite that calls another composite via ``dispatch_child``.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_HOST_EVACUATE,
+        sub_op_ids=_SUB_OPS_HOST_EVACUATE,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     host_moid = params["host"]
     tolerate_partial = bool(params.get("tolerate_partial_failure", False))
 
@@ -837,6 +943,12 @@ async def host_detach_from_vds_composite(
     detach when any NIC migration failed -- vSphere would reject the
     step-4 detach anyway.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_HOST_DETACH_FROM_VDS,
+        sub_op_ids=_SUB_OPS_HOST_DETACH_FROM_VDS,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     host_moid = params["host"]
     dvs_moid = params["dvs"]
     fallback_network = params["fallback_network"]
@@ -970,6 +1082,12 @@ async def cluster_patch_composite(
     concurrent host patches would force every cluster VM to vMotion
     at once.
     """
+    await preflight_l2_dependencies(
+        composite_op_id=_COMPOSITE_OP_ID_CLUSTER_PATCH,
+        sub_op_ids=_SUB_OPS_CLUSTER_PATCH,
+        connector_id=_CONNECTOR_ID,
+        tenant_id=operator.tenant_id,
+    )
     cluster_moid = params["cluster"]
     patch_method = params.get("patch_method", "default")
 

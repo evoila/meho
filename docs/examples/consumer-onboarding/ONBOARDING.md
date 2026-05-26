@@ -208,6 +208,53 @@ Patterns to follow:
   things that genuinely apply only to operators working in this
   repo's checkout.
 
+## Convention freshness — static-at-connect, reconnect-to-refresh
+
+Tenant conventions are loaded into the session preamble **at session
+connect time**, not continuously. The MCP `initialize` response on
+each new connection assembles the preamble from the current
+`tenant_conventions` rows and ships it as the spec-optional
+`instructions` field (per
+[MCP 2025-06-18 Lifecycle](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)).
+After that, the session holds the preamble snapshot it received at
+connect; subsequent edits do not retroactively reach already-
+connected sessions.
+
+What this means in practice:
+
+* A `tenant_admin` who edits a convention via
+  `meho conventions edit <slug>` while another operator's agent
+  session is already running will **not** see that edit reflected in
+  the running session. The edited convention reaches the running
+  session only after the agent reconnects (e.g. the consumer harness
+  restarts the MCP client, or the operator opens a new Claude
+  session).
+* New sessions opened after the edit see the new convention
+  immediately, via their own `initialize` assembly.
+* Audit-trail integrity is preserved either way — every edit writes
+  one `audit_log` row and one `tenant_convention_history` row in the
+  same DB transaction, regardless of whether any live session sees
+  the change mid-run.
+
+This is the **v0.2 baseline** behaviour. A mid-session refresh path
+is specified but conditional on MCP's
+`capabilities.resources.subscribe` being advertised as `true`. When
+that capability is enabled, edits emit
+`notifications/resources/updated` for the
+`meho://tenant/{tenant_id}/conventions/{slug}` resource, and
+subscribing clients re-read the resource to refresh their preamble
+mid-session.
+
+**Current posture:** v0.2 ships `resources.subscribe: false` — the
+`_initialize` capabilities envelope advertises `subscribe: false`,
+and the helper that wraps every convention write
+(`_maybe_emit_resource_updated`) is a no-op. v0.2.next flips both
+halves together (capability advertisement + emit on write), kept in
+sync by a single constant
+(`RESOURCES_SUBSCRIBE_ENABLED` in
+[`backend/src/meho_backplane/mcp/server.py`](https://github.com/evoila/meho/blob/main/backend/src/meho_backplane/mcp/server.py)).
+Until then, **reconnect-to-refresh** above is the documented contract.
+
 ## Step 4 — Refresh when MEHO ships a new minor version
 
 `meho version` reports the CLI version; `meho status` reports the

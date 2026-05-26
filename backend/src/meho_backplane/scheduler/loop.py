@@ -78,15 +78,31 @@ Delivery semantics
 
 The dispatcher is **at-most-once** per scheduled instant, *not*
 exactly-once. The advance/mark-fired conditional UPDATE commits
-*before* the agent invoke (see :func:`_advance_cron_in_txn` /
-:func:`_mark_one_off_fired_in_txn`) so an invoke that crashes /
-times out leaves the trigger advanced (cron) or terminal (one-off)
-with no ``agent_run`` row recorded. This is the conservative
-direction the consumer doc (G11.3-T4) accepts: a missed fire is
-visible in audit (the advance/fired transition is logged) and the
-operator can manually re-fire via the admin surface. The opposite
-choice (commit *after* invoke) would risk double-fire under
-crash-during-commit and is rejected for that reason.
+*before* the actual agent invoke so an invoke that crashes / times
+out leaves the trigger advanced (cron) or terminal (one-off) with no
+``agent_run`` row recorded. This is the conservative direction the
+consumer doc (G11.3-T4) accepts: a missed fire is visible in audit
+(the advance/fired transition is logged) and the operator can
+manually re-fire via the admin surface. The opposite choice (commit
+*after* invoke) would risk double-fire under crash-during-commit and
+is rejected for that reason.
+
+Precondition gate vs. invoke-time failure
+-----------------------------------------
+
+The at-most-once contract applies to *invoke-time* failures only --
+the agent loop crashing, the Keycloak grant timing out, the JWT
+verifier rejecting the issued token. Failures of *precondition*
+state -- the agent definition was deleted, the agent is disabled,
+the agent's secret hasn't been wired into the pod env yet --
+short-circuit through :func:`_prepare_invocation` **before** the
+advance/mark-fired step, so the row's scheduled instant is **not**
+consumed: a subsequent tick re-runs the precondition gate and either
+fires (operator fixed the underlying issue) or short-circuits again.
+This split keeps the at-most-once contract honest for the cases it
+was designed for (invoker crash) without silently dropping one-off
+work for the cases it was not (missing config that the operator can
+fix without re-creating the trigger).
 
 Operators wanting at-least-once semantics on a per-trigger basis set
 ``in_flight_policy = 'resume'`` (T4 #825 owns the resume mechanics).
@@ -210,20 +226,20 @@ async def _advisory_unlock(session: AsyncSession, key: int) -> None:
 
 async def _resolve_definition(
     session: AsyncSession,
-    agent_definition_id: uuid.UUID | None,
+    agent_definition_id: uuid.UUID,
     tenant_id: uuid.UUID,
 ) -> _ResolvedDefinition | None:
     """Look up the agent definition referenced by a trigger.
 
-    Returns ``None`` when the row was deleted between trigger
-    creation and the fire (the soft-FK relationship -- see the
-    ``ScheduledTrigger`` docstring). A ``None`` resolution causes the
+    Returns ``None`` only when the FK lookup yields no row -- the
+    ``agent_definition`` table is the real-FK parent (migration 0020
+    tightened it from a soft reference), so the only way to hit
+    ``None`` is the parent row being removed after the trigger was
+    created and before the fire. A ``None`` resolution causes the
     loop to skip the fire and log; the trigger itself is left
     ``active`` so an operator who recreates the definition unblocks
     the schedule without re-creating the trigger.
     """
-    if agent_definition_id is None:
-        return None
     stmt = select(
         AgentDefinition.name,
         AgentDefinition.enabled,
@@ -287,6 +303,102 @@ def _coerce_inputs(inputs: dict[str, object] | None) -> str:
     return json.dumps(inputs, sort_keys=True, default=str)
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedInvocation:
+    """Precondition snapshot for a fire: definition + credentials + inputs.
+
+    Built by :func:`_prepare_invocation` *before* the advance / mark-
+    fired commit, so a failure on any of these precondition lookups
+    (missing definition, disabled agent, unresolved credentials)
+    leaves the trigger's row state untouched and a subsequent tick
+    can re-try cleanly once the operator fixes the underlying issue.
+    Once a :class:`_PreparedInvocation` is in hand the caller may
+    advance/mark-fire the row and dispatch the run; the at-most-once
+    contract still applies *after* the conditional UPDATE commits
+    (invoker exceptions are logged but the row is not re-fired).
+    """
+
+    name: str
+    identity_ref: str
+    agent_client_id: str
+    agent_client_secret: str
+    inputs_str: str
+
+
+async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | None:
+    """Resolve definition + credentials for a due trigger; ``None`` to skip.
+
+    Called *before* the advance/mark-fired commit so a precondition
+    miss (definition deleted, agent disabled, agent secret not wired)
+    does not consume the trigger's scheduled instant -- the row stays
+    ``active`` with its current ``next_fire_at``/``fire_at`` so the
+    next tick retries.
+
+    Returns:
+        :class:`_PreparedInvocation` on success.
+        ``None`` when the caller should skip the fire without advancing.
+
+    Skip-with-``None`` cases (each logged at WARN/INFO before return):
+
+    * **definition missing** -- the FK lookup returned no row. The
+      ``agent_definition`` row was removed after the trigger was
+      created; an operator who recreates the definition unblocks the
+      schedule on the next tick.
+    * **definition disabled** -- the agent definition exists but
+      ``enabled=False``. Same recovery shape: flip the flag, schedule
+      resumes.
+    * **credentials unresolved** -- the env var derived from the
+      :attr:`Settings.scheduler_agent_secret_env_pattern` pattern is
+      not set or empty. The operator wires the secret (Helm chart /
+      external-secrets / sealed-secret); the next tick retries.
+
+    The lookup session is opened fresh -- separate from the claim
+    session whose transaction is still open at the caller -- so the
+    SELECT keeps off the claim's connection.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as lookup_session:
+        definition = await _resolve_definition(
+            lookup_session,
+            row.agent_definition_id,
+            row.tenant_id,
+        )
+    if definition is None:
+        _log.warning(
+            "scheduler_definition_missing",
+            trigger_id=str(row.id),
+            agent_definition_id=str(row.agent_definition_id),
+        )
+        return None
+    if not definition.enabled:
+        _log.info(
+            "scheduler_definition_disabled",
+            trigger_id=str(row.id),
+            agent_name=definition.name,
+        )
+        return None
+    try:
+        agent_client_id, agent_client_secret = resolve_agent_credentials(
+            definition.identity_ref,
+        )
+    except AgentCredentialsUnresolvedError as exc:
+        _log.warning(
+            "scheduler_credentials_unresolved",
+            trigger_id=str(row.id),
+            agent_name=definition.name,
+            identity_ref=definition.identity_ref,
+            reason=str(exc),
+        )
+        return None
+    return _PreparedInvocation(
+        name=definition.name,
+        identity_ref=definition.identity_ref,
+        agent_client_id=agent_client_id,
+        agent_client_secret=agent_client_secret,
+        inputs_str=_coerce_inputs(row.inputs),
+    )
+
+
 async def _fire_cron(
     session: AsyncSession,
     row: ScheduledTrigger,
@@ -296,11 +408,28 @@ async def _fire_cron(
 ) -> bool:
     """Advance + fire one cron trigger; return ``True`` when the run was kicked off.
 
-    The advance happens *before* the agent invocation so a slow agent
-    run cannot delay the next tick. Returns ``False`` when the
-    conditional advance lost a race to another claimer (the other
-    replica owns this tick).
+    Lifecycle:
+
+    1. **Prepare** -- look up the definition + credentials BEFORE any
+       state write. A precondition miss returns ``False`` with the
+       trigger row untouched, so the next tick re-tries (no missed
+       cron instant attributed to a misconfigured side-channel).
+    2. **Advance** -- ``advance_cron_trigger`` commits the next
+       ``next_fire_at`` *before* the agent invocation. A slow agent
+       run cannot delay the next tick.
+    3. **Dispatch** -- call the invoker. Invocation-time failures
+       (token grant, identity binding) follow the at-most-once
+       contract: the advance has already committed; the missed
+       instant is visible in audit and the trigger continues firing
+       on subsequent cron matches.
+
+    Returns ``False`` when the precondition gate skipped (Step 1)
+    or the conditional advance lost a race to another claimer (the
+    other replica owns this tick).
     """
+    prepared = await _prepare_invocation(row)
+    if prepared is None:
+        return False
     try:
         advanced = await advance_cron_trigger(
             session,
@@ -317,7 +446,7 @@ async def _fire_cron(
     if advanced is None:
         return False
     await session.commit()
-    return await _invoke_agent(session, row, invoker)
+    return await _dispatch_invocation(row, prepared, invoker)
 
 
 async def _fire_one_off(
@@ -329,97 +458,58 @@ async def _fire_one_off(
 ) -> bool:
     """Mark fired + invoke for one one-off trigger; ``True`` on launch.
 
-    Same conditional-UPDATE discipline as the cron path: the mark-fired
-    step is the single-fire enforcement, and a lost race returns
-    ``False`` so the loop skips the agent invocation.
+    Same lifecycle shape as :func:`_fire_cron`: precondition gate
+    runs *before* :func:`mark_one_off_fired` so a missing-definition
+    / disabled / unresolved-credentials case does **not** consume the
+    one-off. The row stays ``status='active'`` so a subsequent tick
+    retries once the operator fixes the underlying issue. Without
+    this gate the at-most-once contract would silently drop one-off
+    work on every credential-rotation gap, with no admin re-fire path
+    in v0.2 (T5 #826 unbuilt).
+
+    After mark-fired commits, invocation-time failures follow the
+    at-most-once contract -- the row is terminal and a missed fire
+    is visible in audit.
     """
+    prepared = await _prepare_invocation(row)
+    if prepared is None:
+        return False
     marked = await mark_one_off_fired(session, row, fire_instant=fire_instant)
     if marked is None:
         return False
     await session.commit()
-    return await _invoke_agent(session, row, invoker)
+    return await _dispatch_invocation(row, prepared, invoker)
 
 
-async def _invoke_agent(
-    session: AsyncSession,
+async def _dispatch_invocation(
     row: ScheduledTrigger,
+    prepared: _PreparedInvocation,
     invoker: AgentInvoker,
 ) -> bool:
-    """Resolve the trigger's definition + credentials and run the agent.
+    """Call :meth:`AgentInvoker.run_scheduled` for a prepared fire.
 
-    Calls :meth:`AgentInvoker.run_scheduled` (G11.2-T2 #1096): the
-    autonomous-agent path that obtains a Keycloak ``client_credentials``
-    token, verifies the agent's principal binds the definition, and
-    drives the run to completion under the agent's own identity (no
-    delegating human actor; ``actor_sub`` stays NULL on the audit
-    rows). The :attr:`AgentRunTrigger.SCHEDULED` provenance is set
-    inside :meth:`run_scheduled` so a cron / one-off fire is
-    distinguishable from a direct invocation in audit queries.
+    Calls G11.2-T2's autonomous-agent seam (G11.2-T2 #1096): the
+    invoker obtains a Keycloak ``client_credentials`` token using
+    *prepared*'s ``(agent_client_id, agent_client_secret)``, verifies
+    the JWT, asserts the agent's principal owns the definition by
+    name, and drives the run to completion under the agent's own
+    identity (``actor_sub`` stays NULL on the audit rows). The
+    :attr:`AgentRunTrigger.SCHEDULED` provenance is set inside
+    :meth:`run_scheduled` so a cron / one-off fire is distinguishable
+    from a direct invocation in audit queries.
 
-    Credential sourcing -- the new credential boundary T2 introduces --
-    runs through :func:`resolve_agent_credentials` against
-    :attr:`Settings.scheduler_agent_secret_env_pattern`. An
-    :class:`AgentCredentialsUnresolvedError` is logged + skipped (the
-    trigger stays ``active`` so an operator who wires the secret
-    unblocks the schedule on the next tick); the row is not parked,
-    matching the soft-FK-missing-definition recovery shape.
-
-    A re-resolution session is opened (not the claim session) because
-    the claim session's transaction is committed at this point and
-    holds no locks; using a fresh session keeps the lookup query off
-    the claim's connection.
-
-    *session* is unused here but kept on the signature so
-    :func:`_fire_cron` / :func:`_fire_one_off` callers do not need a
-    second wrapper.
+    Errors are logged + swallowed (return ``False``); the at-most-once
+    contract documented in the module docstring applies -- the
+    advance/mark-fired commit has already happened, so a transient
+    grant failure or a misconfigured identity binding does not
+    re-fire.
     """
-    del session  # The lookup uses its own session; see docstring.
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as lookup_session:
-        definition = await _resolve_definition(
-            lookup_session,
-            row.agent_definition_id,
-            row.tenant_id,
-        )
-    if definition is None:
-        _log.warning(
-            "scheduler_definition_missing",
-            trigger_id=str(row.id),
-            agent_definition_id=(
-                str(row.agent_definition_id) if row.agent_definition_id is not None else None
-            ),
-        )
-        return False
-    if not definition.enabled:
-        _log.info(
-            "scheduler_definition_disabled",
-            trigger_id=str(row.id),
-            agent_name=definition.name,
-        )
-        return False
-    try:
-        agent_client_id, agent_client_secret = resolve_agent_credentials(
-            definition.identity_ref,
-        )
-    except AgentCredentialsUnresolvedError as exc:
-        # Operator must wire the agent secret; leave the trigger
-        # ``active`` so the next tick retries automatically once the
-        # secret is present.
-        _log.warning(
-            "scheduler_credentials_unresolved",
-            trigger_id=str(row.id),
-            agent_name=definition.name,
-            identity_ref=definition.identity_ref,
-            reason=str(exc),
-        )
-        return False
-    inputs_str = _coerce_inputs(row.inputs)
     try:
         outcome = await invoker.run_scheduled(
-            definition.name,
-            inputs_str,
-            agent_client_id=agent_client_id,
-            agent_client_secret=agent_client_secret,
+            prepared.name,
+            prepared.inputs_str,
+            agent_client_id=prepared.agent_client_id,
+            agent_client_secret=prepared.agent_client_secret,
         )
     except (AgentNotFoundError, AgentDisabledError, AgentInvocationError) as exc:
         # AgentInvocationError covers the identity-binding refusal
@@ -429,19 +519,20 @@ async def _invoke_agent(
         _log.warning(
             "scheduler_invoke_refused",
             trigger_id=str(row.id),
-            agent_name=definition.name,
+            agent_name=prepared.name,
             reason=type(exc).__name__,
         )
         return False
     except AgentTokenError as exc:
         # Network / Keycloak failure on the client_credentials grant.
-        # Transient by nature; the next tick retries. Logged at WARN
-        # so monitoring can alert on sustained failures without
-        # parking the trigger.
+        # Transient by nature; the cron path retries on the next
+        # scheduled instant, the one-off is consumed (at-most-once
+        # contract). Logged at WARN so monitoring can alert on
+        # sustained failures without parking the trigger.
         _log.warning(
             "scheduler_token_grant_failed",
             trigger_id=str(row.id),
-            agent_name=definition.name,
+            agent_name=prepared.name,
             reason=type(exc).__name__,
         )
         return False
@@ -449,7 +540,7 @@ async def _invoke_agent(
         "scheduler_fired",
         trigger_id=str(row.id),
         kind=row.kind,
-        agent_name=definition.name,
+        agent_name=prepared.name,
         agent_run_id=str(outcome.run_id),
     )
     return True

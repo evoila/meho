@@ -127,9 +127,43 @@ future G11.2 follow-up that will swap the env-var path for a
 scheduler-service-token Vault read; ships configured but unused in
 v0.2.
 
+### Precondition gate vs invoke-time failure
+
+The two fire paths follow the same lifecycle shape:
+
+1. **Prepare** (`_prepare_invocation`) — look up the agent definition
+   (FK; real-FK lookup-by-primary-key) and resolve the agent's
+   `client_credentials` pair from the env var pattern. Returns
+   `None` (skip without state writes) when any precondition fails:
+   - the agent definition was removed since trigger creation, or
+   - the definition is disabled, or
+   - the agent's secret env var is not set / empty.
+2. **Advance / mark-fired** — only when the prepare step succeeded.
+   The conditional `UPDATE` (status / next_fire_at guard) commits
+   the row's state transition.
+3. **Dispatch** (`_dispatch_invocation`) — call
+   `AgentInvoker.run_scheduled` (G11.2-T2 #1096). Invocation-time
+   failures (Keycloak grant timeout, identity-binding refusal) are
+   logged and swallowed under the at-most-once contract — the
+   state transition has already committed; the missed fire is
+   visible in audit and an operator can re-fire via the admin
+   surface (T5).
+
+This split is load-bearing for one-off triggers: without the
+precondition gate, an unresolved agent secret would be committed as
+`status='fired'` before `_dispatch_invocation` could reject the
+fire, silently consuming the one-off with no admin re-fire surface
+in v0.2 (T5 #826 unbuilt). The gate keeps the at-most-once contract
+honest for invoke-time failures (where it was always the right
+behaviour) without dropping work for the precondition cases (where
+it was always recoverable by the operator).
+
 ### Cron fire path (`_fire_cron`)
 
-1. `advance_cron_trigger(row, fire_instant=now)`:
+1. `_prepare_invocation(row)` → `_PreparedInvocation` or `None`.
+   On `None` the trigger's `next_fire_at` stays unchanged so the
+   next tick re-claims and re-tries.
+2. `advance_cron_trigger(row, fire_instant=now)`:
    - Compute the next cron match via `croniter` from `now` in the
      trigger's timezone.
    - Conditional `UPDATE` (`WHERE id=:id AND status='active' AND
@@ -137,23 +171,24 @@ v0.2.
      `last_fired_at=now`.
    - Returns `None` when zero rows match (another claimer beat this
      replica to it) — skip the fire.
-2. Commit the advance.
-3. `_invoke_agent()` resolves the agent definition (FK lookup —
-   `agent_definition_id` is a real FK, so this `SELECT` is by primary
-   key under the definition-NOT-NULL invariant), resolves the agent's
-   `client_credentials` pair, then calls
+3. Commit the advance.
+4. `_dispatch_invocation(row, prepared, invoker)` calls
    `AgentInvoker.run_scheduled` (G11.2-T2 #1096) which obtains a
    Keycloak token, verifies it, and kicks off the agent run with
    `AgentRunTrigger.SCHEDULED` provenance.
 
 ### One-off fire path (`_fire_one_off`)
 
-1. `mark_one_off_fired(row, fire_instant=now)`:
+1. `_prepare_invocation(row)` → `_PreparedInvocation` or `None`.
+   On `None` the trigger stays `status='active'` (the row is
+   **not** consumed) so the next tick re-claims and re-tries once
+   the operator fixes the underlying issue.
+2. `mark_one_off_fired(row, fire_instant=now)`:
    - Conditional `UPDATE` (`WHERE id=:id AND status='active' AND
      next_fire_at=:previous_next`) sets `status='fired'`,
      `last_fired_at=now`.
    - Returns `None` when another claimer beat this replica to it.
-2. Commit, then invoke.
+3. Commit, then dispatch the invocation.
 
 ### Replica-safety property
 

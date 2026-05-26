@@ -58,6 +58,23 @@ __all__ = [
 ]
 
 
+def _is_five_field_expr(expr: str) -> bool:
+    """Return ``True`` when *expr* is a whitespace-separated 5-token string.
+
+    ``croniter.is_valid`` admits 5, 6, **and** 7-field expressions
+    (croniter 6.x ``expand()`` validates token count ``in {5, 6, 7}``);
+    the 6/7-field shapes carry seconds / years semantics MEHO's
+    scheduler does not interpret. The dispatcher (``next_fire_after`` +
+    the per-row ``next_fire_at`` advance) treats every accepted
+    expression as 5-field, so a 6-field ``* * * * * *`` (every second)
+    would silently fire at every tick instead of at the expected
+    minute boundary. This pre-validator enforces the documented
+    5-field contract by counting whitespace-separated tokens before
+    delegating to croniter's own validation pass.
+    """
+    return len(expr.split()) == 5
+
+
 class InvalidCronExpressionError(ValueError):
     """Raised when a cron expression fails ``croniter``'s validation.
 
@@ -89,11 +106,14 @@ class InvalidTimezoneError(ValueError):
 def is_valid_cron_expr(expr: str) -> bool:
     """Return ``True`` when *expr* is a valid 5-field cron expression.
 
-    Thin pass-through to ``croniter.croniter.is_valid``. Exposed as a
-    module-level function so the rest of the codebase imports one name
-    and the croniter dependency stays confined to this module.
+    Two-layer validation: the field-count check rejects 6/7-token
+    shapes croniter would otherwise admit (its ``expand`` allows
+    ``{5, 6, 7}``), then ``croniter.is_valid`` validates the per-field
+    syntax. Exposed as a module-level function so the rest of the
+    codebase imports one name and the croniter dependency stays
+    confined to this module.
     """
-    return bool(croniter.is_valid(expr))
+    return _is_five_field_expr(expr) and bool(croniter.is_valid(expr))
 
 
 def resolve_timezone(tz_name: str) -> tzinfo:
@@ -133,10 +153,11 @@ def next_fire_after(
       expression's semantics are interpreted in.
 
     Raises:
-        InvalidCronExpressionError: *expr* fails croniter's validation.
+        InvalidCronExpressionError: *expr* fails the 5-field +
+            croniter syntax validation.
         InvalidTimezoneError: *tz_name* is not a valid IANA zone.
     """
-    if not croniter.is_valid(expr):
+    if not _is_five_field_expr(expr) or not croniter.is_valid(expr):
         raise InvalidCronExpressionError(expr)
     tz = resolve_timezone(tz_name)
     # Normalise *base* into the trigger's timezone. Naive base -> attach

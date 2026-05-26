@@ -64,6 +64,7 @@ from meho_backplane.db.models import (
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.scheduler.cron import (
     InvalidCronExpressionError,
+    is_valid_cron_expr,
     next_fire_after,
 )
 from meho_backplane.scheduler.loop import run_one_tick
@@ -298,6 +299,47 @@ def test_next_fire_after_rejects_garbage_expression() -> None:
         next_fire_after("not a cron expr", datetime.now(UTC))
 
 
+@pytest.mark.parametrize(
+    "non_five_field_expr",
+    [
+        "* * * * * *",  # 6 fields (croniter seconds shape)
+        "* * * * * * *",  # 7 fields (croniter seconds+year shape)
+        "0 9 * *",  # 4 fields
+        "* * *",  # 3 fields
+        "",  # zero fields
+        "   ",  # whitespace only
+    ],
+)
+def test_next_fire_after_rejects_non_five_field_expression(
+    non_five_field_expr: str,
+) -> None:
+    """``croniter.is_valid`` admits 5/6/7-field expressions; T2 contracts 5.
+
+    croniter 6.x's ``expand`` accepts token counts ``in {5, 6, 7}``,
+    where 6-field carries seconds semantics and 7-field carries
+    seconds+year semantics. MEHO's dispatcher treats every accepted
+    expression as 5-field cron; a silently-admitted 6-field
+    ``* * * * * *`` would fire at every scheduler tick instead of at
+    the expected minute boundary, with no way for the operator to
+    notice short of the trigger row's surprising fire history. The
+    ``_is_five_field_expr`` guard rejects these at create time so the
+    contract is enforced at the row-shape boundary, not deferred to
+    dispatch-time surprise.
+    """
+    assert not is_valid_cron_expr(non_five_field_expr)
+    with pytest.raises(InvalidCronExpressionError):
+        next_fire_after(non_five_field_expr, datetime.now(UTC))
+
+
+def test_is_valid_cron_expr_accepts_five_field_expression() -> None:
+    """The whitespace-token guard does not over-reject canonical 5-field exprs."""
+    assert is_valid_cron_expr("*/5 * * * *")
+    assert is_valid_cron_expr("0 9 * * 1-5")
+    # Extra whitespace between fields still counts as 5 tokens
+    # (``str.split()`` collapses runs of whitespace).
+    assert is_valid_cron_expr("0   9   *   *   1-5")
+
+
 def test_next_fire_after_returns_utc_for_non_utc_timezone() -> None:
     """A trigger in Europe/Berlin still persists ``next_fire_at`` as UTC.
 
@@ -369,6 +411,90 @@ async def test_one_off_trigger_fires_once_and_marks_fired() -> None:
     async with sessionmaker() as session:
         all_runs = list((await session.execute(select(AgentRun))).scalars().all())
     assert len(all_runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_one_off_with_unresolved_credentials_stays_active_and_fires_on_secret_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-off with no agent secret stays ``active``; the next tick after the
+    secret is wired fires the run cleanly.
+
+    Without the precondition gate this scenario consumed the one-off
+    permanently: ``mark_one_off_fired`` would commit ``status='fired'``
+    before the credential resolution raised, and no admin re-fire
+    surface exists in v0.2 (T5 #826 unbuilt). The
+    :func:`_prepare_invocation` step moves the credential lookup
+    *before* the state-changing UPDATE so a missing-secret tick leaves
+    the row untouched; the next tick re-runs the gate and fires once
+    the operator wires the env var.
+    """
+    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    agent_id = await _seed_tenant_and_agent()
+    trigger = await _create_one_off(
+        agent_definition_id=agent_id,
+        run_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    fires_first = await run_one_tick(invoker=_make_invoker())
+    assert fires_first == 0, (
+        "the precondition gate must not advance/mark-fired when credentials are unresolved"
+    )
+    refetched = await _get_trigger(trigger.id)
+    assert refetched.status == ScheduledTriggerStatus.ACTIVE.value, (
+        "one-off must stay active when credentials are unresolved so the next "
+        "tick retries after the operator wires the secret"
+    )
+
+    # Wire the secret -- the next tick fires the long-overdue run.
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    fires_after = await run_one_tick(invoker=_make_invoker())
+    assert fires_after == 1
+    finalised = await _get_trigger(trigger.id)
+    assert finalised.status == ScheduledTriggerStatus.FIRED.value
+
+
+@pytest.mark.asyncio
+async def test_cron_with_unresolved_credentials_stays_active_and_does_not_advance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cron with no agent secret leaves ``next_fire_at`` unchanged so the
+    next tick retries the same scheduled instant.
+
+    Same gate as the one-off test but for the cron path: an unresolved
+    credential must not consume the scheduled instant via
+    ``advance_cron_trigger``. The row's ``next_fire_at`` stays at the
+    overdue value; once the operator wires the secret, the next tick
+    fires the missed instant and advances to the next cron match.
+    """
+    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron(agent_definition_id=agent_id, base=base)
+    # Force the row's next_fire_at into the past so the loop's claim
+    # query treats it as due; pin the value so we can assert it is
+    # unchanged across the first (skipped) tick.
+    stuck_instant = base - timedelta(minutes=1)
+    await _force_due(trigger.id, stuck_instant)
+
+    fires_first = await run_one_tick(invoker=_make_invoker())
+    assert fires_first == 0
+    held = await _get_trigger(trigger.id)
+    assert held.status == ScheduledTriggerStatus.ACTIVE.value
+    # ``next_fire_at`` must still be the original due instant, NOT the
+    # next cron match -- the missed credentials short-circuited before
+    # the advance.
+    assert _aware(held.next_fire_at) == stuck_instant
+
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    fires_after = await run_one_tick(invoker=_make_invoker())
+    assert fires_after == 1
+    fired = await _get_trigger(trigger.id)
+    assert fired.status == ScheduledTriggerStatus.ACTIVE.value
+    assert fired.last_fired_at is not None
+    # next_fire_at advanced past the previously-stuck instant.
+    assert _aware(fired.next_fire_at) is not None
+    assert _aware(fired.next_fire_at) > stuck_instant
 
 
 # ---------------------------------------------------------------------------

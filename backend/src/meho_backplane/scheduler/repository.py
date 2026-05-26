@@ -61,7 +61,7 @@ async def create_cron_trigger(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    agent_definition_id: uuid.UUID | None,
+    agent_definition_id: uuid.UUID,
     cron_expr: str,
     inputs: dict[str, object],
     identity_sub: str,
@@ -75,6 +75,11 @@ async def create_cron_trigger(
     default ``datetime.now(UTC)`` is what production wants ("schedule
     relative to wall-clock now"). Tests pass an explicit base to make
     the first-fire instant deterministic.
+
+    *agent_definition_id* is non-optional: the column is ``NOT NULL``
+    with a real FK to ``agent_definition`` (migration 0020). Rejecting
+    ``None`` at the API surface produces a clean caller error rather
+    than the opaque ``IntegrityError`` SQLAlchemy raises at flush.
 
     Raises:
         InvalidCronExpressionError: *cron_expr* is not a valid 5-field
@@ -107,7 +112,7 @@ async def create_one_off_trigger(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    agent_definition_id: uuid.UUID | None,
+    agent_definition_id: uuid.UUID,
     run_at: datetime,
     inputs: dict[str, object],
     identity_sub: str,
@@ -118,6 +123,9 @@ async def create_one_off_trigger(
     *run_at* is the wall-clock instant the trigger should fire. The
     column is stored UTC-normalised so cross-tz operators see consistent
     timestamps; a naive input is treated as UTC.
+
+    *agent_definition_id* is non-optional for the same reason as
+    :func:`create_cron_trigger` -- real FK, ``NOT NULL`` on the column.
     """
     run_at_utc = run_at.replace(tzinfo=UTC) if run_at.tzinfo is None else run_at.astimezone(UTC)
     # ``fire_at`` is the column 0020's discriminated-union CHECK

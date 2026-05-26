@@ -413,16 +413,12 @@ class SchedulerAdminService:
             if current_status == ScheduledTriggerStatus.FIRED.value:
                 return False
             # active / paused -> cancelled (conditional).
-            rowcount = await self._conditional_cancel_update(
-                session, tenant_id, trigger_id
-            )
+            rowcount = await self._conditional_cancel_update(session, tenant_id, trigger_id)
             if rowcount > 0:
                 return True
             # Read-after-update: rowcount==0 means another writer
             # transitioned the row between our pre-flight SELECT and
             # our UPDATE. Re-read to disambiguate idempotent success
             # (CANCELLED) from real failure (FIRED / gone / etc).
-            post_race_status = await self._read_status(
-                session, tenant_id, trigger_id
-            )
+            post_race_status = await self._read_status(session, tenant_id, trigger_id)
             return post_race_status == ScheduledTriggerStatus.CANCELLED.value

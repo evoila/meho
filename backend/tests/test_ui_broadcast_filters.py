@@ -309,6 +309,51 @@ def test_target_dropdown_is_tenant_scoped() -> None:
     assert "other-tenant-target" not in body
 
 
+def test_target_dropdown_excludes_soft_deleted_targets() -> None:
+    """The target dropdown filters ``deleted_at IS NULL``.
+
+    Regression test for G0.14-T4 #1145: the dropdown must stay in parity
+    with ``GET /api/v1/targets`` and the MCP ``list_targets`` tool, which
+    both exclude soft-deleted rows. Without this, a tombstoned target
+    name would surface in the dropdown and selecting it would produce an
+    empty filtered feed with no UI explanation.
+
+    Seeds one live + one soft-deleted target on the same tenant; the
+    rendered page must contain the live name and omit the dead one.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import Target as TargetORM
+
+    _seed_target(tenant_id=_TENANT_A, name="live-target")
+    _seed_target(tenant_id=_TENANT_A, name="dead-target")
+
+    # Soft-delete the second target the same way the DELETE handler does.
+    async def _soft_delete(name: str) -> None:
+        from sqlalchemy import select as sa_select
+
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            row = (
+                await session.execute(
+                    sa_select(TargetORM).where(
+                        TargetORM.tenant_id == _TENANT_A,
+                        TargetORM.name == name,
+                    )
+                )
+            ).scalar_one()
+            row.deleted_at = datetime.now(UTC)
+
+    asyncio.run(_soft_delete("dead-target"))
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/broadcast")
+    body = response.text
+    assert 'value="live-target"' in body
+    assert "dead-target" not in body
+
+
 # ---------------------------------------------------------------------------
 # Filter fragment -- SSE URL carries the active filters
 # ---------------------------------------------------------------------------

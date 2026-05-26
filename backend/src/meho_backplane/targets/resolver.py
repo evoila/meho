@@ -7,8 +7,8 @@
 a ``--target`` / ``target`` parameter. The algorithm (from consumer-needs.md
 §G3 and the consumer's #110 fix) is:
 
-1. Exact name match for the tenant — ``WHERE tenant_id = ? AND name = ?``.
-   If unique, return immediately.
+1. Exact name match for the tenant — ``WHERE tenant_id = ? AND name = ?
+   AND deleted_at IS NULL``. If unique, return immediately.
 2. Element-equality alias match — ``query = ANY(aliases)`` on PostgreSQL,
    Python-side set-membership on other dialects (SQLite dev/test path).
    The consumer's #110 incident showed that substring matching caused
@@ -19,6 +19,13 @@ a ``--target`` / ``target`` parameter. The algorithm (from consumer-needs.md
    the candidates in the ``matches`` field.
 4. If step 1 or 2 returns more than one row (defensive — the unique index
    prevents it under normal conditions), raise :exc:`AmbiguousTargetError`.
+
+Every clause filters ``deleted_at IS NULL`` so soft-deleted targets
+(G0.14-T4 #1145) are invisible to the resolver. The DELETE handler
+stamps ``deleted_at`` and lets the row stay queryable from the
+:attr:`AuditLog.target_id` soft-FK, but every dispatch / probe /
+list / CLI verb that goes through the resolver sees the row as
+"not found" with the live near-misses surfaced exactly as before.
 
 Dialect portability
 -------------------
@@ -134,9 +141,14 @@ async def resolve_target(
     # (unique index violation repaired mid-flight, or a restored backup with
     # a relaxed constraint) raise AmbiguousTargetError (409) rather than
     # leaking MultipleResultsFound as an unhandled 500.
+    # ``deleted_at IS NULL`` filter (G0.14-T4 #1145) excludes soft-deleted
+    # rows so a re-creation under the same name does not collide with a
+    # tombstone, and a stale CLI cache referencing a deleted name resolves
+    # to the standard 404 (rather than returning the deleted row).
     stmt = select(TargetORM).where(
         TargetORM.tenant_id == tenant_id,
         TargetORM.name == query,
+        TargetORM.deleted_at.is_(None),
     )
     result = await session.execute(stmt.limit(2))
     exact_hits = list(result.scalars().all())
@@ -192,18 +204,27 @@ async def _alias_match(
     tenant_id: UUID,
     query: str,
 ) -> list[TargetORM]:
-    """Return targets whose ``aliases`` contain *query* as an exact element."""
+    """Return live targets whose ``aliases`` contain *query* as an exact element.
+
+    ``deleted_at IS NULL`` filter (G0.14-T4 #1145) excludes soft-deleted
+    rows so an alias on a retired target does not shadow a live re-creation
+    holding the same alias.
+    """
     conn = await session.connection()
     if conn.dialect.name == "postgresql":
         stmt = select(TargetORM).where(
             TargetORM.tenant_id == tenant_id,
+            TargetORM.deleted_at.is_(None),
             text(":q = ANY(aliases)").bindparams(q=query),
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
-    # Non-PG (SQLite dev/test): load all tenant targets, filter in Python.
+    # Non-PG (SQLite dev/test): load all live tenant targets, filter in Python.
     # Aliases is a list[str] column; element-equality is a Python `in` check.
-    stmt = select(TargetORM).where(TargetORM.tenant_id == tenant_id)
+    stmt = select(TargetORM).where(
+        TargetORM.tenant_id == tenant_id,
+        TargetORM.deleted_at.is_(None),
+    )
     result = await session.execute(stmt)
     return [t for t in result.scalars().all() if query in t.aliases]
 
@@ -213,7 +234,12 @@ async def _near_misses(
     tenant_id: UUID,
     query: str,
 ) -> list[TargetORM]:
-    """Return up to 5 near-miss targets for the 404 ``matches`` field."""
+    """Return up to 5 live near-miss targets for the 404 ``matches`` field.
+
+    ``deleted_at IS NULL`` filter (G0.14-T4 #1145) keeps near-miss
+    suggestions to live targets only so an operator typo-correcting
+    against a recent deletion is not pointed at the tombstone.
+    """
     conn = await session.connection()
     prefix = f"{query}%"
     if conn.dialect.name == "postgresql":
@@ -221,6 +247,7 @@ async def _near_misses(
             select(TargetORM)
             .where(
                 TargetORM.tenant_id == tenant_id,
+                TargetORM.deleted_at.is_(None),
                 or_(
                     TargetORM.name.ilike(prefix),
                     text("EXISTS (SELECT 1 FROM unnest(aliases) AS a WHERE a ILIKE :p)").bindparams(
@@ -236,6 +263,7 @@ async def _near_misses(
             select(TargetORM)
             .where(
                 TargetORM.tenant_id == tenant_id,
+                TargetORM.deleted_at.is_(None),
                 TargetORM.name.ilike(prefix),
             )
             .limit(5)

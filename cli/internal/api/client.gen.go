@@ -2781,6 +2781,7 @@ type Target struct {
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
 	AuthModel       AuthModel               `json:"auth_model"`
 	CreatedAt       time.Time               `json:"created_at"`
+	DeletedAt       *time.Time              `json:"deleted_at"`
 	Extras          map[string]interface{}  `json:"extras"`
 	Fingerprint     *map[string]interface{} `json:"fingerprint"`
 	Fqdn            *string                 `json:"fqdn"`
@@ -2850,8 +2851,22 @@ type TargetSummary struct {
 // All fields are optional. The route handler applies only the fields
 // that are not “None“; callers must send an explicit “null“ JSON
 // value to clear a nullable column (“fqdn“, “secret_ref“,
-// “notes“). “name“ and “product“ are absent — rename = delete
-// + create.
+// “notes“). “name“ is absent — rename = delete + create.
+//
+// “product“ is patchable as of G0.14-T4 (#1145). The original
+// G0.3 contract treated “product“ as immutable after creation
+// on the theory that the operator should delete + re-create on a
+// typo, but the v0.6.0 dogfood pass (signal 6) showed the
+// combination of "no DELETE route" + "no PATCH on product" left a
+// misregistered target permanently broken — name and alias slots
+// occupied, “secret_ref“ pointing at a stranded Vault path. T4
+// closes the gap by adding DELETE *and* allowing PATCH on
+// “product“. The route handler validates the new value against
+// the set of registered connector products and rejects unknown
+// values with a structured 422 mirroring the “/probe“ 501
+// shape — so a typo at PATCH time produces the same actionable
+// diagnostic as the typo would at probe time, instead of
+// silently breaking the working target.
 //
 // “fingerprint“ is **not** accepted via PATCH — it is server-managed
 // and rewritten by every successful probe. Sending “fingerprint“
@@ -2868,6 +2883,7 @@ type TargetUpdate struct {
 	Notes           *string                 `json:"notes"`
 	Port            *int                    `json:"port"`
 	PreferredImplId *string                 `json:"preferred_impl_id"`
+	Product         *string                 `json:"product"`
 	SecretRef       *string                 `json:"secret_ref"`
 	VpnRequired     *bool                   `json:"vpn_required"`
 }
@@ -3958,6 +3974,12 @@ type DiscoverTargetsApiV1TargetsDiscoverGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// DeleteTargetApiV1TargetsNameDeleteParams defines parameters for DeleteTargetApiV1TargetsNameDelete.
+type DeleteTargetApiV1TargetsNameDeleteParams struct {
+	Force         *bool   `form:"force,omitempty" json:"force,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DescribeTargetApiV1TargetsNameGetParams defines parameters for DescribeTargetApiV1TargetsNameGet.
 type DescribeTargetApiV1TargetsNameGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -4789,6 +4811,9 @@ type ClientInterface interface {
 
 	// DiscoverTargetsApiV1TargetsDiscoverGet request
 	DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteTargetApiV1TargetsNameDelete request
+	DeleteTargetApiV1TargetsNameDelete(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DescribeTargetApiV1TargetsNameGet request
 	DescribeTargetApiV1TargetsNameGet(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -6137,6 +6162,18 @@ func (c *Client) CreateTargetApiV1TargetsPost(ctx context.Context, params *Creat
 
 func (c *Client) DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteTargetApiV1TargetsNameDelete(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteTargetApiV1TargetsNameDeleteRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -11396,6 +11433,77 @@ func NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(server string, params *Dis
 	return req, nil
 }
 
+// NewDeleteTargetApiV1TargetsNameDeleteRequest generates requests for DeleteTargetApiV1TargetsNameDelete
+func NewDeleteTargetApiV1TargetsNameDeleteRequest(server string, name string, params *DeleteTargetApiV1TargetsNameDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Force != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "force", runtime.ParamLocationQuery, *params.Force); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDescribeTargetApiV1TargetsNameGetRequest generates requests for DescribeTargetApiV1TargetsNameGet
 func NewDescribeTargetApiV1TargetsNameGetRequest(server string, name string, params *DescribeTargetApiV1TargetsNameGetParams) (*http.Request, error) {
 	var err error
@@ -14565,6 +14673,9 @@ type ClientWithResponsesInterface interface {
 	// DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request
 	DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error)
 
+	// DeleteTargetApiV1TargetsNameDeleteWithResponse request
+	DeleteTargetApiV1TargetsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteTargetApiV1TargetsNameDeleteResponse, error)
+
 	// DescribeTargetApiV1TargetsNameGetWithResponse request
 	DescribeTargetApiV1TargetsNameGetWithResponse(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*DescribeTargetApiV1TargetsNameGetResponse, error)
 
@@ -16381,6 +16492,36 @@ func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteTargetApiV1TargetsNameDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON409      *struct {
+		Detail struct {
+			GraphNodeRefs int                                             `json:"graph_node_refs"`
+			Kind          DeleteTargetApiV1TargetsNameDelete409DetailKind `json:"kind"`
+			Message       string                                          `json:"message"`
+		} `json:"detail"`
+	}
+	JSON422 *HTTPValidationError
+}
+type DeleteTargetApiV1TargetsNameDelete409DetailKind string
+
+// Status returns HTTPResponse.Status
+func (r DeleteTargetApiV1TargetsNameDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteTargetApiV1TargetsNameDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -18257,6 +18398,15 @@ func (c *ClientWithResponses) DiscoverTargetsApiV1TargetsDiscoverGetWithResponse
 		return nil, err
 	}
 	return ParseDiscoverTargetsApiV1TargetsDiscoverGetResponse(rsp)
+}
+
+// DeleteTargetApiV1TargetsNameDeleteWithResponse request returning *DeleteTargetApiV1TargetsNameDeleteResponse
+func (c *ClientWithResponses) DeleteTargetApiV1TargetsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteTargetApiV1TargetsNameDeleteResponse, error) {
+	rsp, err := c.DeleteTargetApiV1TargetsNameDelete(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteTargetApiV1TargetsNameDeleteResponse(rsp)
 }
 
 // DescribeTargetApiV1TargetsNameGetWithResponse request returning *DescribeTargetApiV1TargetsNameGetResponse
@@ -21049,6 +21199,45 @@ func ParseDiscoverTargetsApiV1TargetsDiscoverGetResponse(rsp *http.Response) (*D
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteTargetApiV1TargetsNameDeleteResponse parses an HTTP response from a DeleteTargetApiV1TargetsNameDeleteWithResponse call
+func ParseDeleteTargetApiV1TargetsNameDeleteResponse(rsp *http.Response) (*DeleteTargetApiV1TargetsNameDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteTargetApiV1TargetsNameDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest struct {
+			Detail struct {
+				GraphNodeRefs int                                             `json:"graph_node_refs"`
+				Kind          DeleteTargetApiV1TargetsNameDelete409DetailKind `json:"kind"`
+				Message       string                                          `json:"message"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

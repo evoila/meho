@@ -29,6 +29,12 @@ from meho_backplane.redaction.engine import (
     RedactionResult,
     redact,
 )
+from meho_backplane.redaction.middleware import (
+    RedactionMiddlewareResult,
+    apply_connector_boundary_redaction,
+    manifest_to_audit_payload,
+    normalize_for_audit,
+)
 from meho_backplane.redaction.patterns import NAMED_PATTERNS, PATTERN_NAMES, get_pattern
 from meho_backplane.redaction.policy import (
     RedactionAction,
@@ -39,19 +45,37 @@ from meho_backplane.redaction.policy import (
     load_policy_yaml,
     parse_policy,
 )
+from meho_backplane.redaction.resolver import (
+    DEFAULT_POLICY_PACKAGE,
+    DEFAULT_POLICY_RESOURCE,
+    clear_overrides,
+    get_default_policy,
+    register_policy,
+    resolve_policy,
+)
 
 __all__ = [
+    "DEFAULT_POLICY_PACKAGE",
+    "DEFAULT_POLICY_RESOURCE",
     "NAMED_PATTERNS",
     "PATTERN_NAMES",
     "RedactionAction",
     "RedactionManifestEntry",
+    "RedactionMiddlewareResult",
     "RedactionPolicy",
     "RedactionPolicyError",
     "RedactionResult",
     "RedactionRule",
     "RedactionScope",
+    "apply_connector_boundary_redaction",
+    "clear_overrides",
+    "get_default_policy",
     "get_pattern",
     "load_policy_yaml",
+    "manifest_to_audit_payload",
+    "normalize_for_audit",
     "parse_policy",
     "redact",
+    "register_policy",
+    "resolve_policy",
 ]

@@ -90,6 +90,40 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`call_operation` accepts bare-string `target` alongside dict —
+  additive convergence with `query_topology` / `query_audit`
+  (G0.13-T2 #1132 / #780 follow-up).** The `call_operation` MCP tool
+  and `POST /api/v1/operations/call` REST route now accept the target
+  reference in either shape: bare string `"rdc-vault"` (the preferred
+  forward shape, matching the read tools) or the existing dict
+  `{"name": "rdc-vault"}` (still works, unchanged for callers pinned
+  to it). Both reduce to the same dispatch via an internal normaliser.
+  The dict shape remains the only one that opens the `fqdn` per-call
+  vhost override field. Resolves the "most-cited daily-driver sharp
+  edge" `target-shape-inconsistency-across-tools` signal from the
+  RDC v0.6.0 closed-loop dogfood (`claude-rdc-hetzner-dc#697`).
+  Non-breaking: agents pinned to the dict shape are not affected.
+- Generalise the `tenant_conventions` seed migration: the previously
+  shipped `rdc-internal` tenant + 8 consumer-specific operational
+  conventions (extracted from one consumer's `CLAUDE.md`) are
+  superseded on `upgrade head` by a generic `default` tenant + 2
+  illustrative conventions that demonstrate the feature without
+  baking in a specific consumer's identity. Operator deploys that
+  had already migrated to head with the old seed will see the
+  `rdc-internal` seeded rows removed on the next `upgrade head`
+  (the `rdc-internal` tenant row itself is preserved; only the
+  rows the seed migration authored are removed -- operator-curated
+  edits under seeded slugs survive). The consumer-side migration
+  template for re-applying the rdc-internal-specific content lives
+  in [`docs/architecture/conventions-seed.md`](docs/architecture/conventions-seed.md).
+  Closes the operational impact from signal-12 of the v0.6.0
+  consumer dogfood: previously, every adopting customer's MCP
+  `initialize.instructions` flowed the original consumer's
+  operational discipline + repo references into their agent session
+  start. (#1137)
+
 ### Fixed
 
 - Dispatcher resolver error surfacing — the typed/composite branch
@@ -104,6 +138,19 @@ connector-related release-notes line.
   target's connector resolves; ambiguous probes return 409 with
   the resolver's message. Closes G0.14-T1 signals 7, 8, 19 from
   `claude-rdc-hetzner-dc#697`. (#1142)
+- **G0.13-T1 auth-invalid-token classifier extended to authlib
+  `DecodeError`.** Promotes the decode-stage failure for a non-JWT
+  bearer (e.g. `Bearer not-a-real-jwt`) at `/api/v1/health` from the
+  residual `invalid_token` to the specific `malformed_jws` 401 detail
+  code in `_classify_decode_error`, closing the v0.6.0 dogfood gap
+  where the G0.9.1-T12 (#797) classifier only covered claim-stage
+  failures. The residual `invalid_token` now applies only to
+  non-`DecodeError` failures (`alg: none` via
+  `UnsupportedAlgorithmError`, future `JoseError` subclasses,
+  post-refresh kid miss). Operators / tooling matching
+  `{detail: invalid_token}` for non-JWT bearers now see
+  `{detail: malformed_jws}`
+  ([#1131](https://github.com/evoila/meho/issues/1131) / #1152).
 
 ## [0.6.0] - 2026-05-26
 
@@ -126,8 +173,29 @@ vcf-automation), the **G10.0** OAuth2.1 + PKCE BFF auth flow, the first
 two **G10 operator-UI surfaces** (broadcast live feed + topology graph),
 the **G3.8 Holodeck** typed connector, the **G6.4 broadcast meta-tools**
 that make the G7.1 consumer-onboarding CLAUDE.md broadcast-discipline
-contract executable, and the **G0.6.1** JsonFluxReducer wiring. No
-breaking changes.
+contract executable, and the **G0.6.1** JsonFluxReducer wiring.
+**Breaking changes: 1 — see Changed (breaking) section.**
+
+### Changed (breaking)
+
+- **MCP `add_to_memory` body field renamed `content` -> `body`
+  (deferred-callout from G0.9.1-T7, #779).** The rename actually
+  landed in this release window (the original task targeted v0.3.2 in
+  its CHANGELOG AC, but the release tagged as v0.6.0 due to the v0.3.2
+  slip; the breaking-change callout evaporated in the transition).
+  Live consumers pinned to the v0.3.1 wire field received a 422
+  `missing required field: body` with no migration breadcrumb. v0.6.x
+  ships a **one-cycle compatibility shim**: the MCP `add_to_memory`
+  tool accepts both `body` (canonical) and `content` (deprecated
+  alias). When `content` is supplied, a structured
+  `add_to_memory_field_deprecated` warning log line fires with
+  `replacement="body"`, `removal_version="0.7"`, and
+  `body_supplied=<bool>`. When both fields are supplied, `body` wins.
+  **The shim is removed in v0.7** -- agents and SDKs pinned to
+  `content` must migrate to `body` before the v0.7 release.
+  Acceptance criteria from #779 (v0.3.2 callout) are satisfied
+  retroactively here against the actual release window.
+  ([#1134](https://github.com/evoila/meho/issues/1134))
 
 ### Added
 
@@ -192,7 +260,8 @@ breaking changes.
   [#1026](https://github.com/evoila/meho/issues/1026)). A recursive-CTE
   `replay_session` substrate + `ReplayNode` shape powers the replay
   ([#1024](https://github.com/evoila/meho/issues/1024)), surfaced as
-  `GET /api/v1/audit/replay` with a 10k count-first 413 cap
+  `GET /api/v1/audit/sessions/{session_id}/replay` with a 10k
+  count-first 413 cap
   ([#1033](https://github.com/evoila/meho/issues/1033)), an MCP
   `meho.audit.replay` admin tool + `meho.audit.*` classifier +
   `query_audit(shape:tree)` shape
@@ -204,8 +273,10 @@ breaking changes.
   `tenant_conventions` + `tenant_convention_history` tables (Alembic
   migration 0013) with unique `(tenant_id, slug)` and full history
   capture ([#313](https://github.com/evoila/meho/issues/313) / #1029),
-  Pydantic schemas + 6 tenant-scoped + RBAC-gated API routes
-  (list / show / create / update / delete / history;
+  Pydantic schemas + 3 tenant-scoped + RBAC-gated API routes mounted
+  at `/api/v1/conventions` (list/create at the collection,
+  show/update/delete at `/api/v1/conventions/{slug}`, history at
+  `/api/v1/conventions/{slug}/history`;
   [#314](https://github.com/evoila/meho/issues/314) / #1039), `meho
   conventions list / show / create / edit / delete / history` CLI
   verbs with editor integration for `edit`
@@ -289,8 +360,9 @@ breaking changes.
   `per_user` / `impersonation` remain out of scope for k8s.
 
 - **Topology history + diff verbs (G9.3-T3/T4) — companion to v0.5.1
-  timeline.** New `meho topology history` + `GET /api/v1/topology/history`
-  + `query_topology(kind=history)` expose per-node/edge mutation history
+  timeline.** New `meho topology history <name>` +
+  `GET /api/v1/topology/history/{name}` + `query_topology(kind=history)`
+  expose per-node/edge mutation history
   ([#936](https://github.com/evoila/meho/issues/936)); `meho topology
   diff <ts1> <ts2>` + `GET /api/v1/topology/diff` +
   `query_topology(kind="diff", ts1=..., ts2=...)` returns the net change
@@ -299,6 +371,18 @@ breaking changes.
   ([#931](https://github.com/evoila/meho/issues/931), follow-up SQL
   bound #987 / #1000). Cross-Initiative integration suite covers the
   full history surface ([#1027](https://github.com/evoila/meho/issues/1027)).
+
+  > **Groundwork — connector populators land in v0.7.** The topology
+  > substrate (graph_node/edge tables, history table, refresh service,
+  > diff endpoint, annotate endpoint, UI surfaces) is shipped at v0.6.0,
+  > but no shipped connector overrides the base-class no-op
+  > `Connector.discover_topology` hook yet, so
+  > `POST /api/v1/topology/refresh/{target_name}` returns zero-row deltas
+  > for k8s and vmware-rest targets out of the box. Operators populate
+  > nodes/edges via `meho topology nodes create` /
+  > `topology_create_node` + `meho topology annotate` until per-product
+  > populators land. Sister callout to the G10-UI "groundwork — no
+  > operator surface enabled yet" framing.
 
 - **Operator web UI — BFF auth flow + first two surfaces (G10.0 / G10.1
   / G10.5).** G10.0 completes the chassis with `/ui/auth/{login,
@@ -335,6 +419,15 @@ breaking changes.
   the shared helper extraction is in flight
   ([#1103](https://github.com/evoila/meho/issues/1103), tracked under
   off-roadmap Initiative G6.4 #1090).
+
+  > **MCP protocol-version negotiation.** The MCP server speaks
+  > revision `2025-06-18` and returns it as `protocolVersion` on every
+  > `initialize` response, regardless of the version the client sent
+  > in the request. Older clients pinned to `2024-11-05` see the
+  > server's `2025-06-18` capabilities in subsequent responses (silent
+  > upgrade rather than fail-close — MCP spec leaves negotiation to the
+  > server). Clients that need a specific protocol revision must check
+  > the `initialize.result.protocolVersion` field and adapt.
 
 ### Changed
 

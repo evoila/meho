@@ -6358,6 +6358,316 @@
         }
       }
     },
+    "/ui/memory": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory List",
+        "description": "``GET /ui/memory`` -- list page or HTMX card-list fragment.",
+        "operationId": "ui_memory_list_ui_memory_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "default": "all",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Tag"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/tags": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Tags",
+        "description": "``GET /ui/memory/tags`` -- HTMX datalist autocomplete fragment.",
+        "operationId": "ui_memory_tags_ui_memory_tags_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/{scope}/{slug}": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Detail",
+        "description": "``GET /ui/memory/<scope>/<slug>`` -- detail page or HTMX body fragment.",
+        "operationId": "ui_memory_detail_ui_memory__scope___slug__get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Patch",
+        "description": "``PATCH /ui/memory/<scope>/<slug>`` -- save the edited body.",
+        "operationId": "ui_memory_patch_ui_memory__scope___slug__patch",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_patch_ui_memory__scope___slug__patch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Delete",
+        "description": "``DELETE /ui/memory/<scope>/<slug>`` -- delete + re-render the list.",
+        "operationId": "ui_memory_delete_ui_memory__scope___slug__delete",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/{scope}/{slug}/edit": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Edit Form",
+        "description": "``GET /ui/memory/<scope>/<slug>/edit`` -- HTMX edit-form fragment.",
+        "operationId": "ui_memory_edit_form_ui_memory__scope___slug__edit_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/knowledge": {
       "get": {
         "tags": [
@@ -6386,27 +6696,6 @@
         ],
         "summary": "Ui Stub Connectors",
         "operationId": "ui_stub_connectors_ui_connectors_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/memory": {
-      "get": {
-        "tags": [
-          "ui-stubs"
-        ],
-        "summary": "Ui Stub Memory",
-        "operationId": "ui_stub_memory_ui_memory_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -7538,6 +7827,24 @@
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
       },
+      "Body_ui_memory_patch_ui_memory__scope___slug__patch": {
+        "properties": {
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "title": "Body_ui_memory_patch_ui_memory__scope___slug__patch"
+      },
       "BroadcastOverrideCreate": {
         "properties": {
           "op_id_pattern": {
@@ -7686,8 +7993,15 @@
             "title": "Op Id"
           },
           "target": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
             "nullable": true,
             "title": "Target"
           },
@@ -7704,7 +8018,7 @@
           "op_id"
         ],
         "title": "CallOperationBody",
-        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` is a partial\ndescriptor (``{\"name\": \"rdc-vcenter\"}``) the handler resolves via\n:func:`~meho_backplane.targets.resolver.resolve_target`; ``None``\nmeans the operation does not need a target (typed handlers that\ndon't read it; composite handlers that do their own resolution).\n\nRecognised keys on the ``target`` dict:\n\n* ``name`` (required when ``target`` is supplied) -- the slug or\n  alias the resolver looks up in the targets registry.\n* ``fqdn`` (optional) -- per-call override for the resolved\n  target's ``fqdn`` column. Honoured by connectors that read\n  ``target.fqdn`` for vhost routing (G3.6 VCF Automation:\n  the appliance enforces strict ``Host:`` matching and returns\n  404 with empty body when reached by IP without the correct\n  vhost set). The override mutates the resolved Target in\n  memory only; the database row is not modified. Any other key\n  in the dict is silently ignored, mirroring the documented\n  forward-compatibility posture in the MCP tool schema.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` -- a v0.2.1 client still sending ``target:\nstr`` (the pre-rename single-name shape) or a typo in\n``connector_id`` now fails loud at the framework boundary instead\nof silently dispatching with the defaults. ``params`` itself is a\nfree-form ``dict`` because per-op parameter shape is enforced by\nthe descriptor's ``parameter_schema`` further down the dispatch\npath; only the meta-tool body's own fields are constrained here."
+        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` accepts either\nshape and ``None``:\n\n* **Bare string** -- ``target: \"rdc-vcenter\"``. The forward-preferred\n  shape; matches ``query_topology`` / ``query_audit`` so an agent\n  can carry a target name across the read and the write surfaces\n  without reshape. G0.13-T2 (#1132) widening of #780.\n* **Dict** -- ``target: {\"name\": \"rdc-vcenter\"}``. The original\n  shape; the handler resolves the ``name`` field and (optionally)\n  reads ``fqdn`` for vhost routing. Still accepted unchanged.\n* **None** -- the operation does not need a target (typed handlers\n  that don't read it; composite handlers that do their own\n  resolution).\n\nBoth shapes normalise to the same dict before dispatch, so the\nresolver and the connectors see one canonical form. A bare-string\n``target`` is equivalent to ``{\"name\": <string>}`` -- no ``fqdn``\noverride can be passed via the string shape; callers that need\nthe override stay on the dict.\n\nRecognised keys on the ``target`` dict:\n\n* ``name`` (required when ``target`` is supplied as a dict) -- the\n  slug or alias the resolver looks up in the targets registry.\n* ``fqdn`` (optional) -- per-call override for the resolved\n  target's ``fqdn`` column. Honoured by connectors that read\n  ``target.fqdn`` for vhost routing (G3.6 VCF Automation:\n  the appliance enforces strict ``Host:`` matching and returns\n  404 with empty body when reached by IP without the correct\n  vhost set). The override mutates the resolved Target in\n  memory only; the database row is not modified. Any other key\n  in the dict is silently ignored, mirroring the documented\n  forward-compatibility posture in the MCP tool schema.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown *body* fields\nwith 422 ``extra_forbidden`` -- a typo in ``connector_id`` or an\nunknown sibling field still fails loud. The ``target`` field's\nown union widening is orthogonal: bare-string is now a first-class\nvalid value, not an unknown field. ``params`` itself is a\nfree-form ``dict`` because per-op parameter shape is enforced by\nthe descriptor's ``parameter_schema`` further down the dispatch\npath; only the meta-tool body's own fields are constrained here."
       },
       "CandidateHint": {
         "properties": {
@@ -10972,6 +11286,32 @@
         ],
         "title": "TopologyTimelineResult",
         "description": "Page of timeline rows plus the forward-only continuation cursor.\n\n``next_cursor`` is :data:`None` when fewer than ``limit`` rows\nwere available (the query reached the end of the matching set).\nConsumers iterate by re-issuing the same filter with\n``cursor = next_cursor`` until ``next_cursor`` is None.\n\nThe cursor is opaque (base64-encoded JSON over ``(valid_from,\nhistory_id, source)``) -- consumers treat it as a token. Stability\nunder concurrent inserts: a new history row landing in the window\nbetween page N and page N+1 is naturally placed by the keyset\ncompare (``(valid_from, history_id) < (cursor.ts, cursor.id)``)\nand either appears on a later page (if it falls below the cursor)\nor never (if it lands above the cursor). No row is duplicated or\nskipped by the act of paging."
+      },
+      "UISessionContext": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Session Id"
+          },
+          "operator_sub": {
+            "type": "string",
+            "title": "Operator Sub"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "operator_sub",
+          "tenant_id"
+        ],
+        "title": "UISessionContext",
+        "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims)."
       },
       "UsageReport": {
         "properties": {

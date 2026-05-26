@@ -905,6 +905,171 @@ async def test_call_operation_missing_target_name_raises_valueerror(
 
 
 @pytest.mark.asyncio
+async def test_call_operation_with_bare_string_target_resolves_and_dispatches(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """G0.13-T2 #1132: bare-string ``target`` round-trips like the dict shape.
+
+    Mirrors :func:`test_call_operation_with_target_resolves_and_dispatches`
+    but passes ``target="rdc-vault"`` (the bare-string form preferred for
+    cross-tool consistency with ``query_topology`` / ``query_audit``).
+    Both shapes must reach the same dispatch result -- the additive
+    widening is the contract.
+    """
+    register_connector_v2(
+        product="vault",
+        version="",
+        impl_id="",
+        cls=_NoOpVaultConnector,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler,
+        summary="Read a secret.",
+        description="reads.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    from datetime import UTC, datetime
+
+    target_id = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s, s.begin():
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_A,
+                name="rdc-vault",
+                aliases=["primary-vault"],
+                product="vault",
+                host="vault.example.com",
+                port=8200,
+                fqdn=None,
+                secret_ref=None,
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={},
+                notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    operator = _make_operator(tenant_id=_TENANT_A)
+    result = await call_operation(
+        operator,
+        {
+            "connector_id": "vault-1.x",
+            "op_id": "vault.kv.read",
+            "target": "rdc-vault",
+            "params": {"path": "secret/foo"},
+        },
+    )
+
+    assert result["status"] == "ok", result.get("error")
+    assert result["result"]["echo"] == {"path": "secret/foo"}
+    assert result["result"]["target_name"] == "rdc-vault"
+
+
+@pytest.mark.asyncio
+async def test_call_operation_empty_string_target_raises_valueerror(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """G0.13-T2 #1132: an empty string ``target`` is rejected like an empty dict.
+
+    The handler validates the bare-string form symmetrically with the
+    dict form -- ``""`` and ``{}`` both fail with the same
+    ``ValueError`` message so the route's 400 mapping stays uniform.
+    """
+    operator = _make_operator(tenant_id=_TENANT_A)
+    with pytest.raises(ValueError):
+        await call_operation(
+            operator,
+            {
+                "connector_id": "vault-1.x",
+                "op_id": "vault.kv.read",
+                "target": "",
+                "params": {},
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_call_operation_bare_string_and_dict_target_dispatch_identically(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """G0.13-T2 #1132: both target shapes produce the same dispatch payload.
+
+    Acceptance criterion: tests cover both shapes round-trip to the
+    same dispatch result. This test asserts that explicitly -- the
+    handler's response envelope is identical (minus dispatcher-side
+    timing) for ``target="rdc-vault"`` and ``target={"name":
+    "rdc-vault"}`` against the same seeded target row.
+    """
+    register_connector_v2(
+        product="vault",
+        version="",
+        impl_id="",
+        cls=_NoOpVaultConnector,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler,
+        summary="Read.",
+        description="reads.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s, s.begin():
+        s.add(
+            TargetORM(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT_A,
+                name="rdc-vault",
+                aliases=[],
+                product="vault",
+                host="vault.example.com",
+                port=8200,
+                fqdn=None,
+                secret_ref=None,
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={},
+                notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    operator = _make_operator(tenant_id=_TENANT_A)
+    base_args: dict[str, Any] = {
+        "connector_id": "vault-1.x",
+        "op_id": "vault.kv.read",
+        "params": {"path": "secret/foo"},
+    }
+    result_string = await call_operation(operator, {**base_args, "target": "rdc-vault"})
+    result_dict = await call_operation(operator, {**base_args, "target": {"name": "rdc-vault"}})
+
+    # Compare the dispatch-meaningful fields; ``duration_ms`` is timing.
+    assert result_string["status"] == result_dict["status"] == "ok"
+    assert result_string["op_id"] == result_dict["op_id"]
+    assert result_string["result"] == result_dict["result"]
+    assert result_string["error"] == result_dict["error"]
+    assert result_string["extras"] == result_dict["extras"]
+
+
+@pytest.mark.asyncio
 async def test_call_operation_unknown_op_returns_structured_error(
     stub_embedding_service: AsyncMock,
 ) -> None:

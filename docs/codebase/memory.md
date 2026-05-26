@@ -247,9 +247,16 @@ marker.
   exercises PG-only operators (`@@`, `<=>`); the unit tests mock
   the retrieve helper and the PG-real contract lives in
   `tests/acceptance/test_g51_memory_canary.py`.
-* The MCP `add_to_memory` schema names the body field `content` while
-  the REST + KB schemas use `body` — sibling task #779 (G0.9.1-T7)
-  closes that asymmetry separately. Out of scope here.
+* The MCP `add_to_memory` body field underwent a rename
+  `content` -> `body` to align with `add_to_knowledge` and the REST
+  `POST /api/v1/memory` body schema. G0.9.1-T7 (#779) shipped the
+  rename; G0.13-T4 (#1134) retro-fitted the missing CHANGELOG and
+  release-body callout against the actual release window (v0.6.0, not
+  v0.3.2 as the original task's AC targeted) and added a one-cycle
+  compatibility shim. v0.6.x accepts both fields: `body` is canonical
+  and wins when both are supplied; `content` is a deprecated alias
+  that fires a structured `add_to_memory_field_deprecated` warning
+  log line with `replacement="body"`. The shim is dropped in v0.7.
 * Non-`user` scopes have no default-TTL gate by design (per #624's
   narrow scope). A future Task widening it should change the
   `scope is not MemoryScope.USER` branch in `memory/ttl.py` and add

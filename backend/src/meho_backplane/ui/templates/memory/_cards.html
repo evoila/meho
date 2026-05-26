@@ -1,0 +1,93 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-swappable card grid for the Memory list (Initiative #341 Task
+  #877). Rendered both inline by ``memory/index.html`` (full page) and
+  by the route handler as a partial response (HTMX swap target on
+  scope-tab + tag-filter changes).
+
+  Each card shows:
+    * Slug + scope badge.
+    * Expiry timestamp (when set) with a ``data-expires-at`` attribute
+      so a future client-side countdown (T3 #879) can render the
+      "expires in 3d 4h" cue without a server change.
+    * Tag chips (DaisyUI badges).
+    * 200-char body preview (truncated server-side).
+    * "View" link to the detail page.
+
+  The element ID ``#memory-cards`` is the HTMX swap target. Per the
+  HTMX docs (https://htmx.org/attributes/hx-swap/), an ``outerHTML``
+  swap replaces the element including its ID, which we want so the
+  empty / non-empty states can swap interchangeably.
+-#}
+<section
+  id="memory-cards"
+  aria-label="Memory card grid"
+  class="space-y-3"
+>
+  {% if flash %}
+    <div class="alert alert-info" role="status">
+      <span>{{ flash }}</span>
+    </div>
+  {% endif %}
+
+  {% if not entries %}
+    <div class="card bg-base-100 border-base-300 border">
+      <div class="card-body text-sm opacity-70">
+        No memories match the current scope / tag filter.
+      </div>
+    </div>
+  {% else %}
+    <ul class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      {% for entry in entries %}
+        <li
+          class="card bg-base-100 border-base-300 border shadow-sm"
+          data-memory-id="{{ entry.id }}"
+          data-memory-scope="{{ entry.scope }}"
+        >
+          <div class="card-body p-4">
+            <div class="flex items-start justify-between gap-2">
+              <h2 class="card-title text-base font-mono break-all">
+                <a
+                  href="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}"
+                  class="link link-hover"
+                >{{ entry.slug }}</a>
+              </h2>
+              <span class="badge badge-outline badge-sm shrink-0">{{ entry.scope }}</span>
+            </div>
+            {% if entry.expires_at %}
+              <div
+                class="text-xs opacity-70"
+                data-expires-at="{{ entry.expires_at.isoformat() }}"
+              >
+                Expires {{ entry.expires_at.isoformat() }}
+              </div>
+            {% endif %}
+            {% if entry.tags %}
+              <ul class="flex flex-wrap gap-1" aria-label="Memory tags">
+                {% for tag in entry.tags %}
+                  <li>
+                    <span class="badge badge-sm badge-ghost">{{ tag }}</span>
+                  </li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+            <p class="text-sm opacity-80 whitespace-pre-wrap break-words">
+              {{ entry.preview }}
+            </p>
+            <div class="card-actions justify-end">
+              <a
+                class="btn btn-xs btn-ghost"
+                href="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}"
+                aria-label="View memory {{ entry.scope }}/{{ entry.slug }}"
+              >
+                View
+              </a>
+            </div>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>

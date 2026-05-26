@@ -56,7 +56,24 @@ const (
 	// feed needs operator role, read_only is rejected. Distinct
 	// from auth_expired because `meho login` won't fix it; the
 	// remedy is a tenant-admin role grant.
+	//
+	// Exit 5 is also overloaded for InsufficientBudget (see
+	// ExitInsufficientBudget), since both states are
+	// "authenticated, but the action couldn't complete because of
+	// a configured limit the operator's tenant_admin must change."
+	// The error code in the JSON envelope distinguishes the two.
 	ExitInsufficientRole = 5
+	// ExitInsufficientBudget indicates the operator's tenant has
+	// over-budget operational conventions that exceed the preamble
+	// token budget — some conventions will be dropped from agent
+	// sessions until the tenant_admin resolves the overflow (raise
+	// priority, shorten, or split entries). Surfaced by `meho
+	// conventions list` (G7.1-T7 #1094) when the GET
+	// /api/v1/conventions response carries non-empty
+	// budget_status.dropped_slugs. Shares the integer value with
+	// ExitInsufficientRole (both are "tenant_admin must act");
+	// callers branch on the error code string, not the integer.
+	ExitInsufficientBudget = 5
 )
 
 // Error codes (the "error" field in the JSON error envelope). The
@@ -79,6 +96,13 @@ const (
 	// endpoint's minimum (HTTP 403). Remedy: tenant-admin role
 	// grant, not a re-login.
 	ErrCodeInsufficientRole = "insufficient_role"
+	// ErrCodeInsufficientBudget pairs with ExitInsufficientBudget.
+	// The operator's tenant has over-budget operational
+	// conventions; some will be dropped from agent sessions until
+	// the tenant_admin raises a priority, shortens a body, or
+	// splits an entry. Surfaced by `meho conventions list` per
+	// G7.1-T7 #1094.
+	ErrCodeInsufficientBudget = "insufficient_budget"
 )
 
 // StructuredError is the error shape produced by every meho
@@ -178,6 +202,20 @@ func InsufficientRole(detail string) *StructuredError {
 		Code:   ErrCodeInsufficientRole,
 		Detail: detail,
 		Exit:   ExitInsufficientRole,
+	}
+}
+
+// InsufficientBudget builds the canonical insufficient_budget
+// StructuredError for the over-budget preamble case (G7.1-T7 #1094).
+// Detail should name the dropped slugs and the tenant's max / estimated
+// token counts so the operator (or tenant_admin they alert) can act
+// without re-running another command. The same exit code 5 surfaces as
+// for insufficient_role; the error code string distinguishes them.
+func InsufficientBudget(detail string) *StructuredError {
+	return &StructuredError{
+		Code:   ErrCodeInsufficientBudget,
+		Detail: detail,
+		Exit:   ExitInsufficientBudget,
 	}
 }
 

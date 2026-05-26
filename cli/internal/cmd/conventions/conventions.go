@@ -122,11 +122,37 @@ type Summary struct {
 	UpdatedAt    string  `json:"updated_at"`
 }
 
+// BudgetStatus mirrors the backend BudgetStatus pydantic model — the
+// preamble budget arithmetic the GET /api/v1/conventions list response
+// surfaces on every call (T7 #1094). MaxTokens is the budget the
+// preamble assembler enforces; EstimatedTokens is the actual weight of
+// the assembled preamble text; OverBudget is True iff DroppedSlugs is
+// non-empty; DroppedSlugs lists the slugs the packer omitted, in
+// lowest-priority-first drop order.
+//
+// The list verb consults DroppedSlugs: when non-empty (and not in --json
+// mode), it prints a stderr warning naming the dropped slugs and exits
+// with code 5 (insufficient_budget). --json mode emits the full envelope
+// and exits 0 — JSON consumers parse the field themselves.
+type BudgetStatus struct {
+	MaxTokens       int      `json:"max_tokens"`
+	EstimatedTokens int      `json:"estimated_tokens"`
+	OverBudget      bool     `json:"over_budget"`
+	DroppedSlugs    []string `json:"dropped_slugs"`
+}
+
 // ListResponse mirrors the backend ConventionListResponse envelope —
 // wrapped in `{"entries": [...]}` for forward-compat with future paging
 // fields. Same shape kb / agent adopted.
+//
+// BudgetStatus (T7 #1094) is always populated; the backend computes it
+// from the tenant's full operational-conventions set on every list
+// call. The --kind query filter narrows Entries only; BudgetStatus
+// always reflects the full operational set so an operator scoping
+// the list by kind cannot mask an over-budget tenant.
 type ListResponse struct {
-	Entries []Summary `json:"entries"`
+	Entries      []Summary    `json:"entries"`
+	BudgetStatus BudgetStatus `json:"budget_status"`
 }
 
 // HistoryEntry mirrors the backend ConventionHistoryEntry pydantic

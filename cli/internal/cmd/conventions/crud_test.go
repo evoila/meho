@@ -118,6 +118,137 @@ func TestPrintListTableEmpty(t *testing.T) {
 	}
 }
 
+// TestRunListOverBudgetExitsFive — G7.1-T7 (#1094) the deferred AC.
+// Table-mode list against an over-budget tenant prints the stderr
+// warning naming the dropped slugs, exits with code 5
+// (insufficient_budget), and still writes the table to stdout so
+// scripted consumers redirecting stdout still see the data.
+func TestRunListOverBudgetExitsFive(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ListResponse{
+			Entries: []Summary{sampleSummary()},
+			BudgetStatus: BudgetStatus{
+				MaxTokens:       600,
+				EstimatedTokens: 920,
+				OverBudget:      true,
+				DroppedSlugs:    []string{"low-priority-rule", "lower-priority-rule"},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	err := runList(cmd, listOptions{BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected non-nil error for over-budget tenant; stdout=%q stderr=%q",
+			stdout.String(), stderr.String())
+	}
+	// Exit code: must be 5 (insufficient_budget).
+	exitCoder, ok := err.(interface{ ExitCode() int })
+	if !ok {
+		t.Fatalf("error does not implement ExitCode(): %T", err)
+	}
+	if got := exitCoder.ExitCode(); got != 5 {
+		t.Errorf("exit code = %d; want 5 (insufficient_budget)", got)
+	}
+	// Table goes to stdout — even when over-budget, the operator
+	// wants to see what's actually registered.
+	if !strings.Contains(stdout.String(), "vault-canonical") {
+		t.Errorf("stdout missing table content; got %q", stdout.String())
+	}
+	// Warning + structured error envelope go to stderr together.
+	for _, want := range []string{
+		"WARNING",
+		"max_tokens=600",
+		"estimated=920",
+		"DROPPED",
+		"low-priority-rule",
+		"lower-priority-rule",
+		"insufficient_budget",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q in %q", want, stderr.String())
+		}
+	}
+}
+
+// TestRunListOverBudgetJSONExitsZero — `--json` mode is the agent /
+// scripting surface; the entire envelope (entries + budget_status)
+// goes to stdout and the exit code is 0 regardless of over-budget
+// state. JSON consumers parse budget_status themselves.
+func TestRunListOverBudgetJSONExitsZero(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ListResponse{
+			Entries: []Summary{sampleSummary()},
+			BudgetStatus: BudgetStatus{
+				MaxTokens:       600,
+				EstimatedTokens: 920,
+				OverBudget:      true,
+				DroppedSlugs:    []string{"low-priority-rule"},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	if err := runList(cmd, listOptions{BackplaneOverride: srv.URL, JSONOut: true}); err != nil {
+		t.Fatalf("runList --json over budget: %v; stderr=%q", err, stderr.String())
+	}
+	// stderr stays clean — no human warning under --json.
+	if stderr.Len() != 0 {
+		t.Errorf("expected clean stderr under --json; got %q", stderr.String())
+	}
+	// stdout carries the full envelope including budget_status.
+	var got ListResponse
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode stdout JSON: %v; raw=%s", err, stdout.String())
+	}
+	if !got.BudgetStatus.OverBudget {
+		t.Errorf("decoded JSON missing over_budget=true; got %+v", got.BudgetStatus)
+	}
+	if len(got.BudgetStatus.DroppedSlugs) != 1 || got.BudgetStatus.DroppedSlugs[0] != "low-priority-rule" {
+		t.Errorf("decoded JSON dropped_slugs wrong: %+v", got.BudgetStatus.DroppedSlugs)
+	}
+}
+
+// TestRunListFittingTenantExitsZero — sanity check that the table
+// path is unchanged for the fitting (default) case: stdout carries
+// the table, stderr is clean, exit code 0.
+func TestRunListFittingTenantExitsZero(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ListResponse{
+			Entries: []Summary{sampleSummary()},
+			BudgetStatus: BudgetStatus{
+				MaxTokens:       600,
+				EstimatedTokens: 120,
+				OverBudget:      false,
+				DroppedSlugs:    []string{},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	if err := runList(cmd, listOptions{BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runList fitting tenant: %v; stderr=%q", err, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("expected clean stderr for fitting tenant; got %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "vault-canonical") {
+		t.Errorf("stdout missing table content; got %q", stdout.String())
+	}
+}
+
 // --- show ---
 
 func TestBuildShowPath(t *testing.T) {

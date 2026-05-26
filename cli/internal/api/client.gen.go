@@ -882,6 +882,58 @@ type BroadcastOverrideRead struct {
 	UpdatedAt    time.Time          `json:"updated_at"`
 }
 
+// BudgetStatus Preamble budget status for the operator's tenant.
+//
+// Surfaced as a sub-document on every “GET /api/v1/conventions“
+// call so the CLI's “meho conventions list“ (T7 #1094) can warn
+// when the tenant's “kind='operational'“ set overflows the
+// preamble budget and name the slugs that will be dropped from the
+// agent session preamble. Without this surface, T3 #315's
+// "lowest-priority slugs that will be dropped" acceptance
+// criterion is unsatisfiable from a single list call -- the
+// deferred AC the issue body folds back in.
+//
+// All four fields are populated by a single call to
+// :func:`~meho_backplane.conventions.preamble.assemble_preamble`
+// against the operator's tenant, so the budget arithmetic is
+// end-to-end consistent with T4's preamble assembler (the same
+// helper that produces the MCP “initialize“ “instructions“
+// field). A divergence between the list surface's
+// “estimated_tokens“ and the preamble actually delivered to
+// agent sessions would be a silent contract drift; sharing the
+// primitive eliminates it by construction.
+//
+// Fields:
+//
+//   - “max_tokens“ -- the budget the preamble assembler enforces.
+//     Currently :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (a module-level
+//     constant; configurable via the assembler's “max_tokens“
+//     parameter in tests). Exposed on the list response so
+//     operators can do the budget math without grepping the source.
+//   - “estimated_tokens“ -- :func:`estimate_tokens` over the
+//     assembled preamble text (header + guard + delimited kept
+//     blocks). Empty tenant: 0. Fitting tenant: positive integer
+//     below “max_tokens“. Over-budget tenant: positive integer
+//     below “max_tokens“ (the packer dropped slugs whole until it
+//     fit), but “over_budget=True“ and “dropped_slugs“ is
+//     non-empty.
+//   - “over_budget“ -- convenience flag derived from
+//     “len(dropped_slugs) > 0“. Cheap derived value but worth
+//     surfacing as a boolean so CLI / dashboard consumers branch on
+//     one bit rather than a length-of-list check.
+//   - “dropped_slugs“ -- slugs that did not fit, in the packer's
+//     drop order (lowest-priority-first, ties broken by oldest-
+//     first). The CLI prints these on stderr with an
+//     "insufficient_budget" exit-code-5 warning so the operator
+//     knows exactly which conventions never reach an agent
+//     session.
+type BudgetStatus struct {
+	DroppedSlugs    []string `json:"dropped_slugs"`
+	EstimatedTokens int      `json:"estimated_tokens"`
+	MaxTokens       int      `json:"max_tokens"`
+	OverBudget      bool     `json:"over_budget"`
+}
+
 // CallOperationBody Request body for the “POST /api/v1/operations/call“ route.
 //
 // Mirrors the :func:`call_operation` “arguments“ shape so the route
@@ -1142,8 +1194,64 @@ type ConventionKind string
 // field can land non-breakingly. Same shape the kb + memory list
 // surfaces adopted; consistency across the v0.2 read APIs keeps
 // the CLI's list renderer one switch statement, not three.
+//
+// “budget_status“ (T7 #1094) carries the preamble budget
+// arithmetic for the operator's tenant. Always populated; the
+// underlying :func:`~meho_backplane.conventions.preamble.assemble_preamble`
+// call is one indexed SELECT + an in-memory pack -- cheap enough
+// to run on every list request. Exposing it on the list
+// response (rather than on a separate
+// “/api/v1/conventions/budget-status“ route the issue body
+// explicitly rejects) keeps the CLI / dashboard consumer paths
+// to one HTTP round-trip.
 type ConventionListResponse struct {
-	Entries []ConventionSummary `json:"entries"`
+	// BudgetStatus Preamble budget status for the operator's tenant.
+	//
+	// Surfaced as a sub-document on every ``GET /api/v1/conventions``
+	// call so the CLI's ``meho conventions list`` (T7 #1094) can warn
+	// when the tenant's ``kind='operational'`` set overflows the
+	// preamble budget and name the slugs that will be dropped from the
+	// agent session preamble. Without this surface, T3 #315's
+	// "lowest-priority slugs that will be dropped" acceptance
+	// criterion is unsatisfiable from a single list call -- the
+	// deferred AC the issue body folds back in.
+	//
+	// All four fields are populated by a single call to
+	// :func:`~meho_backplane.conventions.preamble.assemble_preamble`
+	// against the operator's tenant, so the budget arithmetic is
+	// end-to-end consistent with T4's preamble assembler (the same
+	// helper that produces the MCP ``initialize`` ``instructions``
+	// field). A divergence between the list surface's
+	// ``estimated_tokens`` and the preamble actually delivered to
+	// agent sessions would be a silent contract drift; sharing the
+	// primitive eliminates it by construction.
+	//
+	// Fields:
+	//
+	// * ``max_tokens`` -- the budget the preamble assembler enforces.
+	//   Currently :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (a module-level
+	//   constant; configurable via the assembler's ``max_tokens``
+	//   parameter in tests). Exposed on the list response so
+	//   operators can do the budget math without grepping the source.
+	// * ``estimated_tokens`` -- :func:`estimate_tokens` over the
+	//   assembled preamble text (header + guard + delimited kept
+	//   blocks). Empty tenant: 0. Fitting tenant: positive integer
+	//   below ``max_tokens``. Over-budget tenant: positive integer
+	//   below ``max_tokens`` (the packer dropped slugs whole until it
+	//   fit), but ``over_budget=True`` and ``dropped_slugs`` is
+	//   non-empty.
+	// * ``over_budget`` -- convenience flag derived from
+	//   ``len(dropped_slugs) > 0``. Cheap derived value but worth
+	//   surfacing as a boolean so CLI / dashboard consumers branch on
+	//   one bit rather than a length-of-list check.
+	// * ``dropped_slugs`` -- slugs that did not fit, in the packer's
+	//   drop order (lowest-priority-first, ties broken by oldest-
+	//   first). The CLI prints these on stderr with an
+	//   "insufficient_budget" exit-code-5 warning so the operator
+	//   knows exactly which conventions never reach an agent
+	//   session.
+	BudgetStatus BudgetStatus        `json:"budget_status"`
+	Entries      []ConventionSummary `json:"entries"`
 }
 
 // ConventionSummary List-row representation returned by “GET /api/v1/conventions“.

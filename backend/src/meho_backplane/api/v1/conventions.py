@@ -60,8 +60,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.audit import bind_preallocated_audit_id
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.conventions.preamble import assemble_preamble
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
+    BudgetStatus,
     Convention,
     ConventionCreate,
     ConventionHistoryEntry,
@@ -294,6 +296,17 @@ async def list_conventions(
     ``body``). Ordering is ``priority DESC, created_at ASC`` --
     the same key T4's preamble assembler uses for packing, so the
     list view surfaces conventions in T4's consideration order.
+
+    The response also carries ``budget_status`` (T7 #1094): the
+    preamble budget arithmetic for the operator's tenant, computed
+    by a call to :func:`~meho_backplane.conventions.preamble.assemble_preamble`.
+    The ``--kind`` query filter narrows the ``entries`` list only;
+    ``budget_status`` always reflects the full ``operational``
+    set (a ``--kind=workflow`` list call still wants the truthful
+    budget signal). The assembler runs an indexed SELECT + an
+    in-memory pack -- O(N) per call where N is the tenant's
+    operational-convention count (~10-20 in practice), so the
+    cost is negligible against the list round-trip.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_ID_LIST,
@@ -309,8 +322,27 @@ async def list_conventions(
         TenantConvention.created_at.asc(),
     )
     rows = (await session.execute(stmt)).scalars().all()
+
+    # Compute the budget status via the same primitive T4's MCP
+    # ``initialize`` handler uses, so a tenant's
+    # ``estimated_tokens`` on the list response and the preamble
+    # actually delivered to agent sessions cannot drift. The
+    # assembler opens its own DB session (it has to: the MCP
+    # ``initialize`` path is not a FastAPI request handler), which
+    # adds one round-trip on top of the list query above; that is
+    # acceptable for the v0.2 budget contract and the natural unit
+    # for "what the preamble actually weighs".
+    preamble = await assemble_preamble(operator.tenant_id)
+    budget_status = BudgetStatus(
+        max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
+        estimated_tokens=estimate_tokens(preamble.text),
+        over_budget=bool(preamble.dropped_slugs),
+        dropped_slugs=preamble.dropped_slugs,
+    )
+
     return ConventionListResponse(
         entries=[ConventionSummary.model_validate(row) for row in rows],
+        budget_status=budget_status,
     )
 
 

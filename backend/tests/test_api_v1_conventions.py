@@ -756,7 +756,18 @@ async def test_get_does_not_leak_cross_tenant(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {token_b}"},
         )
     assert resp.status_code == 200
-    assert resp.json() == {"entries": []}
+    body = resp.json()
+    # T7 #1094: list now carries ``budget_status`` alongside entries.
+    # Tenant B's view sees its own empty preamble budget -- tenant A's
+    # convention does not bleed across (the cross-tenant assertion this
+    # test originated to guard).
+    assert body["entries"] == []
+    assert body["budget_status"] == {
+        "max_tokens": DEFAULT_MAX_PREAMBLE_TOKENS,
+        "estimated_tokens": 0,
+        "over_budget": False,
+        "dropped_slugs": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -1005,3 +1016,210 @@ async def test_audit_payload_carries_op_id_and_slug(client: TestClient) -> None:
     assert payload["op_id"] == "conventions.create"
     assert payload["op_class"] == "write"
     assert payload["slug"] == "audit-payload"
+
+
+# ---------------------------------------------------------------------------
+# T7 #1094 -- BudgetStatus surfacing on GET /api/v1/conventions
+# ---------------------------------------------------------------------------
+
+
+def _near_budget_body(target_tokens: int = 400) -> str:
+    """A body whose token estimate is close to ``target_tokens``.
+
+    Stays well under :data:`DEFAULT_MAX_PREAMBLE_TOKENS` so the
+    per-entry POST 422 gate accepts it (the single-entry overflow
+    check at write time is independent of the cumulative pack-
+    budget check at preamble-assembly time). Three of these
+    together overflow the cumulative budget and exercise the
+    packer's drop-lowest-priority-first behaviour.
+
+    Math: ``estimate_tokens`` is ``ceil(len / 3.3)``. For
+    ``target_tokens=400`` we need ``len >= 1320``; we use 1400 for
+    headroom.
+    """
+    chars = max(target_tokens * 4, 1400)
+    return "x " * (chars // 2)
+
+
+@pytest.mark.asyncio
+async def test_list_budget_status_empty_tenant(client: TestClient) -> None:
+    """Empty tenant: ``estimated_tokens=0``, ``over_budget=False``, ``dropped_slugs=[]``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-budget-empty")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            "/api/v1/conventions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["entries"] == []
+    bs = body["budget_status"]
+    assert bs["max_tokens"] == DEFAULT_MAX_PREAMBLE_TOKENS
+    assert bs["estimated_tokens"] == 0
+    assert bs["over_budget"] is False
+    assert bs["dropped_slugs"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_budget_status_fitting_tenant(client: TestClient) -> None:
+    """Fitting tenant: ``over_budget=False``, ``dropped_slugs=[]``, ``estimated_tokens > 0``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-budget-fits")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # Two small operational conventions -- both fit the 600-
+        # token budget with room to spare.
+        _post_convention(client, token, slug="rule-one", body="Short rule one.", priority=10)
+        _post_convention(client, token, slug="rule-two", body="Short rule two.", priority=5)
+        # And a workflow / reference each -- preamble-unbound; should
+        # not affect ``budget_status`` since the packer reads only
+        # ``operational``.
+        _post_convention(client, token, slug="wf", body="Workflow note.", kind="workflow")
+        _post_convention(client, token, slug="ref", body="Reference note.", kind="reference")
+        resp = client.get(
+            "/api/v1/conventions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["entries"]) == 4  # all four rows
+    bs = body["budget_status"]
+    assert bs["max_tokens"] == DEFAULT_MAX_PREAMBLE_TOKENS
+    assert bs["estimated_tokens"] > 0
+    assert bs["estimated_tokens"] < DEFAULT_MAX_PREAMBLE_TOKENS
+    assert bs["over_budget"] is False
+    assert bs["dropped_slugs"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_budget_status_over_budget_tenant(client: TestClient) -> None:
+    """Over-budget tenant: ``over_budget=True``, ``dropped_slugs`` lowest-priority-first."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-budget-over")
+    token = _token(key)
+    body_near = _near_budget_body(target_tokens=400)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # Three operational conventions each ~400 tokens; cumulative
+        # ~1200 tokens against a 600 budget -> the lowest-priority
+        # entries must drop. Priorities are distinct so the drop
+        # order is deterministic.
+        _post_convention(client, token, slug="high-prio", body=body_near, priority=10)
+        _post_convention(client, token, slug="mid-prio", body=body_near, priority=5)
+        _post_convention(client, token, slug="low-prio", body=body_near, priority=1)
+        resp = client.get(
+            "/api/v1/conventions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # ``entries`` returns the full set -- packing does not filter
+    # the list view; budget_status is the signal.
+    assert {row["slug"] for row in body["entries"]} == {"high-prio", "mid-prio", "low-prio"}
+    bs = body["budget_status"]
+    assert bs["over_budget"] is True
+    # Lowest priorities drop first (priority DESC order, then
+    # created_at ASC; the packer drops once cumulative + next
+    # would exceed the budget). The first one to overflow is
+    # mid-prio or low-prio depending on header overhead -- both
+    # must be in the dropped list and low-prio must precede none
+    # of the higher priorities.
+    assert "low-prio" in bs["dropped_slugs"]
+    # The dropped order respects the packer's iteration: lower
+    # priority appears later in iteration, so it lands later in
+    # ``dropped_slugs``. Mid-prio (priority=5) ranks above low-
+    # prio (priority=1), so any drop list containing mid-prio
+    # must have it before low-prio.
+    if "mid-prio" in bs["dropped_slugs"]:
+        assert bs["dropped_slugs"].index("mid-prio") < bs["dropped_slugs"].index(
+            "low-prio",
+        )
+    # High-prio (priority=10) is the first packed; it must not
+    # appear in the dropped list -- the packer fills from highest
+    # priority down.
+    assert "high-prio" not in bs["dropped_slugs"]
+
+
+@pytest.mark.asyncio
+async def test_list_budget_status_cross_tenant_isolation(client: TestClient) -> None:
+    """Tenant A's list call reflects only A's budget; B's conventions don't affect A."""
+    await _seed_tenants()
+    key_a = make_rsa_keypair("kid-budget-xt-a")
+    key_b = make_rsa_keypair("kid-budget-xt-b")
+    token_a = _token(key_a, tenant_id=_TENANT_A)
+    token_b = _token(key_b, sub="op-b", tenant_id=_TENANT_B)
+    body_near = _near_budget_body(target_tokens=400)
+    with respx.mock as r:
+        combined_jwks = {
+            "keys": [public_jwks(key_a)["keys"][0], public_jwks(key_b)["keys"][0]],
+        }
+        mock_discovery_and_jwks(r, combined_jwks)
+        # Tenant A: one tiny convention -> easily fits.
+        _post_convention(client, token_a, slug="a-small", body="Tiny rule.", priority=10)
+        # Tenant B: three near-budget conventions -> overflows.
+        _post_convention(client, token_b, slug="b-high", body=body_near, priority=10)
+        _post_convention(client, token_b, slug="b-mid", body=body_near, priority=5)
+        _post_convention(client, token_b, slug="b-low", body=body_near, priority=1)
+
+        resp_a = client.get(
+            "/api/v1/conventions",
+            headers={"Authorization": f"Bearer {token_a}"},
+        )
+        resp_b = client.get(
+            "/api/v1/conventions",
+            headers={"Authorization": f"Bearer {token_b}"},
+        )
+    assert resp_a.status_code == 200
+    assert resp_b.status_code == 200
+    body_a = resp_a.json()
+    body_b = resp_b.json()
+    # Tenant A: own entries only + fitting budget. Tenant B's bulk
+    # of conventions must not influence A's ``over_budget``.
+    assert {row["slug"] for row in body_a["entries"]} == {"a-small"}
+    assert body_a["budget_status"]["over_budget"] is False
+    assert body_a["budget_status"]["dropped_slugs"] == []
+    # Tenant B: own entries + over-budget; A's tiny convention must
+    # not have crossed into B's budget arithmetic.
+    assert {row["slug"] for row in body_b["entries"]} == {"b-high", "b-mid", "b-low"}
+    assert body_b["budget_status"]["over_budget"] is True
+    assert "a-small" not in body_b["budget_status"]["dropped_slugs"]
+    assert "b-low" in body_b["budget_status"]["dropped_slugs"]
+
+
+@pytest.mark.asyncio
+async def test_list_budget_status_kind_filter_does_not_narrow_budget(
+    client: TestClient,
+) -> None:
+    """``?kind=`` narrows entries only; ``budget_status`` reflects the full operational set."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-budget-kind-filter")
+    token = _token(key)
+    body_near = _near_budget_body(target_tokens=400)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        _post_convention(client, token, slug="op-a", body=body_near, priority=10)
+        _post_convention(client, token, slug="op-b", body=body_near, priority=5)
+        _post_convention(client, token, slug="op-c", body=body_near, priority=1)
+        _post_convention(client, token, slug="wf-x", body="WF.", kind="workflow")
+        # Narrow the list with ?kind=workflow -- entries collapse to
+        # the single workflow row, but budget_status still reflects
+        # the cumulative operational set (which is over budget).
+        resp = client.get(
+            "/api/v1/conventions?kind=workflow",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert {row["slug"] for row in body["entries"]} == {"wf-x"}
+    # ``budget_status`` is computed off the full operational set
+    # (the packer reads only ``operational`` regardless of the
+    # query filter), so a ``--kind=workflow`` list still surfaces
+    # the truthful overflow signal -- the operator can't hide an
+    # over-budget tenant by narrowing the kind.
+    bs = body["budget_status"]
+    assert bs["over_budget"] is True
+    assert "op-c" in bs["dropped_slugs"]

@@ -42,10 +42,34 @@
         Operator + tenant + target memories across the 5 scopes.
       </p>
     </div>
-    <div class="text-sm opacity-70">
-      <span aria-live="polite">{{ entry_count }} memor{{ "y" if entry_count == 1 else "ies" }}</span>
+    <div class="flex items-center gap-3">
+      <span class="text-sm opacity-70" aria-live="polite">
+        {{ entry_count }} memor{{ "y" if entry_count == 1 else "ies" }}
+      </span>
+      {# T2 #878: "+" button opens the HTMX-loaded create modal. The
+         button targets ``#memory-modal-container`` so the modal slots
+         into a dedicated DOM mount point rather than the cards grid;
+         the inserted ``<dialog>`` opens via its ``modal-open`` class
+         (DaisyUI v5 convention) so no client-side ``showModal()``
+         call is required. #}
+      <button
+        type="button"
+        class="btn btn-sm btn-primary"
+        hx-get="/ui/memory/create"
+        hx-target="#memory-modal-container"
+        hx-swap="innerHTML"
+        data-action="open-create-modal"
+        aria-label="Create memory"
+      >
+        + Create
+      </button>
     </div>
   </header>
+
+  {# T2 #878: Mount point for HTMX-loaded modals (create, future
+     bulk actions). The empty wrapper persists across HTMX swaps so
+     the modal markup always has a stable target. #}
+  <div id="memory-modal-container"></div>
 
   {# ---------- Scope tabs ---------- #}
   <nav

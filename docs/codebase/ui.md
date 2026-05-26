@@ -1227,3 +1227,161 @@ The full suite lives in
 The PATCH happy-path mocks `meho_backplane.retrieval.indexer.get_embedding_service`
 because `MemoryService.remember`'s re-index path calls `encode_one`
 on the new body. Read paths bypass embedding entirely.
+
+## Memory create modal + scope-promotion (Task #878)
+
+Initiative [#341](https://github.com/evoila/meho/issues/341) (G10.4
+Memory UI), Task [#878](https://github.com/evoila/meho/issues/878)
+(G10.4-T2) layers the **create modal** + the **scope-promotion flow**
+onto the T1 router. The "+" button on `/ui/memory` opens an
+HTMX-loaded `<dialog>` with an RBAC-filtered scope selector, slug
+input (optional, auto-generated when blank), Markdown body
+textarea + debounced server-side preview, expiry picker, and a
+comma-separated tags input. Submit calls `MemoryService.remember`
+and HTMX redirects back to the list. The detail-page Promote
+button (rendered only when the source scope has at least one legal
+ladder step) opens a second HTMX-loaded modal and submits through
+the same G5.2 `MemoryService.promote` the REST surface uses; the
+chassis `AuditMiddleware` writes one `memory.promote` audit row
+per request because the handler binds `operator_sub` + `tenant_id`
++ `audit_op_id` + `audit_op_class` + `audit_scope` + `audit_slug`
++ `audit_promotion_target_scope` to the structlog contextvars
+before calling the service.
+
+### Routes
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/ui/memory/create` | HTMX-loaded create modal fragment. Scope selector filtered to scopes the operator can write to via `MemoryRbacResolver.can_write`. |
+| `POST` | `/ui/memory/create` | Submit handler. Form-encoded body shape mirrors `/api/v1/memory`'s `RememberBody`. Returns 204 + `HX-Redirect: /ui/memory`. |
+| `POST` | `/ui/memory/preview` | Debounced server-side Markdown preview. Returns the `_body_preview.html` fragment; same `<article>` shape `_body_view.html` uses on the detail page so styling matches. |
+| `GET` | `/ui/memory/<scope>/<slug>/promote` | HTMX-loaded promote modal. Legal targets derived from `PROMOTE_TARGETS_BY_SOURCE`; terminal scopes (`tenant` / `target`) return 400. |
+| `POST` | `/ui/memory/<scope>/<slug>/promote` | Submit handler. Calls G5.2's `MemoryService.promote`. Returns 204 + `HX-Redirect: /ui/memory/<target-scope>/<slug>`. |
+
+### Module layout (additions to T1)
+
+* `backend/src/meho_backplane/ui/routes/memory/create.py` —
+  render + submit helpers for the create modal
+  (`render_create_modal`, `render_body_preview`, `create_entry`).
+  Split out of `views.py` so each module stays under the
+  chassis-wide ~600-line cap.
+* `backend/src/meho_backplane/ui/routes/memory/promote.py` —
+  render + submit helpers for the scope-promotion modal
+  (`render_promote_modal`, `promote_entry`, `_map_promote_error`).
+  Sibling of `create.py`; both call into G5.2's `MemoryService`.
+* `backend/src/meho_backplane/ui/routes/memory/_modal_shared.py` —
+  shared helpers + constants for both modals: scope-selector
+  vocabulary (`writable_scopes_for`, `scope_label`), the
+  double-submit CSRF cookie set (`set_csrf_cookie`,
+  `build_common_template_context`), the form-encoded tags parser
+  (`parse_tags`), and the form-field sizing constants
+  (`TAGS_MAX_LENGTH`, etc.).
+* `backend/src/meho_backplane/ui/routes/memory/routes.py` — adds
+  `_register_static_prefix_routes` which registers `/ui/memory/create`
+  + `/ui/memory/preview` (+ T1's `/ui/memory/tags`) ahead of the
+  parametrised `/ui/memory/{scope}/{slug}` routes. Registration
+  order is load-bearing: a request to `/ui/memory/create` would
+  otherwise be matched by `/ui/memory/{scope}/{slug}` with
+  `scope="create"`, producing a 422 from the `MemoryScope` enum.
+* `backend/src/meho_backplane/ui/templates/memory/_create_modal.html` —
+  the HTMX-loaded create modal with the RBAC-filtered scope selector,
+  Markdown textarea with debounced preview wiring, and a tiny inline
+  script that toggles the `target_name` row visibility based on the
+  selected scope. Empty-state renders an alert when
+  `writable_scopes_for(operator)` is empty (read-only role).
+* `backend/src/meho_backplane/ui/templates/memory/_promote_modal.html` —
+  the HTMX-loaded promote modal. Legal targets are rendered as a
+  `<select>`; the same inline-script pattern as the create modal
+  toggles `target_name` when the selected target is
+  target-flavoured.
+* `backend/src/meho_backplane/ui/templates/memory/_body_preview.html` —
+  Markdown-rendered preview fragment returned by `POST /ui/memory/preview`.
+* `backend/src/meho_backplane/ui/templates/memory/index.html` — adds
+  the "+" Create button (`hx-get="/ui/memory/create"`) and a stable
+  `#memory-modal-container` mount point that persists across HTMX
+  swaps.
+* `backend/src/meho_backplane/ui/templates/memory/detail.html` — adds
+  the Promote button (only rendered for non-terminal source scopes)
+  and a second `#memory-modal-container` mount point.
+
+### HTMX modal conventions
+
+* Modals are loaded into a stable `#memory-modal-container` mount
+  point via `hx-get` with `hx-target="#memory-modal-container"
+  hx-swap="innerHTML"`. The inserted `<dialog>` element carries the
+  `modal-open` class (DaisyUI v5) so it opens immediately without a
+  client-side `showModal()` call.
+* Submit forms inside the modals use `hx-post` with `hx-target="this"
+  hx-swap="none"` — the 204 + `HX-Redirect` response shape means
+  HTMX navigates the whole page rather than swapping the form into a
+  rendered fragment. Same convention T1's delete-confirm modal uses.
+* Form encoding is `application/x-www-form-urlencoded`. The chassis
+  `CSRFMiddleware` accepts the double-submit token from either the
+  `X-CSRF-Token` header (HTMX inherits it from the page-level
+  `hx-headers` directive) or the `csrf_token` form field.
+* `hx-trigger="keyup changed delay:300ms"` on the create modal's
+  body textarea drives the debounced server-side preview — see
+  https://htmx.org/attributes/hx-trigger/. `delay:300ms` matches
+  the convention T1's tag-filter input uses for the list page's
+  type-ahead.
+* The create + promote modals each carry a tiny inline `<script>`
+  that toggles the `target_name` field's visibility based on the
+  selected scope. Pulled inline (not into a separate `<script src>`)
+  because the modal is HTMX-injected and a fresh request for the
+  external JS file would race the `<dialog>` insertion. The script
+  reads the target-scoped scope values off a `data-target-scoped-values`
+  attribute on the form so the enum is not re-hardcoded on the
+  client.
+
+### Idempotency + audit trail
+
+`MemoryService.promote` is idempotent (G5.2 contract): a re-promotion
+to the same target returns the existing target row, no insert, no
+`promote_target_conflict` 409. The UI mirrors that contract — a
+double-click on Promote redirects to the same URL twice; the second
+audit row reflects a successful repeat (status 204) and the row
+count in the target scope stays at one.
+
+The promote handler explicitly binds `operator_sub` + `tenant_id`
++ `audit_op_id="memory.promote"` + `audit_op_class="write"` +
+`audit_scope` + `audit_slug` + `audit_promotion_target_scope` to the
+structlog contextvars before calling the service so the chassis
+`AuditMiddleware` writes the audit row with the canonical op id.
+Without this binding the UI session middleware leaves the contextvars
+unset and the chassis middleware skips the audit write — the T1 read
++ edit + delete handlers run without an audit row today for the same
+reason. T2's create handler also binds `audit_op_id="memory.remember"`
++ `audit_op_class="write"` for parity with the `/api/v1/memory` POST
+route, so any future audit-query consumer can correlate a UI-driven
+write with the same op-id literal a CLI / MCP-driven write produces.
+
+### Tests
+
+The full suite lives in
+`backend/tests/test_ui_memory_create_promote.py`. It pins:
+
+* the create-modal render (RBAC-filtered scope selector for
+  operator, tenant-admin sees TENANT, read-only sees the empty state),
+* the create submit (persists the row + HX-Redirects to the list,
+  blank slug auto-generates, tenant scope as operator 403s, empty
+  body 422s, target-scoped without `target_name` 422s, missing CSRF
+  cookie 403s),
+* the Markdown preview (renders Markdown to HTML, empty body returns
+  the placeholder, raw `<script>` escapes),
+* the promote-modal render (USER source lists USER_TENANT +
+  USER_TARGET; terminal TENANT source 400s; cross-user 404),
+* the promote submit (USER -> USER_TENANT persists the target +
+  HX-Redirects to the new detail page; the chassis audit row commits
+  with op id `memory.promote` and the right payload fields; re-promote
+  is idempotent at the row count; operator -> TENANT 403s with
+  `insufficient_promotion_authority`; tenant_admin USER_TENANT ->
+  TENANT succeeds; cross-ladder USER -> TENANT 400s; cross-user 404;
+  cross-tenant 404),
+* the UI integration (list page renders the Create button + modal
+  container; detail page renders the Promote button only for
+  non-terminal source scopes).
+
+The create + promote tests stub the embedding service for the same
+reason the T1 PATCH test does — `index_document` (called by both
+`MemoryService.remember` and `MemoryService.promote`) computes a
+new embedding for the inserted row.

@@ -56,6 +56,7 @@ Reference
 from __future__ import annotations
 
 import threading
+from html import escape as _html_escape
 
 from markdown_it import MarkdownIt
 from markupsafe import Markup
@@ -98,7 +99,7 @@ def _highlight_code(code: str, lang: str, attrs: str) -> str:
     else:
         lexer = TextLexer()
     highlighted = highlight(code, lexer, _FORMATTER)
-    lang_attr = lang if lang else ""
+    lang_attr = _html_escape(lang, quote=True) if lang else ""
     return f'<pre class="kb-code"><code class="language-{lang_attr}">{highlighted}</code></pre>'
 
 

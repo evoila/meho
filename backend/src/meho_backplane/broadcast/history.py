@@ -96,8 +96,13 @@ __all__ = [
     "DEFAULT_WINDOW_MINUTES",
     "OP_CLASS_ENUM",
     "InvalidSinceError",
+    "default_since_ms",
+    "event_matches",
     "list_recent_events_fail_soft",
     "list_recent_events_strict",
+    "parse_entry",
+    "parse_since",
+    "stream_key",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -138,7 +143,7 @@ OP_CLASS_ENUM: Final[tuple[str, ...]] = (
 
 
 class InvalidSinceError(ValueError):
-    """Raised when :func:`_parse_since` rejects the caller's input.
+    """Raised when :func:`parse_since` rejects the caller's input.
 
     Surfaced as a domain error so a wire-layer caller (the MCP handler)
     can map it to ``-32602`` Invalid Params, and a non-wire caller (the
@@ -147,7 +152,7 @@ class InvalidSinceError(ValueError):
     """
 
 
-def _stream_key(tenant_id: object) -> str:
+def stream_key(tenant_id: object) -> str:
     """Build the per-tenant Valkey stream key.
 
     Mirrors :func:`meho_backplane.broadcast.publisher._stream_key` and
@@ -157,7 +162,7 @@ def _stream_key(tenant_id: object) -> str:
     return f"meho:feed:{tenant_id}"
 
 
-def _default_since_ms() -> int:
+def default_since_ms() -> int:
     """Return the inclusive bare-millisecond cursor for the default window.
 
     Default window is :data:`DEFAULT_WINDOW_MINUTES` minutes before
@@ -170,7 +175,7 @@ def _default_since_ms() -> int:
     return max(now_ms - DEFAULT_WINDOW_MINUTES * _MS_PER_MINUTE, 0)
 
 
-def _parse_since(raw: str | None) -> str:
+def parse_since(raw: str | None) -> str:
     """Translate the caller-supplied ``since`` into an ``XRANGE`` ``min``.
 
     Three shapes accepted:
@@ -199,7 +204,7 @@ def _parse_since(raw: str | None) -> str:
     Invalid inputs raise :class:`InvalidSinceError`.
     """
     if raw is None:
-        return str(_default_since_ms())
+        return str(default_since_ms())
     if _looks_like_stream_cursor(raw):
         return f"({raw}"
     return _iso8601_to_min_cursor(raw)
@@ -238,7 +243,7 @@ def _iso8601_to_min_cursor(raw: str) -> str:
     return str(int(parsed.timestamp() * 1000))
 
 
-def _event_matches(
+def event_matches(
     event: BroadcastEvent | AgentAnnouncementEvent,
     *,
     op_class: str | None,
@@ -286,7 +291,7 @@ def _event_matches(
     return True
 
 
-def _parse_entry(
+def parse_entry(
     entry_id: str,
     fields: dict[str, str],
     *,
@@ -393,12 +398,12 @@ async def _list_recent_events_core(
     re-raise.
     """
     client = get_broadcast_client()
-    stream_key = _stream_key(operator.tenant_id)
-    min_cursor = _parse_since(since)
+    key = stream_key(operator.tenant_id)
+    min_cursor = parse_since(since)
     raw_entries = cast(
         "list[tuple[str, dict[str, str]]]",
         await client.xrange(
-            stream_key,
+            key,
             min=min_cursor,
             max=_XRANGE_END,
             count=limit,
@@ -407,10 +412,10 @@ async def _list_recent_events_core(
 
     matched: list[dict[str, Any]] = []
     for entry_id, fields in raw_entries:
-        event = _parse_entry(entry_id, fields, stream_key=stream_key)
+        event = parse_entry(entry_id, fields, stream_key=key)
         if event is None:
             continue
-        if not _event_matches(
+        if not event_matches(
             event,
             op_class=op_class,
             principal=principal,
@@ -512,6 +517,6 @@ async def list_recent_events_fail_soft(
         _log.warning(
             "broadcast_history_fetch_failed",
             error_class=type(exc).__name__,
-            stream_key=_stream_key(operator.tenant_id),
+            stream_key=stream_key(operator.tenant_id),
         )
         return {"events": [], "next_cursor": None}

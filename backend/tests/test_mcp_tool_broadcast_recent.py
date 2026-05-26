@@ -57,8 +57,8 @@ from meho_backplane.broadcast import (
 )
 from meho_backplane.broadcast.history import (
     InvalidSinceError,
-    _default_since_ms,
-    _parse_since,
+    default_since_ms,
+    parse_since,
 )
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.broadcast import _handler_recent
@@ -304,7 +304,7 @@ def test_since_invalid_iso_rejects_with_domain_error() -> None:
     :func:`test_invalid_since_iso_returns_invalid_params_at_wire` below.
     """
     with pytest.raises(InvalidSinceError, match="not a valid ISO-8601"):
-        _parse_since("not-a-real-timestamp")
+        parse_since("not-a-real-timestamp")
 
 
 @pytest.mark.parametrize(
@@ -335,9 +335,9 @@ def test_invalid_since_iso_returns_invalid_params_at_wire(
 
 
 def test_parse_since_default_is_now_minus_30m() -> None:
-    """``_parse_since(None)`` returns a bare-ms ~30 minutes in the past."""
+    """``parse_since(None)`` returns a bare-ms ~30 minutes in the past."""
     before_ms = int(time.time() * 1000)
-    cursor = _parse_since(None)
+    cursor = parse_since(None)
     after_ms = int(time.time() * 1000)
     assert cursor.isdigit()
     cursor_ms = int(cursor)
@@ -352,7 +352,7 @@ def test_default_since_ms_handles_clock_underflow(monkeypatch: pytest.MonkeyPatc
     reject the command, breaking every call until the clock recovers.
     """
     monkeypatch.setattr(time, "time", lambda: 60.0)  # ts*1000 = 60_000 ms; minus 30m = -ve
-    assert _default_since_ms() == 0
+    assert default_since_ms() == 0
 
 
 # ---------------------------------------------------------------------------

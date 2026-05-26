@@ -110,7 +110,7 @@ def _window_start_iso(*, retention_hours: int, now: datetime) -> str:
     """Build the inclusive ISO-8601 ``since`` for the retention-window read.
 
     Returns ``now - retention_hours``, ISO-8601 with a ``Z`` suffix --
-    the shape :func:`~meho_backplane.broadcast.history._parse_since`
+    the shape :func:`~meho_backplane.broadcast.history.parse_since`
     accepts as an ISO-8601 ``since`` and converts to a bare-ms inclusive
     lower bound. ``retention_hours`` is bounded by the
     :attr:`Settings.broadcast_retention_hours` setting (default 24).

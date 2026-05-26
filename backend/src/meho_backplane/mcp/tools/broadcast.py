@@ -32,8 +32,8 @@ T1's xrange + filter + redact-aware parse loop lives in
 :mod:`meho_backplane.broadcast.history`; the UI history route at
 ``/ui/broadcast/history`` uses the same body through its fail-soft
 sibling wrapper (G6.4-T4 #1103). The parse primitives the watch tool
-(T3) shares with T1 (``_event_matches`` / ``_parse_entry`` /
-``_stream_key``) also live in that module and are re-used here.
+(T3) shares with T1 (``event_matches`` / ``parse_entry`` /
+``stream_key``) also live in that module and are re-used here.
 
 PII inheritance
 ===============
@@ -95,9 +95,9 @@ from meho_backplane.broadcast import (
     publish_agent_announcement,
 )
 from meho_backplane.broadcast.history import (
-    _event_matches,
-    _parse_entry,
-    _stream_key,
+    event_matches,
+    parse_entry,
+    stream_key,
 )
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -623,16 +623,16 @@ def _filter_xread_items(
     Each surviving entry carries ``id`` (the Valkey stream cursor, the
     round-trip handle) plus every :class:`BroadcastEvent` field
     (including the durable ``event_id`` UUID and the ``audit_id`` for
-    audit-log correlation). Entries that fail :func:`_parse_entry` (bad
+    audit-log correlation). Entries that fail :func:`parse_entry` (bad
     field shape, malformed JSON) are logged + skipped inside the helper
     so the watch handler never raises on a single bad entry.
     """
     matched: list[dict[str, Any]] = []
     for entry_id, fields in items:
-        event = _parse_entry(entry_id, fields, stream_key=stream_key)
+        event = parse_entry(entry_id, fields, stream_key=stream_key)
         if event is None:
             continue
-        if not _event_matches(
+        if not event_matches(
             event,
             op_class=op_class,
             principal=principal,
@@ -678,10 +678,10 @@ async def _watch_events_impl(
     ``next_cursor`` field; from that point forward each watch call's
     ``next_cursor`` feeds the next call's ``since_cursor``.
     """
-    stream_key = _stream_key(operator.tenant_id)
+    key = stream_key(operator.tenant_id)
     raw_response = await _xread_or_cancelled(
         operator,
-        stream_key=stream_key,
+        stream_key=key,
         since_cursor=since_cursor,
         timeout_ms=timeout_ms,
     )
@@ -697,7 +697,7 @@ async def _watch_events_impl(
     next_cursor = items[-1][0]
     matched = _filter_xread_items(
         items,
-        stream_key=stream_key,
+        stream_key=key,
         op_class=op_class,
         principal=principal,
         target=target,

@@ -609,6 +609,20 @@ app.include_router(api_v1_audit_router)
 # boundaries. Every mutation writes an audit row and broadcasts
 # under op_class=write.
 app.include_router(api_v1_broadcast_overrides_router)
+# G11.2-T6 (#819) -- agent permission grant management (grant / revoke /
+# list / elevate). All verbs gated to tenant_admin. Tenant-scoped via
+# the JWT; cross-tenant probes return 404. Every mutation writes an
+# audit row and broadcasts under op_class=write.
+#
+# Registered BEFORE ``api_v1_agents_router`` (G11.2 follow-up #1168):
+# FastAPI dispatches routes in include order, so the agents-router's
+# ``GET /{name}`` would otherwise shadow ``GET /api/v1/agents/grants``
+# (matching ``name="grants"``). Specific prefix first → grants-list
+# route resolves correctly; ``GET /api/v1/agents/incident-triage``
+# (and every other non-``grants`` name) still falls through to
+# ``show_agent`` because the grants router only matches paths under
+# its own ``/api/v1/agents/grants`` prefix.
+app.include_router(api_v1_agent_grants_router)
 # G11.1-T2 (#809) -- agent-definition CRUD verbs (list / show / create
 # / edit / delete) over the AgentDefinition ORM model. Reads gated to
 # operator-level, writes to tenant_admin. Tenant-scoped via the JWT's
@@ -616,11 +630,6 @@ app.include_router(api_v1_broadcast_overrides_router)
 # existence is not leaked across tenant boundaries. Every mutation
 # writes an audit row and broadcasts under op_class=write.
 app.include_router(api_v1_agents_router)
-# G11.2-T6 (#819) -- agent permission grant management (grant / revoke /
-# list / elevate). All verbs gated to tenant_admin. Tenant-scoped via
-# the JWT; cross-tenant probes return 404. Every mutation writes an
-# audit row and broadcasts under op_class=write.
-app.include_router(api_v1_agent_grants_router)
 # G11.2-T1 (#815) -- agent-principal lifecycle (register / list / revoke).
 # register creates a Keycloak client tagged kind=agent + inserts a DB row.
 # revoke disables the Keycloak client (kill switch) + marks the row revoked.

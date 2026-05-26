@@ -378,6 +378,110 @@ func TestPrintIngestSummaryDryRun(t *testing.T) {
 	}
 }
 
+// TestPrintIngestSummaryCatalogMode — catalog-mode regression (G0.14-T9
+// / #1150). The pre-#1150 CLI resolved the catalog entry client-side
+// and populated opts.Product/Version/ImplID before printing; post-#1150
+// the backplane resolves the entry and opts stays empty in catalog
+// mode. The heading must still carry the resolved triple — derived
+// from the response's connector_id via parseConnectorID — so the
+// operator-visible output (`ingest vmware/9.0/vmware-rest — ...`)
+// matches v0.6.0 verbatim. The B1 review on PR #1182 caught the
+// regression where opts.Product/Version/ImplID being empty rendered
+// `ingest // — ...` (bare slashes); this test pins the fix.
+func TestPrintIngestSummaryCatalogMode(t *testing.T) {
+	cases := []struct {
+		name   string
+		dryRun bool
+		// The bits the operator reads to identify what was ingested.
+		// Bare `//` would mean the heading was rendered from empty
+		// opts.Product/Version/ImplID — the regression we're guarding.
+		wantStrings  []string
+		bannedString string
+	}{
+		{
+			name:        "dry-run",
+			dryRun:      true,
+			wantStrings: []string{"ingest vmware/9.0/vmware-rest", "DRY RUN"},
+			// `//` appears bare only when product/version/impl are all
+			// empty; the post-fix render carries `vmware/9.0/vmware-rest`.
+			bannedString: "ingest // —",
+		},
+		{
+			name:   "non-dry-run",
+			dryRun: false,
+			wantStrings: []string{
+				"ingest vmware/9.0/vmware-rest",
+				"connector_id=vmware-rest-9.0",
+			},
+			bannedString: "ingest // —",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &IngestResponse{
+				Ingestion: IngestionResult{
+					ConnectorID:         "vmware-rest-9.0",
+					InsertedCount:       961,
+					ConnectorRegistered: true,
+					OperationsGrouped:   !tc.dryRun,
+				},
+			}
+			// Catalog mode: opts.Product/Version/ImplID are unset; the
+			// CLI's runIngest leaves them empty because the request
+			// shape is `{"catalog_entry": "..."}` (no client-side
+			// resolution).
+			opts := ingestOptions{Catalog: "vmware/9.0", DryRun: tc.dryRun}
+			var buf bytes.Buffer
+			printIngestSummary(&buf, opts, r)
+			out := buf.String()
+			for _, want := range tc.wantStrings {
+				if !strings.Contains(out, want) {
+					t.Errorf("catalog-mode render missing %q in:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, tc.bannedString) {
+				t.Errorf("catalog-mode render contains %q (bare-slash regression); got:\n%s",
+					tc.bannedString, out)
+			}
+		})
+	}
+}
+
+// TestIngestSummaryHeadingFromConnectorID — table-pins the parser's
+// shape against the backend's parse_connector_id convention
+// (backend/src/meho_backplane/operations/ingest/parser.py). The
+// heading derives the (product, version, impl_id) triple from the
+// response's connector_id so catalog mode (G0.14-T9 / #1150) renders
+// the resolved triple instead of empty placeholders.
+func TestIngestSummaryHeadingFromConnectorID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// Worked examples from parse_connector_id's docstring — the
+		// CLI parser must agree on every one or the heading drifts
+		// from `meho connector list` / review output.
+		{"vmware-rest-9.0", "vmware/9.0/vmware-rest"},
+		{"nsx-4.2", "nsx/4.2/nsx"},
+		{"harbor-2.x", "harbor/2.x/harbor"},
+		{"hetzner-robot-2026-04", "hetzner/2026-04/hetzner-robot"},
+		{"vault-1.x", "vault/1.x/vault"},
+		{"k8s-1.x", "k8s/1.x/k8s"},
+		// Non-conforming connector_id (no dash-before-digit) falls
+		// back to echoing verbatim — operators still see something
+		// useful instead of bare slashes if the backend ever drifts.
+		{"weird", "weird"},
+		// Empty impl_id segment (`-9.0`) is non-conforming; fall back
+		// to the verbatim form rather than render `/9.0/`.
+		{"-9.0", "-9.0"},
+	}
+	for _, tc := range cases {
+		if got := ingestSummaryHeading(tc.in); got != tc.want {
+			t.Errorf("ingestSummaryHeading(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestPrintIngestSummaryNonDryRun — happy-path render includes
 // connector_id + next-steps hint + canonical IngestionResult fields
 // (connector_registered, operations_grouped) and the canonical

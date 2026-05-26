@@ -208,6 +208,64 @@ func TestRunIngestCatalogModePostsCatalogEntry(t *testing.T) {
 	}
 }
 
+// TestRunIngestCatalogModeRendersResolvedTriple pins the operator-
+// visible summary heading in catalog mode (G0.14-T9 / #1150). The
+// CLI posts `{"catalog_entry": "vmware/9.0"}` without the explicit
+// quadruple; the backplane resolves the entry and returns a
+// connector_id (`vmware-rest-9.0`) that round-trips through
+// parse_connector_id to the resolved triple. The CLI derives the
+// `<product>/<version>/<impl_id>` heading from that response value,
+// so the operator sees `ingest vmware/9.0/vmware-rest — ...` even
+// though opts.Product/Version/ImplID stay empty in catalog mode.
+// Regression guard against the B1 finding on PR #1182 where the
+// post-#1150 CLI rendered `ingest // — ...` (bare slashes) because
+// the heading was sourced from the empty request opts.
+func TestRunIngestCatalogModeRendersResolvedTriple(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			// Mock the backplane's resolved-quadruple response shape:
+			// catalog_entry "vmware/9.0" resolves to connector_id
+			// "vmware-rest-9.0" via parse_connector_id's convention
+			// (impl_id "vmware-rest", version "9.0", product "vmware").
+			writeJSON(t, w, 200, IngestResponse{
+				Ingestion: IngestionResult{
+					ConnectorID:   "vmware-rest-9.0",
+					InsertedCount: 961,
+				},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		DryRun:            true,
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runIngest catalog mode: %v", err)
+	}
+
+	out := stdout.String()
+	// The resolved triple must appear in the heading (derived from
+	// the response's connector_id, NOT from opts.Product/Version/ImplID
+	// which are empty in catalog mode).
+	if !strings.Contains(out, "ingest vmware/9.0/vmware-rest") {
+		t.Errorf("catalog-mode summary missing resolved triple `vmware/9.0/vmware-rest` in:\n%s", out)
+	}
+	// Bare `//` is the regression: it appears only when the heading
+	// renders product/version/impl_id all empty.
+	if strings.Contains(out, "ingest // —") {
+		t.Errorf("catalog-mode summary contains bare `//` heading (B1 regression); got:\n%s", out)
+	}
+}
+
 // TestRunIngestManualModePostsQuadruple pins the parallel contract:
 // manual mode POSTs the explicit quadruple, NOT a catalog_entry.
 // This is the regression guard for the historical

@@ -332,15 +332,22 @@ func postIngest(ctx context.Context, backplaneURL string, body IngestRequest) (*
 // breakdown and the embeddings split that the original PR-body
 // contract carried are not in the wire shape — operators see the
 // aggregate via this rollup and the per-spec story via the audit log.
+//
+// The `<product>/<version>/<impl_id>` heading is derived from the
+// response's `connector_id` rather than `opts.Product/Version/ImplID`
+// because catalog mode (G0.14-T9 / #1150) leaves those opts empty —
+// the backplane resolves the catalog entry server-side and returns
+// the resolved triple via `connector_id`. Deriving from the response
+// keeps the heading correct in both modes and matches the pre-#1150
+// operator-visible output.
 func printIngestSummary(w io.Writer, opts ingestOptions, r *IngestResponse) {
 	totalOps := r.Ingestion.InsertedCount + r.Ingestion.UpdatedCount + r.Ingestion.SkippedCount
+	heading := ingestSummaryHeading(r.Ingestion.ConnectorID)
 	if opts.DryRun {
-		fmt.Fprintf(w, "ingest %s/%s/%s — DRY RUN (no DB writes)\n",
-			opts.Product, opts.Version, opts.ImplID,
-		)
+		fmt.Fprintf(w, "ingest %s — DRY RUN (no DB writes)\n", heading)
 	} else {
-		fmt.Fprintf(w, "ingest %s/%s/%s — connector_id=%s\n",
-			opts.Product, opts.Version, opts.ImplID, r.Ingestion.ConnectorID,
+		fmt.Fprintf(w, "ingest %s — connector_id=%s\n",
+			heading, r.Ingestion.ConnectorID,
 		)
 	}
 	fmt.Fprintf(w, "  operations: %d total (%d inserted / %d updated / %d skipped)\n",
@@ -378,4 +385,45 @@ func printIngestSummary(w io.Writer, opts ingestOptions, r *IngestResponse) {
 			r.Ingestion.ConnectorID, r.Ingestion.ConnectorID,
 		)
 	}
+}
+
+// ingestSummaryHeading derives the `<product>/<version>/<impl_id>`
+// heading from a response connector_id. Both ingest modes route
+// through this helper so the operator-visible output is identical
+// to v0.6.0 regardless of which request shape (catalog or explicit
+// quadruple) the CLI used. The backend resolves the catalog entry
+// server-side, so deriving from the response is what makes the
+// catalog-mode heading carry the resolved triple instead of empty
+// `//` placeholders.
+//
+// Mirrors `parse_connector_id` in
+// `backend/src/meho_backplane/operations/ingest/parser.py` — the
+// operator-facing identifier is `<impl_id>-<version>` where
+// `version` starts with a digit; `product` is the first
+// dash-segment of `impl_id`. If the response carries a
+// non-conforming connector_id (shouldn't happen in practice — the
+// backend builds it from a validated triple) we fall back to
+// echoing the connector_id verbatim so the operator still sees
+// something useful instead of bare slashes.
+func ingestSummaryHeading(connectorID string) string {
+	for i, ch := range connectorID {
+		if ch != '-' || i+1 >= len(connectorID) {
+			continue
+		}
+		next := connectorID[i+1]
+		if next < '0' || next > '9' {
+			continue
+		}
+		implID := connectorID[:i]
+		version := connectorID[i+1:]
+		if implID == "" {
+			return connectorID
+		}
+		product := implID
+		if first := strings.IndexByte(implID, '-'); first != -1 {
+			product = implID[:first]
+		}
+		return fmt.Sprintf("%s/%s/%s", product, version, implID)
+	}
+	return connectorID
 }

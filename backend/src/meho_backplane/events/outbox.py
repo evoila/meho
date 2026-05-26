@@ -126,8 +126,7 @@ def _register_post_commit_notify(session: AsyncSession) -> None:
                 # provenance; the assertion above is the load-time
                 # invariant that justifies the suppression.
                 notify_sql = f"NOTIFY {EVENT_OUTBOX_NOTIFY_CHANNEL}"
-                # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text  # noqa: E501
-                conn.execute(text(notify_sql))
+                conn.execute(text(notify_sql))  # nosemgrep
                 conn.commit()
         except Exception:
             # NOTIFY is a latency hint, not a durability mechanism;

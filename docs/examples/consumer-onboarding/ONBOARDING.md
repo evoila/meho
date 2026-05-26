@@ -232,9 +232,13 @@ What this means in practice:
 * New sessions opened after the edit see the new convention
   immediately, via their own `initialize` assembly.
 * Audit-trail integrity is preserved either way — every edit writes
-  one `audit_log` row and one `tenant_convention_history` row in the
-  same DB transaction, regardless of whether any live session sees
-  the change mid-run.
+  the convention mutation + a `tenant_convention_history` row inside
+  the route's DB transaction, while the audit middleware writes its
+  `audit_log` row in its own session in the same response cycle. The
+  two are linked by a pre-allocated `audit_id` soft-FK on the history
+  row, so the diff trail joins back to the operator-attributed audit
+  entry by exact uuid match — regardless of whether any live session
+  sees the change mid-run.
 
 This is the **v0.2 baseline** behaviour. A mid-session refresh path
 is specified but conditional on MCP's

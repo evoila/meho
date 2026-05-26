@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -114,6 +115,65 @@ async def test_sweep_refreshes_every_target_across_tenants() -> None:
         await _run_one_sweep(_SchedulerState())
 
     assert sorted(refreshed) == sorted([target_a.id, target_b.id])
+
+
+@pytest.mark.asyncio
+async def test_sweep_excludes_soft_deleted_targets() -> None:
+    """Soft-deleted targets are skipped by the background refresh sweep.
+
+    Regression test for G0.14-T4 #1145: without the ``deleted_at IS NULL``
+    filter in :func:`_run_one_sweep`, the scheduler keeps probing a
+    tombstoned target every cadence — generating connector calls,
+    audit rows, broadcast events, and graph_node reconciliation against
+    a retired target. The soft-delete must apply to the scheduler the
+    same way it applies to the resolver, the REST list, the MCP
+    ``list_targets`` tool, and the broadcast feed dropdown.
+
+    Seeds one live + one soft-deleted target on the same tenant; the
+    sweep must invoke :func:`refresh_target_topology` for the live one
+    only. The deletion is stamped on the same ``deleted_at`` column the
+    DELETE handler in ``api/v1/targets.py`` writes, so the test exercises
+    the production contract end-to-end.
+    """
+    # Seed one tenant with two targets directly so both share the
+    # tenant (``_seed_target`` creates a fresh tenant per call and
+    # would collide on the unique ``slug``).
+    tenant_id = uuid.uuid4()
+    live = Target(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        name="live-target",
+        aliases=[],
+        product="faketopo",
+        host="live.example.test",
+    )
+    dead = Target(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        name="dead-target",
+        aliases=[],
+        product="faketopo",
+        host="dead.example.test",
+        deleted_at=datetime.now(UTC),
+    )
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(Tenant(id=tenant_id, slug="tenant-soft-delete", name="Tenant"))
+        session.add(live)
+        session.add(dead)
+        await session.commit()
+
+    refreshed: list[uuid.UUID] = []
+
+    async def _fake_refresh(target: Target, operator: object) -> object:
+        refreshed.append(target.id)
+        return object()
+
+    with patch(_REFRESH, new=AsyncMock(side_effect=_fake_refresh)):
+        await _run_one_sweep(_SchedulerState())
+
+    assert refreshed == [live.id]
+    assert dead.id not in refreshed
 
 
 @pytest.mark.asyncio

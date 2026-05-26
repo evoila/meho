@@ -260,6 +260,12 @@ def _registered_products() -> set[str]:
     has not yet merged at the time of writing; the two sites will
     consolidate against a shared helper once both land (see PR
     description on #1145).
+
+    TODO: consolidate with sibling PR #1166's
+    ``registered_product_tokens()`` helper in
+    ``connectors/registry.py`` once it merges — scheduled for a
+    Wave 5 follow-up so the duplication does not race the parallel
+    PRs.
     """
     return {product for (product, _version, _impl_id) in all_connectors_v2() if product}
 

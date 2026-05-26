@@ -52,10 +52,13 @@ _require_session_dep = Depends(require_ui_session)
 _require_admin_dep = Depends(resolve_operator_or_403)
 _get_session_dep = Depends(get_session)
 
-#: Upper bound on the YAML payload the parse path accepts. The chassis
-#: CSRF middleware already caps the buffered body at 256 KiB; this
-#: tighter cap rejects an oversized paste before the parse allocates,
-#: matching the form-field caps the T2 create / edit router sets.
+#: Upper bound on the YAML payload the parse path accepts. The CSRF
+#: middleware's 256 KiB body cap only runs for
+#: ``application/x-www-form-urlencoded`` requests; a multipart upload is
+#: instead bounded by Starlette's ``MultiPartParser.max_part_size``
+#: (1 MiB default, 422 on exceed). This tighter app-level cap rejects an
+#: oversized paste or upload before the parse allocates, matching the
+#: form-field caps the T2 create / edit router sets.
 _YAML_MAX_BYTES = 256 * 1024
 
 

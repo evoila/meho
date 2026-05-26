@@ -1484,7 +1484,7 @@ the same way broadcast / topology / memory retired theirs.
 | `PATCH` | `/ui/connectors/{name}` | (T2 #874) Edit submit. Builds a `TargetUpdate` and delegates to the REST `update_target` handler in-process. Same success / failure shapes as create. |
 | `GET` | `/ui/connectors/import` | (T3 #875) Full bulk-import page: paste box + file upload. Tenant_admin gated. |
 | `POST` | `/ui/connectors/import` | (T3 #875) Parse the pasted / uploaded `targets.yaml` (`yaml.safe_load`) and render the CREATE-vs-UPDATE preview table; parse errors render inline (422, no 500). Read-only — no writes. |
-| `POST` | `/ui/connectors/import/confirm` | (T3 #875) Re-parse + re-classify against the tenant's current targets, then apply the plan in-process via `create_target` (new) + `update_target` (existing); renders the result summary (N created, M updated). |
+| `POST` | `/ui/connectors/import/confirm` | (T3 #875) Re-parse + re-classify against the tenant's current targets, validate the whole plan up front (schema-invalid entry → inline 422, no partial write), then apply it in-process via `create_target` (new) + `update_target` (existing); renders the result summary (N created, M updated). |
 
 ### Module layout
 
@@ -1650,16 +1650,29 @@ filters on `session_ctx.tenant_id`, and the in-process `create_target` /
 `update_target` handlers write / resolve under `operator.tenant_id`, so
 an import can only ever land in the caller's own tenant.
 
-**Parse errors render inline.** `yaml.safe_load` failures, a non-mapping
-root, a missing / empty `targets:` list, and per-entry required-field
-violations (`name` / `product` / `host`) all render an inline error in
-the preview fragment with HTTP 422 — never a 500.
+**Validate the whole plan before any write (no partial import).**
+`build_plan` constructs *and* schema-validates every `TargetCreate` /
+`TargetUpdate` body up front — before the confirm route's write loop
+runs. A structurally-valid YAML carrying a schema-invalid value (a bad
+`auth_model` enum, an out-of-range `port`, etc.) therefore fails the
+*whole* plan (`ImportParseError`, rendered as the inline 422 fragment)
+and writes nothing, rather than committing the rows ahead of the bad
+entry and then 500-ing mid-loop. This mirrors the CLI's no-partial-write
+contract (`import.go` builds the full plan before any API call fires).
+The same pre-validation runs in `render_preview`, so the preview never
+green-lights a plan the confirm step would reject.
+
+**Errors render inline.** `yaml.safe_load` failures, a non-mapping root,
+a missing / empty `targets:` list, per-entry required-field violations
+(`name` / `product` / `host`), and Pydantic schema-validation failures
+all render an inline error in the preview fragment with HTTP 422 — never
+a 500.
 
 #### Files (Task #875)
 
-* `backend/src/meho_backplane/ui/routes/connectors/import_view.py` — parse (`yaml.safe_load`) + key-mapping + CREATE/UPDATE classification (port of `import.go`'s `mapEntry` / `buildLivePlan`) + render helpers + in-process confirm.
+* `backend/src/meho_backplane/ui/routes/connectors/import_view.py` — parse (`yaml.safe_load`) + key-mapping + CREATE/UPDATE classification (port of `import.go`'s `mapEntry` / `buildLivePlan`) + up-front Pydantic body validation (whole plan validated before any write — no partial import) + render helpers + in-process confirm.
 * `backend/src/meho_backplane/ui/routes/connectors/import_router.py` — thin FastAPI route wrappers (multipart paste + upload parse; tenant_admin-gated deps); registered before the detail route so the literal `/ui/connectors/import` paths win the first-match lookup over `/ui/connectors/{name}`.
 * `backend/src/meho_backplane/ui/templates/connectors/import.html` — full-page paste-box + upload form.
 * `backend/src/meho_backplane/ui/templates/connectors/_import_preview.html` — preview table fragment (CREATE/UPDATE badges + per-entry warnings + confirm form, or an inline parse error).
 * `backend/src/meho_backplane/ui/templates/connectors/_import_result.html` — result summary fragment (N created, M updated).
-* `backend/tests/test_ui_connectors_import.py` — `build_plan` mapping / classification unit tests (extras spill, explicit-extras merge, fingerprint drop, sparse UPDATE) + behavioural tests: auth / RBAC (403 operator, 403 missing CSRF), preview (paste + upload + parse error + missing-field error), confirm (in-process create + update, sparse PATCH preserves omitted columns, malformed-YAML no-write), cross-tenant isolation (import lands in caller tenant only; same-name in another tenant does not flip CREATE→UPDATE).
+* `backend/tests/test_ui_connectors_import.py` — `build_plan` mapping / classification unit tests (extras spill, explicit-extras merge, fingerprint drop, sparse UPDATE) + behavioural tests: auth / RBAC (403 operator, 403 missing CSRF), preview (paste + upload + parse error + missing-field error + schema-invalid-value inline error), confirm (in-process create + update, sparse PATCH preserves omitted columns, malformed-YAML no-write, schema-invalid entry 422 + zero writes), cross-tenant isolation (import lands in caller tenant only; same-name in another tenant does not flip CREATE→UPDATE).

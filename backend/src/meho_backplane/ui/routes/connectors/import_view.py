@@ -66,6 +66,7 @@ import structlog
 import yaml
 from fastapi import Request, status
 from fastapi.responses import HTMLResponse
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -120,18 +121,22 @@ _SKIP_SILENT: frozenset[str] = frozenset({"fingerprint"})
 class PlanEntry:
     """One classified import entry: what the confirm step would do.
 
-    ``action`` is ``"CREATE"`` or ``"UPDATE"``. ``body`` is the mapped
-    field dict already shaped for the chosen write path (full for
-    CREATE; sparse -- ``name`` / ``product`` stripped -- for UPDATE).
+    ``action`` is ``"CREATE"`` or ``"UPDATE"``. ``body`` is the
+    fully-validated write model (:class:`TargetCreate` for CREATE,
+    :class:`TargetUpdate` for UPDATE) -- it is built *and* schema-checked
+    by :func:`build_plan` before any write fires, so the confirm step
+    can never raise a schema error mid-loop. ``fields`` is the sorted
+    set of present field keys, retained for the preview projection.
     ``warnings`` collects per-entry advisories (e.g. a dropped
     ``fingerprint`` key). The dataclass is the in-process equivalent of
-    the CLI's ``planEntry`` JSON shape; it is never serialised to the
-    wire here (the preview renders straight from it).
+    the CLI's ``planEntry`` shape; it is never serialised to the wire
+    here (the preview renders straight from it).
     """
 
     name: str
     action: str
-    body: dict[str, Any]
+    body: TargetCreate | TargetUpdate
+    fields: list[str]
     warnings: list[str] = field(default_factory=list)
 
 
@@ -190,9 +195,12 @@ class ImportParseError(Exception):
 
     Carries an operator-facing message rendered inline in the preview
     fragment (no 500). Covers a YAML syntax error, a non-mapping root, a
-    missing / empty ``targets:`` list, and a per-entry required-field
-    violation (``name`` / ``product`` / ``host``) -- the same fail-fast
-    validation the CLI parser does before any write.
+    missing / empty ``targets:`` list, a per-entry required-field
+    violation (``name`` / ``product`` / ``host``), and a schema
+    validation failure when the mapped body is built into its Pydantic
+    write model (bad ``auth_model`` enum, out-of-range ``port``, etc.)
+    -- the same fail-fast validation the CLI parser + plan builder do
+    before any write.
     """
 
 
@@ -250,22 +258,91 @@ async def _existing_names(db_session: AsyncSession, tenant_id: object) -> set[st
     return set(result.scalars().all())
 
 
+def _build_create_body(body: dict[str, Any]) -> TargetCreate:
+    """Coerce a mapped CREATE body dict into a :class:`TargetCreate`.
+
+    ``auth_model`` arrives as a YAML string; coerce it through the enum
+    so an unknown value raises a ``ValueError`` the way the schema would
+    on a bad enum member. All other fields flow straight to Pydantic,
+    which runs the identical validation the REST POST body runs.
+    """
+    coerced = dict(body)
+    if "auth_model" in coerced and coerced["auth_model"] is not None:
+        coerced["auth_model"] = AuthModel(coerced["auth_model"])
+    return TargetCreate.model_validate(coerced)
+
+
+def _build_update_body(body: dict[str, Any]) -> TargetUpdate:
+    """Coerce a sparse UPDATE body dict into a :class:`TargetUpdate`."""
+    coerced = dict(body)
+    if "auth_model" in coerced and coerced["auth_model"] is not None:
+        coerced["auth_model"] = AuthModel(coerced["auth_model"])
+    return TargetUpdate.model_validate(coerced)
+
+
+def _format_schema_error(exc: Exception) -> str:
+    """Render a Pydantic ``ValidationError`` (or enum ``ValueError``) compactly.
+
+    The full Pydantic dump is noisy for an operator; surface just the
+    offending field and its message so the inline preview error is
+    readable (e.g. ``port: Input should be less than or equal to 65535``).
+    """
+    if isinstance(exc, ValidationError):
+        parts = []
+        for err in exc.errors():
+            loc = ".".join(str(p) for p in err["loc"]) or "(body)"
+            parts.append(f"{loc}: {err['msg']}")
+        return "; ".join(parts)
+    return str(exc)
+
+
 def build_plan(entries: list[dict[str, Any]], existing: set[str]) -> list[PlanEntry]:
-    """Classify every entry CREATE-vs-UPDATE and build its write body.
+    """Classify every entry CREATE-vs-UPDATE and build its **validated** body.
 
     Existing names plan as UPDATE (sparse body); new names plan as
-    CREATE (full mapped body). Source order is preserved so the preview
-    table reads top-to-bottom in the same order as the YAML.
+    CREATE (full mapped body). Every body is validated through its
+    Pydantic write model *here*, before the confirm step's write loop --
+    a schema-invalid entry (bad ``auth_model`` enum, out-of-range
+    ``port``, etc.) raises :class:`ImportParseError` now rather than a
+    500 mid-write. This mirrors the CLI's no-partial-write contract: the
+    full plan is built and validated before any write fires (see
+    ``cli/internal/cmd/targets/import.go`` -- "the plan is built before
+    any API call fires"). Source order is preserved so the preview table
+    reads top-to-bottom in the same order as the YAML.
     """
     plan: list[PlanEntry] = []
     for entry in entries:
         name = str(entry["name"])
         if name in existing:
-            body, warnings = _entry_to_update_body(entry)
-            plan.append(PlanEntry(name=name, action="UPDATE", body=body, warnings=warnings))
+            raw_body, warnings = _entry_to_update_body(entry)
+            try:
+                update_body = _build_update_body(raw_body)
+            except (ValidationError, ValueError) as exc:
+                raise ImportParseError(f"entry {name!r}: {_format_schema_error(exc)}") from exc
+            plan.append(
+                PlanEntry(
+                    name=name,
+                    action="UPDATE",
+                    body=update_body,
+                    fields=sorted(raw_body.keys()),
+                    warnings=warnings,
+                )
+            )
         else:
-            body, warnings = _map_entry(entry)
-            plan.append(PlanEntry(name=name, action="CREATE", body=body, warnings=warnings))
+            raw_body, warnings = _map_entry(entry)
+            try:
+                create_body = _build_create_body(raw_body)
+            except (ValidationError, ValueError) as exc:
+                raise ImportParseError(f"entry {name!r}: {_format_schema_error(exc)}") from exc
+            plan.append(
+                PlanEntry(
+                    name=name,
+                    action="CREATE",
+                    body=create_body,
+                    fields=sorted(raw_body.keys()),
+                    warnings=warnings,
+                )
+            )
     return plan
 
 
@@ -281,6 +358,35 @@ def _set_csrf_cookie(response: HTMLResponse, csrf_token: str) -> None:
     )
 
 
+def _render_inline_error(
+    request: Request,
+    *,
+    csrf_token: str,
+    message: str,
+    yaml_text: str,
+) -> HTMLResponse:
+    """Render the preview fragment with an inline error and HTTP 422.
+
+    The single fail-fast render path shared by the preview and confirm
+    routes: a YAML parse error, a missing required field, or a schema
+    validation failure all surface here (no 500, no partial write).
+    """
+    response = get_templates().TemplateResponse(
+        request,
+        "connectors/_import_preview.html",
+        {
+            "ready": False,
+            "csrf_token": csrf_token,
+            "error": message,
+            "rows": [],
+            "yaml_text": yaml_text,
+        },
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+    )
+    _set_csrf_cookie(response, csrf_token)
+    return response
+
+
 def _plan_to_rows(plan: list[PlanEntry]) -> list[dict[str, Any]]:
     """Project the plan into the template-friendly row shape.
 
@@ -292,7 +398,7 @@ def _plan_to_rows(plan: list[PlanEntry]) -> list[dict[str, Any]]:
         {
             "name": entry.name,
             "action": entry.action,
-            "fields": sorted(entry.body.keys()),
+            "fields": entry.fields,
             "warnings": entry.warnings,
         }
         for entry in plan
@@ -328,33 +434,25 @@ async def render_preview(
 ) -> HTMLResponse:
     """Parse the submitted YAML and render the CREATE / UPDATE preview.
 
-    A parse error renders the preview fragment with an inline error
-    message and HTTP 422 (never a 500). A clean parse renders the plan
-    table; the YAML is echoed back into a hidden field so the confirm
-    submit re-parses the same bytes (the preview is stateless -- the
-    server holds no plan between the two requests).
+    A parse error *or* a schema-validation error renders the preview
+    fragment with an inline error message and HTTP 422 (never a 500) --
+    building the plan here runs the same Pydantic validation the confirm
+    step relies on, so the preview never green-lights a plan that confirm
+    would reject. A clean parse renders the plan table; the YAML is echoed
+    back into a hidden field so the confirm submit re-parses the same
+    bytes (the preview is stateless -- the server holds no plan between
+    the two requests).
     """
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
+    existing = await _existing_names(db_session, session_ctx.tenant_id)
     try:
         entries = _parse_targets_yaml(yaml_text)
+        plan = build_plan(entries, existing)
     except ImportParseError as exc:
-        response = get_templates().TemplateResponse(
-            request,
-            "connectors/_import_preview.html",
-            {
-                "ready": False,
-                "csrf_token": csrf_token,
-                "error": str(exc),
-                "rows": [],
-                "yaml_text": yaml_text,
-            },
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        return _render_inline_error(
+            request, csrf_token=csrf_token, message=str(exc), yaml_text=yaml_text
         )
-        _set_csrf_cookie(response, csrf_token)
-        return response
 
-    existing = await _existing_names(db_session, session_ctx.tenant_id)
-    plan = build_plan(entries, existing)
     rows = _plan_to_rows(plan)
     response = get_templates().TemplateResponse(
         request,
@@ -373,28 +471,6 @@ async def render_preview(
     return response
 
 
-def _build_create_body(body: dict[str, Any]) -> TargetCreate:
-    """Coerce a mapped CREATE body dict into a :class:`TargetCreate`.
-
-    ``auth_model`` arrives as a YAML string; coerce it through the enum
-    so an unknown value raises the same ``ValueError`` the schema would
-    on a bad enum member. All other fields flow straight to Pydantic,
-    which runs the identical validation the REST POST body runs.
-    """
-    coerced = dict(body)
-    if "auth_model" in coerced and coerced["auth_model"] is not None:
-        coerced["auth_model"] = AuthModel(coerced["auth_model"])
-    return TargetCreate.model_validate(coerced)
-
-
-def _build_update_body(body: dict[str, Any]) -> TargetUpdate:
-    """Coerce a sparse UPDATE body dict into a :class:`TargetUpdate`."""
-    coerced = dict(body)
-    if "auth_model" in coerced and coerced["auth_model"] is not None:
-        coerced["auth_model"] = AuthModel(coerced["auth_model"])
-    return TargetUpdate.model_validate(coerced)
-
-
 async def submit_confirm(
     request: Request,
     session_ctx: UISessionContext,
@@ -409,41 +485,33 @@ async def submit_confirm(
     keeps the server the source of truth for the classification: the
     CREATE-vs-UPDATE decision is re-made against the tenant's *current*
     target set, so a target created between preview and confirm is
-    correctly PATCHed rather than re-CREATEd into a 409. Each entry is
-    applied via the in-process REST handler -- ``create_target`` for new
-    names, ``update_target`` for existing -- so the product-registry
-    check, the audit binding, and the broadcast hook fire exactly as
-    they do on the REST and CLI surfaces. The result summary (N created,
-    M updated) renders into the same slot.
+    correctly PATCHed rather than re-CREATEd into a 409. The whole plan
+    is built **and schema-validated** by :func:`build_plan` before the
+    write loop, so a structurally-valid-but-schema-invalid entry renders
+    the inline 422 fragment and writes nothing -- the same no-partial-
+    write contract the CLI honours. Each entry is then applied via the
+    in-process REST handler -- ``create_target`` for new names,
+    ``update_target`` for existing -- so the product-registry check, the
+    audit binding, and the broadcast hook fire exactly as they do on the
+    REST and CLI surfaces. The result summary (N created, M updated)
+    renders into the same slot.
     """
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
+    existing = await _existing_names(db_session, session_ctx.tenant_id)
     try:
         entries = _parse_targets_yaml(yaml_text)
+        plan = build_plan(entries, existing)
     except ImportParseError as exc:
-        response = get_templates().TemplateResponse(
-            request,
-            "connectors/_import_preview.html",
-            {
-                "ready": False,
-                "csrf_token": csrf_token,
-                "error": str(exc),
-                "rows": [],
-                "yaml_text": yaml_text,
-            },
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        return _render_inline_error(
+            request, csrf_token=csrf_token, message=str(exc), yaml_text=yaml_text
         )
-        _set_csrf_cookie(response, csrf_token)
-        return response
-
-    existing = await _existing_names(db_session, session_ctx.tenant_id)
-    plan = build_plan(entries, existing)
 
     created = 0
     updated = 0
     for entry in plan:
-        if entry.action == "CREATE":
+        if isinstance(entry.body, TargetCreate):
             await create_target(
-                body=_build_create_body(entry.body),
+                body=entry.body,
                 operator=operator,
                 session=db_session,
             )
@@ -451,7 +519,7 @@ async def submit_confirm(
         else:
             await update_target(
                 name=entry.name,
-                body=_build_update_body(entry.body),
+                body=entry.body,
                 operator=operator,
                 session=db_session,
             )

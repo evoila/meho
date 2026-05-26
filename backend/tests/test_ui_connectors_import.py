@@ -64,7 +64,7 @@ from meho_backplane.ui.auth.session_store import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
-from meho_backplane.ui.routes.connectors.import_view import build_plan
+from meho_backplane.ui.routes.connectors.import_view import ImportParseError, build_plan
 from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._oidc_jwt_helpers import AUDIENCE as _DEFAULT_AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _DEFAULT_ISSUER
@@ -350,9 +350,9 @@ def test_build_plan_spills_unknown_keys_into_extras() -> None:
     entries = [{"name": "g", "product": _PRODUCT, "host": "h.test", "account": "acct-1"}]
     plan = build_plan(entries, existing=set())
     body = plan[0].body
-    assert body["host"] == "h.test"
-    assert body["extras"] == {"account": "acct-1"}
-    assert "account" not in body
+    assert body.host == "h.test"
+    assert body.extras == {"account": "acct-1"}
+    assert plan[0].fields == ["extras", "host", "name", "product"]
 
 
 def test_build_plan_merges_explicit_extras_with_spilled() -> None:
@@ -367,14 +367,14 @@ def test_build_plan_merges_explicit_extras_with_spilled() -> None:
         }
     ]
     plan = build_plan(entries, existing=set())
-    assert plan[0].body["extras"] == {"region": "eu", "project_id": "proj-7"}
+    assert plan[0].body.extras == {"region": "eu", "project_id": "proj-7"}
 
 
 def test_build_plan_drops_fingerprint_with_warning() -> None:
     """``fingerprint`` is dropped from the body and a warning is recorded."""
     entries = [{"name": "g", "product": _PRODUCT, "host": "h.test", "fingerprint": {"vendor": "x"}}]
     plan = build_plan(entries, existing=set())
-    assert "fingerprint" not in plan[0].body
+    assert "fingerprint" not in plan[0].fields
     assert any("fingerprint" in w for w in plan[0].warnings)
 
 
@@ -383,9 +383,28 @@ def test_build_plan_update_body_is_sparse_and_strips_name_product() -> None:
     entries = [{"name": "alpha", "product": _PRODUCT, "host": "a.test", "notes": "n"}]
     plan = build_plan(entries, existing={"alpha"})
     body = plan[0].body
-    assert "name" not in body
-    assert "product" not in body
-    assert body == {"host": "a.test", "notes": "n"}
+    # Sparse PATCH: only keys present in the YAML are set on the model.
+    assert body.model_dump(exclude_unset=True) == {"host": "a.test", "notes": "n"}
+    assert "name" not in plan[0].fields
+    assert "product" not in plan[0].fields
+
+
+def test_build_plan_raises_on_schema_invalid_auth_model() -> None:
+    """A structurally-valid entry with a bad ``auth_model`` enum fails the plan."""
+    entries = [
+        {"name": "g", "product": _PRODUCT, "host": "h.test", "auth_model": "NOT_A_VALID_ENUM"}
+    ]
+    with pytest.raises(ImportParseError) as excinfo:
+        build_plan(entries, existing=set())
+    assert "auth_model" in str(excinfo.value) or "NOT_A_VALID_ENUM" in str(excinfo.value)
+
+
+def test_build_plan_raises_on_out_of_range_port() -> None:
+    """An out-of-range ``port`` fails the plan before any write is attempted."""
+    entries = [{"name": "g", "product": _PRODUCT, "host": "h.test", "port": 70000}]
+    with pytest.raises(ImportParseError) as excinfo:
+        build_plan(entries, existing=set())
+    assert "port" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +577,34 @@ def test_preview_missing_required_field_renders_inline_error() -> None:
     assert "host" in response.text
 
 
+def test_preview_schema_invalid_value_renders_inline_error() -> None:
+    """A structurally-valid entry with a schema-invalid value (bad ``auth_model``
+    enum) surfaces inline on preview -- the preview must not green-light a plan
+    that confirm would reject.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    yaml_text = (
+        "targets:\n"
+        "  - name: a\n"
+        "    product: fakeprod\n"
+        "    host: a.example.test\n"
+        "    auth_model: NOT_A_VALID_ENUM"
+    )
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/import",
+            headers=_form_headers(csrf),
+            data={"pasted": yaml_text},
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 422, response.text
+    assert "data-import-error" in response.text
+
+
 # ---------------------------------------------------------------------------
 # Confirm -- in-process create/update + result summary
 # ---------------------------------------------------------------------------
@@ -650,6 +697,43 @@ def test_confirm_malformed_yaml_renders_inline_error_no_write() -> None:
     assert response.status_code == 422, response.text
     assert "data-import-error" in response.text
     assert _count_targets(_TENANT_A) == 0
+
+
+def test_confirm_schema_invalid_entry_422_writes_nothing() -> None:
+    """A schema-invalid entry mid-list aborts the whole import (no partial write).
+
+    The first entry is valid; the second carries an out-of-range ``port``.
+    Because the full plan is built and validated before the write loop, the
+    valid first entry must NOT be committed -- confirm renders the inline 422
+    and writes zero rows (parity with the CLI's no-partial-write contract).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    yaml_text = (
+        "targets:\n"
+        "  - name: valid-first\n"
+        "    product: fakeprod\n"
+        "    host: valid.example.test\n"
+        "  - name: bad-port\n"
+        "    product: fakeprod\n"
+        "    host: bad.example.test\n"
+        "    port: 70000"
+    )
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/import/confirm",
+            headers=_form_headers(csrf),
+            data={"pasted": yaml_text},
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 422, response.text
+    assert "data-import-error" in response.text
+    # No partial import: neither the valid first row nor the bad second row landed.
+    assert _count_targets(_TENANT_A) == 0
+    assert _load_target(_TENANT_A, "valid-first") is None
 
 
 # ---------------------------------------------------------------------------

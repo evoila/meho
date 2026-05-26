@@ -79,6 +79,25 @@
             >
               Edit
             </button>
+            {# T2 #878: Promote button. Only rendered when the source
+               scope has at least one legal target on the promotion
+               ladder (terminal scopes ``tenant`` / ``target`` show no
+               button). The button loads the HTMX promote modal into
+               the dedicated container; G5.2's ``assert_can_promote``
+               re-checks role + ladder at submit. #}
+            {% if entry.scope in ("user", "user-tenant", "user-target") %}
+              <button
+                type="button"
+                class="btn btn-sm btn-accent"
+                hx-get="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}/promote"
+                hx-target="#memory-modal-container"
+                hx-swap="innerHTML"
+                data-action="open-promote-modal"
+                aria-label="Promote memory to broader scope"
+              >
+                Promote
+              </button>
+            {% endif %}
             <button
               type="button"
               class="btn btn-sm btn-ghost"
@@ -112,6 +131,14 @@
 
   {# Body slot -- HTMX swap target for Edit / Save / Cancel. #}
   {% include "memory/_body_view.html" %}
+
+  {# T2 #878: Mount point for HTMX-loaded modals (promote). The
+     empty wrapper persists across HTMX swaps so the modal markup
+     always has a stable target. The delete-confirm modal below
+     stays inline because it's small and always-relevant; the
+     promote modal is HTMX-loaded because the legal-targets list is
+     server-derived from the row's source scope. #}
+  <div id="memory-modal-container"></div>
 
   {# Delete-confirm modal -- DaisyUI's ``<dialog>`` element + Alpine
      for click-outside dismissal. The confirm button issues the

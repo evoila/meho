@@ -137,7 +137,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.base import Connector
-from meho_backplane.connectors.registry import all_connectors_v2
+from meho_backplane.connectors.registry import all_connectors_v2, registered_product_tokens
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.db.engine import get_session
@@ -219,6 +219,40 @@ def _to_summary(t: TargetORM) -> TargetSummary:
         product=t.product,
         host=t.host,
     )
+
+
+def _build_unknown_product_detail(
+    product: str,
+    valid_products: list[str],
+) -> dict[str, object]:
+    """Build the T11-compliant ``unknown_product`` 422 detail.
+
+    G0.14-T3 (#1144). Mirrors the ``/probe`` 501's diagnostic shape
+    but moves it forward to the POST / PATCH validation boundary so
+    the operator sees the actionable error at create time instead of
+    after committing a permanent broken row. The detail follows the
+    convention codified in ``docs/codebase/error-message-shape.md``
+    (T11 #1141): a stable ``kind`` code, a ``message`` naming the
+    offending value + remediation + a doc reference, and a machine-
+    actionable ``valid_products`` list the client can branch on.
+
+    Pure builder — no I/O, no logging. Called from both
+    :func:`create_target` (POST) and (after T4 #1145 consolidation)
+    :func:`update_target` (PATCH); the shared shape is what lets a
+    CLI / agent handle the two surfaces identically.
+    """
+    return {
+        "kind": "unknown_product",
+        "product": product,
+        "valid_products": valid_products,
+        "message": (
+            f"product={product!r} is not registered; "
+            f"pick one of {valid_products!r} or register a "
+            f"connector for it before retrying. "
+            f"See docs/codebase/error-message-shape.md for "
+            f"the convention."
+        ),
+    }
 
 
 def _to_full(t: TargetORM) -> Target:
@@ -506,7 +540,29 @@ async def create_target(
     the tenant. The ``id`` and timestamps are generated server-side.
     ``tenant_id`` is always taken from the JWT — the body cannot override
     it.
+
+    G0.14-T3 (#1144). The ``product`` field is validated at request time
+    against :func:`~meho_backplane.connectors.registry.registered_product_tokens`.
+    An unknown product yields a structured 422 (see
+    :func:`_build_unknown_product_detail`); the OpenAPI schema also
+    exposes the enum (see :func:`meho_backplane.main.build_openapi_schema`)
+    so Swagger / generator tooling surfaces the valid set before the
+    request leaves the editor. Both layers share the same source-of-
+    truth helper so they cannot drift.
+
+    Validation is skipped when the registry is empty — that state means
+    "no connectors imported" (test isolation, or a deploy booted before
+    :func:`_eager_import_connectors` ran). In production the lifespan
+    populates the registry before the first request arrives, so the
+    skip branch never fires; a misregistered deploy that *did* hit it
+    is recoverable via T4 #1145's PATCH-product or DELETE path.
     """
+    valid_products = sorted(registered_product_tokens())
+    if valid_products and body.product not in valid_products:
+        raise HTTPException(
+            status_code=422,
+            detail=_build_unknown_product_detail(body.product, valid_products),
+        )
     now = datetime.now(UTC)
     t = TargetORM(
         id=uuid.uuid4(),

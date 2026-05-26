@@ -487,7 +487,7 @@
           "targets"
         ],
         "summary": "Create Target",
-        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.",
+        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.\n\nG0.14-T3 (#1144). The ``product`` field is validated at request time\nagainst :func:`~meho_backplane.connectors.registry.registered_product_tokens`.\nAn unknown product yields a structured 422 (see\n:func:`_build_unknown_product_detail`); the OpenAPI schema also\nexposes the enum (see :func:`meho_backplane.main.build_openapi_schema`)\nso Swagger / generator tooling surfaces the valid set before the\nrequest leaves the editor. Both layers share the same source-of-\ntruth helper so they cannot drift.\n\nValidation is skipped when the registry is empty \u2014 that state means\n\"no connectors imported\" (test isolation, or a deploy booted before\n:func:`_eager_import_connectors` ran). In production the lifespan\npopulates the registry before the first request arrives, so the\nskip branch never fires; a misregistered deploy that *did* hit it\nis recoverable via T4 #1145's PATCH-product or DELETE path.",
         "operationId": "create_target_api_v1_targets_post",
         "parameters": [
           {
@@ -6396,6 +6396,152 @@
         }
       }
     },
+    "/ui/memory/tags": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Tags",
+        "description": "``GET /ui/memory/tags`` -- HTMX datalist autocomplete fragment.",
+        "operationId": "ui_memory_tags_ui_memory_tags_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/create": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Create Modal",
+        "description": "``GET /ui/memory/create`` -- HTMX-loaded create modal fragment.",
+        "operationId": "ui_memory_create_modal_ui_memory_create_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Create Submit",
+        "description": "``POST /ui/memory/create`` -- create one memory via the service.\n\nReturns 204 + ``HX-Redirect: /ui/memory`` so HTMX navigates back\nto the list. The form-encoded body shape mirrors the\n``RememberBody`` Pydantic model on ``/api/v1/memory``: scope is\na ``MemoryScope`` enum value, body is required, slug + tags +\nexpires_at + target_name are optional. CSRF is enforced by the\nchassis :class:`CSRFMiddleware` before this handler runs.\n\n``tags`` is a comma-separated string parsed server-side into a\nlist; the form input is one ``<input>`` rather than five (the\ntypical UX shape for the v0.2 surface). ``expires_at`` is\nparsed by FastAPI's :class:`datetime` form coercion from the\nISO-8601 string a ``<input type=\"datetime-local\">`` produces.",
+        "operationId": "ui_memory_create_submit_ui_memory_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_create_submit_ui_memory_create_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/preview": {
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Preview",
+        "description": "``POST /ui/memory/preview`` -- debounced server-side Markdown preview.\n\nTriggered by ``hx-trigger=\"keyup changed delay:300ms\"`` on the\ncreate-modal body textarea. Returns the rendered Markdown\nwrapped in the same ``<article>`` shape :file:`_body_view.html`\nuses so the preview pane and the detail view render identically.\n\nSession is required (the chassis CSRF middleware would already\nhave rejected an anonymous POST, but the session dep adds the\naudit-trail anchor; ``_require_session_dep`` runs the standard\nredirect-to-login on a missing cookie).",
+        "operationId": "ui_memory_preview_ui_memory_preview_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_preview_ui_memory_preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/memory": {
       "get": {
         "tags": [
@@ -6445,28 +6591,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/memory/tags": {
-      "get": {
-        "tags": [
-          "ui-memory"
-        ],
-        "summary": "Ui Memory Tags",
-        "description": "``GET /ui/memory/tags`` -- HTMX datalist autocomplete fragment.",
-        "operationId": "ui_memory_tags_ui_memory_tags_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
                 }
               }
             }
@@ -6681,6 +6805,169 @@
               }
             }
           }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/{scope}/{slug}/promote": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Promote Modal",
+        "description": "``GET /ui/memory/<scope>/<slug>/promote`` -- HTMX-loaded promote modal.",
+        "operationId": "ui_memory_promote_modal_ui_memory__scope___slug__promote_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Promote Submit",
+        "description": "``POST /ui/memory/<scope>/<slug>/promote`` -- promote and HX-Redirect.\n\nDelegates ladder + authority checks to G5.2's\n:func:`assert_can_promote` via :meth:`MemoryService.promote`.\nIdempotent re-run returns the same target row -- the redirect\nURL is the same on first promote and on a re-promote, matching\nthe G5.2 contract.",
+        "operationId": "ui_memory_promote_submit_ui_memory__scope___slug__promote_post",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/bulk": {
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Bulk",
+        "description": "``POST /ui/memory/bulk`` -- T3 (#879) bulk delete / bulk extend-expiry.",
+        "operationId": "ui_memory_bulk_ui_memory_bulk_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_bulk_ui_memory_bulk_post"
+              }
+            }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -7865,6 +8152,95 @@
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
       },
+      "Body_ui_memory_bulk_ui_memory_bulk_post": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Action"
+          },
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ids"
+          },
+          "extend_duration": {
+            "type": "string",
+            "maxLength": 8,
+            "nullable": true,
+            "title": "Extend Duration"
+          },
+          "scope": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Scope",
+            "default": "all"
+          },
+          "tag": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Tag"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "title": "Body_ui_memory_bulk_ui_memory_bulk_post"
+      },
+      "Body_ui_memory_create_submit_ui_memory_create_post": {
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body"
+          },
+          "slug": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Slug"
+          },
+          "tags": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Tags"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "target_name": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "body"
+        ],
+        "title": "Body_ui_memory_create_submit_ui_memory_create_post"
+      },
       "Body_ui_memory_patch_ui_memory__scope___slug__patch": {
         "properties": {
           "body": {
@@ -7882,6 +8258,40 @@
           "body"
         ],
         "title": "Body_ui_memory_patch_ui_memory__scope___slug__patch"
+      },
+      "Body_ui_memory_preview_ui_memory_preview_post": {
+        "properties": {
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_memory_preview_ui_memory_preview_post"
+      },
+      "Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post": {
+        "properties": {
+          "to": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "target_name": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "to"
+        ],
+        "title": "Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post"
       },
       "BroadcastOverrideCreate": {
         "properties": {
@@ -10736,7 +11146,25 @@
             "type": "string",
             "maxLength": 100,
             "minLength": 1,
-            "title": "Product"
+            "title": "Product",
+            "enum": [
+              "bind9",
+              "gcloud",
+              "harbor",
+              "hetzner-robot",
+              "holodeck",
+              "k8s",
+              "nsx",
+              "pfsense",
+              "sddc-manager",
+              "vault",
+              "vcf-automation",
+              "vcf-fleet",
+              "vcf-logs",
+              "vcf-operations",
+              "vmware"
+            ],
+            "description": "Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss."
           },
           "host": {
             "type": "string",

@@ -640,6 +640,22 @@ class Settings(BaseModel):
     # elevation windows are typically hours, not days.
     grant_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
     grant_expiry_enabled: bool = True
+    # G11.3-T4 #825 -- agent_run reaper knobs. Same opt-out shape as
+    # GRANT_EXPIRY_ENABLED / MEMORY_EXPIRY_ENABLED so an operator
+    # running an external lease-reclaim mechanism (DBOS Transact, a
+    # workflow engine, etc.) can disable the in-tree reaper without
+    # patching code.
+    #
+    # The default tick (30s) + the default lease TTL (60s) give a
+    # worker two heartbeat windows of slack before reclaim -- a
+    # transient ~20s GC pause / network blip does not cost a run. The
+    # MAX_PER_TICK bound (50) keeps a post-outage backlog from
+    # monopolising one Postgres backend; a 500-row backlog drains
+    # across ~10 ticks.
+    agent_run_reaper_enabled: bool = True
+    agent_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    agent_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
+    agent_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -835,6 +851,18 @@ def get_settings() -> Settings:
         ),
         grant_expiry_enabled=parse_bool_env(
             os.environ.get("GRANT_EXPIRY_ENABLED", "true"),
+        ),
+        agent_run_reaper_enabled=parse_bool_env(
+            os.environ.get("AGENT_RUN_REAPER_ENABLED", "true"),
+        ),
+        agent_run_reaper_tick_interval_seconds=int(
+            os.environ.get("AGENT_RUN_REAPER_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        agent_run_reaper_max_per_tick=int(
+            os.environ.get("AGENT_RUN_REAPER_MAX_PER_TICK", "50"),
+        ),
+        agent_run_lease_ttl_seconds=int(
+            os.environ.get("AGENT_RUN_LEASE_TTL_SECONDS", "60"),
         ),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),

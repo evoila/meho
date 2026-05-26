@@ -62,14 +62,21 @@ for the cancellation) inside one transaction.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Final
+from typing import Any, Final, cast
 
+from sqlalchemy import update
+from sqlalchemy.engine.cursor import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.models import AgentRun, AgentRunStatus, AgentRunTrigger
+from meho_backplane.db.models import (
+    AgentRun,
+    AgentRunStatus,
+    AgentRunTrigger,
+    ScheduledTriggerInFlightPolicy,
+)
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -77,12 +84,17 @@ __all__ = [
     "AgentRunError",
     "AgentRunNotFoundError",
     "IllegalTransitionError",
+    "LeaseLostError",
     "UnauthorizedCancellationError",
     "cancel_run",
+    "claim_lease",
     "create_run",
     "fail_run",
     "get_run",
+    "heartbeat",
     "increment_turns",
+    "release_lease",
+    "snapshot_in_flight_policy",
     "start_run",
     "succeed_run",
     "transition",
@@ -207,6 +219,33 @@ class UnauthorizedCancellationError(AgentRunError):
         super().__init__(
             f"operator {operator_sub!r} with role {role.value!r} may not cancel an agent run "
             f"(requires at least {_MIN_CANCEL_ROLE.value!r})"
+        )
+
+
+class LeaseLostError(AgentRunError):
+    """The lease this worker thought it held has been reassigned.
+
+    Initiative #804 (G11.3 Scheduler), Task #825 (T4). Raised by
+    :func:`heartbeat` when the conditional update touches zero rows --
+    the row's ``lease_owner`` no longer matches the heartbeating
+    worker (the reaper or another claimer has taken over) or the row
+    has reached a terminal status while the worker was off-CPU. The
+    worker must stop its work immediately on this signal: any further
+    side-effects would be at-least-twice (the reaper has handed the
+    work to someone else or recorded it as failed).
+
+    Distinct from :class:`IllegalTransitionError` (which is about
+    *state*) so the runtime can map this to a clean abort path rather
+    than a 409: a lost lease is a coordination event, not a caller
+    bug.
+    """
+
+    def __init__(self, *, run_id: uuid.UUID, owner: str) -> None:
+        self.run_id = run_id
+        self.owner = owner
+        super().__init__(
+            f"agent_run {run_id} lease no longer held by {owner!r} "
+            f"(reaper reclaimed or run terminated)"
         )
 
 
@@ -342,6 +381,14 @@ async def transition(
         row.started_at = now
     if to_status in TERMINAL_STATUSES:
         row.ended_at = now
+        # T4 #825 -- clear the lease on terminal transitions so the
+        # ``agent_run_lease_expires_at_idx`` does not retain stale
+        # metadata, and so a future reader sees "no worker holds
+        # this" rather than "the worker that ran this once held a
+        # lease here". The columns are nullable; clearing is
+        # idempotent.
+        row.lease_owner = None
+        row.lease_expires_at = None
 
     row.status = to_status.value
     await session.flush()
@@ -378,6 +425,198 @@ async def start_run(
     row.provider = provider
     row.model = model
     return await transition(session, row, AgentRunStatus.RUNNING)
+
+
+async def claim_lease(
+    session: AsyncSession,
+    row: AgentRun,
+    *,
+    owner: str,
+    ttl_seconds: int,
+) -> AgentRun:
+    """Stamp a lease on *row* and record the owning worker.
+
+    Initiative #804 (G11.3 Scheduler), Task #825 (T4). Called by the
+    trigger-firing path (T2 #823 / T3 #824) when a worker begins
+    executing a run; called by the reaper's ``resume`` policy when it
+    re-dispatches a run whose previous worker died. The lease + the
+    owner are written together so a reader that observes the lease
+    always sees who holds it.
+
+    Storage discipline
+    ------------------
+
+    The lease columns are pure side-effect: they do not change
+    ``status``. The caller threads :func:`claim_lease` and
+    :func:`start_run` (which transitions ``pending`` -> ``running``)
+    together inside the same transaction so a partial commit cannot
+    leave the row ``running`` without a lease (or with a lease but
+    still ``pending``).
+
+    Args:
+        session: Open :class:`AsyncSession`; flushed, not committed.
+        row: The :class:`AgentRun` to claim.
+        owner: A stable identifier for the worker (e.g. pod name +
+            pid). The reaper uses this for diagnostics; the *expiry*
+            column drives reclaim.
+        ttl_seconds: Wall-clock seconds the lease is valid for. The
+            worker must heartbeat within this window or the reaper
+            will reclaim the row. Typical values: 60-180s, with a
+            heartbeat at ~1/2 the TTL.
+
+    Returns:
+        The mutated, flushed row with ``lease_owner`` /
+        ``lease_expires_at`` populated.
+    """
+    row.lease_owner = owner
+    row.lease_expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+    await session.flush()
+    return row
+
+
+async def heartbeat(
+    session: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    owner: str,
+    ttl_seconds: int,
+) -> AgentRun:
+    """Extend the lease on *run_id* iff this worker still holds it.
+
+    Initiative #804 (G11.3 Scheduler), Task #825 (T4). The healthy
+    worker calls this on a periodic cadence (≈ ``ttl_seconds / 2``)
+    to keep the reaper from reclaiming the run. The update is
+    conditional on ``lease_owner = owner`` AND ``status = 'running'``
+    so a worker whose lease has been stolen by the reaper (or whose
+    run has been cancelled out from under it by an operator) gets a
+    :class:`LeaseLostError` and stops cleanly -- at-least-once
+    semantics depend on the worker honouring this signal.
+
+    Why a conditional ``UPDATE`` rather than a Python ``if`` + edit
+    -----------------------------------------------------------------
+
+    The Python-side check would race the reaper: between reading the
+    row and writing the new ``lease_expires_at`` the reaper could
+    reclaim, and the worker's later write would silently overwrite
+    the reaper's clear (or another claimer's owner). A single
+    conditional ``UPDATE`` is atomic at the DB layer -- the predicate
+    and the write commit together, so either the worker keeps the
+    lease (one row touched) or it has already lost it (zero rows
+    touched) and we raise.
+
+    Args:
+        session: Open :class:`AsyncSession`; flushed, not committed.
+        run_id: The run whose lease this worker is extending.
+        owner: The worker identifier (must match the row's current
+            ``lease_owner`` or the update touches zero rows).
+        ttl_seconds: The new lease window (same shape as
+            :func:`claim_lease`).
+
+    Returns:
+        The :class:`AgentRun` with its lease extended. Newly-loaded
+        from the DB after the update so the caller sees the latest
+        server-side values (the conditional update bypasses the ORM's
+        change tracking).
+
+    Raises:
+        LeaseLostError: The conditional update touched zero rows --
+            this worker no longer holds the lease.
+    """
+    new_expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+    # ``session.execute()`` on an ``UPDATE`` returns a
+    # :class:`~sqlalchemy.engine.cursor.CursorResult` (which carries
+    # the DBAPI ``rowcount``) at runtime; the static stub return type
+    # is the generic :class:`Result` so mypy needs the explicit cast
+    # to resolve ``rowcount``. ``synchronize_session=False`` is also
+    # correct semantically -- we are about to reload the row from the
+    # DB anyway, so synchronising the identity map before that reload
+    # would be wasted work.
+    raw_result = await session.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == run_id,
+            AgentRun.lease_owner == owner,
+            AgentRun.status == AgentRunStatus.RUNNING.value,
+        )
+        .values(lease_expires_at=new_expires_at)
+        .execution_options(synchronize_session=False)
+    )
+    cursor_result = cast(CursorResult[Any], raw_result)
+    if cursor_result.rowcount == 0:
+        raise LeaseLostError(run_id=run_id, owner=owner)
+    await session.flush()
+    # Reload so the caller sees server-side state (the conditional
+    # UPDATE bypasses the ORM's identity map change tracking).
+    row = await session.get(AgentRun, run_id)
+    if row is None:
+        # Defensive: the rowcount>0 branch means the row existed at
+        # update time; deletion mid-flight would be a substrate-level
+        # event we do not currently model. Surface it as
+        # LeaseLostError so the worker stops.
+        raise LeaseLostError(run_id=run_id, owner=owner)
+    return row
+
+
+async def release_lease(session: AsyncSession, row: AgentRun) -> AgentRun:
+    """Clear the lease on *row* without changing its status.
+
+    Initiative #804 (G11.3 Scheduler), Task #825 (T4). Used by:
+
+    * The reaper's ``resume`` policy after marking a row eligible for
+      re-dispatch (the next worker claim populates the columns
+      fresh).
+    * The lifecycle service's terminal-transition helpers
+      (:func:`succeed_run`, :func:`fail_run`, :func:`cancel_run`)
+      after the row reaches a terminal state so the indexes do not
+      retain stale lease metadata.
+
+    Idempotent: clearing an already-cleared lease is a no-op (both
+    fields are set to ``None`` regardless of their prior value).
+
+    Args:
+        session: Open :class:`AsyncSession`; flushed, not committed.
+        row: The :class:`AgentRun` whose lease to clear.
+
+    Returns:
+        The mutated, flushed row.
+    """
+    row.lease_owner = None
+    row.lease_expires_at = None
+    await session.flush()
+    return row
+
+
+async def snapshot_in_flight_policy(
+    session: AsyncSession,
+    row: AgentRun,
+    policy: ScheduledTriggerInFlightPolicy,
+) -> AgentRun:
+    """Copy the firing trigger's :attr:`in_flight_policy` onto the run row.
+
+    Initiative #804 (G11.3 Scheduler), Task #825 (T4). T2 #823 / T3
+    #824 wire this call when they fire a run: the trigger's policy is
+    snapshotted onto the run row so a definition edit mid-flight
+    cannot flip behavior on a run that's already executing. The
+    runtime (G11.1) and the reaper (T4) both read the snapshot, not
+    the trigger.
+
+    The runtime helper here is a thin wrapper around the
+    column assignment because copying the policy is *part of* the
+    run-start handshake -- threading a separate caller path for the
+    snapshot risks the trigger / run rows committing in different
+    transactions and the run executing under the wrong policy.
+
+    Args:
+        session: Open :class:`AsyncSession`; flushed, not committed.
+        row: The :class:`AgentRun` being started.
+        policy: The trigger's current :class:`ScheduledTriggerInFlightPolicy`.
+
+    Returns:
+        The mutated, flushed row.
+    """
+    row.in_flight_policy = policy.value
+    await session.flush()
+    return row
 
 
 async def increment_turns(session: AsyncSession, row: AgentRun) -> AgentRun:

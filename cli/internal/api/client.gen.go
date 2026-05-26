@@ -1279,17 +1279,67 @@ type ConnectorSpecEntry struct {
 // bound writes to the enum but read paths surface whatever the
 // DB stored (a future “kind“ value introduced by a migration
 // would otherwise blow up the JSON encoder on every read).
+//
+// “preamble_status“ (G0.14-T8 #1149) is the post-write inclusion
+// signal POST/PATCH attach: “None“ on “GET /{slug}“ (the
+// aggregate budget signal lives on the list response's
+// “budget_status“) and on writes against “workflow“ /
+// “reference“ kinds (those are not preamble-bound). Populated
+// only when the write touched an “operational“ row.
 type Convention struct {
 	Body         string             `json:"body"`
 	CreatedAt    time.Time          `json:"created_at"`
 	CreatedBySub *string            `json:"created_by_sub"`
 	Id           openapi_types.UUID `json:"id"`
 	Kind         string             `json:"kind"`
-	Priority     int                `json:"priority"`
-	Slug         string             `json:"slug"`
-	TenantId     openapi_types.UUID `json:"tenant_id"`
-	Title        string             `json:"title"`
-	UpdatedAt    time.Time          `json:"updated_at"`
+
+	// PreambleStatus Whether a just-written convention reaches the session preamble.
+	//
+	// G0.14-T8 (#1149, signal 18) -- the post-write feedback shape
+	// ``POST /api/v1/conventions`` and ``PATCH /api/v1/conventions/{slug}``
+	// attach to the response when the convention is ``kind='operational'``.
+	// Without it, the operator gets a ``201`` (or ``200`` on PATCH), assumes
+	// the rule is in effect, and the agent silently never sees it because
+	// the preamble packer dropped it on budget overflow.
+	//
+	// Fields:
+	//
+	// * ``included`` -- ``True`` when the slug landed in the assembled
+	//   preamble (after the priority-ranked pack against
+	//   :data:`DEFAULT_MAX_PREAMBLE_TOKENS`). ``False`` when the packer
+	//   dropped it whole on overflow.
+	// * ``position`` -- 1-based index of the convention in the assembled
+	//   preamble's packed order (the packer iterates ``priority DESC,
+	//   created_at ASC``; ``position=1`` means highest-priority slot in
+	//   the operator's tenant). ``None`` when ``included=False``.
+	// * ``token_count`` -- the convention body's own estimated token
+	//   cost via :func:`estimate_tokens`. Useful for the operator to
+	//   see why a near-budget body got dropped (it weighed more than
+	//   the remaining headroom).
+	// * ``would_drop_slugs`` -- the full ``dropped_slugs`` list the
+	//   packer produced on this assembly. When ``included=True`` this
+	//   names *other* slugs that fell out of the preamble (the just-
+	//   written convention may have pushed a lower-priority neighbour
+	//   out); when ``included=False`` the list contains *this* slug
+	//   plus any others dropped under the same pack. The shape lets
+	//   a single ``meho conventions create ...`` round-trip surface
+	//   both the personal outcome (did mine land?) and the collateral
+	//   damage (did mine push someone else out?).
+	//
+	// Why a separate model instead of inlining fields on
+	// :class:`Convention`: the response shape ``Convention`` is used
+	// by ``GET /{slug}`` too, where ``preamble_status`` would be
+	// redundant (operators inspecting a row already have the
+	// ``GET /api/v1/conventions``'s ``budget_status`` envelope for
+	// aggregate budget signal). Keeping the inclusion shape on a
+	// sub-model means GET-single can drop the field cleanly while
+	// POST/PATCH attach it.
+	PreambleStatus *PreambleInclusion `json:"preamble_status,omitempty"`
+	Priority       int                `json:"priority"`
+	Slug           string             `json:"slug"`
+	TenantId       openapi_types.UUID `json:"tenant_id"`
+	Title          string             `json:"title"`
+	UpdatedAt      time.Time          `json:"updated_at"`
 }
 
 // ConventionCreate POST body for “/api/v1/conventions“.
@@ -2103,6 +2153,54 @@ type OperatorIdentity struct {
 // require a code + migration change, which is the cheapest way to
 // prevent drift between the DB layer and the policy engine.
 type PermissionVerdict string
+
+// PreambleInclusion Whether a just-written convention reaches the session preamble.
+//
+// G0.14-T8 (#1149, signal 18) -- the post-write feedback shape
+// “POST /api/v1/conventions“ and “PATCH /api/v1/conventions/{slug}“
+// attach to the response when the convention is “kind='operational'“.
+// Without it, the operator gets a “201“ (or “200“ on PATCH), assumes
+// the rule is in effect, and the agent silently never sees it because
+// the preamble packer dropped it on budget overflow.
+//
+// Fields:
+//
+//   - “included“ -- “True“ when the slug landed in the assembled
+//     preamble (after the priority-ranked pack against
+//     :data:`DEFAULT_MAX_PREAMBLE_TOKENS`). “False“ when the packer
+//     dropped it whole on overflow.
+//   - “position“ -- 1-based index of the convention in the assembled
+//     preamble's packed order (the packer iterates “priority DESC,
+//     created_at ASC“; “position=1“ means highest-priority slot in
+//     the operator's tenant). “None“ when “included=False“.
+//   - “token_count“ -- the convention body's own estimated token
+//     cost via :func:`estimate_tokens`. Useful for the operator to
+//     see why a near-budget body got dropped (it weighed more than
+//     the remaining headroom).
+//   - “would_drop_slugs“ -- the full “dropped_slugs“ list the
+//     packer produced on this assembly. When “included=True“ this
+//     names *other* slugs that fell out of the preamble (the just-
+//     written convention may have pushed a lower-priority neighbour
+//     out); when “included=False“ the list contains *this* slug
+//     plus any others dropped under the same pack. The shape lets
+//     a single “meho conventions create ...“ round-trip surface
+//     both the personal outcome (did mine land?) and the collateral
+//     damage (did mine push someone else out?).
+//
+// Why a separate model instead of inlining fields on
+// :class:`Convention`: the response shape “Convention“ is used
+// by “GET /{slug}“ too, where “preamble_status“ would be
+// redundant (operators inspecting a row already have the
+// “GET /api/v1/conventions“'s “budget_status“ envelope for
+// aggregate budget signal). Keeping the inclusion shape on a
+// sub-model means GET-single can drop the field cleanly while
+// POST/PATCH attach it.
+type PreambleInclusion struct {
+	Included       bool     `json:"included"`
+	Position       *int     `json:"position"`
+	TokenCount     int      `json:"token_count"`
+	WouldDropSlugs []string `json:"would_drop_slugs"`
+}
 
 // PromoteBody POST body for “/api/v1/memory/{scope}/{slug}/promote“.
 //

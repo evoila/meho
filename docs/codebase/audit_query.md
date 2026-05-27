@@ -50,9 +50,9 @@ Field-to-source mapping:
 | `target_name` | LEFT JOIN `targets.name ON audit_log.target_id = targets.id AND targets.tenant_id = :tenant_id`. The tenant-id half of the ON clause is defence-in-depth: `audit_log.target_id` has no FK in v0.2 (soft column per chassis discipline) so a cross-tenant value resolves to `target_name=None` rather than leaking another tenant's name. |
 | `method` / `path` / `status_code` / `request_id` / `duration_ms` / `payload` | Columns of the same name on `audit_log`. |
 | `op_id` | `payload['op_id']` if a string, else `f"http.{method.lower()}:{path}"`. |
-| `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. |
+| `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. For the MCP `call_operation` outer-wrapper row this is `"tool_call"` (G0.15-T3 #1212) — the inner DISPATCH row carries the domain `read` / `write` class. |
 | `result_status` | Derived from `status_code` — 401/403 → `"denied"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. |
-| `principal_name` | **None in v0.2** — JWT `name` claim is not captured by either write path. |
+| `principal_name` | `payload['principal_name']` when present (MCP rows since G0.15-T3 #1212; `write_mcp_audit_row` merges `Operator.name` from the validated JWT). HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); the flat *filter* on it stays gated. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |

@@ -102,6 +102,7 @@ class AmbiguousTargetError(HTTPException):
         )
 
 
+# code-quality-allow: function-size — linear three-phase resolver (exact → alias → near-miss) where each phase consumes the prior's None result and the trailing bind requires the resolved row; decomposition forces sentinel returns or raise-mid-helper.
 async def resolve_target(
     session: AsyncSession,
     tenant_id: UUID,
@@ -193,8 +194,18 @@ async def resolve_target(
         )
         raise TargetNotFoundError(query, summaries)
 
-    # Single exit point — bind target_id for AuditMiddleware (G0.3-T4).
-    structlog.contextvars.bind_contextvars(target_id=str(target.id))
+    # Single exit point — bind target_id for AuditMiddleware (G0.3-T4) and
+    # target_name for the MCP outer-wrapper row's payload (G0.15-T3 #1212).
+    # The HTTP audit middleware writes only the typed target_id column; the
+    # MCP path additionally drops the canonical name into payload so
+    # ``query_audit target=<name>`` matches the MCP envelope row as well as
+    # the inner DISPATCH row. Binding here — the single canonical exit
+    # point of name-or-alias resolution — keeps the value consistent with
+    # the resolved row's identity (aliases collapse to the canonical name).
+    structlog.contextvars.bind_contextvars(
+        target_id=str(target.id),
+        target_name=target.name,
+    )
     _log.info("target_resolved", target_id=str(target.id), name=target.name)
     return target
 

@@ -82,10 +82,11 @@ def test_filters_frozen_blocks_reassignment() -> None:
 def _make_entry(**overrides: object) -> AuditEntry:
     """Build a populated :class:`AuditEntry` with every field set.
 
-    Every field on the model is required (none carries a Pydantic default), so
-    the helper spells out all of them — including the two v0.2 placeholders
-    that the handler always sets to None (``principal_name`` /
-    ``broadcast_event_id``) and the two lineage columns the handler now
+    Every field on the model is required (none carries a Pydantic default),
+    so the helper spells out all of them — including ``broadcast_event_id``
+    (still unconditionally None in v0.2; FK direction is reversed),
+    ``principal_name`` (conditionally populated since G0.15-T3 #1212 — None
+    here unless overridden), and the two lineage columns the handler now
     populates from the row (``parent_audit_id`` / ``agent_session_id``).
     """
     defaults: dict[str, object] = {
@@ -140,11 +141,16 @@ def test_entry_frozen_blocks_reassignment() -> None:
 
 
 def test_entry_placeholders_default_to_none() -> None:
-    """The two remaining v0.2 placeholder fields stay None.
+    """The remaining v0.2 placeholder fields stay None when unset.
 
     ``parent_audit_id`` (#398) and ``agent_session_id`` (#1009) are now real
-    columns the handler reads off the row; only ``principal_name`` and
-    ``broadcast_event_id`` are still unconditionally None in v0.2.
+    columns the handler reads off the row. ``principal_name`` is now
+    conditionally populated from ``payload['principal_name']`` since
+    G0.15-T3 #1212 (MCP rows carry the JWT-derived name); the default
+    here covers the HTTP-chassis case where the payload lacks the key.
+    Only ``broadcast_event_id`` is still unconditionally None
+    (FK direction is reversed: ``BroadcastEvent.audit_id`` points at
+    the audit row).
     """
     entry = _make_entry()
     assert entry.principal_name is None

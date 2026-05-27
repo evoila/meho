@@ -298,12 +298,25 @@ def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
         op_class_raw if isinstance(op_class_raw, str) and op_class_raw else classify_op(op_id)
     )
 
+    # G0.15-T3 #1212 — surface ``principal_name`` when the writer landed
+    # one in payload (MCP rows since #1212 carry ``Operator.name`` /
+    # ``Operator.email`` derived from the JWT). HTTP-chassis rows remain
+    # ``None`` because ``verify_jwt_and_bind`` does not bind ``name`` to
+    # contextvars — fixing that is a separate, broader change. Same
+    # ``isinstance(str)`` defence as ``op_class`` / ``op_id`` so a row
+    # whose payload was hand-edited to a non-string value falls back to
+    # ``None`` instead of raising at the validation layer.
+    principal_name_raw = payload.get("principal_name")
+    principal_name = (
+        principal_name_raw if isinstance(principal_name_raw, str) and principal_name_raw else None
+    )
+
     return AuditEntry(
         id=row.id,
         ts=row.occurred_at,
         tenant_id=row.tenant_id,
         principal_sub=row.operator_sub,
-        principal_name=None,
+        principal_name=principal_name,
         target_id=row.target_id,
         target_name=target_name,
         method=row.method,

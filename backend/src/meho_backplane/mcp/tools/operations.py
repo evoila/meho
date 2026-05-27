@@ -367,7 +367,21 @@ register_mcp_tool(
             "required": ["status", "op_id", "duration_ms"],
         },
         required_role=TenantRole.OPERATOR,
-        op_class="write",
+        # G0.15-T3 #1212 — finding 1: ``call_operation`` is a tool-call
+        # envelope, not a domain operation. The actual mutation /
+        # read-class of the inner op lives on the DISPATCH row the
+        # dispatcher writes from inside the handler; the outer MCP
+        # wrapper row's class must NOT shadow that with a fixed value
+        # (the pre-#1212 ``"write"`` mis-classified every ``k8s.node.list``
+        # / ``k8s.about`` invocation as a write at the audit-query layer).
+        # ``"tool_call"`` is the agreed Option-A value from the issue
+        # (the inner DISPATCH carries the truth; this is a filterable
+        # envelope marker). ``classify_op`` in
+        # :mod:`meho_backplane.broadcast.events` treats unknown classes
+        # as ``other`` for redaction, which keeps the broadcast event's
+        # full-detail shape for the envelope row — operators can still
+        # see the request params on the SSE feed.
+        op_class="tool_call",
     ),
     handler=_call_operation_handler,
 )

@@ -302,7 +302,15 @@ async def test_audit_write_failure_converts_call_to_internal_error(
 
 @pytest.mark.asyncio
 async def test_write_mcp_audit_row_persists_every_field() -> None:
-    """The helper round-trips every field including the JSON ``payload``."""
+    """The helper round-trips every field including the JSON ``payload``.
+
+    The persisted payload is the caller's payload **augmented** with the
+    JWT-derived ``principal_name`` (G0.15-T3 #1212); the assertion
+    compares the keys the caller supplied to the persisted view of the
+    same keys rather than equality on the whole dict, so the audit
+    write's column-hoisting extensions stay invisible to the helper's
+    caller contract while remaining verifiable.
+    """
     op = build_operator()
     request_id = uuid4()
     payload = {"op_id": "test.tool", "params_hash": "abc123", "op_class": "read"}
@@ -328,7 +336,19 @@ async def test_write_mcp_audit_row_persists_every_field() -> None:
     assert row.request_id == request_id
     # SQLite stores Numeric via _PORTABLE_JSON if applicable; check value
     assert float(row.duration_ms or 0) == pytest.approx(12.34)
-    assert json.loads(json.dumps(row.payload)) == payload
+    # Caller-supplied keys survive the round-trip verbatim; the writer
+    # additionally injects ``principal_name`` from ``Operator.name`` (the
+    # fixture sets it to ``"Test"``). Assert on the caller's keys plus
+    # the new G0.15-T3 #1212 columns separately so a future extension
+    # of the writer (e.g. delegation-aware ``actor_name``) does not
+    # silently break this test.
+    persisted = dict(row.payload)
+    for k, v in payload.items():
+        assert persisted[k] == v
+    assert persisted["principal_name"] == "Test"
+    # ``Operator.email`` is None on the default fixture so no
+    # ``principal_email`` key is written; explicit absence test below.
+    assert "principal_email" not in persisted
 
 
 # ---------------------------------------------------------------------------
@@ -551,3 +571,263 @@ async def test_write_helper_leaves_agent_session_id_null_without_contextvar() ->
     assert len(rows) == 1
     assert rows[0].agent_session_id is None
     assert rows[0].parent_audit_id is None
+
+
+# ---------------------------------------------------------------------------
+# G0.15-T3 (#1212): MCP audit-write column hoisting
+#
+# Covers the three findings from claude-rdc-hetzner-dc#753:
+#   * Finding 1 — ``op_class`` mis-classification: ``call_operation``'s
+#     outer-wrapper row now carries ``"tool_call"`` (Option A) so the inner
+#     DISPATCH row remains the source of truth for the domain class.
+#   * Finding 3 — ``principal_name`` / ``principal_email`` lost despite the
+#     JWT carrying them: the writer now merges ``Operator.name`` /
+#     ``Operator.email`` into the row payload.
+#   * Finding 5 — ``target_id`` / ``target_name`` lost: the typed
+#     ``target_id`` column is hoisted from the ``target_id`` contextvar the
+#     targets resolver binds, and the canonical ``target_name`` lands in
+#     payload (the schema has no typed name column in v0.2).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_principal_name_and_email_merged_from_operator() -> None:
+    """G0.15-T3 finding 3: writer merges ``Operator.name`` / ``Operator.email``.
+
+    Both JWT-derived claims land under ``payload['principal_name']`` /
+    ``payload['principal_email']`` so a forensic query against one
+    session's rows attributes activity to a human-readable identity
+    without a Keycloak round-trip. ``EmailStr`` is coerced to plain
+    ``str`` so the JSON encoder doesn't need to special-case the
+    pydantic type.
+    """
+    import structlog
+
+    from meho_backplane.auth.operator import Operator, TenantRole
+
+    structlog.contextvars.clear_contextvars()
+    op = Operator(
+        sub="op-test-2",
+        name="Damir Topic",
+        email="damir.topic@example.com",
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=uuid4(),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+    await write_mcp_audit_row(
+        operator=op,
+        method="MCP",
+        path="/mcp/tools/call/meho.status",
+        status_code=200,
+        duration_ms=1.0,
+        payload={"op_id": "meho.status", "op_class": "read"},
+    )
+
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    payload = dict(rows[0].payload)
+    assert payload["principal_name"] == "Damir Topic"
+    assert payload["principal_email"] == "damir.topic@example.com"
+    # JSON-encoder safety: the value is a plain ``str`` instance, not an
+    # ``EmailStr`` subclass; ``json.dumps(payload)`` round-trips cleanly.
+    assert type(payload["principal_email"]) is str
+    assert json.loads(json.dumps(payload)) == payload
+
+
+@pytest.mark.asyncio
+async def test_operator_without_name_or_email_writes_no_principal_keys() -> None:
+    """An ``Operator`` with ``name=None`` / ``email=None`` doesn't pollute payload.
+
+    Background: when the JWT issuer omits both ``name`` and ``email``
+    claims (service-account tokens, agent principals on the CIMD path),
+    the writer must not insert ``"principal_name": null`` /
+    ``"principal_email": null`` placeholder entries — both because
+    those waste storage on every row, and because the audit-query
+    handler's surfacing logic prefers absent keys over null values to
+    keep the broadcast event redaction shape stable.
+    """
+    import structlog
+
+    from meho_backplane.auth.operator import Operator, TenantRole
+
+    structlog.contextvars.clear_contextvars()
+    op = Operator(
+        sub="service-account-3",
+        name=None,
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=uuid4(),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+    await write_mcp_audit_row(
+        operator=op,
+        method="MCP",
+        path="/mcp/tools/call/meho.status",
+        status_code=200,
+        duration_ms=1.0,
+        payload={"op_id": "meho.status", "op_class": "read"},
+    )
+
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    payload = dict(rows[0].payload)
+    assert "principal_name" not in payload
+    assert "principal_email" not in payload
+
+
+@pytest.mark.asyncio
+async def test_explicit_payload_principal_name_wins_over_operator() -> None:
+    """Caller-supplied ``principal_name`` in payload wins on collision.
+
+    Forward-compat for a hypothetical future delegation-aware writer that
+    needs to record the *acting* principal's name even when the
+    :class:`Operator` slot carries the user-on-behalf identity. The
+    writer uses ``setdefault``, so an explicit payload key is preserved.
+    """
+    import structlog
+
+    from meho_backplane.auth.operator import Operator, TenantRole
+
+    structlog.contextvars.clear_contextvars()
+    op = Operator(
+        sub="op-test-4",
+        name="Damir Topic",
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=uuid4(),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+    await write_mcp_audit_row(
+        operator=op,
+        method="MCP",
+        path="/mcp/tools/call/meho.status",
+        status_code=200,
+        duration_ms=1.0,
+        payload={
+            "op_id": "meho.status",
+            "op_class": "read",
+            "principal_name": "Acting Agent Name",
+        },
+    )
+
+    rows = await _audit_rows()
+    assert rows[0].payload["principal_name"] == "Acting Agent Name"
+
+
+@pytest.mark.asyncio
+async def test_target_id_and_name_hoisted_from_contextvars() -> None:
+    """G0.15-T3 finding 5: ``target_id`` typed column + ``target_name`` payload key.
+
+    The :func:`~meho_backplane.targets.resolver.resolve_target` helper
+    binds ``target_id`` (UUID-as-string) and ``target_name`` (string)
+    to structlog contextvars at its single exit point. The MCP audit
+    writer reads both — ``target_id`` lands on the typed column for
+    ``query_audit target=`` lookups via the targets JOIN; ``target_name``
+    lands in payload for forensic readability.
+    """
+    import structlog
+
+    structlog.contextvars.clear_contextvars()
+    target_id = uuid4()
+    structlog.contextvars.bind_contextvars(
+        target_id=str(target_id),
+        target_name="rdc-vcenter",
+    )
+    op = build_operator()
+
+    await write_mcp_audit_row(
+        operator=op,
+        method="MCP",
+        path="/mcp/tools/call/call_operation",
+        status_code=200,
+        duration_ms=1.0,
+        payload={"op_id": "call_operation", "op_class": "tool_call"},
+    )
+
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.target_id == target_id
+    assert row.payload["target_name"] == "rdc-vcenter"
+    structlog.contextvars.clear_contextvars()
+
+
+@pytest.mark.asyncio
+async def test_target_id_malformed_contextvar_logs_and_falls_back_to_null() -> None:
+    """Malformed ``target_id`` contextvar lands NULL and is logged.
+
+    Matches the invariant-violation pattern used by the chassis
+    ``_resolve_target_id`` (in ``meho_backplane.audit``): bound values
+    that fail UUID parse log at error level but never block the audit
+    insert — losing the row would compound a programming bug into a
+    fully unaudited operation.
+    """
+    import structlog
+
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(target_id="not-a-uuid")
+    op = build_operator()
+
+    await write_mcp_audit_row(
+        operator=op,
+        method="MCP",
+        path="/mcp/tools/call/call_operation",
+        status_code=200,
+        duration_ms=1.0,
+        payload={"op_id": "call_operation", "op_class": "tool_call"},
+    )
+
+    rows = await _audit_rows()
+    assert rows[0].target_id is None
+    structlog.contextvars.clear_contextvars()
+
+
+@pytest.mark.asyncio
+async def test_no_target_contextvar_leaves_target_id_null_and_no_name() -> None:
+    """A tool that doesn't resolve a target leaves ``target_id`` NULL.
+
+    ``meho.status`` and similar tenant-wide MCP tools never invoke the
+    targets resolver, so the contextvar is unbound — the typed column
+    must stay NULL (the chassis-era default) and no ``target_name`` key
+    should be injected into payload.
+    """
+    import structlog
+
+    structlog.contextvars.clear_contextvars()
+    op = build_operator()
+
+    await write_mcp_audit_row(
+        operator=op,
+        method="MCP",
+        path="/mcp/tools/call/meho.status",
+        status_code=200,
+        duration_ms=1.0,
+        payload={"op_id": "meho.status", "op_class": "read"},
+    )
+
+    rows = await _audit_rows()
+    assert rows[0].target_id is None
+    assert "target_name" not in rows[0].payload
+
+
+@pytest.mark.asyncio
+async def test_call_operation_tool_definition_carries_tool_call_op_class() -> None:
+    """G0.15-T3 finding 1: ``call_operation``'s ToolDefinition uses ``op_class="tool_call"``.
+
+    The outer-wrapper row's ``op_class`` comes from the tool def via
+    ``handle_tools_call`` (``mcp/handlers.py``), so pinning the def's
+    value is equivalent to pinning every MCP envelope row for that
+    tool. The inner DISPATCH row writes a separate row through
+    ``operations._audit.write_audit_row`` whose ``op_class`` is the
+    classifier output for the *inner* op_id — unchanged by this fix
+    and verified separately in ``test_operations_dispatcher``.
+    """
+    from meho_backplane.mcp.registry import get_tool
+
+    entry = get_tool("call_operation")
+    assert entry is not None
+    defn, _handler = entry
+    assert defn.op_class == "tool_call"

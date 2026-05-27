@@ -51,6 +51,7 @@ from meho_backplane.agent import (
     DEFAULT_TENANT_KEY,
     AgentDefinition,
     AgentRunError,
+    AgentRunEventKind,
     AgentRunStatus,
     AgentTier,
     BackendCapabilities,
@@ -273,11 +274,16 @@ def test_default_anthropic_policy_routes_to_anthropic(
     )
     operator = _make_operator(tenant_id=_TENANT_B)
 
-    model = resolver.resolve(operator, AgentTier.TRIAGE)
-    # The Anthropic Model class is the one the builder constructs.
+    # The Anthropic Model class is the one the builder constructs. Assert
+    # every AgentTier value routes to it, not just TRIAGE — the
+    # default-tenant policy is the recovery shape, so a tier that quietly
+    # missed registration would regress every existing default-tenant
+    # deploy.
     from pydantic_ai.models.anthropic import AnthropicModel
 
-    assert isinstance(model, AnthropicModel)
+    for tier in AgentTier:
+        model = resolver.resolve(operator, tier)
+        assert isinstance(model, AnthropicModel), tier
 
 
 def test_default_anthropic_builder_fails_closed_without_key(
@@ -533,5 +539,75 @@ async def test_seam_wraps_resolver_error_in_agent_run_error() -> None:
     )
     operator = _make_operator(tenant_id=_TENANT_A)
 
-    with pytest.raises(AgentRunError, match="resolve a model"):
+    with pytest.raises(AgentRunError, match="resolve a model") as exc_info:
         runtime.start(definition, operator, "hello")
+
+    # The resolver's typed error is preserved as the wrapped __cause__ so
+    # debuggers / loggers can recover the precise mismatch (a future
+    # regression that drops the ``from exc`` chain would silently lose
+    # the diagnostic).
+    assert isinstance(exc_info.value.__cause__, CapabilityMismatchError)
+
+
+async def test_stream_events_yields_error_on_resolver_failure() -> None:
+    """A resolver failure inside ``stream_events`` emits one terminal ERROR event.
+
+    The :meth:`PydanticAgentRun.stream_events` docstring promises every
+    failure mode (turn-budget exhausted, model error, tool error)
+    surfaces as a terminal :attr:`AgentRunEventKind.ERROR` event, so the
+    SSE consumer always sees a closing frame regardless of which level
+    failed. A resolver failure (capability mismatch, no-egress
+    violation, missing backend) lives in the same envelope: it must
+    not propagate as a raw exception out of the generator, which would
+    tear the ``text/event-stream`` connection without a terminal frame
+    (and the EventSource client would auto-reconnect into a hot loop).
+    """
+    from uuid import uuid4
+
+    no_tools_caps = BackendCapabilities(
+        supports_tools=False,
+        supports_streaming=False,
+        supports_prompt_cache=False,
+        tool_format="openai",
+    )
+
+    def build_no_tools() -> Model:
+        return _stub_model()
+
+    resolver = build_resolver(
+        policies={
+            _TENANT_A: TenantModelPolicy(
+                tiers={
+                    AgentTier.TRIAGE: TierMapping(backend_id="no-tools"),
+                },
+            ),
+        },
+        backends={
+            "no-tools": (build_no_tools, no_tools_caps, False),
+        },
+    )
+
+    def fallback_factory() -> Model:
+        raise AssertionError("factory should not be reached")
+
+    runtime = PydanticAgentRun(
+        model_factory=fallback_factory,
+        model_resolver=resolver,
+    )
+    definition = AgentDefinition(
+        name="broken-stream",
+        system_prompt="ignored",
+        request_limit=2,
+        tier=AgentTier.TRIAGE,
+    )
+    operator = _make_operator(tenant_id=_TENANT_A)
+
+    events = [
+        event
+        async for event in runtime.stream_events(definition, operator, "hello", run_id=uuid4())
+    ]
+
+    # One terminal ERROR event, generator completes cleanly (no escape).
+    assert len(events) == 1
+    assert events[0].kind is AgentRunEventKind.ERROR
+    assert "supports_tools=False" in events[0].data["error"]

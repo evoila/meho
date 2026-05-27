@@ -883,14 +883,20 @@ class PydanticAgentRun:
         A tripped turn budget surfaces as a :attr:`AgentRunEventKind.ERROR`
         event (then the generator ends) rather than a raised exception, so
         an SSE consumer always sees a terminal frame regardless of how the
-        loop ended. Tool returns are read from the run's message history
-        after the call-tools node completes — the plain (non-streaming)
-        node-graph path the deterministic test model supports.
+        loop ended. Same envelope covers a resolver failure (no backend
+        registered, no-egress tenant routed to SaaS, capability mismatch)
+        from :meth:`_build_agent`: it surfaces as a terminal ``ERROR`` event
+        rather than an exception escaping the generator, so the SSE consumer
+        always sees a terminal frame regardless of how the agent
+        construction or the loop went wrong. Tool returns are read from
+        the run's message history after the call-tools node completes —
+        the plain (non-streaming) node-graph path the deterministic test
+        model supports.
         """
-        agent = self._build_agent(definition, operator)
-        limits = UsageLimits(request_limit=definition.request_limit)
         emitted_tool_returns = 0
         try:
+            agent = self._build_agent(definition, operator)
+            limits = UsageLimits(request_limit=definition.request_limit)
             async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
                 async for node in run:
                     events, emitted_tool_returns = _node_events(node, run, emitted_tool_returns)

@@ -445,7 +445,7 @@ tenant* is running the agent, and *which logical tier* (`triage` /
 `ModelResolver` protocol in `meho_backplane/agent/models.py`, the
 architectural sibling of the connectors' fingerprint resolver:
 
-```
+```python
 resolver.resolve(operator, tier) -> pydantic_ai.models.Model
 ```
 

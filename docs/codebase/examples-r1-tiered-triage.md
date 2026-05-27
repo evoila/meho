@@ -170,6 +170,22 @@ scheduled-trigger row and out to the broadcast event that fired
 it; it follows `act_sub` to each tier's principal and the grants
 they hold.
 
+## Per-firing escalation cap
+
+The cheap tier's prompt asks for "at most 5 escalations per
+firing", but a prompt-side limit is advisory — a misaligned model
+can attempt more. The harness enforces the cap **in code**:
+`make_policy_persisting_hooks` in `workflow.py` builds a recorder
+that counts `invoke_agent` calls and raises `ModelRetry` on the
+(`MAX_ESCALATIONS_PER_FIRING`+1)-th attempt (default 5). The raise
+happens inside `make_invoke_agent_tool`'s recorder slot, which the
+runtime invokes **before** `run_child` — the refused escalation
+costs zero deep-tier spend. The cheap-tier loop receives the
+`ModelRetry` as a tool-level error and answers with a cap-hit
+count, matching the prompt's documented behaviour. Consumers can
+tighten the cap via the `max_escalations` kwarg (raising it
+requires also editing the cheap-tier prompt).
+
 ## Cost interaction
 
 Two budgets fire on every closed-loop tick:

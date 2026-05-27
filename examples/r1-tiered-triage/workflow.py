@@ -87,6 +87,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic_ai import ModelRetry
 
 from meho_backplane.agent import AgentDefinition, PydanticAgentRun
 from meho_backplane.agent.invoke import (
@@ -101,6 +102,7 @@ if TYPE_CHECKING:  # pragma: no cover -- typing-only imports
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
+    "MAX_ESCALATIONS_PER_FIRING",
     "POLICY_SLUG_PREFIX",
     "POLICY_SLUG_RE",
     "BroadcastEvent",
@@ -115,6 +117,20 @@ __all__ = [
     "policy_slug_for_class",
     "run_closed_loop",
 ]
+
+
+#: The maximum number of ``invoke_agent`` escalations the harness will
+#: allow from one cheap-tier firing. The cheap tier's system prompt
+#: documents the same number ("Escalate at most 5 events per firing"),
+#: but a prompt-side limit is advisory -- a misaligned cheap-tier
+#: response can attempt N > 5 calls. The harness enforces this in code
+#: by counting escalations inside the recorder hook and surfacing the
+#: 6th attempt as :class:`pydantic_ai.ModelRetry`, which the cheap
+#: tier's loop reasons about ("the cap is hit, stop escalating, emit
+#: the final answer"). Raising in the recorder runs **before** any
+#: child loop spend, so the cap is purely defensive on the
+#: prompt-side compute budget, not on the deep tier's spend.
+MAX_ESCALATIONS_PER_FIRING: int = 5
 
 
 #: Slug prefix the harness uses for every policy entry it writes back
@@ -388,6 +404,7 @@ def make_policy_persisting_hooks(
     memory: MemoryService | None = None,
     sink: list[PolicyWriteBack] | None = None,
     escalations_observed: list[str] | None = None,
+    max_escalations: int = MAX_ESCALATIONS_PER_FIRING,
 ) -> tuple[ChildRunRecorder, ChildRunFinalizer]:
     """Return ``(recorder, finalizer)`` hooks for the closed-loop run.
 
@@ -421,8 +438,38 @@ def make_policy_persisting_hooks(
     documented extension points and the production invocation
     surface (T4 #811 / T6 #813) targets the same API; using them
     keeps the harness composing against the real seam.
+
+    The recorder also enforces the per-firing escalation cap. The
+    cheap tier's prompt asks for "at most 5 escalations per firing",
+    but a prompt-side directive is advisory -- a misaligned model can
+    attempt more. The recorder counts escalations and raises
+    :class:`~pydantic_ai.ModelRetry` on the
+    ``(max_escalations + 1)``-th attempt, **before** the child loop
+    starts (the runtime invokes the recorder before
+    :meth:`~meho_backplane.agent.run.PydanticAgentRun.run_child`),
+    so an over-cap escalation costs zero deep-tier spend. The cheap
+    tier's loop receives the ``ModelRetry`` as the tool's outcome
+    and answers the operator with the cap-hit count, matching the
+    prompt's documented behaviour. ``max_escalations`` is exposed so
+    a consumer can tighten the cap further; raising it requires
+    matching the cheap-tier prompt.
     """
     service = memory if memory is not None else MemoryService()
+
+    if max_escalations < 0:
+        # A negative cap is meaningless. Reject at hook-construction
+        # time so the misconfiguration surfaces immediately instead of
+        # as a confusing zero-escalation run later.
+        raise ValueError(
+            f"max_escalations must be >= 0; got {max_escalations}",
+        )
+
+    # The escalation count is closed-over by the recorder. A fresh
+    # hook pair per firing keeps this counter scoped to one cheap-tier
+    # tick; calling :func:`make_policy_persisting_hooks` again returns
+    # a new counter (the harness's :func:`run_closed_loop` does this
+    # on every invocation, so each firing starts from zero).
+    escalation_count: list[int] = [0]
 
     async def _record(
         *,
@@ -436,6 +483,22 @@ def make_policy_persisting_hooks(
         # away with a fresh UUID because the only consumer of the id
         # is the finalizer, which keys on the output, not on the row.
         import uuid as _uuid_mod
+
+        # Cap enforcement: refuse the escalation *before* the child
+        # loop starts. Raising ModelRetry here propagates through
+        # ``make_invoke_agent_tool``'s recorder call as a tool-level
+        # error the cheap tier reasons about ("escalation cap hit,
+        # answer with cap-hit count"); no escalation count is
+        # recorded for the refused call.
+        if escalation_count[0] >= max_escalations:
+            raise ModelRetry(
+                f"escalation cap hit: this firing already issued "
+                f"{escalation_count[0]} invoke_agent calls and the "
+                f"per-firing cap is {max_escalations}. Stop "
+                f"escalating; report cap-hit count in your final "
+                f"answer."
+            )
+        escalation_count[0] += 1
 
         if escalations_observed is not None:
             # Record the child definition's name as the escalation

@@ -66,6 +66,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import ValidationError
+from pydantic_ai import ModelRetry
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -404,6 +405,7 @@ def test_workflow_module_loads_and_exports_expected_symbols() -> None:
     """
     workflow = _load_workflow_module()
     expected_exports = {
+        "MAX_ESCALATIONS_PER_FIRING",
         "BroadcastEvent",
         "POLICY_SLUG_PREFIX",
         "POLICY_SLUG_RE",
@@ -423,6 +425,11 @@ def test_workflow_module_loads_and_exports_expected_symbols() -> None:
     # cheap tier reads it; the harness writes it. Pin to detect
     # drift in either direction.
     assert workflow.POLICY_SLUG_PREFIX == "r1-policy-"
+    # The cap value is part of the cheap-tier prompt's documented
+    # behaviour and the workflow's code-side enforcement. Pin so a
+    # drift between the prompt's "at most 5" line and the harness's
+    # raise threshold surfaces here.
+    assert workflow.MAX_ESCALATIONS_PER_FIRING == 5
 
 
 def test_policy_slug_for_class_validates_kebab_case() -> None:
@@ -441,6 +448,74 @@ def test_policy_slug_for_class_validates_kebab_case() -> None:
         workflow.policy_slug_for_class("UPPERCASE-bad")
     with pytest.raises(ValueError, match="does not match the kebab-case"):
         workflow.policy_slug_for_class("123-leading-digit-bad")
+
+
+@pytest.mark.asyncio
+async def test_escalation_cap_enforced_in_recorder_hook() -> None:
+    """The recorder hook caps escalations and rejects further calls.
+
+    The cheap-tier prompt documents "at most 5 escalations per
+    firing" but a prompt-side directive is advisory -- a misaligned
+    model can attempt more. The harness enforces the cap inside
+    :func:`make_policy_persisting_hooks`'s recorder by raising
+    :class:`pydantic_ai.ModelRetry` on the (cap+1)-th call.
+
+    Test exercise: build the hooks with ``max_escalations=2``, call
+    the recorder twice (both succeed), then assert the third call
+    surfaces ``ModelRetry`` with the cap-hit message. The
+    ``escalations_observed`` log records only the two accepted
+    escalations -- the refused call is not counted.
+    """
+    workflow = _load_workflow_module()
+    operator = _make_operator()
+    cheap, deep = workflow.load_runnable_definitions()
+
+    observed: list[str] = []
+    recorder, _finalizer = workflow.make_policy_persisting_hooks(
+        operator=operator,
+        escalations_observed=observed,
+        max_escalations=2,
+    )
+
+    # First two escalations land cleanly; the recorder returns a
+    # fresh UUID for each (mirroring the production invocation
+    # surface's child_run_id contract).
+    first_id = await recorder(operator=operator, definition=deep, parent_run_id=None)
+    second_id = await recorder(operator=operator, definition=deep, parent_run_id=None)
+    assert isinstance(first_id, uuid.UUID)
+    assert isinstance(second_id, uuid.UUID)
+    assert observed == [deep.name, deep.name]
+
+    # Third attempt trips the cap. ModelRetry surfaces inside the
+    # cheap-tier's loop as a tool-level error the model reasons
+    # about ("stop escalating, report cap-hit count").
+    with pytest.raises(ModelRetry, match="escalation cap hit"):
+        await recorder(operator=operator, definition=deep, parent_run_id=None)
+
+    # The refused call is not added to the observed log -- the
+    # cap-hit error happens before the bookkeeping.
+    assert observed == [deep.name, deep.name]
+    # The cheap-tier definition is unaffected by the cap; pulling
+    # it here keeps both load_runnable_definitions return values
+    # consumed (the test exercises the definitions as a pair, not
+    # the deep tier in isolation).
+    assert cheap.name == "r1-cheap-tier-classifier"
+
+
+def test_make_policy_persisting_hooks_rejects_negative_cap() -> None:
+    """A negative ``max_escalations`` is a misconfiguration.
+
+    Reject at hook-construction time so the operator sees the
+    error immediately, instead of as a confusing zero-escalation
+    run later.
+    """
+    workflow = _load_workflow_module()
+    operator = _make_operator()
+    with pytest.raises(ValueError, match="max_escalations must be >= 0"):
+        workflow.make_policy_persisting_hooks(
+            operator=operator,
+            max_escalations=-1,
+        )
 
 
 def test_load_runnable_definitions_matches_json_payloads() -> None:

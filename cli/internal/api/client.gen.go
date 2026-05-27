@@ -963,6 +963,16 @@ type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
 	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
 	// the session-cookie path does not load them today (the encrypted
 	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
 	SessionCtx  *UISessionContext `json:"session_ctx,omitempty"`
 	VpnRequired *bool             `json:"vpn_required,omitempty"`
 }
@@ -986,6 +996,16 @@ type BodyUiConnectorsEditSubmitUiConnectorsNamePatch struct {
 	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
 	// the session-cookie path does not load them today (the encrypted
 	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
 	SessionCtx  *UISessionContext `json:"session_ctx,omitempty"`
 	VpnRequired *bool             `json:"vpn_required,omitempty"`
 }
@@ -1003,6 +1023,16 @@ type BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost struct {
 	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
 	// the session-cookie path does not load them today (the encrypted
 	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Upload     *string           `json:"upload"`
 }
@@ -1020,6 +1050,16 @@ type BodyUiConnectorsImportPreviewUiConnectorsImportPost struct {
 	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
 	// the session-cookie path does not load them today (the encrypted
 	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Upload     *string           `json:"upload"`
 }
@@ -1040,6 +1080,16 @@ type BodyUiMemoryBulkUiMemoryBulkPost struct {
 	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
 	// the session-cookie path does not load them today (the encrypted
 	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Tag        *string           `json:"tag"`
 }
@@ -1073,6 +1123,16 @@ type BodyUiMemoryCreateSubmitUiMemoryCreatePost struct {
 	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
 	// the session-cookie path does not load them today (the encrypted
 	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	Slug       *string           `json:"slug"`
 	Tags       *string           `json:"tags"`
@@ -1092,6 +1152,16 @@ type BodyUiMemoryPatchUiMemoryScopeSlugPatch struct {
 	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
 	// the session-cookie path does not load them today (the encrypted
 	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
@@ -1111,6 +1181,16 @@ type BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost struct {
 	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
 	// the session-cookie path does not load them today (the encrypted
 	// row carries only the access token, not the decoded claims).
+	//
+	// ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+	// from a same-request lookup against the ``tenant`` table (keyed on
+	// :attr:`tenant_id`). The fields are surfaced into every UI template
+	// by the chassis context processor so the page header's tenant chip
+	// renders the operator-readable name without each route having to
+	// re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+	// tenant row was deleted between session-creation and the request
+	// (an ops anomaly; the operator still authenticates fine, the chip
+	// just falls back to the tenant UUID).
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 	TargetName *string           `json:"target_name"`
 
@@ -3554,10 +3634,22 @@ type TopologyTimelineResult struct {
 // “raw_jwt“ / “tenant_role“ are intentionally absent because
 // the session-cookie path does not load them today (the encrypted
 // row carries only the access token, not the decoded claims).
+//
+// “tenant_slug“ / “tenant_name“ are populated by the middleware
+// from a same-request lookup against the “tenant“ table (keyed on
+// :attr:`tenant_id`). The fields are surfaced into every UI template
+// by the chassis context processor so the page header's tenant chip
+// renders the operator-readable name without each route having to
+// re-fetch the row (G0.15-T9 #1217). Both are “None“ only when the
+// tenant row was deleted between session-creation and the request
+// (an ops anomaly; the operator still authenticates fine, the chip
+// just falls back to the tenant UUID).
 type UISessionContext struct {
 	OperatorSub string             `json:"operator_sub"`
 	SessionId   openapi_types.UUID `json:"session_id"`
 	TenantId    openapi_types.UUID `json:"tenant_id"`
+	TenantName  *string            `json:"tenant_name"`
+	TenantSlug  *string            `json:"tenant_slug"`
 }
 
 // UsageReport Top-level shape returned by :func:`compute_usage` + the API route.

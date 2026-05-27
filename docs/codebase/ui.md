@@ -43,14 +43,14 @@ Locked decisions:
 | Module | Purpose |
 | ------ | ------- |
 | `meho_backplane.ui.paths` | Resolves `templates/`, `static/src/`, `static/dist/` directories at runtime. Source-tree dev and image deploy both work via `Path(__file__).resolve().parent`. |
-| `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.__version__`. |
+| `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.__version__`. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217. |
 | `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), and the remaining surface stubs (`GET /ui/{connectors,memory}`, `_stub.html` placeholders). Real routers are included **before** the stubs so their concrete paths win the first-match-wins lookup. G10.3-G10.4 replace the remaining stubs the same way. |
 | `meho_backplane.ui.csrf` | T5 (#866) double-submit-cookie CSRF middleware on state-changing `/ui/*` requests (POST/PATCH/PUT/DELETE). Signed-double-submit per OWASP -- the token is `hmac_sha256(session_secret, session_id || random) + "." + random`; the cookie is JS-readable (`meho_csrf`) so HTMX can echo it in `X-CSRF-Token`. Mismatch / missing token / forged signature -> 403. Read-only methods + out-of-prefix paths pass through. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware. |
 | `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. |
 | `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter) and registers the per-flow verifier in a server-side `PKCEVerifierStore`. `exchange_code_for_tokens` pops the verifier and exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
 | `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Callback verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks. Sets `meho_session` cookie with `HttpOnly; Secure; SameSite=Strict; Path=/`. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
-| `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session. Bypasses `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. |
+| `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session. Bypasses `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. |
 
 The Jinja2 `Environment` is a module-level singleton (constructed on
 first `get_jinja_env()` call); the template cache it holds is keyed
@@ -271,6 +271,50 @@ The chassis template references the five surface URLs
 each; the KB stub was retired by G10.2-T1 (#870) which registered
 the real `/ui/kb` routes. The broadcast and topology stubs were
 retired by G10.1-T1 (#867) and G10.5-T1 (#880) respectively.
+
+### Tenant chip (G0.15-T9 #1217)
+
+The header's tenant chip used to render the stub literal
+`tenant: (sign in to choose)` on a disabled `<select>` regardless of
+whether the operator had a session — a leftover of the chassis
+landing T5 (#866) ahead of the auto-select wiring. After #1217 the
+chip's data source is the same `UISessionContext` the BFF middleware
+attaches to `request.state.ui_session`: the JWT's `tenant_id` claim
+is the operator's default tenant and is auto-selected at
+session-create time by
+[`_persist_session_from_tokens`](../../backend/src/meho_backplane/ui/auth/routes.py),
+so the chip can always read it.
+
+The plumbing is a Jinja2 context processor in
+[`templating.py`](../../backend/src/meho_backplane/ui/templating.py),
+`_ui_session_context_processor`, registered on the chassis
+`Jinja2Templates` wrapper. The processor reads
+`request.state.ui_session` and exposes a `session_tenant` template
+variable (dict carrying `id` / `slug` / `name`, or `None` on the
+unauthenticated auth surfaces). `base.html` renders the chip
+conditionally on `session_tenant is not none` and falls through
+`name → slug → id` so a tenant row deleted out from under an active
+session still produces a readable chip (the `web_session.tenant_id`
+FK is intentionally soft; the chassis logs
+`ui_session_tenant_row_missing` and serves the page).
+
+The middleware itself
+([`UISessionMiddleware`](../../backend/src/meho_backplane/ui/auth/middleware.py))
+loads tenant slug + name in the same transaction as the session row
+(a PK lookup on the tiny `tenant` table); both fields land on
+`UISessionContext` so every render is IO-free at the processor seam.
+Cross-tenant switching is a future Initiative — today the chip is a
+read-only label, not a selector.
+
+The cascade symptoms the v0.7.0 dogfood flagged (`/ui/memory` showing
+0 rows, `/ui/broadcast` empty despite live MCP activity) turned out
+to be unrelated to the chip: the Memory and Broadcast routes already
+scoped their queries by `session_ctx.tenant_id`. The chip's stub
+placeholder was the only real defect; the empty-state observations
+were a measurement artifact of the consumer running with seed data
+that didn't match the active tenant. The `test_ui_tenant_chip.py`
+suite pins the cascade contract (Memory and Broadcast surfaces both
+render against the session tenant) as a regression guard.
 
 ## Dependencies
 

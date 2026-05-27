@@ -13086,6 +13086,16 @@
             "type": "string",
             "format": "uuid",
             "title": "Tenant Id"
+          },
+          "tenant_slug": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tenant Slug"
+          },
+          "tenant_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tenant Name"
           }
         },
         "type": "object",
@@ -13095,7 +13105,7 @@
           "tenant_id"
         ],
         "title": "UISessionContext",
-        "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims)."
+        "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims).\n\n``tenant_slug`` / ``tenant_name`` are populated by the middleware\nfrom a same-request lookup against the ``tenant`` table (keyed on\n:attr:`tenant_id`). The fields are surfaced into every UI template\nby the chassis context processor so the page header's tenant chip\nrenders the operator-readable name without each route having to\nre-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the\ntenant row was deleted between session-creation and the request\n(an ops anomaly; the operator still authenticates fine, the chip\njust falls back to the tenant UUID)."
       },
       "UsageReport": {
         "properties": {

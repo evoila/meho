@@ -12292,7 +12292,6 @@
           "name",
           "aliases",
           "product",
-          "version",
           "host",
           "port",
           "fqdn",

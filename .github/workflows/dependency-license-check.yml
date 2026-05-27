@@ -36,11 +36,28 @@ on:
       - '**/package.json'
       - '**/package-lock.json'
       - '.github/workflows/dependency-license-check.yml'
+  # Fires when a PR enters the GitHub merge queue. Required so the
+  # `Python License Check` and `NPM License Check` status contexts —
+  # required checks in branch protection — report against the
+  # synthesised merge commit, not just the PR head. Bare `merge_group:`
+  # is intentional: the `merge_group` event does not support `paths:`
+  # filtering (GitHub docs only allow `types:`), so the license jobs
+  # run on every queue admission. The `hashFiles()` guards on each
+  # step already make the jobs no-op when manifests are unchanged, so
+  # the redundant runs are cheap. Same rationale as ci.yml's
+  # merge_group trigger (#769).
+  merge_group:
   workflow_dispatch:
 
 concurrency:
-  group: dependency-license-check-${{ github.ref }}
-  cancel-in-progress: true
+  # Mirrors ci.yml's pattern (#769): event-suffixed group key so
+  # pull_request / push / merge_group runs don't collide, and
+  # cancel-in-progress is scoped OFF for merge_group because a
+  # cancelled queue check fails the merge attempt and defeats the
+  # queue. Workflow-name-specific group prefix so this workflow's
+  # cancellation domain stays distinct from ci.yml's.
+  group: dependency-license-check-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 permissions:
   contents: read

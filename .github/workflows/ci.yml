@@ -57,6 +57,17 @@
 # human-readable tag in a trailing comment (devops_best_practices:
 # SHA-pin every action). Same SHAs as the publish workflows where the
 # action overlaps, so a single supply-chain audit covers all of CI.
+#
+# Merge queue (#769): the `merge_group` event fires when a PR is admitted
+# to the GitHub merge queue. Required checks configured in the merge-queue
+# ruleset run against the actual merge result (PR head + current main +
+# any ahead-in-queue PRs), so a semantically-broken combination is caught
+# before it reaches main — ending the inherited-red episodes from
+# 2026-05-20/21. The concurrency group is intentionally NOT set to
+# cancel-in-progress on merge_group runs: a cancelled queue check fails
+# the merge attempt and defeats the queue's purpose. cancel-in-progress
+# is scoped to pull_request / push refs only so PR force-pushes and rapid
+# main pushes still cancel their predecessors cleanly.
 
 name: CI
 
@@ -65,6 +76,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Fires when a PR enters the merge queue. Runs the full check matrix
+  # against the synthesised merge commit (PR + current main tip +
+  # any ahead-in-queue PRs). This is the gate that prevents a
+  # stale-but-green PR from landing a broken combination on main.
+  merge_group:
 
 permissions:
   contents: read
@@ -74,8 +90,15 @@ concurrency:
   # commit cancels its predecessor. On PRs: scoped per PR ref so an
   # author force-push cancels its own prior CI run cleanly. Mirrors
   # the pattern used by image.yml, chart.yml, and cli-release.yml.
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  #
+  # IMPORTANT: already-running merge_group jobs must NEVER be cancelled.
+  # A cancelled queue check causes the merge attempt to fail and the PR
+  # falls out of the queue — defeating the whole point of the merge queue.
+  # The conditional below restricts cancel-in-progress to pull_request /
+  # push contexts only. Queued (not-yet-started) merge_group runs can
+  # still be displaced by newer queue entries; that is expected behaviour.
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   python-lint-test:

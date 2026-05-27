@@ -605,6 +605,50 @@ re-verified after the 2026-05-20 #698 promotion of the integration
 lane, the structural corrective to the v0.2 / G3.4 green-but-hollow
 incidents #634 / #697).
 
+### Merge queue (#769)
+
+`ci.yml` triggers on `merge_group` in addition to `pull_request` and
+`push`. The `merge_group` event fires when a PR is admitted to the
+GitHub merge queue and runs the full check matrix against the
+**synthesised merge commit** — PR head + current `main` tip + any
+PRs ahead in the queue. A merge that would break `main` fails in the
+queue and never reaches `main`, ending the inherited-red episodes from
+2026-05-20/21 where cancelled post-merge CI allowed broken combinations
+to land silently.
+
+Merge-queue setup (admin action, separate from this code change):
+
+1. Enable "Require merge queue" in the repository's branch-protection
+   ruleset for `main` (Settings → Rules → Branches → protect main →
+   add "Require merge queue" rule, or via
+   `gh api -X PUT repos/evoila/meho/rulesets/14556458 ...`).
+2. Configure merge-queue required checks. The full set required by
+   branch protection on `main` spans four workflows; mirror the same
+   set in the merge-queue ruleset so the queue enforces the same bar
+   against the actual merge result, not just the PR's own head:
+   - From `ci.yml`: `Python (ruff + mypy + pytest)`,
+     `Python (integration testcontainers)`,
+     `Go (golangci-lint + go test)`,
+     `Helm (lint + template + kubeconform)`.
+   - From `security-scan.yml`: `Semgrep SAST`.
+   - From `secret-scan.yml`: `TruffleHog Secret Scan`.
+   - From `dependency-license-check.yml`: `Python License Check`,
+     `NPM License Check`. Both jobs no-op via `hashFiles()` when the
+     PR doesn't touch a manifest, so they report cheap green on
+     unrelated PRs — but they MUST run on every queue admission so
+     branch protection's required-context list stays satisfiable.
+3. The `merge_group` triggers in `ci.yml`, `security-scan.yml`,
+   `secret-scan.yml`, and `dependency-license-check.yml` are the
+   code-side prerequisite for step 2 — without each sibling workflow
+   subscribing to `merge_group`, its required context would never
+   report on queue runs and the queue would hang on missing checks.
+
+Concurrency note: `cancel-in-progress` is conditional on
+`github.event_name != 'merge_group'`. A cancelled queue check causes
+the merge attempt to fail and the PR falls out of the queue — so
+merge-queue runs are never cancelled. PR force-pushes and rapid main
+commits still cancel their own prior runs as before.
+
 ### Matrix
 
 | Job | Surface | Steps |

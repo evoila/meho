@@ -66,6 +66,17 @@ G4's ``meho kb search`` calls ``retrieve(source="kb")``; G5's
 ``meho recall`` calls ``retrieve(source="memory", kind="memory-user")``
 to scope to per-operator memories.
 
+``metadata_filters`` (G4.4-T1 / #1177) narrows further by
+``documents.doc_metadata`` JSONB containment. A flat ``{key: scalar}``
+dict translates to ``doc_metadata @> :filters_jsonb`` on the PG side,
+which excludes any row whose top-level metadata does not contain
+every supplied key/value pair (PG ``@>`` semantics). The substrate
+accepts arbitrary keys -- the taxonomy (``source_kind``,
+``sidecar_kind``, ``product``, etc.) is a consumer-side convention.
+A GIN index on ``documents.metadata`` (migration ``0032``, default
+``jsonb_ops`` opclass) keeps containment lookups index-backed as
+corpora grow.
+
 Out of scope (deferred per Initiative body)
 -------------------------------------------
 
@@ -74,11 +85,17 @@ Out of scope (deferred per Initiative body)
 * Streaming hits / SSE -- single batch response.
 * Per-query embedding cache -- every retrieval re-embeds the query.
   v0.2.next can add an LRU once cache-hit ratios are measured.
-* Filtering by metadata JSONB fields -- v0.2 supports source/kind only.
+* Per-source RRF weighting (Proposal B from #1177). Filters give a
+  binary "include / exclude" answer that is deterministic by
+  construction; weights add a per-request judgment call that has
+  to be specified, tested for determinism, and documented. Deferred
+  until a Tier 2 corpus surfaces a measured ranking-quality
+  regression that filters alone cannot resolve.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Sequence
 from datetime import datetime
@@ -162,6 +179,7 @@ async def retrieve(
     kind: str | None = None,
     limit: int = 10,
     session: AsyncSession | None = None,
+    metadata_filters: dict[str, Any] | None = None,
 ) -> list[RetrievalHit]:
     """Hybrid BM25 + cosine retrieval with RRF fusion. Tenant-scoped.
 
@@ -187,6 +205,20 @@ async def retrieve(
         Optional caller-owned :class:`AsyncSession`. When ``None``
         the helper opens its own and closes on exit (no commit
         needed -- retrieve is read-only).
+    metadata_filters
+        Optional flat ``{key: scalar}`` dict. When set, rows are
+        narrowed by ``documents.doc_metadata @> :filters_jsonb``
+        containment in both candidate SQL statements. Missing keys
+        exclude the row (PG ``@>`` semantics); multi-key dicts behave
+        as an intersection. ``None`` (default) preserves the
+        pre-G4.4-T1 byte-for-byte behaviour. Empty dict ``{}`` is
+        treated as ``None`` -- ``@> '{}'`` matches every row, but
+        emitting the predicate adds DB-side parse cost for zero
+        filtering benefit. Values are expected to be JSON scalars
+        (``str`` / ``int`` / ``float`` / ``bool`` / ``None``); the
+        substrate does not validate beyond JSON-encodability -- the
+        API surface (#1177's :class:`RetrieveRequest`) is the gate
+        that enforces scalar-only at request time.
 
     Returns
     -------
@@ -237,11 +269,20 @@ async def retrieve(
         raise ValueError(f"limit must be >= 0; got {limit}")
     if limit == 0:
         return []
+    # Empty-dict early-normalise: ``@> '{}'::jsonb`` matches every row,
+    # so emitting the predicate is pure DB-side parse cost with zero
+    # filtering benefit. Treat ``{}`` as ``None`` at the boundary.
+    if metadata_filters is not None and not metadata_filters:
+        metadata_filters = None
     if session is not None:
-        return await _retrieve_in_session(session, tenant_id, query, source, kind, limit)
+        return await _retrieve_in_session(
+            session, tenant_id, query, source, kind, limit, metadata_filters
+        )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as owned_session:
-        return await _retrieve_in_session(owned_session, tenant_id, query, source, kind, limit)
+        return await _retrieve_in_session(
+            owned_session, tenant_id, query, source, kind, limit, metadata_filters
+        )
 
 
 async def _retrieve_in_session(
@@ -251,6 +292,7 @@ async def _retrieve_in_session(
     source: str | None,
     kind: str | None,
     limit: int,
+    metadata_filters: dict[str, Any] | None,
 ) -> list[RetrievalHit]:
     """Inner implementation -- runs the two candidate queries + RRF fusion.
 
@@ -267,8 +309,27 @@ async def _retrieve_in_session(
     query_embedding = await get_embedding_service().encode_one(query)
     embedding_literal = _vector_literal(query_embedding)
 
-    bm25_rows = await _bm25_candidates(session, tenant_id, query, source, kind)
-    cosine_rows = await _cosine_candidates(session, tenant_id, embedding_literal, source, kind)
+    # Pre-serialise the metadata-filter dict to a JSON string here so
+    # both candidate SQL statements bind the identical text payload.
+    # ``json.dumps`` with sort_keys is not strictly required for
+    # correctness (PG's ``@>`` is key-order-independent) but keeps the
+    # bind value reproducible across calls, which is what the audit-
+    # payload hash on the API surface relies on for stable digests.
+    metadata_filters_json = (
+        json.dumps(metadata_filters, sort_keys=True) if metadata_filters is not None else None
+    )
+
+    bm25_rows = await _bm25_candidates(
+        session, tenant_id, query, source, kind, metadata_filters_json
+    )
+    cosine_rows = await _cosine_candidates(
+        session, tenant_id, embedding_literal, source, kind, metadata_filters_json
+    )
+
+    # Log keys (not values) so structlog never carries tenant-shaped
+    # metadata into the application log. The audit payload uses the
+    # same key-only discipline (see api/v1/retrieve.py).
+    metadata_filter_keys = sorted(metadata_filters.keys()) if metadata_filters else None
 
     fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
     if not fused:
@@ -277,6 +338,7 @@ async def _retrieve_in_session(
             tenant_id=str(tenant_id),
             source=source,
             kind=kind,
+            metadata_filter_keys=metadata_filter_keys,
         )
         return []
 
@@ -286,6 +348,7 @@ async def _retrieve_in_session(
         tenant_id=str(tenant_id),
         source=source,
         kind=kind,
+        metadata_filter_keys=metadata_filter_keys,
         hit_count=len(hits),
     )
     return hits
@@ -315,6 +378,7 @@ async def _bm25_candidates(
     query: str,
     source: str | None,
     kind: str | None,
+    metadata_filters_json: str | None,
 ) -> Sequence[Any]:
     """Top :data:`CANDIDATE_LIMIT` BM25 candidates by ``ts_rank_cd``.
 
@@ -322,7 +386,11 @@ async def _bm25_candidates(
     ``@@`` filter), ranked descending. The ``CAST(:source AS text) IS
     NULL OR ...`` pattern lets us bind a single SQL string for every
     filter combination; the asyncpg driver short-circuits the OR
-    cleanly.
+    cleanly. The metadata-filter predicate uses the same null-or-match
+    shape (``CAST(:metadata_filters AS text) IS NULL OR metadata @>
+    CAST(:metadata_filters AS jsonb)``); the GIN index on
+    ``documents.metadata`` (migration ``0032``) backs the containment
+    operator so the predicate stays index-backed at corpus scale.
     """
     bm25_sql = text(
         """
@@ -334,6 +402,8 @@ async def _bm25_candidates(
         WHERE tenant_id = :tenant_id
           AND (CAST(:source AS text) IS NULL OR source = :source)
           AND (CAST(:kind AS text) IS NULL OR kind = :kind)
+          AND (CAST(:metadata_filters AS text) IS NULL
+               OR metadata @> CAST(:metadata_filters AS jsonb))
           AND to_tsvector('english', body) @@ plainto_tsquery('english', :query)
         ORDER BY score DESC
         LIMIT :limit
@@ -346,6 +416,7 @@ async def _bm25_candidates(
             "tenant_id": str(tenant_id),
             "source": source,
             "kind": kind,
+            "metadata_filters": metadata_filters_json,
             "limit": CANDIDATE_LIMIT,
         },
     )
@@ -358,6 +429,7 @@ async def _cosine_candidates(
     embedding_literal: str,
     source: str | None,
     kind: str | None,
+    metadata_filters_json: str | None,
 ) -> Sequence[Any]:
     """Top :data:`CANDIDATE_LIMIT` cosine candidates by pgvector distance.
 
@@ -366,7 +438,9 @@ async def _cosine_candidates(
     can rank on a higher-is-better signal that aligns with BM25's
     ``ts_rank_cd``. No content filter on the cosine side -- the
     embedding is the query, and the IVFFlat index returns ranked
-    candidates whether the body shares query terms or not.
+    candidates whether the body shares query terms or not. The
+    metadata-filter predicate mirrors :func:`_bm25_candidates` so a
+    multi-key filter narrows both signals symmetrically.
     """
     cosine_sql = text(
         """
@@ -375,6 +449,8 @@ async def _cosine_candidates(
         WHERE tenant_id = :tenant_id
           AND (CAST(:source AS text) IS NULL OR source = :source)
           AND (CAST(:kind AS text) IS NULL OR kind = :kind)
+          AND (CAST(:metadata_filters AS text) IS NULL
+               OR metadata @> CAST(:metadata_filters AS jsonb))
         ORDER BY embedding <=> CAST(:emb AS vector)
         LIMIT :limit
         """
@@ -386,6 +462,7 @@ async def _cosine_candidates(
             "tenant_id": str(tenant_id),
             "source": source,
             "kind": kind,
+            "metadata_filters": metadata_filters_json,
             "limit": CANDIDATE_LIMIT,
         },
     )

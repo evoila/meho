@@ -30,11 +30,12 @@ gracefulness.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -45,6 +46,7 @@ from meho_backplane.retrieval.retriever import (
     _coerce_uuid,
     _FusedEntry,
     _rrf_fuse,
+    retrieve,
 )
 from meho_backplane.settings import get_settings
 
@@ -326,3 +328,245 @@ def test_fused_entry_starts_with_none_scores() -> None:
     assert e.bm25_rank is None
     assert e.cosine_rank is None
     assert e.fused_score == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# metadata_filters plumbing (G4.4-T1 / #1177)
+#
+# These tests don't hit a real PG cluster -- they patch the per-signal
+# candidate helpers + the embedding service to assert that the
+# ``metadata_filters`` parameter threads from :func:`retrieve` through
+# both candidate queries' bind dicts as a stable JSON string. PG-real
+# coverage (the actual ``documents.metadata @> :filters_jsonb``
+# containment query semantics) lives in the integration suite per the
+# same SQLite-undefined contract the BM25 + cosine operators carry.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retrieve_threads_metadata_filters_to_candidate_helpers() -> None:
+    """A ``metadata_filters`` dict reaches both per-signal SQL helpers.
+
+    The substrate's contract: both BM25 and cosine candidate queries
+    apply the same ``documents.metadata @>`` containment so the fused
+    list is the intersection of two equally-scoped sets, not a
+    surprise asymmetry. Assert the JSON payload arrives at both
+    helpers byte-for-byte identical.
+    """
+    captured_bm25: dict[str, object] = {}
+    captured_cosine: dict[str, object] = {}
+
+    async def fake_bm25(
+        session: Any,
+        tenant_id: uuid.UUID,
+        query: str,
+        source: str | None,
+        kind: str | None,
+        metadata_filters_json: str | None,
+    ) -> list[Any]:
+        captured_bm25["metadata_filters_json"] = metadata_filters_json
+        return []
+
+    async def fake_cosine(
+        session: Any,
+        tenant_id: uuid.UUID,
+        embedding_literal: str,
+        source: str | None,
+        kind: str | None,
+        metadata_filters_json: str | None,
+    ) -> list[Any]:
+        captured_cosine["metadata_filters_json"] = metadata_filters_json
+        return []
+
+    fake_embedding_service = MagicMock()
+    fake_embedding_service.encode_one = AsyncMock(return_value=[0.0] * 384)
+    fake_session = MagicMock()
+
+    with (
+        patch(
+            "meho_backplane.retrieval.retriever.get_embedding_service",
+            return_value=fake_embedding_service,
+        ),
+        patch(
+            "meho_backplane.retrieval.retriever._bm25_candidates",
+            side_effect=fake_bm25,
+        ),
+        patch(
+            "meho_backplane.retrieval.retriever._cosine_candidates",
+            side_effect=fake_cosine,
+        ),
+    ):
+        hits = await retrieve(
+            tenant_id=uuid.uuid4(),
+            query="anything",
+            metadata_filters={"source_kind": "evoila-distilled", "product": "vcenter"},
+            session=fake_session,
+        )
+
+    assert hits == []
+    # Both helpers received the same serialised JSON.
+    bm25_json = captured_bm25["metadata_filters_json"]
+    cosine_json = captured_cosine["metadata_filters_json"]
+    assert bm25_json == cosine_json
+    assert isinstance(bm25_json, str)
+    # Sort_keys=True is load-bearing for the audit-payload reproducibility
+    # the API surface tests pin -- assert the sorted key ordering directly.
+    assert json.loads(bm25_json) == {
+        "product": "vcenter",
+        "source_kind": "evoila-distilled",
+    }
+    assert bm25_json.index('"product"') < bm25_json.index('"source_kind"')
+
+
+@pytest.mark.asyncio
+async def test_retrieve_passes_none_metadata_filters_by_default() -> None:
+    """``metadata_filters=None`` (default) preserves the pre-G4.4-T1 path.
+
+    Both candidate helpers receive ``metadata_filters_json=None``; the
+    SQL ``CAST(:metadata_filters AS text) IS NULL`` branch short-
+    circuits the containment predicate so existing tests are
+    byte-for-byte unaffected.
+    """
+    captured_bm25: dict[str, object] = {}
+
+    async def fake_bm25(
+        session: Any,
+        tenant_id: uuid.UUID,
+        query: str,
+        source: str | None,
+        kind: str | None,
+        metadata_filters_json: str | None,
+    ) -> list[Any]:
+        captured_bm25["metadata_filters_json"] = metadata_filters_json
+        return []
+
+    async def fake_cosine(*args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    fake_embedding_service = MagicMock()
+    fake_embedding_service.encode_one = AsyncMock(return_value=[0.0] * 384)
+
+    with (
+        patch(
+            "meho_backplane.retrieval.retriever.get_embedding_service",
+            return_value=fake_embedding_service,
+        ),
+        patch(
+            "meho_backplane.retrieval.retriever._bm25_candidates",
+            side_effect=fake_bm25,
+        ),
+        patch(
+            "meho_backplane.retrieval.retriever._cosine_candidates",
+            side_effect=fake_cosine,
+        ),
+    ):
+        await retrieve(tenant_id=uuid.uuid4(), query="q", session=MagicMock())
+
+    assert captured_bm25["metadata_filters_json"] is None
+
+
+@pytest.mark.asyncio
+async def test_retrieve_normalises_empty_dict_to_none() -> None:
+    """``metadata_filters={}`` short-circuits to ``None`` (no predicate).
+
+    ``@> '{}'::jsonb`` matches every row, so emitting the predicate
+    against an empty dict is pure DB-side parse cost with zero
+    filtering benefit. Assert the boundary normalises ``{}`` →
+    ``None`` so the SQL stays clean.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_bm25(
+        session: Any,
+        tenant_id: uuid.UUID,
+        query: str,
+        source: str | None,
+        kind: str | None,
+        metadata_filters_json: str | None,
+    ) -> list[Any]:
+        captured["metadata_filters_json"] = metadata_filters_json
+        return []
+
+    async def fake_cosine(*args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    fake_embedding_service = MagicMock()
+    fake_embedding_service.encode_one = AsyncMock(return_value=[0.0] * 384)
+
+    with (
+        patch(
+            "meho_backplane.retrieval.retriever.get_embedding_service",
+            return_value=fake_embedding_service,
+        ),
+        patch(
+            "meho_backplane.retrieval.retriever._bm25_candidates",
+            side_effect=fake_bm25,
+        ),
+        patch(
+            "meho_backplane.retrieval.retriever._cosine_candidates",
+            side_effect=fake_cosine,
+        ),
+    ):
+        await retrieve(tenant_id=uuid.uuid4(), query="q", metadata_filters={}, session=MagicMock())
+
+    assert captured["metadata_filters_json"] is None
+
+
+@pytest.mark.asyncio
+async def test_retrieve_serialises_metadata_filters_with_sorted_keys() -> None:
+    """The bind JSON sorts keys so the same dict produces the same string.
+
+    Two semantically-equal filter dicts with different in-memory key
+    insertion orders must produce byte-identical bind strings. The
+    audit payload's key-only digest pins the same reproducibility on
+    the API surface; the substrate-side stability is the foundation
+    that makes the API-side digest stable across Python's dict ordering.
+    """
+    payloads: list[str | None] = []
+
+    async def fake_bm25(
+        session: Any,
+        tenant_id: uuid.UUID,
+        query: str,
+        source: str | None,
+        kind: str | None,
+        metadata_filters_json: str | None,
+    ) -> list[Any]:
+        payloads.append(metadata_filters_json)
+        return []
+
+    async def fake_cosine(*args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    fake_embedding_service = MagicMock()
+    fake_embedding_service.encode_one = AsyncMock(return_value=[0.0] * 384)
+
+    with (
+        patch(
+            "meho_backplane.retrieval.retriever.get_embedding_service",
+            return_value=fake_embedding_service,
+        ),
+        patch(
+            "meho_backplane.retrieval.retriever._bm25_candidates",
+            side_effect=fake_bm25,
+        ),
+        patch(
+            "meho_backplane.retrieval.retriever._cosine_candidates",
+            side_effect=fake_cosine,
+        ),
+    ):
+        await retrieve(
+            tenant_id=uuid.uuid4(),
+            query="q",
+            metadata_filters={"b": 2, "a": 1, "c": 3},
+            session=MagicMock(),
+        )
+        await retrieve(
+            tenant_id=uuid.uuid4(),
+            query="q",
+            metadata_filters={"c": 3, "a": 1, "b": 2},
+            session=MagicMock(),
+        )
+
+    assert payloads[0] == payloads[1]
+    assert payloads[0] == '{"a": 1, "b": 2, "c": 3}'

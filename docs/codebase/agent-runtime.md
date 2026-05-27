@@ -657,6 +657,147 @@ catch the seam's one exception type regardless of which precise
 resolver mismatch fired. The original `ResolverError` is preserved as
 `__cause__` so an operator's log read sees the policy detail.
 
+## VCF Private AI Foundation backend (G11.5-T4 #1078)
+
+VCF Private AI Foundation (PAIF) is VMware's air-gapped on-prem
+inference platform — the **zero-egress** target the Initiative #806
+DoD names. PAIF reuses the OpenAI-compat seam from #1077 with two
+deviations that matter:
+
+1. **Non-standard sub-path.** PAIF mounts the OpenAI-compatible
+   API at `/api/v1/compatibility/openai/v1/` (Broadcom developer
+   docs — pinned as `VCF_PAIF_OPENAI_COMPAT_BASE_PATH`), not the
+   bare `/v1` vLLM exposes or the `api.openai.com/v1` SaaS shape.
+2. **OpenID bearer auth.** PAIF requires an OAuth 2.0 / OIDC
+   access token in the `Authorization` header — not an API key.
+   The Broadcom developer docs name Authorization Code with PKCE
+   as the preferred interactive grant; for the backplane (a
+   service-to-service caller), the bundled OIDC provider runs the
+   `client_credentials` grant against the IdP's token endpoint.
+
+The wire format is OpenAI Chat Completions verbatim, so the
+`OpenAIChatModel` + `OpenAIProvider` stack from #1077 is reused. The
+PAIF profile (`vcf_paif_chat_profile`) is bit-equivalent to the vLLM
+profile — strict-tool-def off, multi-system on — because the underlying
+PAIF engine is vLLM for chat completions (Broadcom techdocs;
+embeddings use Infinity, CPU fallback uses llama.cpp, but only the
+chat-completions surface is in scope for the agent runtime today).
+
+### Bearer-token provider (lazy callable, not static api_key)
+
+The auth pattern shape is the design decision worth understanding:
+
+- The framework default would be to pass `api_key="<bearer>"` to
+  `OpenAIProvider` and rebuild the provider whenever the IdP
+  rotates the token. That works, but it re-instantiates the
+  underlying `httpx.AsyncClient` on every resolver call —
+  losing connection pooling and forcing a TCP+TLS handshake to
+  PAIF on every agent run.
+- `openai>=2.0` accepts `api_key: str | Callable[[], Awaitable[str]] | None`
+  natively on `AsyncOpenAI`. The PAIF backend takes the
+  `Callable` path: one long-lived `AsyncOpenAI` client wired with
+  a token-provider callable that re-resolves on every request.
+  Token rotation is transparent — no resolver rebuild required.
+
+```python
+provider = vcf_paif_bearer_provider(
+    token_url="https://kc.airgap.local/realms/meho/protocol/openid-connect/token",
+    client_id="meho-backplane",
+    client_secret=vault_secret,
+    scope="paif",  # optional
+)
+builder = vcf_paif_backend_builder(
+    model_id="openai:meta-llama/Llama-3.1-8B-Instruct",
+    base_url="https://pais.airgap.local/api/v1/compatibility/openai/v1/",
+    bearer_token_provider=provider,
+)
+backends = {
+    "vcf-paif": (builder, vcf_paif_capabilities, False),  # is_saas_egress=False
+}
+```
+
+The bundled `OidcClientCredentialsTokenProvider` caches the access
+token + an absolute monotonic expiry (`time.monotonic() + expires_in
+- refresh_skew_seconds`) under a `threading.Lock` — concurrent
+agent runs against the same provider don't double-post the grant.
+`refresh_skew_seconds` defaults to 30 s: long enough to mask a slow
+IdP, short enough not to waste most of a typical 5–15 min lifetime.
+
+Why `client_credentials` and not Authorization-Code-with-PKCE (the
+PAIF docs' "preferred" grant): the backplane is a service-to-service
+caller, not an interactive user. Per-tenant authorization is enforced
+one layer up — the tenant policy maps the tier to this PAIF backend —
+not by per-call token issuance. A future per-tenant token mode would
+supply a *different* `BearerTokenProvider` callable; the builder
+surface stays unchanged.
+
+Why no refresh-token plumbing: the `client_credentials` grant in
+OAuth 2.0 does not return a refresh token (RFC 6749 §4.4.3). The
+recovery path is "re-issue an access token by re-running the grant"
+— exactly what `_fetch_token` does on cache miss.
+
+### Settings-driven default
+
+The convenience path mirrors `default_openai_backend_builder` /
+`anthropic_backend_builder`:
+
+```python
+model = default_vcf_paif_backend_builder()
+```
+
+Reads `vcf_paif_base_url` / `vcf_paif_model` / the OIDC config
+(`vcf_paif_oidc_token_url` / `vcf_paif_oidc_client_id` /
+`vcf_paif_oidc_client_secret` / `vcf_paif_oidc_scope`) from
+`Settings`. Fail-closed: any of the four required settings empty
+raises `AgentRunError` naming every missing key — the operator's
+fix is one `helm upgrade` away. Multi-PAIF deploys (per-tenant
+routing to different appliances) construct each backend via
+`vcf_paif_backend_builder(...)` explicitly and never touch the
+settings-driven default.
+
+### Egress posture (the on-prem invariant)
+
+PAIF is on-prem by definition — the registration triple must
+declare `is_saas_egress=False`. An air-gapped tenant
+(`allow_egress=False`) routing every tier to a PAIF backend
+resolves without tripping `EgressViolationError`. A regression
+that mis-registered PAIF with `is_saas_egress=True` would
+fail-close on resolve — the resolver enforces the egress flag,
+not URL-parsing — proving the egress contract is end-to-end
+robust regardless of which backend kind is misregistered.
+
+### Token-acquisition failure modes
+
+A separate typed error — `TokenAcquisitionError` — surfaces IdP
+failures distinctly from `ResolverError`:
+
+- IdP returns a non-2xx (invalid client id/secret, grant not
+  enabled, IdP down): message names the IdP's `error` field
+  when present (`invalid_client`, `invalid_grant`, …) so the
+  operator's log read maps to a Keycloak / Okta / Authentik
+  client config without spelunking through logs.
+- IdP returns 200 with a malformed body (no `access_token` or
+  `expires_in`): typed error rather than silent fallthrough to
+  `None`.
+- Network unreachable: same typed surface, with the underlying
+  `httpx.HTTPError` preserved as `__cause__`.
+
+`TokenAcquisitionError` is deliberately **not** wrapped in
+`ResolverError` because it is a runtime condition (token endpoint
+down, secret rotated out-of-band) discovered after resolve, not a
+configuration mismatch discovered at resolve time. The agent loop
+surfaces it as the terminal `AgentRunEventKind.ERROR` event with the
+typed reason preserved.
+
+### Cross-repo deployer recipe
+
+Operator-facing setup — provisioning the OIDC client in the IdP
+realm, the Helm values for the OIDC env vars, the
+per-environment values pattern — is at
+[`docs/cross-repo/vcf-paif-deployment.md`](../cross-repo/vcf-paif-deployment.md).
+That doc is the consumer-facing handshake spec; this section is
+the architecture grounding it links back to.
+
 ## Testing
 
 - `backend/tests/test_agent_run.py` — unit tests against a deterministic
@@ -683,6 +824,21 @@ resolver mismatch fired. The original `ResolverError` is preserved as
   but routes through a PrivateLink-flagged sibling registration
   cleanly; a tenant policy can split tiers across Anthropic + Bedrock
   by layering both default registrations.
+- `backend/tests/test_agent_openai_compat_backend.py` (G11.5-T3) — unit
+  tests for the OpenAI-compat builder, per-vendor profile dispatch
+  (OpenAI / vLLM / Ollama), the air-gapped + on-prem registration path,
+  the settings-driven default builder's host-hint heuristic, and
+  fail-closed posture without `OPENAI_API_KEY`.
+- `backend/tests/test_agent_vcf_paif_backend.py` (G11.5-T4) — unit tests
+  for the VCF PAIF builder and the bundled OIDC token provider: the
+  vLLM-equivalent profile flips strict-tool-def off; the `client_credentials`
+  grant body is form-encoded with the right parameters; the cached access
+  token survives the skew window and gets re-acquired past it; IdP
+  non-2xx + malformed-200 + network errors surface as `TokenAcquisitionError`;
+  the air-gapped tenant resolves all three tiers to PAIF with **zero**
+  SaaS-host traffic; a mis-flagged `is_saas_egress=True` PAIF registration
+  still fails closed for an air-gapped tenant; the settings-driven default
+  fails closed naming every missing setting.
 - `backend/tests/test_agent_toolset.py` — unit tests for the resolver /
   adapter directly (no model run): the spec ∩ identity-perms intersection
   (including the read_only-floor exclusion), operator threading, tool input

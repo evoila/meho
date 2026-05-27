@@ -92,6 +92,39 @@ connector-related release-notes line.
 
 ### Added
 
+- **VCF Private AI Foundation backend behind the tier resolver
+  (G11.5-T4 #1078).** Closes the **zero-egress** path for the
+  G11.5 multi-provider seam. PAIF is OpenAI-compatible at a fixed
+  `/api/v1/compatibility/openai/v1/` sub-path (pinned as
+  `VCF_PAIF_OPENAI_COMPAT_BASE_PATH`) with an OpenID bearer in the
+  `Authorization` header instead of an API key. The wire format
+  reuses `OpenAIChatModel` + `OpenAIProvider` from #1077; the
+  bearer comes from a **lazy async callable** the openai SDK
+  re-resolves on every request — token rotation is transparent
+  without rebuilding the resolver. The bundled
+  `OidcClientCredentialsTokenProvider` runs the OAuth 2.0
+  `client_credentials` grant (RFC 6749 §4.4), caches the access
+  token under a `threading.Lock` with a configurable refresh skew
+  (default 30 s), surfaces IdP non-2xx / malformed-200 / network
+  errors as the typed `TokenAcquisitionError` (the IdP's `error`
+  field is included in the message). Six new settings —
+  `vcf_paif_base_url` / `vcf_paif_model` / `vcf_paif_oidc_token_url`
+  / `vcf_paif_oidc_client_id` / `vcf_paif_oidc_client_secret` /
+  `vcf_paif_oidc_scope` — feed `default_vcf_paif_backend_builder()`
+  (single-PAIF-endpoint convenience); multi-PAIF deploys use
+  `vcf_paif_backend_builder(...)` + `vcf_paif_bearer_provider(...)`
+  directly. PAIF registers with `is_saas_egress=False`: an
+  air-gapped tenant (`allow_egress=False`) routes every tier to
+  PAIF without tripping `EgressViolationError`; a regression that
+  mis-flagged it `True` still fails closed (the egress check is
+  flag-driven, not URL-parsing). vLLM-equivalent profile
+  (`openai_supports_strict_tool_definition=False`,
+  `openai_chat_supports_multiple_system_messages=True`) since PAIF's
+  chat-completions engine is vLLM (Broadcom techdocs). Cross-repo
+  deployer doc at `docs/cross-repo/vcf-paif-deployment.md`. Tenant
+  policy persistence + the `AgentModelTier` ↔ `AgentTier` enum
+  unification remain the M1 follow-up — the `TODO(G11.5-T2)`
+  marker stays. (#1078)
 - **`KubernetesConnector.discover_topology` populator — closes v0.6.0
   signal-13 amendment promise (G0.14-T12 #1201).** First shipped
   override of `Connector.discover_topology` against the K8s connector

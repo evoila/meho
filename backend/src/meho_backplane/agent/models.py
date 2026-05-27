@@ -71,12 +71,16 @@ Bedrock-only deploy never imports the Anthropic SDK).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+import contextlib
+import time
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
+from threading import Lock
 from typing import TYPE_CHECKING, Final, Protocol
 from uuid import UUID
 
+import httpx
 import structlog
 
 if TYPE_CHECKING:
@@ -86,17 +90,21 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_TENANT_KEY",
+    "VCF_PAIF_OPENAI_COMPAT_BASE_PATH",
     "AgentTier",
     "BackendBuilder",
     "BackendCapabilities",
     "BackendNotConfiguredError",
+    "BearerTokenProvider",
     "CapabilityMismatchError",
     "EgressViolationError",
     "ModelResolver",
+    "OidcClientCredentialsTokenProvider",
     "OpenAICompatVendor",
     "ResolverError",
     "TenantModelPolicy",
     "TierMapping",
+    "TokenAcquisitionError",
     "anthropic_backend_builder",
     "anthropic_capabilities",
     "bedrock_backend_builder",
@@ -106,10 +114,15 @@ __all__ = [
     "default_anthropic_policy",
     "default_bedrock_backends",
     "default_openai_backend_builder",
+    "default_vcf_paif_backend_builder",
     "ollama_chat_profile",
     "openai_chat_profile",
     "openai_compat_backend_builder",
     "openai_compat_capabilities",
+    "vcf_paif_backend_builder",
+    "vcf_paif_bearer_provider",
+    "vcf_paif_capabilities",
+    "vcf_paif_chat_profile",
     "vllm_chat_profile",
 ]
 
@@ -990,3 +1003,531 @@ if TYPE_CHECKING:
     # while preserving the runtime lazy-import posture (the actual
     # class is imported inside each factory at call time).
     from pydantic_ai.profiles.openai import OpenAIModelProfile
+
+
+# ---------------------------------------------------------------------------
+# VCF Private AI Foundation backend (G11.5-T4 #1078)
+# ---------------------------------------------------------------------------
+#
+# VCF Private AI Foundation (PAIF) is VMware's air-gapped on-prem inference
+# platform. The Initiative #806 §C4 calls out PAIF as the **zero-egress**
+# target: a tenant with ``allow_egress=False`` routes every tier through a
+# PAIF endpoint and **no** request leaves the cluster boundary. The
+# Broadcom developer docs (https://developer.broadcom.com/xapis/
+# vmware-private-ai-service-api/latest/) document that PAIF exposes an
+# **OpenAI-compatible surface** under a fixed sub-path; the
+# Broadcom techdocs (https://techdocs.broadcom.com/.../deploying-model-endpoints.html)
+# confirm the underlying engine set: **vLLM** for chat completions on
+# GPU, **Infinity** for embeddings, **llama.cpp** for CPU fallback.
+#
+# What that means for this slice:
+#
+# * The wire format is OpenAI Chat Completions verbatim — same
+#   :class:`OpenAIChatModel` + :class:`OpenAIProvider` as the C4-c slice
+#   (#1077). No bespoke client.
+# * The base URL takes a **non-standard sub-path** —
+#   ``<host>/api/v1/compatibility/openai/v1/`` — distinct from OpenAI
+#   SaaS's ``api.openai.com/v1`` or vLLM's bare ``/v1``. The
+#   :data:`VCF_PAIF_OPENAI_COMPAT_BASE_PATH` constant pins the path so
+#   a deploy that mis-types the sub-path fails at config-load time
+#   rather than at first agent invocation. Operators pass the
+#   appliance host; the builder appends the path.
+# * The engine is vLLM, so the same profile quirks apply: strict tool
+#   definitions are advisory (the engine does not enforce them), and
+#   multiple system messages are honoured. Reuses
+#   :func:`vllm_chat_profile` rather than declaring a new profile —
+#   surfacing PAIF as "vLLM behind a different sub-path with a
+#   bearer header instead of an API key" is the honest abstraction.
+# * The auth is **OpenID bearer** (Authorization Code with PKCE for
+#   interactive clients, Resource Owner Password Flow / client
+#   credentials for non-interactive). Bearer tokens are short-lived
+#   and rotated by the IdP; the builder takes a **token provider**
+#   callable (async, ``str | Callable[[], Awaitable[str]]``) so the
+#   :class:`AsyncOpenAI` client can re-resolve the token on every
+#   request — letting the OIDC layer transparently refresh expiring
+#   tokens without rebuilding the resolver. This is the auth-pattern
+#   choice the framework supports natively (``openai>=2.0`` accepts a
+#   ``Callable[[], Awaitable[str]]`` as ``api_key=``).
+# * The :class:`BackendCapabilities` flags match the vLLM ones from
+#   #1077: tools yes, streaming yes, prompt-cache no, tool format
+#   ``"openai"`` — none of the underlying engines exposes the
+#   Anthropic-style ``cache_control`` knob.
+
+
+#: The fixed sub-path PAIF mounts the OpenAI-compatible API under
+#: (Broadcom developer docs). An operator configures the appliance
+#: host (e.g. ``https://pais.airgap.local``) and the builder appends
+#: this path; declaring the constant here lets a misconfigured
+#: ``OPENAI_BASE_URL`` (operator pointed the legacy single-knob
+#: setting at a PAIF host but forgot the sub-path) be diagnosed
+#: against this anchor in a future preflight check, and stops the
+#: literal path string from drifting across the code/docs surfaces.
+VCF_PAIF_OPENAI_COMPAT_BASE_PATH: Final[str] = "/api/v1/compatibility/openai/v1/"
+
+
+#: An async callable that, when invoked, returns a current bearer
+#: token for the PAIF endpoint. The shape matches what
+#: :class:`openai.AsyncOpenAI` accepts as ``api_key=`` — a
+#: ``Callable[[], Awaitable[str]]`` — so the openai SDK calls it
+#: on every request and gets a fresh value, no provider rebuild
+#: needed when the IdP rotates the token. Callers can pass either
+#: the bundled :class:`OidcClientCredentialsTokenProvider` (the
+#: settings-driven default) or a custom callable backed by their
+#: own secret manager (Vault dynamic credentials, a sidecar that
+#: rotates a file on disk, etc.).
+BearerTokenProvider = Callable[[], Awaitable[str]]
+
+
+class TokenAcquisitionError(RuntimeError):
+    """Raised when the OIDC token endpoint refuses the bearer request.
+
+    Distinct error type so an operator's log read picks the failure
+    out of the noise of generic transport errors and pages — a PAIF
+    deploy with a misconfigured client secret or a revoked client
+    surfaces here, not as an opaque ``httpx.HTTPStatusError`` deep
+    inside the agent loop. The error message names the token
+    endpoint and the IdP's error response (when present) so the
+    operator can map back to a Keycloak / Okta / Authentik client
+    config without spelunking through structured logs.
+
+    Not wrapped in :class:`ResolverError` because token failure is a
+    *runtime* condition (the IdP is down, the secret was rotated
+    out-of-band, etc.) rather than a configuration mismatch
+    discovered at resolve time. The seam at
+    :meth:`~meho_backplane.agent.run.PydanticAgentRun._resolve_model`
+    treats unwrapped runtime exceptions as the framework's domain;
+    bubbling :class:`TokenAcquisitionError` up surfaces the failure
+    as the loop's :attr:`AgentRunEventKind.ERROR` event with the
+    typed reason preserved.
+    """
+
+
+@dataclass(slots=True)
+class OidcClientCredentialsTokenProvider:
+    """Acquire + cache bearer tokens via the OIDC ``client_credentials`` grant.
+
+    A reusable, thread-safe token provider that implements the
+    OAuth 2.0 ``client_credentials`` grant against a configured OIDC
+    token endpoint, caches the access token until shortly before its
+    expiry, and re-acquires on demand. The instance is callable
+    (``await provider()`` returns a fresh string), matching the
+    :data:`BearerTokenProvider` shape :class:`openai.AsyncOpenAI`
+    accepts as ``api_key=``.
+
+    Why ``client_credentials`` is the default grant for PAIF:
+
+    * The agent runtime is a **service-to-service** caller (the
+      backplane talks to PAIF on behalf of a tenant, not on behalf of
+      a human user). Authorization-Code-with-PKCE — the PAIF docs'
+      "preferred" grant — fits an interactive client; the
+      client-credentials grant fits a daemon. Keycloak / Okta /
+      Authentik / Auth0 all support both grants on the same realm,
+      so swapping is an IdP-side config change, not a code change.
+    * The token belongs to the **deploy**, not to the agent's
+      operator: every tenant routed to this PAIF endpoint shares the
+      same machine identity. Per-tenant authorization is enforced
+      one layer up — by the tenant policy that maps the tier to this
+      backend in the first place — not by per-call token issuance.
+      (A future per-tenant token-issuance mode would supply a
+      different :data:`BearerTokenProvider` callable; the builder
+      surface stays unchanged.)
+
+    Caching contract:
+
+    * The provider stores the latest ``access_token`` + an absolute
+      expiry timestamp (``time.monotonic() + expires_in -
+      refresh_skew_seconds``). Subsequent calls within the skew
+      window return the cached token without re-hitting the IdP.
+    * **Refresh skew** defaults to 30 s — long enough to mask a slow
+      network or a slow IdP, short enough not to throw away most of
+      a typical 5 to 15 min access-token lifetime. Operators with very
+      short-lived tokens (sub-minute) tune this down at construction.
+    * The cache is guarded by a :class:`threading.Lock`: the openai
+      SDK can call the provider concurrently from multiple in-flight
+      requests on the same client, and without the lock two
+      requests racing past the expiry would each fire a token POST.
+      The lock is held only across the in-memory check + the HTTP
+      call's *kick-off*; concurrent callers that arrive during a
+      refresh-in-flight find a refreshed value on retry.
+
+    Why no refresh-token plumbing:
+
+    * The ``client_credentials`` grant in OAuth 2.0 / OIDC does **not**
+      return a refresh token (`RFC 6749 §4.4.3
+      <https://datatracker.ietf.org/doc/html/rfc6749#section-4.4.3>`_).
+      The recovery path is "re-issue an access token by re-running
+      the grant" — exactly what this class does on cache miss.
+      Adding a refresh-token branch would be dead code for the
+      grant we actually use; if a deploy switches to ROPC or
+      Authorization-Code grants (both of which *do* issue refresh
+      tokens), that's a different provider class.
+
+    Args:
+        token_url: The IdP's token endpoint (Keycloak:
+            ``https://kc.airgap.local/realms/<realm>/protocol/openid-connect/token``).
+        client_id: The OIDC client id registered with the IdP for
+            the backplane → PAIF integration.
+        client_secret: The OIDC client secret. Read from Vault /
+            external-secret / sealed-secret upstream; the provider
+            does not log the value (stored as a private attribute,
+            never included in ``__repr__``).
+        scope: Optional ``scope`` parameter to send with the token
+            request. Most IdPs default to a sensible OIDC scope; PAIF
+            deployments using fine-grained scopes pass the relevant
+            value here.
+        http_client: Optional :class:`httpx.AsyncClient`. When ``None``
+            the provider constructs a short-lived per-call client —
+            simpler in tests, but in production a long-lived client
+            (with connection pooling) sized to the agent runtime's
+            concurrency should be passed in.
+        refresh_skew_seconds: How many seconds before the IdP-reported
+            expiry to treat the cached token as expired. Defaults to
+            30 s; tune down for sub-minute access tokens.
+    """
+
+    token_url: str
+    client_id: str
+    client_secret: str
+    scope: str | None = None
+    http_client: httpx.AsyncClient | None = None
+    refresh_skew_seconds: float = 30.0
+    # Cache state. The two paired fields are mutated together under
+    # the lock; an absolute monotonic expiry (rather than wall-clock)
+    # is robust to clock jumps. ``init=False`` keeps them out of the
+    # generated ``__init__`` — callers only configure the IdP-facing
+    # surface above, never seed the cache.
+    _cached_token: str | None = field(default=None, init=False)
+    _cached_expiry_monotonic: float = field(default=0.0, init=False)
+    _lock: Lock = field(init=False, repr=False, default_factory=Lock)
+
+    async def __call__(self) -> str:
+        """Return a non-expired access token, acquiring one if needed.
+
+        The hot path is the cache hit: check the expiry under the lock,
+        return the cached value. On miss, drop the lock for the HTTP
+        round-trip (so concurrent callers aren't blocked on the IdP),
+        then re-acquire to commit the new cache state. The double-check
+        on re-acquire avoids two concurrent misses both firing a POST.
+
+        Raises:
+            TokenAcquisitionError: the IdP returned a non-2xx response
+                or a body without ``access_token`` / ``expires_in``.
+                The cause chain preserves the underlying
+                ``httpx.HTTPStatusError`` or ``KeyError`` for debug
+                triage; the message names the token endpoint and the
+                IdP's ``error`` field when present.
+        """
+        with self._lock:
+            if self._cached_token is not None and time.monotonic() < self._cached_expiry_monotonic:
+                return self._cached_token
+
+        # Drop the lock for the network round-trip — concurrent callers
+        # waiting here would be blocked on the IdP, not on a hot path.
+        token, expires_in = await self._fetch_token()
+
+        with self._lock:
+            # Re-check under the lock in case a concurrent caller beat
+            # us to the refresh; the freshest value wins. Using ``time.
+            # monotonic()`` (not ``time.time()``) so a wall-clock jump
+            # mid-acquire doesn't immediately invalidate the new token.
+            self._cached_token = token
+            self._cached_expiry_monotonic = (
+                time.monotonic() + expires_in - self.refresh_skew_seconds
+            )
+            return token
+
+    async def _fetch_token(self) -> tuple[str, float]:
+        """POST the ``client_credentials`` grant; return ``(token, expires_in)``.
+
+        Constructs an HTTP client if the caller didn't supply one — a
+        short-lived per-call client is simpler to reason about in tests,
+        but the per-call cost (TCP+TLS handshake to the IdP) is fine for
+        the low-cadence token-refresh path. Production deploys with very
+        short-lived tokens supply a long-lived ``http_client`` with
+        connection pooling.
+
+        The grant body uses ``application/x-www-form-urlencoded`` per
+        RFC 6749 §4.4.2; the SDK-style JSON body is **not** what most
+        IdPs accept. ``scope`` is included only when non-empty (some
+        IdPs reject an empty ``scope`` parameter as malformed).
+        """
+        data: dict[str, str] = {
+            "grant_type": "client_credentials",
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+        }
+        if self.scope:
+            data["scope"] = self.scope
+        try:
+            if self.http_client is not None:
+                response = await self.http_client.post(self.token_url, data=data)
+            else:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(self.token_url, data=data)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            # Surface the IdP's ``error`` field when present so the
+            # operator's log read maps to an IdP-side misconfiguration
+            # (invalid_client, invalid_grant, ...) without spelunking
+            # through structured logs.
+            idp_error = ""
+            with contextlib.suppress(Exception):
+                # ``response.json()`` raises on non-JSON / malformed
+                # bodies; ``.get`` raises if the JSON root isn't a
+                # dict. Either way, falling back to an empty error
+                # name is fine — we still surface the status code.
+                idp_error = exc.response.json().get("error", "")
+            raise TokenAcquisitionError(
+                f"OIDC token endpoint {self.token_url!r} returned "
+                f"HTTP {exc.response.status_code}"
+                + (f" ({idp_error!r})" if idp_error else "")
+                + "; check the PAIF deploy's OIDC client id/secret and "
+                "verify the client has the client_credentials grant enabled.",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise TokenAcquisitionError(
+                f"could not reach OIDC token endpoint {self.token_url!r} "
+                f"to acquire a PAIF bearer token: {exc}",
+            ) from exc
+        try:
+            token = payload["access_token"]
+            expires_in = float(payload["expires_in"])
+        except (KeyError, TypeError, ValueError) as exc:
+            payload_hint = sorted(payload) if isinstance(payload, dict) else type(payload).__name__
+            raise TokenAcquisitionError(
+                f"OIDC token endpoint {self.token_url!r} returned a "
+                f"2xx response without an ``access_token`` / ``expires_in`` "
+                f"pair; payload keys: {payload_hint}.",
+            ) from exc
+        return token, expires_in
+
+
+def vcf_paif_chat_profile() -> OpenAIModelProfile:
+    """Return the capability profile for VCF Private AI Foundation.
+
+    PAIF's chat-completion engine is vLLM (per Broadcom techdocs at
+    https://techdocs.broadcom.com/.../deploying-model-endpoints.html),
+    so the profile is bit-equivalent to :func:`vllm_chat_profile`:
+
+    * ``openai_supports_strict_tool_definition=False`` — vLLM accepts
+      the OpenAI ``strict: true`` tool-definition flag but the engine
+      does not enforce the schema; sending it would let the model
+      emit a non-conforming tool call the loop then rejects on a
+      structural mismatch.
+    * ``openai_chat_supports_multiple_system_messages=True`` — vLLM
+      preserves the ``messages[]`` array verbatim (no chat-template
+      collapse of multiple ``role=system`` turns).
+    * ``json_schema_transformer=None`` — no per-call schema rewrite
+      needed.
+
+    Surfaced as a distinct factory (rather than aliased to
+    :func:`vllm_chat_profile`) so a future PAIF release that diverges
+    from vanilla vLLM (a Broadcom-side patch, a non-vLLM engine swap)
+    only requires editing this function, not every PAIF call site.
+    """
+    from pydantic_ai.profiles.openai import OpenAIModelProfile
+
+    return OpenAIModelProfile(
+        openai_supports_strict_tool_definition=False,
+        openai_chat_supports_multiple_system_messages=True,
+        json_schema_transformer=None,
+    )
+
+
+#: Capability flags for a VCF Private AI Foundation backend
+#: (``pydantic_ai.models.openai.OpenAIChatModel`` over the PAIF
+#: OpenAI-compat surface). Tools and streaming are honoured by the
+#: underlying vLLM engine; prompt caching is off — neither vLLM nor
+#: PAIF exposes the Anthropic-style ``cache_control`` knob, and PAIF
+#: does not have an opaque-to-the-client automatic cache the way
+#: OpenAI SaaS does. ``tool_format`` is ``"openai"`` — same wire
+#: shape as the rest of the OpenAI-compat family.
+vcf_paif_capabilities: Final[BackendCapabilities] = BackendCapabilities(
+    supports_tools=True,
+    supports_streaming=True,
+    supports_prompt_cache=False,
+    tool_format="openai",
+)
+
+
+def vcf_paif_bearer_provider(
+    *,
+    token_url: str,
+    client_id: str,
+    client_secret: str,
+    scope: str | None = None,
+    http_client: httpx.AsyncClient | None = None,
+    refresh_skew_seconds: float = 30.0,
+) -> BearerTokenProvider:
+    """Build a :data:`BearerTokenProvider` driven by OIDC client-credentials.
+
+    Convenience constructor returning a configured
+    :class:`OidcClientCredentialsTokenProvider` instance — most callers
+    only need this thin wrapper, not the class directly. A deploy with
+    a non-OIDC token source (Vault dynamic credentials, a sidecar that
+    refreshes a file, a static long-lived token) constructs its own
+    ``Callable[[], Awaitable[str]]`` and hands it to
+    :func:`vcf_paif_backend_builder` directly.
+
+    Args:
+        token_url: The IdP's token endpoint.
+        client_id: The OIDC client id for the backplane → PAIF integration.
+        client_secret: The OIDC client secret. Sourced upstream from
+            Vault / external-secret / sealed-secret; never logged.
+        scope: Optional ``scope`` to include in the token request.
+        http_client: Optional shared :class:`httpx.AsyncClient` — pass a
+            long-lived client for connection pooling in production.
+        refresh_skew_seconds: How many seconds before the IdP-reported
+            expiry to treat the cached token as expired (default 30 s).
+
+    Returns:
+        A callable awaitable of ``str`` matching :data:`BearerTokenProvider`.
+    """
+    return OidcClientCredentialsTokenProvider(
+        token_url=token_url,
+        client_id=client_id,
+        client_secret=client_secret,
+        scope=scope,
+        http_client=http_client,
+        refresh_skew_seconds=refresh_skew_seconds,
+    )
+
+
+def vcf_paif_backend_builder(
+    *,
+    model_id: str,
+    base_url: str,
+    bearer_token_provider: BearerTokenProvider,
+) -> BackendBuilder:
+    """Build a zero-arg :class:`BackendBuilder` for one PAIF endpoint.
+
+    Returns a closure the resolver registers; the closure constructs a
+    fresh :class:`OpenAIChatModel` whose underlying :class:`AsyncOpenAI`
+    client is wired with the **lazy** token provider — every request
+    re-resolves the bearer, so the IdP's token rotation is transparent
+    (no resolver rebuild on rotation).
+
+    The lazy-callable shape (``api_key=Callable[[], Awaitable[str]]``)
+    is what :class:`openai.AsyncOpenAI` accepts natively from openai
+    ``>=2.0``; verified by installed-library introspection on
+    ``openai==2.38.0`` in this slice. The alternative pattern —
+    rebuilding the provider per resolve — would re-instantiate the
+    underlying httpx client on every agent run and lose connection
+    pooling, so the framework-native lazy-callable wins on both code
+    economy and runtime efficiency.
+
+    Args:
+        model_id: The pydantic_ai model id (e.g.
+            ``openai:meta-llama/Llama-3.1-8B-Instruct``). PAIF accepts
+            the bare model name; pydantic_ai's :class:`OpenAIChatModel`
+            strips the ``openai:`` prefix when present.
+        base_url: The PAIF endpoint base URL **including** the
+            :data:`VCF_PAIF_OPENAI_COMPAT_BASE_PATH` sub-path —
+            e.g. ``https://pais.airgap.local/api/v1/compatibility/openai/v1/``.
+            The builder does **not** auto-append the path: operators
+            who point a generic OpenAI-compat backend at a PAIF host
+            should switch to this builder rather than relying on the
+            generic one to silently fix the path.
+        bearer_token_provider: An async callable that returns a current
+            bearer token. The bundled :func:`vcf_paif_bearer_provider`
+            covers the OIDC ``client_credentials`` case; a custom
+            callable covers Vault-dynamic / sidecar / static-token
+            shapes.
+
+    Returns:
+        A :class:`BackendBuilder` suitable for the ``backends=`` argument
+        of :func:`build_resolver`. The builder is **lazy**: the openai
+        SDK only imports when the resolver calls the closure, so a
+        deploy that registers a PAIF backend but never resolves to it
+        never loads the ``openai`` wheel.
+    """
+    profile = vcf_paif_chat_profile()
+
+    def _build() -> Model:
+        # Lazy import — the ``[openai]`` extra is pinned (#1077) but the
+        # SDK still costs ~20 MB of resident memory and a non-trivial
+        # import-time. Deploys whose policy never resolves to PAIF skip
+        # the cost entirely. The AsyncOpenAI client must be constructed
+        # here (not at module-import time) because it spins up an
+        # event-loop-aware httpx client; constructing at import would
+        # bind to whichever loop happened to be current then.
+        from openai import AsyncOpenAI
+        from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.providers.openai import OpenAIProvider
+
+        openai_client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=bearer_token_provider,
+        )
+        provider = OpenAIProvider(openai_client=openai_client)
+        return OpenAIChatModel(model_id, provider=provider, profile=profile)
+
+    return _build
+
+
+def default_vcf_paif_backend_builder() -> Model:
+    """Build the settings-driven default VCF PAIF Model.
+
+    Reads ``vcf_paif_base_url`` / ``vcf_paif_model`` and the OIDC
+    config (``vcf_paif_oidc_token_url`` / ``vcf_paif_oidc_client_id`` /
+    ``vcf_paif_oidc_client_secret`` / ``vcf_paif_oidc_scope``) from
+    :class:`~meho_backplane.settings.Settings`; constructs the bundled
+    :class:`OidcClientCredentialsTokenProvider`; returns the built
+    :class:`OpenAIChatModel`.
+
+    Fail-closed: any of ``vcf_paif_base_url`` / ``vcf_paif_oidc_token_url``
+    / ``vcf_paif_oidc_client_id`` / ``vcf_paif_oidc_client_secret``
+    empty raises :class:`~meho_backplane.agent.run.AgentRunError`, so
+    a deploy that registered a PAIF backend but never wired the OIDC
+    config surfaces at first agent invocation rather than mid-loop
+    with an opaque 401. The error message names the specific missing
+    setting so the operator's fix is one ``helm upgrade`` away.
+
+    Operators with **multiple** PAIF endpoints (per-tenant routing)
+    construct each backend explicitly via
+    :func:`vcf_paif_backend_builder` + :func:`vcf_paif_bearer_provider`
+    instead — the settings-driven default is the single-PAIF-endpoint
+    convenience path, symmetric to :func:`anthropic_backend_builder`
+    and :func:`default_openai_backend_builder`.
+    """
+    # Imported lazily so this function only pays the cost when the
+    # resolver actually resolves to PAIF (the :class:`AgentRunError`
+    # import would otherwise tie this module's import time to
+    # ``agent.run`` and its dependencies).
+    from meho_backplane.agent.run import AgentRunError
+    from meho_backplane.settings import get_settings
+
+    settings = get_settings()
+    missing: list[str] = []
+    if not settings.vcf_paif_base_url:
+        missing.append("VCF_PAIF_BASE_URL")
+    if not settings.vcf_paif_oidc_token_url:
+        missing.append("VCF_PAIF_OIDC_TOKEN_URL")
+    if not settings.vcf_paif_oidc_client_id:
+        missing.append("VCF_PAIF_OIDC_CLIENT_ID")
+    if not settings.vcf_paif_oidc_client_secret:
+        missing.append("VCF_PAIF_OIDC_CLIENT_SECRET")
+    if missing:
+        raise AgentRunError(
+            "VCF Private AI Foundation backend is registered but the "
+            "following required settings are unset: "
+            + ", ".join(missing)
+            + ". Wire them via Helm / external-secret / sealed-secret "
+            "(see docs/cross-repo/vcf-paif-deployment.md) before routing "
+            "a tier to the PAIF backend, or register a per-backend "
+            "builder via vcf_paif_backend_builder(...) explicitly.",
+        )
+
+    provider = vcf_paif_bearer_provider(
+        token_url=settings.vcf_paif_oidc_token_url,
+        client_id=settings.vcf_paif_oidc_client_id,
+        client_secret=settings.vcf_paif_oidc_client_secret,
+        scope=settings.vcf_paif_oidc_scope or None,
+    )
+    builder = vcf_paif_backend_builder(
+        model_id=settings.vcf_paif_model,
+        base_url=settings.vcf_paif_base_url,
+        bearer_token_provider=provider,
+    )
+    return builder()

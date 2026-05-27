@@ -644,6 +644,47 @@ class Settings(BaseModel):
         switched (G11.5-T6 #1080). Case-insensitive; whitespace
         between values ignored. An empty string (the default) means no
         tenants are disabled. Set via ``AGENT_RUNS_DISABLED_TENANTS``.
+    vcf_paif_base_url:
+        Base URL of the VCF Private AI Foundation OpenAI-compatible
+        endpoint (G11.5-T4 #1078), **including** the fixed sub-path
+        ``/api/v1/compatibility/openai/v1/`` PAIF mounts the API under
+        (Broadcom developer docs — see
+        :data:`~meho_backplane.agent.models.VCF_PAIF_OPENAI_COMPAT_BASE_PATH`).
+        Example: ``https://pais.airgap.local/api/v1/compatibility/openai/v1/``.
+        Empty (the default) is fail-closed: a deploy whose policy
+        never routes any tier to PAIF never reads the value. Set via
+        ``VCF_PAIF_BASE_URL``. Per-tenant routing to *different* PAIF
+        appliances uses
+        :func:`~meho_backplane.agent.models.vcf_paif_backend_builder`
+        directly rather than this single-knob default.
+    vcf_paif_model:
+        Pinned model id the PAIF backend uses when an
+        ``AgentDefinition`` does not override it. Full provider-qualified
+        id (``openai:meta-llama/Llama-3.1-8B-Instruct`` /
+        ``openai:mistralai/Mixtral-8x7B-Instruct``, etc. — pydantic_ai's
+        :class:`OpenAIChatModel` strips the ``openai:`` prefix). Set via
+        ``VCF_PAIF_MODEL``.
+    vcf_paif_oidc_token_url:
+        The IdP token endpoint the bundled OIDC token provider POSTs
+        the ``client_credentials`` grant against. Example (Keycloak):
+        ``https://kc.airgap.local/realms/<realm>/protocol/openid-connect/token``.
+        Empty is fail-closed for a deploy that registered the PAIF
+        backend. Set via ``VCF_PAIF_OIDC_TOKEN_URL``.
+    vcf_paif_oidc_client_id:
+        OIDC client id registered with the IdP for the backplane →
+        PAIF integration. Set via ``VCF_PAIF_OIDC_CLIENT_ID``.
+    vcf_paif_oidc_client_secret:
+        OIDC client secret. Sourced upstream from Vault / external-
+        secret / sealed-secret the same way ``ANTHROPIC_API_KEY`` is
+        wired today; **never** logged. Set via
+        ``VCF_PAIF_OIDC_CLIENT_SECRET``.
+    vcf_paif_oidc_scope:
+        Optional ``scope`` to include in the OIDC token request.
+        Empty (the default) sends no scope parameter — most IdPs
+        accept this for ``client_credentials`` and issue a default
+        scope. Deployments with fine-grained scope enforcement set
+        this to the value the IdP expects. Set via
+        ``VCF_PAIF_OIDC_SCOPE``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
@@ -870,6 +911,22 @@ class Settings(BaseModel):
     # exactly like the global switch. An empty string (the default) is
     # "no tenants disabled". Set via ``AGENT_RUNS_DISABLED_TENANTS``.
     agent_runs_disabled_tenants: str = ""
+    # G11.5-T4 #1078 — VCF Private AI Foundation backend. PAIF is the
+    # air-gapped enterprise target: OpenAI-compatible wire format under
+    # a fixed ``/api/v1/compatibility/openai/v1/`` sub-path, OpenID
+    # bearer auth (the bundled provider runs the OAuth ``client_credentials``
+    # grant against the IdP's token endpoint). Empty defaults are
+    # fail-closed: a deploy whose policy never registers the PAIF
+    # backend reads none of these knobs. Multi-PAIF deploys (per-tenant
+    # routing to different appliances) construct their builders via
+    # ``vcf_paif_backend_builder(...)`` explicitly and never touch
+    # these settings.
+    vcf_paif_base_url: str = ""
+    vcf_paif_model: str = Field(default="openai:meta-llama/Llama-3.1-8B-Instruct", min_length=1)
+    vcf_paif_oidc_token_url: str = ""
+    vcf_paif_oidc_client_id: str = ""
+    vcf_paif_oidc_client_secret: str = Field(default="", repr=False)
+    vcf_paif_oidc_scope: str = ""
     # G11.3-T2 #823 — cron + one-off trigger scheduler. ``tick_interval``
     # bounds how often the loop scans for due triggers; the default
     # (30 s) is the consumer-doc-accepted granularity for cron triggers
@@ -1208,6 +1265,15 @@ def get_settings() -> Settings:
             "AGENT_RUNS_DISABLED_TENANTS",
             "",
         ),
+        vcf_paif_base_url=os.environ.get("VCF_PAIF_BASE_URL", "").strip(),
+        vcf_paif_model=os.environ.get(
+            "VCF_PAIF_MODEL",
+            "openai:meta-llama/Llama-3.1-8B-Instruct",
+        ),
+        vcf_paif_oidc_token_url=os.environ.get("VCF_PAIF_OIDC_TOKEN_URL", "").strip(),
+        vcf_paif_oidc_client_id=os.environ.get("VCF_PAIF_OIDC_CLIENT_ID", "").strip(),
+        vcf_paif_oidc_client_secret=os.environ.get("VCF_PAIF_OIDC_CLIENT_SECRET", "").strip(),
+        vcf_paif_oidc_scope=os.environ.get("VCF_PAIF_OIDC_SCOPE", "").strip(),
         scheduler_tick_interval_seconds=int(
             os.environ.get("SCHEDULER_TICK_INTERVAL_SECONDS", "30"),
         ),

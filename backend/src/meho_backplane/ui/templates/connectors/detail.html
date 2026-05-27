@@ -19,7 +19,7 @@
 -#}
 {% extends "base.html" %}
 
-{% block page_title %}{{ target.name }} &middot; Connectors &middot; MEHO Operator Console{% endblock %}
+{% block page_title %}{{ target.name }} &middot; Targets &middot; MEHO Operator Console{% endblock %}
 
 {% block content %}
 <section
@@ -27,8 +27,13 @@
   hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
 >
   {# ---------- Breadcrumb + header ---------- #}
+  {# The sidebar entry stays "Connectors" (route + label parity); the
+     page-level breadcrumb + heading use the backend taxonomy "Targets"
+     so an operator clicking into a row sees they're inspecting a
+     **target** (deployed instance), not a **connector** (typed class).
+     G0.15-T10 #1218 / Option B in the issue body. #}
   <nav aria-label="Breadcrumb" class="text-xs opacity-70">
-    <a href="/ui/connectors" class="link link-hover">Connectors</a>
+    <a href="/ui/connectors" class="link link-hover">Targets</a>
     <span aria-hidden="true">/</span>
     <span class="font-mono">{{ target.name }}</span>
   </nav>
@@ -42,20 +47,34 @@
         {% if target.vpn_required %}<span aria-label="VPN required" title="VPN required">&#x1F512;</span>{% endif %}
       </p>
     </div>
-    {# "Edit" button -- tenant_admin only (T2 #874). Same server-side
-       gate as the re-probe button (``resolve_operator_or_403`` on the
-       PATCH route); the hide is the UX affordance. #}
+    {# "Edit" + "Delete" buttons -- tenant_admin only (T2 #874 / T10 #1218).
+       Same server-side gate as the re-probe button (``resolve_operator_or_403``
+       on the PATCH / DELETE routes); the hide is the UX affordance.
+       Delete renders to the right of Edit and uses ``btn-error`` to
+       visually signal the destructive verb. #}
     {% if is_tenant_admin %}
-      <button
-        type="button"
-        class="btn btn-outline btn-sm"
-        hx-get="/ui/connectors/{{ target.name | urlencode }}/edit"
-        hx-target="#connectors-modal-container"
-        hx-swap="innerHTML"
-        aria-label="Edit {{ target.name }}"
-      >
-        Edit
-      </button>
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class="btn btn-outline btn-sm"
+          hx-get="/ui/connectors/{{ target.name | urlencode }}/edit"
+          hx-target="#connectors-modal-container"
+          hx-swap="innerHTML"
+          aria-label="Edit {{ target.name }}"
+        >
+          Edit
+        </button>
+        <button
+          type="button"
+          class="btn btn-outline btn-error btn-sm"
+          hx-get="/ui/connectors/{{ target.name | urlencode }}/delete"
+          hx-target="#connectors-modal-container"
+          hx-swap="innerHTML"
+          aria-label="Delete {{ target.name }}"
+        >
+          Delete
+        </button>
+      </div>
     {% endif %}
   </header>
 

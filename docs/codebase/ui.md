@@ -1629,6 +1629,8 @@ the same way broadcast / topology / memory retired theirs.
 | `POST` | `/ui/connectors/create` | (T2 #874) Create submit. Builds a `TargetCreate` and delegates to the REST `create_target` handler in-process. Success → 204 + `HX-Redirect: /ui/connectors`; validation failure → 422 + modal re-rendered with per-field errors. |
 | `GET` | `/ui/connectors/{name}/edit` | (T2 #874) HTMX-loaded edit-target modal, pre-populated server-side from the resolved target. Tenant_admin gated; alias-aware 404 on cross-tenant. |
 | `PATCH` | `/ui/connectors/{name}` | (T2 #874) Edit submit. Builds a `TargetUpdate` and delegates to the REST `update_target` handler in-process. Same success / failure shapes as create. |
+| `GET` | `/ui/connectors/{name}/delete` | (G0.15-T10 #1218) HTMX-loaded delete-confirm modal. Tenant_admin gated; pre-checks the `graph_node.target_id` cascade count so the modal surfaces the impact and pre-sets `?force=true` on the submit URL when refs exist (mirrors the REST 409+force flow). |
+| `POST` | `/ui/connectors/{name}/delete` | (G0.15-T10 #1218) Delete submit. Delegates to the REST `delete_target` handler in-process — same soft-delete (`deleted_at` stamp) + cascade-count + audit code path. Success → 204 + `HX-Redirect: /ui/connectors`. |
 | `GET` | `/ui/connectors/import` | (T3 #875) Full bulk-import page: paste box + file upload. Tenant_admin gated. |
 | `POST` | `/ui/connectors/import` | (T3 #875) Parse the pasted / uploaded `targets.yaml` (`yaml.safe_load`) and render the CREATE-vs-UPDATE preview table; parse errors render inline (422, no 500). Read-only — no writes. |
 | `POST` | `/ui/connectors/import/confirm` | (T3 #875) Re-parse + re-classify against the tenant's current targets, validate the whole plan up front (schema-invalid entry → inline 422, no partial write), then apply it in-process via `create_target` (new) + `update_target` (existing); renders the result summary (N created, M updated). |
@@ -1721,6 +1723,61 @@ modal form inherits the `X-CSRF-Token` header from the page-level
 `hx-headers` directive; each modal render re-mints + re-sets the
 `meho_csrf` cookie so the double-submit pair lines up.
 
+### Detail page UX fixes (G0.15-T10 #1218 — v0.7.0 dogfood signal #6 closure follow-up)
+
+`claude-rdc-hetzner-dc#753` flagged three UX clusters on the connector
+detail surface that didn't exist when v0.7.0 cut:
+
+1. **"Re-probe vs PATCH vs DELETE" verb confusion on the
+   `no_connector` resolver verdict.** Two visually-identical cases —
+   "fingerprint not cached yet" and "product slug doesn't match any
+   registered connector" — both rendered the same "Re-probe" call-to-
+   action, but only the first case is actually fixable by re-probing.
+   Re-probing the second case dispatches through the same resolver
+   with the same `(product, version)` tuple and fails the same way.
+   The fix at `detail.py:_classify_no_connector_cause` classifies the
+   verdict into `missing_fingerprint` (target's product **is**
+   registered, but `fingerprint IS NULL` — Re-probe is the right verb)
+   vs `product_mismatch` (target's product slug is **not** in the
+   `registered_product_tokens()` set — Edit-product or Delete is the
+   right verb). The template branches on the cause and surfaces the
+   `valid_products` enum (the same source `TargetCreate.product`
+   validates against — G0.14-T3 #1166) when the cause is
+   `product_mismatch`, so the operator knows what values are
+   acceptable for a PATCH.
+
+2. **No Delete button on the detail page.** The REST DELETE shipped
+   at v0.7.0 (G0.14-T4 #1145) but the UI didn't expose it; an
+   operator hitting the unrecoverable `product_mismatch` case in
+   cluster 1 had to drop into CLI / REST to recover. The fix adds a
+   `Delete` button top-right of the detail page alongside `Edit`
+   (tenant_admin-gated, same server-side `resolve_operator_or_403`
+   posture as Edit + Re-probe). Clicking it loads a confirm modal
+   (`_delete_modal.html`) via `GET /ui/connectors/{name}/delete` that
+   pre-checks the `graph_node.target_id` cascade count. When the
+   count is non-zero, the modal surfaces the impact ("N topology rows
+   reference this target — they survive the delete with target_id =
+   NULL per the ON DELETE SET NULL FK") and pre-sets `?force=true` on
+   the submit URL so the typical confirmed-by-the-operator submit
+   lands a clean 204 rather than the REST 409+force handshake. Submit
+   delegates to `delete_target` in-process — same soft-delete
+   (`deleted_at` stamp), same cascade-count, same audit row
+   (`op_id='targets.delete'`) the REST surface writes.
+
+3. **Connectors-vs-Targets taxonomic drift.** The sidebar /
+   page-title / page-subtitle used "Connectors" while the URL +
+   backend table is `targets`; the listed entities are **targets**
+   (per-tenant deployed instances) not **connectors** (typed connector
+   classes like `k8s-1.x`, `vault-1.x`). Picked Option B from the
+   issue body — the lower-friction split: the sidebar label and URL
+   path stay `Connectors` / `/ui/connectors` (parity, no route
+   rename), the list-page `<h1>` + the detail-page breadcrumb +
+   page-title use "Targets" instead. An operator scanning the list
+   page now reads "Targets" and clicking into a row sees the
+   breadcrumb "Targets / `<name>`" — matching what they actually
+   manipulate. The two-page split (separate `/ui/connectors` catalog
+   page for the actual connector classes) is left as future scope.
+
 ### Files
 
 * `backend/src/meho_backplane/ui/routes/connectors/__init__.py` — umbrella router factory.
@@ -1728,12 +1785,13 @@ modal form inherits the `X-CSRF-Token` header from the page-level
 * `backend/src/meho_backplane/ui/routes/connectors/detail.py` — detail handler + connector_id resolution + ops matrix query + recent-ops query.
 * `backend/src/meho_backplane/ui/routes/connectors/operator.py` — role-probe (read) + operator-403 (write).
 * `backend/src/meho_backplane/ui/routes/connectors/probe.py` — re-probe POST handler.
-* `backend/src/meho_backplane/ui/routes/connectors/forms.py` — (T2 #874) create / edit render + submit helpers; builds `TargetCreate` / `TargetUpdate`, delegates to the REST handlers, maps `ValidationError` to per-field form errors.
-* `backend/src/meho_backplane/ui/routes/connectors/forms_router.py` — (T2 #874) create / edit route registration (thin FastAPI wrappers; tenant_admin-gated deps).
+* `backend/src/meho_backplane/ui/routes/connectors/forms.py` — (T2 #874) create / edit render + submit helpers; builds `TargetCreate` / `TargetUpdate`, delegates to the REST handlers, maps `ValidationError` to per-field form errors. (G0.15-T10 #1218) adds `render_delete_modal` + `submit_delete` helpers delegating to `delete_target`.
+* `backend/src/meho_backplane/ui/routes/connectors/forms_router.py` — (T2 #874) create / edit route registration (thin FastAPI wrappers; tenant_admin-gated deps). (G0.15-T10 #1218) adds `GET`/`POST` `/ui/connectors/{name}/delete` routes.
 * `backend/src/meho_backplane/ui/templates/connectors/_target_form_fields.html` — (T2 #874) shared form fields for both modals.
 * `backend/src/meho_backplane/ui/templates/connectors/_create_modal.html` — (T2 #874) create modal.
 * `backend/src/meho_backplane/ui/templates/connectors/_edit_modal.html` — (T2 #874) edit modal.
-* `backend/tests/test_ui_connectors_forms.py` — (T2 #874) create / edit form tests: modal render (admin) + 403 (operator), create success + Pydantic validation errors (port out of range, empty name), edit pre-population + PATCH, cross-tenant isolation, CSRF enforcement.
+* `backend/src/meho_backplane/ui/templates/connectors/_delete_modal.html` — (G0.15-T10 #1218) delete-confirm modal; shows the cascade-count warning when `graph_node.target_id` references exist + pre-sets `?force=true` on the submit URL in that case.
+* `backend/tests/test_ui_connectors_forms.py` — (T2 #874) create / edit form tests: modal render (admin) + 403 (operator), create success + Pydantic validation errors (port out of range, empty name), edit pre-population + PATCH, cross-tenant isolation, CSRF enforcement. (G0.15-T10 #1218) adds delete tests: modal render + cascade-count surface, RBAC + cross-tenant + CSRF gating, soft-delete on success, 409-without-force vs 204-with-force on a referenced target.
 * `backend/src/meho_backplane/ui/templates/connectors/list.html` — full-page list template.
 * `backend/src/meho_backplane/ui/templates/connectors/_table_rows.html` — list rows fragment (HTMX swap target).
 * `backend/src/meho_backplane/ui/templates/connectors/detail.html` — full-page detail template.

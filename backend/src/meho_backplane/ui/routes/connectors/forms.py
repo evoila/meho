@@ -29,6 +29,16 @@ re-probe); this module layers the **write** surface on top:
 * **``PATCH /ui/connectors/{name}``** -- submit handler. Builds a
   :class:`~meho_backplane.targets.schemas.TargetUpdate` and delegates
   to :func:`~meho_backplane.api.v1.targets.update_target`.
+* **``GET /ui/connectors/{name}/delete``** -- HTMX-loaded delete-confirm
+  modal (G0.15-T10 #1218). Pre-checks the ``graph_node.target_id``
+  cascade count so the modal surfaces the impact before the operator
+  confirms. The same count drives the modal's submit URL to pre-set
+  ``?force=true`` (mirroring the REST 409+``?force=true`` flow on
+  :func:`~meho_backplane.api.v1.targets.delete_target`).
+* **``POST /ui/connectors/{name}/delete``** -- submit handler. Calls
+  :func:`~meho_backplane.api.v1.targets.delete_target` in-process so
+  the UI delete and the REST delete share one cascade-count + soft-
+  delete + audit code path. Success -> 204 + ``HX-Redirect: /ui/connectors``.
 
 RBAC posture
 ------------
@@ -66,12 +76,18 @@ import structlog
 from fastapi import Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.api.v1.targets import create_target, update_target
+from meho_backplane.api.v1.targets import (
+    create_target,
+    delete_target,
+    update_target,
+)
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.registry import registered_product_tokens
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.db.models import GraphNode
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.ui.auth.middleware import UISessionContext
@@ -81,8 +97,10 @@ from meho_backplane.ui.templating import get_templates
 __all__ = [
     "parse_aliases",
     "render_create_modal",
+    "render_delete_modal",
     "render_edit_modal",
     "submit_create",
+    "submit_delete",
     "submit_edit",
 ]
 
@@ -429,6 +447,90 @@ def _coerce_port(raw: str | None) -> int | None:
     if raw is None or not raw.strip():
         return None
     return int(raw.strip())
+
+
+async def render_delete_modal(
+    request: Request,
+    session_ctx: UISessionContext,
+    db_session: AsyncSession,
+    *,
+    target_name: str,
+) -> HTMLResponse:
+    """Render the delete-confirm modal pre-checked against the cascade count.
+
+    G0.15-T10 #1218. Called by ``GET /ui/connectors/{name}/delete``
+    (tenant_admin-gated server-side). Resolves the target tenant-scoped
+    via :func:`~meho_backplane.targets.resolver.resolve_target` (404 on
+    cross-tenant / unknown -- the same gate the REST delete handler
+    enforces) and counts ``graph_node.target_id`` references so the
+    modal surfaces the cascade impact before the operator confirms.
+
+    The count is a UX hint: the REST handler at
+    :func:`~meho_backplane.api.v1.targets.delete_target` is the
+    authority -- it re-counts on POST and 409s if non-zero without
+    ``?force=true``. Surfacing the count here lets the modal pre-set
+    the submit's ``force=true`` flag (mirroring the REST contract) so
+    a tenant_admin who has read the cascade warning gets a single-
+    click confirm path rather than a 409 + re-submit dance.
+    """
+    target = await resolve_target(db_session, session_ctx.tenant_id, target_name)
+    count_stmt = select(func.count()).select_from(GraphNode).where(GraphNode.target_id == target.id)
+    graph_node_refs = int((await db_session.execute(count_stmt)).scalar_one())
+    csrf_token = mint_csrf_token(str(session_ctx.session_id))
+    context: dict[str, object] = {
+        "page_title": "Targets",
+        "active_surface": "connectors",
+        "ready": False,
+        "csrf_token": csrf_token,
+        "target": {"name": target.name},
+        "graph_node_refs": graph_node_refs,
+    }
+    response = get_templates().TemplateResponse(
+        request,
+        "connectors/_delete_modal.html",
+        context,
+    )
+    _set_csrf_cookie(response, csrf_token)
+    return response
+
+
+async def submit_delete(
+    session_ctx: UISessionContext,
+    operator: Operator,
+    db_session: AsyncSession,
+    *,
+    target_name: str,
+    force: bool,
+) -> HTMLResponse:
+    """Delegate to :func:`~meho_backplane.api.v1.targets.delete_target`.
+
+    G0.15-T10 #1218. The REST handler:
+
+    * resolves the target tenant-scoped (404 on cross-tenant);
+    * counts ``graph_node`` references and 409s when non-zero without
+      ``force=true`` (the modal pre-sets force when the pre-check shows
+      a non-zero count, so the typical UI submit lands a clean 204);
+    * stamps ``deleted_at`` and writes the audit row
+      (``audit_op_id='targets.delete'``).
+
+    Returns the same 204 + ``HX-Redirect: /ui/connectors`` shape the
+    create / edit submit handlers return so HTMX takes the operator
+    back to the list with the deleted row gone.
+    """
+    await delete_target(
+        name=target_name,
+        force=force,
+        operator=operator,
+        session=db_session,
+    )
+    _log.info(
+        "ui_target_delete",
+        tenant_id=str(session_ctx.tenant_id),
+        operator_sub=session_ctx.operator_sub,
+        name=target_name,
+        force=force,
+    )
+    return _redirect_to_list()
 
 
 def _render_form_with_errors(

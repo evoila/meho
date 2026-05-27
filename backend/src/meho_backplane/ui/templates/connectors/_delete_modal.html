@@ -1,0 +1,86 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded delete-target confirm modal for the Connectors surface
+  (G0.15-T10 #1218 -- v0.7.0 dogfood signal #6 closure). Loaded into
+  ``#connectors-modal-container`` on the detail page by the "Delete"
+  button's ``hx-get`` to ``/ui/connectors/<name>/delete``.
+
+  The modal asks the operator to confirm the destructive action.
+  When the server-side pre-check returns a non-zero ``graph_node_refs``
+  count, the modal surfaces it explicitly and the submit carries the
+  ``force=true`` query parameter (mirrors the REST 409+``?force=true``
+  contract on ``DELETE /api/v1/targets/{name}``).
+
+  Submit contract: the form ``hx-post``s to
+  ``/ui/connectors/<name>/delete[?force=true]`` targeting itself.
+    * Success -> 204 + ``HX-Redirect: /ui/connectors`` (back to the
+      list with the deleted row gone).
+    * Failure (e.g. 403 from a non-admin caller -- the gate is server-
+      side) -> the HTMX response carries the error fragment.
+
+  CSRF posture matches the create / edit modals -- inherited from the
+  page-level ``hx-headers`` directive.
+-#}
+<dialog id="connectors-delete-modal" class="modal modal-open">
+  <div class="modal-box max-w-lg">
+    <h3 class="font-semibold text-lg" id="connectors-delete-modal-title">
+      Delete target <span class="font-mono">{{ target.name }}</span>?
+    </h3>
+
+    <div class="py-2 space-y-2 text-sm">
+      <p>
+        This soft-deletes the target row -- the audit-log history stays
+        intact, but the target disappears from every read surface
+        (list, detail, probe, dispatch) immediately.
+      </p>
+      {% if graph_node_refs and graph_node_refs > 0 %}
+        <div role="alert" class="alert alert-warning text-xs">
+          <div>
+            <p>
+              <strong>Cascade impact:</strong>
+              {{ graph_node_refs }} topology
+              {% if graph_node_refs == 1 %}row{% else %}rows{% endif %}
+              reference this target. The topology rows survive the
+              delete (their ``target_id`` is set to ``NULL`` per the
+              ``ON DELETE SET NULL`` FK), but the link from those rows
+              back to this target is severed.
+            </p>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+
+    <form
+      id="connectors-delete-form"
+      hx-post="/ui/connectors/{{ target.name | urlencode }}/delete{% if graph_node_refs and graph_node_refs > 0 %}?force=true{% endif %}"
+      hx-target="this"
+      hx-swap="outerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-2"
+      aria-labelledby="connectors-delete-modal-title"
+    >
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-delete"
+          onclick="document.getElementById('connectors-delete-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-error" data-action="delete-submit">
+          {% if graph_node_refs and graph_node_refs > 0 %}
+            Delete anyway
+          {% else %}
+            Delete target
+          {% endif %}
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

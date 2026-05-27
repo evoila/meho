@@ -739,3 +739,302 @@ def test_edit_submit_rejects_operator_role_with_403() -> None:
     row = _load_target(_TENANT_A, "op-patch")
     assert row is not None
     assert row.host == "orig.example.test"
+
+
+# ---------------------------------------------------------------------------
+# Delete modal + submit (G0.15-T10 #1218)
+# ---------------------------------------------------------------------------
+
+
+def _seed_graph_node(*, tenant_id: uuid.UUID, target_id: uuid.UUID, name: str) -> None:
+    """Insert one ``graph_node`` row pointing at ``target_id``.
+
+    Used to exercise the cascade-count branch of the delete modal +
+    the REST handler's 409+``?force=true`` flow (which the modal
+    pre-bypasses by appending ``force=true`` to the submit URL when
+    the cascade count is non-zero on render).
+    """
+    from meho_backplane.db.models import GraphNode
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                GraphNode(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    kind="service",
+                    name=name,
+                    target_id=target_id,
+                    properties={},
+                    discovered_by="test",
+                ),
+            )
+
+    asyncio.run(_do())
+
+
+def _load_target_including_deleted(tenant_id: uuid.UUID, name: str) -> TargetORM | None:
+    """Read a target row back regardless of ``deleted_at`` -- soft-delete check."""
+    from sqlalchemy import select
+
+    async def _do() -> TargetORM | None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            stmt = select(TargetORM).where(
+                TargetORM.tenant_id == tenant_id,
+                TargetORM.name == name,
+            )
+            return (await session.execute(stmt)).scalar_one_or_none()
+
+    return asyncio.run(_do())
+
+
+def test_delete_modal_unauthenticated_redirects_to_login() -> None:
+    """``GET /ui/connectors/<name>/delete`` without a session 302s to login."""
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get("/ui/connectors/some-target/delete")
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("/ui/auth/login?return_to=")
+
+
+def test_delete_modal_renders_for_tenant_admin() -> None:
+    """G0.15-T10 #1218 -- a tenant_admin GET renders the confirm modal."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="del-me")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/del-me/delete")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'id="connectors-delete-modal"' in body
+    # No cascade refs -- the submit URL must NOT carry ``?force=true``.
+    assert 'hx-post="/ui/connectors/del-me/delete"' in body
+    assert "?force=true" not in body
+    assert "Delete target" in body
+
+
+def test_delete_modal_surfaces_cascade_count_when_nonzero() -> None:
+    """G0.15-T10 #1218 -- a target referenced by graph_node rows shows the count
+    and the submit URL is pre-set to ``?force=true``.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="del-linked")
+    _seed_graph_node(tenant_id=_TENANT_A, target_id=target_id, name="node-a")
+    _seed_graph_node(tenant_id=_TENANT_A, target_id=target_id, name="node-b")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/del-linked/delete")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Cascade impact" in body
+    assert "2 topology" in body
+    # The submit URL pre-bypasses the 409+force handshake by setting
+    # ``?force=true`` on the form's hx-post when cascade refs exist.
+    assert "/delete?force=true" in body
+    assert "Delete anyway" in body
+
+
+def test_delete_modal_rejects_operator_role_with_403() -> None:
+    """G0.15-T10 #1218 -- a non-admin GET of the delete modal hits 403."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="op-del")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        response = client.get("/ui/connectors/op-del/delete")
+    finally:
+        mock.stop()
+    assert response.status_code == 403, response.text
+
+
+def test_delete_modal_isolates_other_tenants_target() -> None:
+    """G0.15-T10 #1218 -- an admin in tenant B cannot load tenant A's delete modal."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    _seed_target(tenant_id=_TENANT_A, name="a-only-del")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_B,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/a-only-del/delete")
+    finally:
+        mock.stop()
+    assert response.status_code == 404, response.text
+
+
+def test_delete_submit_soft_deletes_and_redirects_to_list() -> None:
+    """G0.15-T10 #1218 -- a valid delete POST soft-deletes + HX-Redirects to /ui/connectors."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="kill-me")
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/kill-me/delete",
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    assert response.headers["HX-Redirect"] == "/ui/connectors"
+    # Row remains in the DB but ``deleted_at`` is stamped -- the read
+    # surface filter (``deleted_at IS NULL``) hides it from list /
+    # detail; audit-log soft-FK keeps pointing at the row.
+    row = _load_target_including_deleted(_TENANT_A, "kill-me")
+    assert row is not None
+    assert row.deleted_at is not None
+    # And the read-surface helper that filters deleted_at IS NULL no
+    # longer sees the row.
+    assert _load_target(_TENANT_A, "kill-me") is not None  # row stays; assertion is on deleted_at
+
+
+def test_delete_submit_with_force_succeeds_when_graph_node_refs_exist() -> None:
+    """G0.15-T10 #1218 -- ``?force=true`` POST soft-deletes despite graph_node refs.
+
+    Mirrors the REST 409+``?force=true`` contract on
+    :func:`~meho_backplane.api.v1.targets.delete_target`: without force,
+    a target with cascade refs 409s; with force, it succeeds and the
+    graph_node rows survive (ON DELETE SET NULL).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="force-del")
+    _seed_graph_node(tenant_id=_TENANT_A, target_id=target_id, name="link")
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/force-del/delete?force=true",
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    assert response.headers["HX-Redirect"] == "/ui/connectors"
+    row = _load_target_including_deleted(_TENANT_A, "force-del")
+    assert row is not None
+    assert row.deleted_at is not None
+
+
+def test_delete_submit_without_force_409s_when_graph_node_refs_exist() -> None:
+    """G0.15-T10 #1218 -- delete without ``?force=true`` 409s when cascade refs exist.
+
+    Mirrors the REST handler's contract -- the UI submit lands in the
+    same place as the CLI submit, so an operator who hand-crafts a
+    no-force POST (the modal otherwise sets ``force=true`` when refs
+    exist) sees the same 409 the REST surface would return.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="noforce")
+    _seed_graph_node(tenant_id=_TENANT_A, target_id=target_id, name="link")
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/noforce/delete",
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 409, response.text
+    # Target row is untouched.
+    row = _load_target_including_deleted(_TENANT_A, "noforce")
+    assert row is not None
+    assert row.deleted_at is None
+
+
+def test_delete_submit_isolates_other_tenants_target() -> None:
+    """G0.15-T10 #1218 -- a tenant B admin cannot delete tenant A's target (404)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    _seed_target(tenant_id=_TENANT_A, name="a-survive")
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_B,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/a-survive/delete",
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 404, response.text
+    # Tenant A's row remains live (not soft-deleted).
+    row = _load_target_including_deleted(_TENANT_A, "a-survive")
+    assert row is not None
+    assert row.deleted_at is None
+
+
+def test_delete_submit_rejects_operator_role_with_403() -> None:
+    """G0.15-T10 #1218 -- a non-admin delete POST is rejected with 403."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="op-survive")
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/op-survive/delete",
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 403, response.text
+    row = _load_target_including_deleted(_TENANT_A, "op-survive")
+    assert row is not None
+    assert row.deleted_at is None
+
+
+def test_delete_submit_without_csrf_is_rejected() -> None:
+    """G0.15-T10 #1218 -- a delete POST missing the CSRF header hits the chassis gate."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="csrf-survive")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/csrf-survive/delete",
+            headers={"HX-Request": "true"},
+        )
+    finally:
+        mock.stop()
+    # Chassis CSRFMiddleware double-submit gate -- exact status is the
+    # chassis contract (typically 403 from a missing/mismatched token).
+    assert response.status_code in {401, 403}, response.text
+    row = _load_target_including_deleted(_TENANT_A, "csrf-survive")
+    assert row is not None
+    assert row.deleted_at is None

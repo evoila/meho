@@ -30,7 +30,7 @@
 -#}
 {% extends "base.html" %}
 
-{% block page_title %}Connectors &middot; MEHO Operator Console{% endblock %}
+{% block page_title %}Targets &middot; MEHO Operator Console{% endblock %}
 
 {% block content %}
 <section
@@ -39,9 +39,14 @@
 >
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
-      <h1 class="text-2xl font-semibold">Connectors</h1>
+      {# The sidebar entry stays "Connectors" (operator-facing label
+         parity with the URL path); the page heading uses the backend
+         taxonomy "Targets" so the noun an operator reads on the page
+         matches what they're inspecting -- a row in the ``targets``
+         table, not a connector class. G0.15-T10 #1218 / Option B. #}
+      <h1 class="text-2xl font-semibold">Targets</h1>
       <p class="text-sm opacity-70">
-        Per-tenant targets registry. Click a row to inspect the target's
+        Per-tenant target registry. Click a row to inspect the target's
         fingerprint, recent operations, and available verbs.
       </p>
     </div>

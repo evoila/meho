@@ -364,7 +364,7 @@ async def _render(
     rows = _render_rows(targets, now=now, sort=sort, direction=direction)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context = {
-        "page_title": "Connectors",
+        "page_title": "Targets",
         "active_surface": "connectors",
         "rows": rows,
         # Template macro ``_relative_time`` reads ``now_utc`` to render

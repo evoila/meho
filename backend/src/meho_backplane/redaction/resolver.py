@@ -13,15 +13,16 @@ are, in order of specificity:
 3. ``(connector_id, tenant)`` -- per-connector, per-tenant.
 4. ``connector_id`` -- per-connector default.
 5. ``tenant`` -- tenant-wide default across every connector.
-6. The conservative built-in default (:data:`DEFAULT_POLICY_NAME`).
+6. ``(None, None, None)`` -- the wildcard global override registered
+   via ``register_policy(policy)`` with no scope kwargs.
 
-The resolver is **default-safe**: a call that matches no registered
-override falls through to the conservative default policy packaged at
-:mod:`meho_backplane.redaction.policies`, which still applies the
-named-pattern library to credential shapes. **Pass-through is never
-the answer** -- the parent goal (#800) treats the API surface as the
-trust boundary, so an un-configured operator-facing connector still
-gets credentials stripped out of its responses.
+When no override at any of those levels matches, the resolver falls
+through to the conservative default-safe policy packaged at
+:mod:`meho_backplane.redaction.policies` (:data:`DEFAULT_POLICY_RESOURCE`).
+**Pass-through is never the answer** -- the parent goal (#800) treats
+the API surface as the trust boundary, so an un-configured
+operator-facing connector still gets credentials stripped out of its
+responses.
 
 Registration is process-global state, deliberately mutable so the
 middleware can be exercised in tests without monkeypatching:
@@ -210,13 +211,18 @@ def resolve_policy(
     # to one specificity level documented on the module docstring.
     # The wildcards are encoded as ``None`` so the resolver loop stays
     # a straight dict lookup; no per-call regex or per-call walk over
-    # the table is needed.
+    # the table is needed. The final ``(None, None, None)`` step is the
+    # wildcard-global override slot: ``register_policy(policy)`` with no
+    # scope kwargs stores under that key, and a hit there shadows the
+    # packaged default (#1189; the entry was missing pre-fix, so a
+    # wildcard registration was stored but never looked up).
     ladder: tuple[_OverrideKey, ...] = (
         (connector_id, tenant, op),
         (connector_id, None, op),
         (connector_id, tenant, None),
         (connector_id, None, None),
         (None, tenant, None),
+        (None, None, None),
     )
     with _overrides_lock:
         for key in ladder:

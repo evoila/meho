@@ -162,3 +162,52 @@ def test_re_register_overwrites_previous_policy() -> None:
 
     resolved = resolve_policy(connector_id="github", tenant=None, op=None)
     assert resolved is second
+
+
+def test_wildcard_register_overrides_default_for_any_call() -> None:
+    """``register_policy(policy)`` with no scope kwargs shadows the
+    packaged default for every ``resolve_policy`` call (#1189).
+
+    The wildcard slot is the documented "tenant-wide, connector-wide,
+    op-wide" override (see ``register_policy`` docstring). Pre-fix,
+    the resolver ladder did not include ``(None, None, None)``, so the
+    registration was stored but never consulted -- ``resolve_policy``
+    silently fell through to ``get_default_policy()`` regardless. The
+    assertion targets every label shape (fully-labelled, partially-
+    labelled, fully-``None``) because the wildcard slot's value
+    proposition is "applies to every call when no more-specific
+    override hits."
+    """
+    custom = _policy("global-wildcard")
+    register_policy(custom)
+
+    for connector_id, tenant, op in (
+        ("github", "t1", "op.x"),
+        ("gitlab", None, "op.y"),
+        (None, "t2", None),
+        (None, None, None),
+    ):
+        resolved = resolve_policy(connector_id=connector_id, tenant=tenant, op=op)
+        assert resolved is custom, (
+            f"wildcard register should win for "
+            f"(connector_id={connector_id!r}, tenant={tenant!r}, op={op!r}); "
+            f"got {resolved.id!r}"
+        )
+
+
+def test_connector_specific_override_beats_wildcard_register() -> None:
+    """A more-specific override out-ranks the wildcard register (#1189).
+
+    Specificity is the resolver's whole contract; the wildcard slot is
+    the *lowest*-specificity override (one rung above the packaged
+    default). A connector-anchored registration must still win for
+    calls labelled with that connector. Calls without a matching
+    more-specific override fall through to the wildcard.
+    """
+    global_policy = _policy("global-wildcard")
+    github_policy = _policy("github-specific")
+    register_policy(global_policy)
+    register_policy(github_policy, connector_id="github")
+
+    assert resolve_policy(connector_id="github", tenant="t1", op="op.x") is github_policy
+    assert resolve_policy(connector_id="gitlab", tenant="t1", op="op.x") is global_policy

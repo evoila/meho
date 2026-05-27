@@ -192,3 +192,50 @@ async def test_run_status_unknown_handle_is_invalid_params(
     body = resp.json()
     assert "error" in body
     assert body["error"]["message"] == "agent_run_not_found"
+
+
+# ---------------------------------------------------------------------------
+# G11.5-T6 #1080 -- pre-execution budget gate contract on the MCP boundary
+# ---------------------------------------------------------------------------
+#
+# The MCP transport has no spec-blessed "too many requests" code, so
+# ``meho.agents.run`` maps :class:`BudgetExceededError` onto the JSON-RPC
+# ``-32602`` (invalid-params) message that mirrors the way the REST 429
+# carries its structured detail body -- the message starts with
+# ``"budget_exceeded: "`` so a client parser distinguishes the budget
+# refusal from agent_not_found / agent_disabled (same -32602 surface,
+# different prefix). The global kill switch is the simplest deterministic
+# trigger; no DB seeding required.
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_mcp_run_returns_invalid_params_when_budget_exceeded_pre_execution(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """meho.agents.run on a budget-refused principal raises -32602 with ``budget_exceeded:``.
+
+    Contract (G11.5-T6 #1080): the MCP tool catches
+    :class:`BudgetExceededError` from
+    :meth:`AgentInvoker.run` and re-raises
+    :class:`McpInvalidParamsError` whose message starts with
+    ``"budget_exceeded: "`` plus the gate's reason. The dispatcher
+    serialises that into the JSON-RPC ``error.code = -32602`` envelope.
+    """
+    from meho_backplane.settings import get_settings
+
+    client, op = client_with_operator
+    await _seed_definition(tenant_id=op.tenant_id)
+    _install_invoker()
+    monkeypatch.setenv("AGENT_RUNS_DISABLED_GLOBAL", "true")
+    get_settings.cache_clear()
+
+    resp = _call(client, "meho.agents.run", {"name": "triage", "input": "go"})
+    body = resp.json()
+    assert "error" in body, body
+    # Invalid-params on the JSON-RPC envelope.
+    assert body["error"]["code"] == -32602, body
+    # Prefix discriminates the budget refusal from sibling refusals
+    # (agent_not_found / agent_disabled) that ride the same code.
+    assert body["error"]["message"].startswith("budget_exceeded: "), body

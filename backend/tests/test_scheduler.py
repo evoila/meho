@@ -36,6 +36,8 @@ hit (python_best_practices §14 -- no network in unit tests).
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -43,6 +45,7 @@ from types import ModuleType
 from unittest.mock import AsyncMock
 
 import pytest
+import structlog
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
@@ -774,3 +777,204 @@ async def test_missing_agent_definition_skips_fire_without_killing_tick() -> Non
     # unblocks the schedule on the next tick.
     surviving = await _get_trigger(trigger.id)
     assert surviving.status == ScheduledTriggerStatus.ACTIVE.value
+
+
+# ---------------------------------------------------------------------------
+# G11.5-T6 #1080 -- pre-execution budget gate contract in the scheduler path
+# ---------------------------------------------------------------------------
+#
+# The scheduler does not retry blindly when the pre-execution budget gate
+# refuses (otherwise a misconfigured cron + a kill switch would log-spam
+# every tick). The contract is: the dispatch is logged at WARN as
+# ``scheduler_invoke_refused`` AND the trigger's state moves forward
+# (cron's ``next_fire_at`` advances, one-off lands ``status='fired'``)
+# so the second tick does not re-trip the same instant.
+#
+# The global kill switch is the simplest deterministic trigger -- no DB
+# budget-row seeding, no per-window arithmetic. The contract holds for
+# the per-identity / per-tenant gates too because they all surface as
+# the same ``BudgetExceededError`` the dispatcher catches.
+
+
+def _capture_structlog_to_buffer(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
+    """Redirect structlog to a per-call :class:`StringIO` buffer.
+
+    The two budget-refused scheduler tests pin the
+    ``scheduler_invoke_refused`` event on the budget-refused dispatch
+    path. :func:`structlog.testing.capture_logs` would normally cover
+    this, but the production
+    :func:`meho_backplane.logging.configure_logging` sets
+    ``cache_logger_on_first_use=True``. Once another test in the same
+    process triggers the FastAPI lifespan (the MCP suite does, via
+    ``TestClient(app)``), the lazy proxy inside
+    :mod:`meho_backplane.scheduler.loop` rewrites its own ``bind``
+    method onto a closure pinning the original stdout-bound BoundLogger
+    (see ``structlog._config.BoundLoggerLazyProxy.bind`` -- the cache
+    short-circuit replaces ``self.bind = finalized_bind`` in place).
+    Subsequent ``structlog.configure(...)`` calls re-set the global
+    config but cannot reach the orphaned closure.
+
+    The robust fix is to monkeypatch the module-level ``_log`` symbol
+    to a freshly-built proxy bound against the local-buffer factory.
+    The fresh proxy has no cached ``bind`` and reads ``_CONFIG`` on
+    each call, so emissions land in the buffer. ``monkeypatch.setattr``
+    auto-restores the original ``_log`` at teardown, leaving the
+    production proxy untouched for subsequent tests in the same
+    process.
+    """
+    import logging as _stdlib_logging
+
+    from meho_backplane.scheduler import loop as _loop_module
+
+    buf = io.StringIO()
+    structlog.reset_defaults()
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.dict_tracebacks,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(_stdlib_logging.INFO),
+        logger_factory=structlog.PrintLoggerFactory(file=buf),
+        cache_logger_on_first_use=False,
+    )
+    # Replace the cached proxy with a freshly-built one whose ``bind``
+    # method is the class default, not the cache short-circuit closure.
+    monkeypatch.setattr(_loop_module, "_log", structlog.get_logger(_loop_module.__name__))
+    return buf
+
+
+def _scheduler_invoke_refused_lines(buf: io.StringIO) -> list[dict[str, object]]:
+    """Return every ``scheduler_invoke_refused`` JSON line in ``buf``."""
+    out: list[dict[str, object]] = []
+    for line in buf.getvalue().splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("event") == "scheduler_invoke_refused":
+            out.append(entry)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_cron_scheduler_invoke_refused_on_budget_advances_and_does_not_refire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget-refused cron fire logs ``scheduler_invoke_refused`` once and
+    advances ``next_fire_at`` so the second tick does not re-trip the same
+    overdue instant (G11.5-T6 #1080).
+    """
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron(agent_definition_id=agent_id, base=base)
+    overdue_instant = datetime(2026, 1, 1, tzinfo=UTC)
+    await _force_due(trigger.id, overdue_instant)
+
+    monkeypatch.setenv("AGENT_RUNS_DISABLED_GLOBAL", "true")
+    get_settings.cache_clear()
+
+    buf = _capture_structlog_to_buffer(monkeypatch)
+    try:
+        fires = await run_one_tick(invoker=_make_invoker())
+    finally:
+        structlog.reset_defaults()
+    assert fires == 0, "budget-refused dispatch must return False / count zero"
+
+    refused = [
+        line
+        for line in _scheduler_invoke_refused_lines(buf)
+        if line.get("reason") == "BudgetExceededError"
+    ]
+    assert len(refused) == 1, buf.getvalue()
+    assert refused[0]["trigger_id"] == str(trigger.id)
+    assert refused[0]["agent_name"] == "reporter"
+
+    # ``next_fire_at`` must have advanced past the overdue instant --
+    # the advance commit happens *before* the dispatch (Step 2 of
+    # ``_fire_cron``'s lifecycle), so even though the dispatch raised
+    # the row's scheduled instant moves forward. Without this the
+    # next tick re-trips the same overdue instant and log-spams.
+    advanced = await _get_trigger(trigger.id)
+    next_fire = _aware(advanced.next_fire_at)
+    assert next_fire is not None
+    assert next_fire > overdue_instant
+
+    # No agent_run row created -- the refusal short-circuits before
+    # the runtime persists anything.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = list((await session.execute(select(AgentRun))).scalars().all())
+    assert rows == [], f"budget-refused fire must not create an agent_run row; got {len(rows)}"
+
+    # Second tick: the row's next_fire_at is still past now (the cron is
+    # ``*/5 * * * *``, the first advance from 2026-01-01 lands at
+    # 2026-01-01 00:05, still well in the past). What we pin is that
+    # the advance happened on the first tick -- the row no longer
+    # points at the original overdue instant -- so the per-instant
+    # log-spam guard holds even though the cron is still due.
+    refetched = await _get_trigger(trigger.id)
+    refetched_next_fire = _aware(refetched.next_fire_at)
+    assert refetched_next_fire is not None
+    assert refetched_next_fire > overdue_instant, (
+        f"advance must persist across ticks; got {refetched_next_fire} vs {overdue_instant}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_off_scheduler_invoke_refused_on_budget_marks_fired_and_does_not_refire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A budget-refused one-off fire logs ``scheduler_invoke_refused`` and lands
+    ``status='fired'`` so the next tick does not re-trip the same row
+    (G11.5-T6 #1080).
+    """
+    agent_id = await _seed_tenant_and_agent()
+    trigger = await _create_one_off(
+        agent_definition_id=agent_id,
+        run_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    monkeypatch.setenv("AGENT_RUNS_DISABLED_GLOBAL", "true")
+    get_settings.cache_clear()
+
+    buf = _capture_structlog_to_buffer(monkeypatch)
+    try:
+        fires = await run_one_tick(invoker=_make_invoker())
+    finally:
+        structlog.reset_defaults()
+    assert fires == 0
+
+    refused = [
+        line
+        for line in _scheduler_invoke_refused_lines(buf)
+        if line.get("reason") == "BudgetExceededError"
+    ]
+    assert len(refused) == 1, buf.getvalue()
+    assert refused[0]["trigger_id"] == str(trigger.id)
+    assert refused[0]["agent_name"] == "reporter"
+
+    # One-off lands ``fired`` -- the mark-fired commit happens *before*
+    # the dispatch (Step 2 of ``_fire_one_off``'s lifecycle), so the
+    # at-most-once contract holds even when the dispatch is refused.
+    finalised = await _get_trigger(trigger.id)
+    assert finalised.status == ScheduledTriggerStatus.FIRED.value, (
+        "one-off must transition to FIRED to avoid re-fire on next tick"
+    )
+
+    # No agent_run row.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = list((await session.execute(select(AgentRun))).scalars().all())
+    assert rows == []
+
+    # Second tick must not re-fire -- the row is terminal.
+    fires_second = await run_one_tick(invoker=_make_invoker())
+    assert fires_second == 0
+    async with sessionmaker() as session:
+        rows_after = list((await session.execute(select(AgentRun))).scalars().all())
+    assert rows_after == []

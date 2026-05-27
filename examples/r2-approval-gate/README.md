@@ -154,10 +154,16 @@ not auto-execute), insert one `AgentPermission` row matching:
 [perms]: ../../backend/src/meho_backplane/auth/permissions.py
 [composites]: ../../backend/src/meho_backplane/connectors/vmware_rest/composites/_register.py
 
-`permissions.json` in this directory carries the exact payload. Apply
-it via the `/api/v1/agent-grants` route (G11.2-T6 #819) or the MCP
-`meho.agent-grants.create` tool — both wrap one INSERT into
-`agent_permission`.
+`permissions.json` in this directory carries the exact payload — one
+JSON row per grant. Apply each row via one of:
+
+- REST: `POST /api/v1/agents/grants` (G11.2-T6 #819), one POST per row.
+- CLI: `meho agent grant create --principal ... --op ... --target ... --verdict ...`,
+  one invocation per row. See [§6](#6-productionising-the-agent-definition)
+  for the literal commands.
+- MCP: `meho.agents.grant.create` tool, one call per row.
+
+All three wrap the same INSERT into `agent_permission`.
 
 ### Pattern specificity tip
 
@@ -230,13 +236,21 @@ curl -sH "Authorization: Bearer $TOKEN" \
   "$MEHO_INSTANCE/api/v1/approvals?status=pending"
 
 # Approve by id alone — the /decide path (no params needed; the
-# durable row + audit row are the authorization)
+# durable row + audit row are the authorization). The decision goes in
+# the JSON body, not a query param — the DecideRequestBody is
+# extra="forbid" so anything outside {"decision", "reason"} 422s.
 curl -sX POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{}' \
-  "$MEHO_INSTANCE/api/v1/approvals/$REQUEST_ID/decide?decision=approved"
+  -d '{"decision": "approved"}' \
+  "$MEHO_INSTANCE/api/v1/approvals/$REQUEST_ID/decide"
 
-# Reject with a reason
+# Reject via the same /decide path (decision + optional reason in the body)
+curl -sX POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"decision": "rejected", "reason": "revert window violates change calendar"}' \
+  "$MEHO_INSTANCE/api/v1/approvals/$REQUEST_ID/decide"
+
+# Or use the dedicated /reject endpoint (legacy; same outcome)
 curl -sX POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"reason": "revert window violates change calendar"}' \
@@ -342,7 +356,26 @@ lives in the audit log.
 
 The CI exercise lives at
 [`backend/tests/test_examples_r2_approval_gate.py`][test].
-It drives the full cycle in-process:
+It drives the full cycle in-process.
+
+**A note on the test's op id.** The test registers a stand-in op
+`examples.r2.snapshot.revert` rather than driving the production
+`vmware.composite.vm.snapshot.revert` directly — the stand-in keeps
+the unit-lane test from colliding with the real composite registry and
+from needing a vCenter. The stand-in carries the **same descriptor
+flags as the production composite** (`requires_approval=True`,
+`safety_level="dangerous"`), so the gate's behaviour is identical:
+the verdict resolver, the durable approval row, the audit chain, and
+the broadcast / resume path all exercise the same code paths. The
+integration coverage for the real `vmware.composite.vm.snapshot.revert`
+path lives in [`backend/tests/test_approval_queue.py`][test-aq] and
+[`backend/tests/test_agent_approval_resume.py`][test-aar], which drive
+the production code against representative composites end-to-end.
+
+[test-aq]: ../../backend/tests/test_approval_queue.py
+[test-aar]: ../../backend/tests/test_agent_approval_resume.py
+
+The cycle the demo test drives:
 
 1. Registers a `requires_approval=True` typed op.
 2. Inserts an `AgentPermission` row granting the agent
@@ -385,22 +418,48 @@ backplane:
 # 1. Pick up the operator's token
 meho login $MEHO_INSTANCE
 
-# 2. Create the agent's Keycloak principal (G11.2-T1 #815). Capture
-#    the assigned `sub`.
-meho agent-principals create vmware-snapshot-revert-agent \
+# 2. Register the agent's Keycloak principal (G11.2-T1 #815). The
+#    backend creates the kind=agent Keycloak client and a DB row; the
+#    assigned `sub` is the clientId (`agent:<name>`). --owner-sub sets
+#    the kill-switch owner and defaults to the caller's sub.
+meho agent-principal register vmware-snapshot-revert-agent \
   --owner-sub $MY_SUB
+AGENT_SUB="agent:vmware-snapshot-revert-agent"
 
-# 3. Substitute the agent's `sub` into permissions.json (see the
-#    `<agent-principal-sub>` placeholder) and apply.
-meho agent-permissions apply permissions.json
+# 3. Apply the AgentPermission grants. The grant API takes one
+#    row per call, so the two permissions.json rows become two
+#    `meho agent grant create` invocations. --target '*' scopes the
+#    grant to any VM; pin a specific UUID to narrow it.
+meho agent grant create \
+  --principal $AGENT_SUB \
+  --op vmware.composite.vm.snapshot.revert \
+  --target '*' \
+  --verdict needs-approval
+meho agent grant create \
+  --principal $AGENT_SUB \
+  --op 'vmware.composite.vm.*' \
+  --target '*' \
+  --verdict auto-execute
 
-# 4. Edit agent_definition.json's `identity_ref` to the same sub,
-#    then create the AgentDefinition row.
-meho agent-definitions create --file agent_definition.json
+# 4. Create the AgentDefinition. The CLI takes the fields
+#    agent_definition.json carries as flags (no `--file`). --toolset
+#    accepts inline JSON, @<path> to read a file, or @- for stdin —
+#    the value must be a JSON object, so extract the nested
+#    `toolset` field out of agent_definition.json first. Required
+#    flags: --identity-ref, --model-tier, --system-prompt,
+#    --turn-budget.
+jq .toolset agent_definition.json > /tmp/r2-toolset.json
+meho agent create vmware-snapshot-revert-agent \
+  --identity-ref "$AGENT_SUB" \
+  --model-tier standard \
+  --system-prompt "$(jq -r .system_prompt agent_definition.json)" \
+  --turn-budget 5 \
+  --toolset @/tmp/r2-toolset.json
 
-# 5. Invoke the agent. The first call will pause.
-meho agent invoke vmware-snapshot-revert-agent \
-  --prompt "Snapshot-revert vm-42 to last-known-good"
+# 5. Run the agent. The first call hits the needs-approval gate and
+#    pauses with status='awaiting_approval'.
+meho agent run vmware-snapshot-revert-agent \
+  --input "Snapshot-revert vm-42 to last-known-good"
 ```
 
 When the operator sees the pending approval on `meho status --watch`

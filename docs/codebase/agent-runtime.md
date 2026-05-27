@@ -419,7 +419,10 @@ correlated by `approval_request_id`.
   meta-tool floors.
 - **`meho_backplane.settings`** — `anthropic_api_key` (fail-closed: empty
   means the model factory raises) and `agent_default_model` (the pinned
-  model id, never a `-latest` tag).
+  model id, never a `-latest` tag). G11.5-T1 keeps both settings — the
+  Anthropic backend builder (in `agent/models.py`) reads them — so a
+  multi-provider deploy that routes some tiers to Anthropic still works
+  with the same env-var surface.
 
 ## Why the model factory, not the `LlmClient` seam
 
@@ -430,9 +433,73 @@ pass, the wrong shape for a multi-turn tool-use loop, which needs the full
 Messages API (tool calls, tool results, repeated turns). Pydantic AI drives
 its loop through a framework `Model`, so the agent seam mirrors the
 *pattern* of `LlmClientFactory` (an injected, fail-closed factory) rather
-than the one-shot method. The G11 initiative ships against Anthropic;
-multi-provider routing (Bedrock, on-prem OpenAI-compatible, VCF Private AI
-Foundation) is G11.5.
+than the one-shot method. The G11 initiative shipped against Anthropic;
+G11.5-T1 layered a per-tenant resolver on top of that pattern.
+
+## Per-tenant tier→Model resolver (G11.5-T1 #1075)
+
+The zero-arg `ModelFactory` shape was right for one-deploy → one-provider.
+It loses the two pieces multi-provider routing needs to honour: *which
+tenant* is running the agent, and *which logical tier* (`triage` /
+`investigate` / `summarize`) the definition asks for. G11.5-T1 added the
+`ModelResolver` protocol in `meho_backplane/agent/models.py`, the
+architectural sibling of the connectors' fingerprint resolver:
+
+```
+resolver.resolve(operator, tier) -> pydantic_ai.models.Model
+```
+
+`PydanticAgentRun` now takes an optional `model_resolver`. When *both* the
+runtime carries a resolver *and* the definition names a tier, the
+resolver builds the model; otherwise the legacy `model_factory` runs.
+This dual path keeps every existing test (which injects
+`model_factory=lambda: FunctionModel(...)`) unmodified — definitions
+without a tier still resolve through the factory.
+
+### The three gates
+
+For every `resolve(operator, tier)` call the resolver checks, in order:
+
+1. **Tenant policy** — `policies[tenant_id]` (falling back to the
+   `__default__` policy when the tenant has no explicit row) maps each
+   `AgentTier` to a `TierMapping(backend_id=...)`. A tier the policy
+   doesn't cover raises `BackendNotConfiguredError`.
+2. **Egress** — when the policy carries `allow_egress=False` (the
+   air-gapped posture), the resolver refuses to materialise any backend
+   flagged `is_saas_egress=True` and raises `EgressViolationError`. The
+   per-backend flag (not a name-string match) is what decides; an
+   on-prem Bedrock-via-AWS-PrivateLink deployment can register the same
+   `bedrock` builder with `is_saas_egress=False`.
+3. **Capabilities** — each backend declares `BackendCapabilities`
+   (`supports_tools`, `supports_streaming`, `supports_prompt_cache`,
+   `tool_format`). The agent runtime always needs tools (the loop is
+   tool-use), so a backend with `supports_tools=False` mapped to any
+   tier raises `CapabilityMismatchError`. Future capability-aware tiers
+   (a no-tools "free-text summary" tier) reuse the same shape.
+
+### What ships in T1 vs C4-b/c/d
+
+T1 ships the resolver + capability flags + the **Anthropic backend
+builder** (lifted from the old `default_model_factory`, fail-closed on
+missing key). The recovery shape `default_anthropic_policy()` +
+`default_anthropic_backends()` reproduces the pre-resolver single-tenant
+behaviour — every tier under the default tenant policy routes to
+Anthropic.
+
+Bedrock (#1076), OpenAI-compatible / vLLM / Ollama (#1077), and VCF
+Private AI Foundation (#1078) land their own `BackendBuilder`
+registrations. They are deliberately not eagerly imported here — the
+`pydantic-ai-slim[bedrock]` / `[openai]` extras are not installed in
+this slice, and an eager import would break the module on a deployment
+without the extra.
+
+### Failure mode unification
+
+Every `ResolverError` subclass raised at `_build_agent` time is wrapped
+in `AgentRunError` by `PydanticAgentRun._resolve_model`, so callers
+catch the seam's one exception type regardless of which precise
+resolver mismatch fired. The original `ResolverError` is preserved as
+`__cause__` so an operator's log read sees the policy detail.
 
 ## Testing
 
@@ -443,6 +510,15 @@ Foundation) is G11.5.
   factory fails closed without a key, and (T3) a toolset-driven definition
   registers the resolved tools, a meta-tool omitted from the spec is absent
   from the model's surface, and a `read_only` identity gets an empty surface.
+- `backend/tests/test_agent_model_resolver.py` (G11.5-T1) — unit tests for
+  the per-tenant tier→Model resolver: a tenant policy picks the configured
+  backend per tier; a no-egress tenant refuses a SaaS backend; a no-tools
+  backend is refused; the default-tenant policy routes every tier to
+  Anthropic; the Anthropic builder fails closed without a key; an unknown
+  backend id raises `BackendNotConfiguredError`; the `PydanticAgentRun`
+  seam routes through the resolver when both a resolver and a `tier` are
+  set, falls back to the factory otherwise, and wraps `ResolverError`s in
+  `AgentRunError`.
 - `backend/tests/test_agent_toolset.py` — unit tests for the resolver /
   adapter directly (no model run): the spec ∩ identity-perms intersection
   (including the read_only-floor exclusion), operator threading, tool input

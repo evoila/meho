@@ -7203,6 +7203,122 @@
         }
       }
     },
+    "/ui/connectors/{name}/delete": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Delete Modal",
+        "description": "``GET /ui/connectors/{name}/delete`` -- HTMX-loaded confirm modal.\n\nG0.15-T10 #1218. Pre-checks the cascade count so the modal can\nshow the operator how many topology rows reference the target\n(the REST DELETE handler 409s when non-zero without ``?force=true``;\nsurfacing the count here lets the modal pre-set the force flag).",
+        "operationId": "ui_connectors_delete_modal_ui_connectors__name__delete_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Delete Submit",
+        "description": "``POST /ui/connectors/{name}/delete[?force=true]`` -- submit handler.\n\nG0.15-T10 #1218. Delegates to\n:func:`~meho_backplane.api.v1.targets.delete_target` (the same\nin-process handler the REST surface exposes) so the UI write and\nthe REST write share one validation + cascade-count + audit code\npath. Success -> 204 + ``HX-Redirect: /ui/connectors``; a 409 from\na missing ``?force=true`` flag is the REST contract -- the modal\npre-sets ``force=true`` when the GET pre-check showed cascade refs,\nso the typical submit lands clean.",
+        "operationId": "ui_connectors_delete_submit_ui_connectors__name__delete_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/connectors/{name}": {
       "patch": {
         "tags": [

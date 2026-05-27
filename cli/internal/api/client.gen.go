@@ -4481,6 +4481,11 @@ type UiConnectorsListUiConnectorsGetParams struct {
 	Product *string                                            `form:"product,omitempty" json:"product,omitempty"`
 }
 
+// UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams defines parameters for UiConnectorsDeleteSubmitUiConnectorsNameDeletePost.
+type UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams struct {
+	Force *bool `form:"force,omitempty" json:"force,omitempty"`
+}
+
 // KbIndexUiKbGetParams defines parameters for KbIndexUiKbGet.
 type KbIndexUiKbGetParams struct {
 	Q      *string `form:"q,omitempty" json:"q,omitempty"`
@@ -4631,6 +4636,12 @@ type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
 
 // UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody defines body for UiConnectorsEditSubmitUiConnectorsNamePatch for application/x-www-form-urlencoded ContentType.
 type UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody = BodyUiConnectorsEditSubmitUiConnectorsNamePatch
+
+// UiConnectorsDeleteModalUiConnectorsNameDeleteGetJSONRequestBody defines body for UiConnectorsDeleteModalUiConnectorsNameDeleteGet for application/json ContentType.
+type UiConnectorsDeleteModalUiConnectorsNameDeleteGetJSONRequestBody = UISessionContext
+
+// UiConnectorsDeleteSubmitUiConnectorsNameDeletePostJSONRequestBody defines body for UiConnectorsDeleteSubmitUiConnectorsNameDeletePost for application/json ContentType.
+type UiConnectorsDeleteSubmitUiConnectorsNameDeletePostJSONRequestBody = UISessionContext
 
 // UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody defines body for UiConnectorsEditModalUiConnectorsNameEditGet for application/json ContentType.
 type UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody = UISessionContext
@@ -5337,6 +5348,16 @@ type ClientInterface interface {
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBody(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBody request with any body
+	UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsDeleteModalUiConnectorsNameDeleteGet(ctx context.Context, name string, body UiConnectorsDeleteModalUiConnectorsNameDeleteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithBody request with any body
+	UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithBody(ctx context.Context, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsDeleteSubmitUiConnectorsNameDeletePost(ctx context.Context, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, body UiConnectorsDeleteSubmitUiConnectorsNameDeletePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsEditModalUiConnectorsNameEditGetWithBody request with any body
 	UiConnectorsEditModalUiConnectorsNameEditGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -7175,6 +7196,54 @@ func (c *Client) UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx context
 
 func (c *Client) UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBody(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithFormdataBody(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDeleteModalUiConnectorsNameDeleteGetRequestWithBody(c.Server, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsDeleteModalUiConnectorsNameDeleteGet(ctx context.Context, name string, body UiConnectorsDeleteModalUiConnectorsNameDeleteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDeleteModalUiConnectorsNameDeleteGetRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithBody(ctx context.Context, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDeleteSubmitUiConnectorsNameDeletePostRequestWithBody(c.Server, name, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsDeleteSubmitUiConnectorsNameDeletePost(ctx context.Context, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, body UiConnectorsDeleteSubmitUiConnectorsNameDeletePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDeleteSubmitUiConnectorsNameDeletePostRequest(c.Server, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -14613,6 +14682,122 @@ func NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithBody(server string
 	return req, nil
 }
 
+// NewUiConnectorsDeleteModalUiConnectorsNameDeleteGetRequest calls the generic UiConnectorsDeleteModalUiConnectorsNameDeleteGet builder with application/json body
+func NewUiConnectorsDeleteModalUiConnectorsNameDeleteGetRequest(server string, name string, body UiConnectorsDeleteModalUiConnectorsNameDeleteGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsDeleteModalUiConnectorsNameDeleteGetRequestWithBody(server, name, "application/json", bodyReader)
+}
+
+// NewUiConnectorsDeleteModalUiConnectorsNameDeleteGetRequestWithBody generates requests for UiConnectorsDeleteModalUiConnectorsNameDeleteGet with any type of body
+func NewUiConnectorsDeleteModalUiConnectorsNameDeleteGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/delete", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsDeleteSubmitUiConnectorsNameDeletePostRequest calls the generic UiConnectorsDeleteSubmitUiConnectorsNameDeletePost builder with application/json body
+func NewUiConnectorsDeleteSubmitUiConnectorsNameDeletePostRequest(server string, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, body UiConnectorsDeleteSubmitUiConnectorsNameDeletePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsDeleteSubmitUiConnectorsNameDeletePostRequestWithBody(server, name, params, "application/json", bodyReader)
+}
+
+// NewUiConnectorsDeleteSubmitUiConnectorsNameDeletePostRequestWithBody generates requests for UiConnectorsDeleteSubmitUiConnectorsNameDeletePost with any type of body
+func NewUiConnectorsDeleteSubmitUiConnectorsNameDeletePostRequestWithBody(server string, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/delete", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Force != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "force", runtime.ParamLocationQuery, *params.Force); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiConnectorsEditModalUiConnectorsNameEditGetRequest calls the generic UiConnectorsEditModalUiConnectorsNameEditGet builder with application/json body
 func NewUiConnectorsEditModalUiConnectorsNameEditGetRequest(server string, name string, body UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -16389,6 +16574,16 @@ type ClientWithResponsesInterface interface {
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
 
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBodyWithResponse(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
+
+	// UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBodyWithResponse request with any body
+	UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse, error)
+
+	UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithResponse(ctx context.Context, name string, body UiConnectorsDeleteModalUiConnectorsNameDeleteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse, error)
+
+	// UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithBodyWithResponse request with any body
+	UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithBodyWithResponse(ctx context.Context, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse, error)
+
+	UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithResponse(ctx context.Context, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, body UiConnectorsDeleteSubmitUiConnectorsNameDeletePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse, error)
 
 	// UiConnectorsEditModalUiConnectorsNameEditGetWithBodyWithResponse request with any body
 	UiConnectorsEditModalUiConnectorsNameEditGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditModalUiConnectorsNameEditGetResponse, error)
@@ -18996,6 +19191,50 @@ func (r UiConnectorsEditSubmitUiConnectorsNamePatchResponse) StatusCode() int {
 	return 0
 }
 
+type UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConnectorsEditModalUiConnectorsNameEditGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -20833,6 +21072,40 @@ func (c *ClientWithResponses) UiConnectorsEditSubmitUiConnectorsNamePatchWithFor
 		return nil, err
 	}
 	return ParseUiConnectorsEditSubmitUiConnectorsNamePatchResponse(rsp)
+}
+
+// UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse
+func (c *ClientWithResponses) UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse, error) {
+	rsp, err := c.UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBody(ctx, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithResponse(ctx context.Context, name string, body UiConnectorsDeleteModalUiConnectorsNameDeleteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse, error) {
+	rsp, err := c.UiConnectorsDeleteModalUiConnectorsNameDeleteGet(ctx, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse(rsp)
+}
+
+// UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithBodyWithResponse request with arbitrary body returning *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse
+func (c *ClientWithResponses) UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithBodyWithResponse(ctx context.Context, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse, error) {
+	rsp, err := c.UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithBody(ctx, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithResponse(ctx context.Context, name string, params *UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams, body UiConnectorsDeleteSubmitUiConnectorsNameDeletePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse, error) {
+	rsp, err := c.UiConnectorsDeleteSubmitUiConnectorsNameDeletePost(ctx, name, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse(rsp)
 }
 
 // UiConnectorsEditModalUiConnectorsNameEditGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsEditModalUiConnectorsNameEditGetResponse
@@ -24530,6 +24803,58 @@ func ParseUiConnectorsEditSubmitUiConnectorsNamePatchResponse(rsp *http.Response
 	}
 
 	response := &UiConnectorsEditSubmitUiConnectorsNamePatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse parses an HTTP response from a UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithResponse call
+func ParseUiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse(rsp *http.Response) (*UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse parses an HTTP response from a UiConnectorsDeleteSubmitUiConnectorsNameDeletePostWithResponse call
+func ParseUiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse(rsp *http.Response) (*UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsDeleteSubmitUiConnectorsNameDeletePostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

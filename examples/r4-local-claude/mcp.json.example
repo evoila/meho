@@ -1,5 +1,5 @@
 {
-  "_comment_meho": "Drop this file into the root of the operator's local repo as `.mcp.json`. Claude Code picks it up on session start. Two variants are provided side-by-side: pick exactly one and delete the other.",
+  "_comment_meho": "Drop this file into the root of the operator's local repo as `.mcp.json`. Claude Code picks it up on session start. Two variants are provided side-by-side: pick exactly one and delete the other. The operator's MEHO access token comes from `meho login`'s credentials store -- see GUIDE.md Step 3 for the token-extraction recipe.",
 
   "mcpServers": {
     "_variant_a_direct_http": {
@@ -12,7 +12,7 @@
     },
 
     "_variant_b_mcp_remote_shim": {
-      "_comment": "VARIANT B -- stdio shim via `mcp-remote`. Works on every Claude Code version that supports stdio servers (effectively all of them), regardless of the realm's CIMD posture. The operator obtains a token out-of-band (`meho login --print-token`) and exports it as MEHO_MCP_TOKEN; mcp-remote injects it as `Authorization: Bearer ...` on every call.",
+      "_comment": "VARIANT B -- stdio shim via `mcp-remote`. Works on every Claude Code version that supports stdio servers (effectively all of them), regardless of the realm's CIMD posture. The operator obtains a token out-of-band by reading the access_token field from $XDG_CONFIG_HOME/meho/credentials.json (the file `meho login` writes when the OS keyring is unavailable) and exports it as MEHO_MCP_TOKEN; mcp-remote injects it as `Authorization: Bearer ...` on every call. GUIDE.md Step 3 carries the full extraction recipe.",
       "command": "npx",
       "args": [
         "-y",

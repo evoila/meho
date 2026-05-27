@@ -51,8 +51,10 @@ leakage, no second permissions surface.
 |---|---|
 | [`README.md`](./README.md) | This file. The one-paragraph framing. |
 | [`GUIDE.md`](./GUIDE.md) | The step-by-step operator recipe: `.mcp.json` wire-up, identity setup, scope grants, pair-up, alerting-flow walkthrough, verification commands. |
-| [`agent.alert-triage.json`](./agent.alert-triage.json) | A runnable `AgentDefinitionCreate` payload (model_tier=fast). `meho agent create` consumes it. |
-| [`scheduler.cron.json`](./scheduler.cron.json) | A `ScheduledTriggerCreate` payload (cron, every minute) that fires the triage agent. `meho scheduler create` consumes it. v0.2 ships cron-only because the `kind=event` matcher path is not yet wired ([`events/drain.py`](../../backend/src/meho_backplane/events/drain.py)); the cron loop pulls the latest broadcast events explicitly. |
+| [`agent.alert-triage.json`](./agent.alert-triage.json) | A runnable `AgentDefinitionCreate` payload (model_tier=fast). `meho agent create` consumes the top-level fields (`identity_ref`, `model_tier`, `system_prompt`, `turn_budget`); the `toolset` subobject is split into [`toolset.json`](./toolset.json) for `--toolset @<path>`. |
+| [`toolset.json`](./toolset.json) | The split-out `toolset` subobject. `meho agent create --toolset @examples/r4-local-claude/toolset.json` reads this file's JSON as the toolset value (the CLI's `--toolset @<path>` reads the whole file, not just one key — see [`cli/internal/cmd/agent/agent.go`](../../cli/internal/cmd/agent/agent.go) `loadJSONObjectFlag`). |
+| [`scheduler.cron.json`](./scheduler.cron.json) | A `ScheduledTriggerCreate` payload (cron, every 15 minutes by default) that fires the triage agent. `meho scheduler create` consumes the top-level fields; the `inputs` subobject is split into [`inputs.json`](./inputs.json) for `--inputs @<path>`. v0.2 ships cron-only because the `kind=event` matcher path is not yet wired ([`events/drain.py`](../../backend/src/meho_backplane/events/drain.py)); the cron loop pulls the latest broadcast events explicitly. |
+| [`inputs.json`](./inputs.json) | The split-out `inputs` subobject for `meho scheduler create --inputs @examples/r4-local-claude/inputs.json`. Same split rationale as `toolset.json`. |
 | [`mcp.json.example`](./mcp.json.example) | A `.mcp.json` snippet the operator drops into their local Claude Code project root. Covers both the direct HTTP transport and the `mcp-remote` shim path. |
 
 ## Composition only — no new MEHO surface

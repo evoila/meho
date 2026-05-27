@@ -541,6 +541,26 @@ class Settings(BaseModel):
         (``anthropic:claude-sonnet-4-6``), never a moving ``-latest`` tag,
         so a model swap is a deliberate config push. Set via
         ``AGENT_DEFAULT_MODEL``.
+    bedrock_region:
+        AWS region the Bedrock backend builder
+        (:func:`meho_backplane.agent.models.bedrock_backend_builder`)
+        constructs its provider against (G11.5-T2 #1076). Empty (the
+        default) defers to boto3's region-resolution chain
+        (``AWS_DEFAULT_REGION`` / ``AWS_REGION`` / shared profile); set
+        ``BEDROCK_REGION`` to pin the region explicitly when none of
+        those sources is wired (local dev, ad-hoc smoke tests).
+        Credentials follow the same boto3 chain (env vars / IRSA role
+        / EC2 instance profile / shared profile) — the backplane does
+        not surface AWS-credential settings of its own. A no-region,
+        no-credentials deployment that routes a tier to Bedrock
+        fail-closes at first agent invocation with an ``AgentRunError``
+        wrapping the underlying ``NoRegionError`` / auth error.
+    bedrock_default_model:
+        Pinned Bedrock model id the Converse loop uses when no per-tier
+        override is set. A full Bedrock id including the geo-prefix and
+        ``-v1:0`` suffix (e.g. ``us.anthropic.claude-sonnet-4-5-v1:0``),
+        never an alias — same posture as :attr:`agent_default_model`.
+        Set via ``BEDROCK_DEFAULT_MODEL``.
     agent_sync_timeout_seconds:
         Server-side timeout for a *synchronous* agent invocation
         (G11.1-T4 #811). A sync ``POST /api/v1/agents/{name}/run`` blocks
@@ -748,6 +768,24 @@ class Settings(BaseModel):
     # not override it (full id in config, not a moving ``-latest`` tag).
     anthropic_api_key: str = ""
     agent_default_model: str = Field(default="anthropic:claude-sonnet-4-6", min_length=1)
+    # G11.5-T2 #1076 — AWS Bedrock backend configuration. The Bedrock
+    # builder (``meho_backplane.agent.models.bedrock_backend_builder``)
+    # uses pydantic_ai's :class:`BedrockConverseModel` + ``boto3`` via
+    # the ``[bedrock]`` extra. ``bedrock_region`` empty (the default)
+    # defers to boto3's standard region-resolution chain
+    # (``AWS_DEFAULT_REGION`` / ``AWS_REGION`` / shared profile);
+    # ``boto3`` credentials follow the same chain (env vars / IRSA
+    # role / instance profile / shared profile). Set ``BEDROCK_REGION``
+    # to pin a region explicitly when the chain would otherwise miss
+    # (no env var + no IRSA, e.g. local dev). ``bedrock_default_model``
+    # is the pinned full Bedrock model id (geo-prefixed, ``-v1:0``-
+    # suffixed) the loop uses when an ``AgentDefinition`` doesn't
+    # override it. Like ``agent_default_model``, never a moving alias.
+    bedrock_region: str = ""
+    bedrock_default_model: str = Field(
+        default="us.anthropic.claude-sonnet-4-5-v1:0",
+        min_length=1,
+    )
     # G11.1-T4 #811 — server-side timeout for a *synchronous* agent run.
     # A sync ``POST /api/v1/agents/{name}/run`` blocks up to this many
     # seconds; a run still going at the deadline converts to async (the
@@ -1052,6 +1090,11 @@ def get_settings() -> Settings:
         agent_default_model=os.environ.get(
             "AGENT_DEFAULT_MODEL",
             "anthropic:claude-sonnet-4-6",
+        ),
+        bedrock_region=os.environ.get("BEDROCK_REGION", "").strip(),
+        bedrock_default_model=os.environ.get(
+            "BEDROCK_DEFAULT_MODEL",
+            "us.anthropic.claude-sonnet-4-5-v1:0",
         ),
         agent_sync_timeout_seconds=float(
             os.environ.get("AGENT_SYNC_TIMEOUT_SECONDS", "30.0"),

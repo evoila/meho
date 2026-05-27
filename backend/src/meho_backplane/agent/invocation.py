@@ -87,6 +87,7 @@ from meho_backplane.agent.run import (
     AgentRunError,
     AgentRunEvent,
     AgentRunEventKind,
+    BudgetExceededError,
     PydanticAgentRun,
 )
 from meho_backplane.agents.schemas import AgentDefinitionRead
@@ -105,6 +106,12 @@ from meho_backplane.operations._audit import (
     agent_run_audit_meta_var,
     agent_session_id_var,
 )
+from meho_backplane.operations.budget_enforcement import (
+    BudgetDecision,
+    BudgetDecisionKind,
+    EnforcementContext,
+    evaluate_pre_run_budget,
+)
 from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.settings import get_settings
 
@@ -116,6 +123,7 @@ __all__ = [
     "AgentRunNotFoundError",
     "AgentRunOutcome",
     "AgentRunStatusView",
+    "BudgetExceededError",
     "get_agent_invoker",
     "reset_agent_invoker_for_testing",
 ]
@@ -226,6 +234,42 @@ class _RunState:
 _DEFAULT_PROVIDER: Final[str] = "anthropic"
 
 
+def _log_decision(
+    decision: BudgetDecision,
+    *,
+    operator: Operator,
+    agent: str,
+) -> None:
+    """Emit one structured log line per pre-execution budget decision.
+
+    Three log shapes so an operator's ``grep`` / Loki query distinguishes
+    them at a glance:
+
+    * ``agent_run_refused_*`` -- already emitted by the enforcement
+      service itself (kill switch + cap-breach paths); this function
+      adds nothing in the REFUSE branch.
+    * ``agent_run_tier_downgraded`` / ``agent_run_threshold_no_cheaper_tier``
+      -- already emitted by the enforcement service.
+    * ``agent_run_budget_allowed`` -- the no-op happy-path line this
+      function emits when nothing fired, gated to ``debug`` so the
+      hot path stays quiet by default.
+
+    Centralising the post-decision logging here (rather than threading
+    it through every invocation entry point) keeps the audit trail
+    consistent across :meth:`AgentInvoker.run` /
+    :meth:`AgentInvoker.run_scheduled` /
+    :meth:`AgentInvoker.stream_events`.
+    """
+    if decision.kind is BudgetDecisionKind.ALLOW and not decision.downgraded:
+        _log.debug(
+            "agent_run_budget_allowed",
+            agent=agent,
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            tier=decision.tier.value if decision.tier is not None else None,
+        )
+
+
 def _split_model_id(model_id: str) -> tuple[str, str]:
     """Split ``"anthropic:claude-..."`` into ``(provider, model)``.
 
@@ -306,15 +350,79 @@ class AgentInvoker:
         """Validate the named agent is runnable for the tenant, run nothing.
 
         The SSE events route calls this *before* opening the stream so a
-        not-found / disabled error surfaces as a clean HTTP status rather
-        than a torn ``text/event-stream`` connection (which an
-        ``EventSource`` client would auto-reconnect into a hot loop).
+        not-found / disabled / budget-refused error surfaces as a clean
+        HTTP status rather than a torn ``text/event-stream`` connection
+        (which an ``EventSource`` client would auto-reconnect into a
+        hot loop). The budget gate runs here too (G11.5-T6 #1080) for
+        the same reason; the SSE generator's own re-check inside
+        :meth:`stream_events` is the source of truth for the resolved
+        tier the loop actually runs against, but the pre-stream call
+        gives the boundary a clean 4xx path.
 
         Raises:
             AgentNotFoundError: no such definition in the tenant.
             AgentDisabledError: the definition is disabled.
+            BudgetExceededError: the per-identity / per-tenant /
+                global pre-execution budget gate refused this run.
         """
-        await self._load_definition(operator, name)
+        entry = await self._load_definition(operator, name)
+        definition = self._to_agent_definition(entry)
+        # Discard the (possibly degraded) return value here: the gate
+        # is re-evaluated inside :meth:`stream_events` once the
+        # generator is actually entered, and that re-evaluation is
+        # the canonical one (it's the gate whose result the loop
+        # runs against). The pre-stream call just trips a 4xx ahead
+        # of the StreamingResponse.
+        await self._enforce_pre_run_budget(operator, definition)
+
+    async def _enforce_pre_run_budget(
+        self,
+        operator: Operator,
+        definition: AgentDefinition,
+    ) -> AgentDefinition:
+        """Run the G11.5-T6 pre-execution budget gate; return the (maybe degraded) definition.
+
+        Calls
+        :func:`~meho_backplane.operations.budget_enforcement.evaluate_pre_run_budget`
+        against the operator's tenant + sub, with the definition's
+        :attr:`AgentDefinition.tier` as the requested tier. On
+        :attr:`BudgetDecisionKind.REFUSE` raises
+        :class:`BudgetExceededError` (which the public surface
+        propagates as a 4xx / MCP elicitation refusal / terminal
+        ``ERROR`` SSE event); on :attr:`BudgetDecisionKind.ALLOW`
+        returns either the unchanged definition or a frozen-model
+        copy with ``tier`` replaced by the one-rung-cheaper tier the
+        policy picked (the runtime then resolves against that tier
+        via :class:`~meho_backplane.agent.run.PydanticAgentRun`'s
+        normal resolver path).
+
+        The check uses a short-lived session because the consumption
+        service is read-only here and the gate must commit no rows
+        (so a refused run leaves no DB footprint per the
+        :class:`BudgetExceededError` contract).
+        """
+        settings = get_settings()
+        context = EnforcementContext.from_settings(settings)
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            decision = await evaluate_pre_run_budget(
+                session,
+                tenant_id=operator.tenant_id,
+                principal_sub=operator.sub,
+                requested_tier=definition.tier,
+                context=context,
+            )
+        _log_decision(decision, operator=operator, agent=definition.name)
+        if decision.kind is BudgetDecisionKind.REFUSE:
+            raise BudgetExceededError(decision.reason)
+        if decision.downgraded and decision.tier is not None:
+            # The definition is frozen (Pydantic ConfigDict(frozen=True)),
+            # so the tier swap goes through ``model_copy`` rather than
+            # in-place mutation — keeps the original value object
+            # untouched for any concurrent reader and matches the
+            # frozen-data convention.
+            return definition.model_copy(update={"tier": decision.tier})
+        return definition
 
     @staticmethod
     def _to_agent_definition(entry: AgentDefinitionRead) -> AgentDefinition:
@@ -554,9 +662,19 @@ class AgentInvoker:
         Raises:
             AgentNotFoundError: no such definition in the tenant.
             AgentDisabledError: the definition is disabled.
+            BudgetExceededError: the per-identity / per-tenant /
+                global pre-execution budget gate refused this run
+                (G11.5-T6 #1080).
         """
         entry = await self._load_definition(operator, name)
         definition = self._to_agent_definition(entry)
+        # G11.5-T6 #1080 — pre-execution budget gate. Refused runs
+        # short-circuit *before* the durable row is created so a
+        # kill-switched deploy doesn't fill the runs table with
+        # ``failed`` rows on every retry. A degraded tier comes back as
+        # a modified definition copy; the runtime picks the cheaper
+        # backend via its normal resolver path.
+        definition = await self._enforce_pre_run_budget(operator, definition)
         settings = get_settings()
         provider, model = _split_model_id(settings.agent_default_model)
         # Resource-server delegation (G11.2-T2 #816): a human triggered this
@@ -678,6 +796,12 @@ class AgentInvoker:
                 f"do not own definition {name!r} (identity_ref={entry.identity_ref!r})"
             )
         definition = self._to_agent_definition(entry)
+        # G11.5-T6 #1080 — same pre-execution gate as :meth:`run`.
+        # A scheduler-fired run is the most common cost-runaway shape
+        # (a misconfigured cron firing every minute), so the gate is
+        # critical here even when the operator is a service account
+        # rather than a human.
+        definition = await self._enforce_pre_run_budget(operator, definition)
         provider, model = _split_model_id(settings.agent_default_model)
         run_id = await self._create_run_row(
             operator,
@@ -781,9 +905,19 @@ class AgentInvoker:
 
         Raises:
             AgentNotFoundError / AgentDisabledError: same as :meth:`run`.
+            BudgetExceededError: the per-identity / per-tenant /
+                global pre-execution budget gate refused this run
+                (G11.5-T6 #1080). The boundary maps it to a 4xx
+                response before the SSE connection is opened.
         """
         entry = await self._load_definition(operator, name)
         definition = self._to_agent_definition(entry)
+        # G11.5-T6 #1080 — pre-execution budget gate. Raised
+        # *before* the durable row is created so the SSE consumer
+        # gets a clean 4xx rather than a stream that opens and
+        # immediately emits a terminal ERROR event (which an
+        # ``EventSource`` client would auto-reconnect into).
+        definition = await self._enforce_pre_run_budget(operator, definition)
         settings = get_settings()
         provider, model = _split_model_id(settings.agent_default_model)
         run_id = await self._create_run_row(operator, entry, provider=provider, model=model)

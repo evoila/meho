@@ -43,6 +43,7 @@ from meho_backplane.agent.invocation import (
     AgentDisabledError,
     AgentNotFoundError,
     AgentRunNotFoundError,
+    BudgetExceededError,
     get_agent_invoker,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -99,6 +100,14 @@ async def _run_handler(
         raise McpInvalidParamsError("agent_not_found") from exc
     except AgentDisabledError as exc:
         raise McpInvalidParamsError("agent_disabled") from exc
+    except BudgetExceededError as exc:
+        # G11.5-T6 #1080 — the pre-execution budget gate refused this
+        # run. JSON-RPC has no spec-blessed "too many requests" code,
+        # so the closest signal is invalid-params with the reason in
+        # the message — same shape AgentNotFoundError / AgentDisabledError
+        # use here. The reason string carries which gate fired (cap /
+        # kill switch / per-identity zero limit).
+        raise McpInvalidParamsError(f"budget_exceeded: {exc.reason}") from exc
     return {
         "run_id": str(outcome.run_id),
         "status": outcome.status.value,

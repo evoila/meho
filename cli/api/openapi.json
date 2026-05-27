@@ -4599,7 +4599,7 @@
           "agents"
         ],
         "summary": "Run Agent",
-        "description": "Run the named agent for the operator's tenant.\n\nSync (default) blocks up to ``agent_sync_timeout_seconds`` and returns\nthe final output at 200; a longer run converts to async and returns a\nhandle at 202. ``async=true`` returns the handle immediately. A\ncross-tenant / absent name is 404; a disabled definition is 409.",
+        "description": "Run the named agent for the operator's tenant.\n\nSync (default) blocks up to ``agent_sync_timeout_seconds`` and returns\nthe final output at 200; a longer run converts to async and returns a\nhandle at 202. ``async=true`` returns the handle immediately. A\ncross-tenant / absent name is 404; a disabled definition is 409; a\nbudget-refused run (per-identity cap reached, per-tenant or global\nkill switch on \u2014 G11.5-T6 #1080) is 429 with the reason in the\n``detail`` body so the operator sees which gate fired.",
         "operationId": "run_agent_api_v1_agents__name__run_post",
         "parameters": [
           {

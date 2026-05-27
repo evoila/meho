@@ -33,6 +33,7 @@ the test routes in production — the documented contract is that
 import os
 from functools import lru_cache
 from typing import Final
+from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
@@ -617,6 +618,32 @@ class Settings(BaseModel):
         present). Same posture as ``agent_default_model``: a full id,
         never a moving alias, so model swaps are deliberate config
         pushes. Set via ``OPENAI_DEFAULT_MODEL``.
+    agent_budget_degrade_threshold:
+        Fraction of a per-identity budget window's limit at which the
+        graceful-degradation policy (G11.5-T6 #1080) downgrades the
+        resolved tier one step before the model is built. Default
+        ``0.8`` per Initiative #806 ("at 80% drop to a cheaper tier; at
+        100% refuse"). Set via ``AGENT_BUDGET_DEGRADE_THRESHOLD``. The
+        downgrade ladder is INVESTIGATE → SUMMARIZE → TRIAGE; TRIAGE
+        cannot downgrade further (it is the cheapest tier) and is
+        allowed to run until the hard cap fires. Values outside
+        ``[0, 1)`` are rejected.
+    agent_runs_disabled_global:
+        Global kill switch (G11.5-T6 #1080). When ``true``, every agent
+        run is refused before any model is resolved or any DB row is
+        created, raising
+        :class:`~meho_backplane.agent.run.BudgetExceededError`. Default
+        ``false``. Set via ``AGENT_RUNS_DISABLED_GLOBAL``. The
+        operator's emergency stop for an in-flight cost runaway when
+        per-identity caps are not enough. Per-tenant gating is
+        ``agent_runs_disabled_tenants``; per-identity gating is
+        ``identity_budget.request_limit=0`` (set via the consumption
+        service's ``set_limits``).
+    agent_runs_disabled_tenants:
+        Comma-separated tenant UUIDs whose agent runs are kill-
+        switched (G11.5-T6 #1080). Case-insensitive; whitespace
+        between values ignored. An empty string (the default) means no
+        tenants are disabled. Set via ``AGENT_RUNS_DISABLED_TENANTS``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
@@ -814,6 +841,35 @@ class Settings(BaseModel):
     openai_api_key: str = ""
     openai_base_url: str = ""
     openai_default_model: str = Field(default="openai:gpt-4o-mini", min_length=1)
+    # G11.5-T6 #1080 — pre-execution budget enforcement knobs. The
+    # threshold is the fraction of a window's limit at which the
+    # graceful-degradation policy fires: at or above this ratio the
+    # runtime downgrades the resolved tier one step (INVESTIGATE →
+    # SUMMARIZE → TRIAGE) before resolving, so a high-cost backend
+    # stops getting picked while there is still some headroom. Default
+    # 0.8 mirrors the Initiative #806 acceptance criteria ("at 80% drop
+    # to a cheaper tier; at 100% refuse"). Set via
+    # ``AGENT_BUDGET_DEGRADE_THRESHOLD``; values outside [0, 1) are
+    # rejected (0 = always-degrade, useless; ≥1 = never-degrade, defeats
+    # the point — use the global kill switch for "no agent runs" instead).
+    agent_budget_degrade_threshold: float = Field(default=0.8, ge=0, lt=1)
+    # G11.5-T6 #1080 — global kill switch. When ``true``, every
+    # ``AgentInvoker.run`` / ``run_scheduled`` / ``stream_events`` call
+    # is refused before any model is resolved or any DB row is created,
+    # raising :class:`~meho_backplane.agent.run.BudgetExceededError`.
+    # Default ``false``. Set via ``AGENT_RUNS_DISABLED_GLOBAL`` — the
+    # operator's emergency stop for an in-flight cost runaway when
+    # per-identity caps are not enough. Per-tenant gating is the
+    # comma-separated ``AGENT_RUNS_DISABLED_TENANTS`` list below;
+    # per-identity gating is ``identity_budget.request_limit=0`` (which
+    # the consumption service already exposes via ``set_limits``).
+    agent_runs_disabled_global: bool = False
+    # G11.5-T6 #1080 — per-tenant kill switch. Comma-separated tenant
+    # UUIDs (case-insensitive, whitespace ignored). A run whose
+    # operator's ``tenant_id`` matches any value here is refused
+    # exactly like the global switch. An empty string (the default) is
+    # "no tenants disabled". Set via ``AGENT_RUNS_DISABLED_TENANTS``.
+    agent_runs_disabled_tenants: str = ""
     # G11.3-T2 #823 — cron + one-off trigger scheduler. ``tick_interval``
     # bounds how often the loop scans for due triggers; the default
     # (30 s) is the consumer-doc-accepted granularity for cron triggers
@@ -941,6 +997,40 @@ class Settings(BaseModel):
                 f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must be a valid "
                 f"str.format pattern; got: {value!r}"
             ) from exc
+        return value
+
+    @field_validator("agent_runs_disabled_tenants")
+    @classmethod
+    def _agent_runs_disabled_tenants_must_be_uuid_csv(cls, value: str) -> str:
+        """Reject ``AGENT_RUNS_DISABLED_TENANTS`` entries that aren't UUIDs.
+
+        Pulled up to :class:`Settings` construction so a typo'd env var
+        fails the pod start rather than silently matching nothing at
+        gate-evaluation time (the kill switch is supposed to fire, and a
+        deploy that thinks it's kill-switched but isn't is the worst-
+        case outcome). Same fail-closed-at-startup discipline as
+        :meth:`_broadcast_url_must_use_supported_scheme` and
+        :meth:`_scheduler_secret_pattern_must_substitute_client_id`:
+        misconfigured env vars surface at import time with an
+        actionable message that names the offending entry.
+
+        Empty values (the documented default, "no tenants disabled")
+        and blank-separator artefacts (trailing comma, double comma)
+        are tolerated -- the gate parser at
+        :func:`~meho_backplane.operations.budget_enforcement.evaluate_pre_run_budget`
+        skips empty chunks already, and this validator mirrors that
+        leniency so the validator's accept-set is exactly the
+        gate's accept-set.
+        """
+        for chunk in (part.strip() for part in value.split(",")):
+            if not chunk:
+                continue
+            try:
+                UUID(chunk)
+            except ValueError as exc:
+                raise ValueError(
+                    f"AGENT_RUNS_DISABLED_TENANTS entries must be UUIDs; got {chunk!r}"
+                ) from exc
         return value
 
 
@@ -1107,6 +1197,16 @@ def get_settings() -> Settings:
         openai_default_model=os.environ.get(
             "OPENAI_DEFAULT_MODEL",
             "openai:gpt-4o-mini",
+        ),
+        agent_budget_degrade_threshold=float(
+            os.environ.get("AGENT_BUDGET_DEGRADE_THRESHOLD", "0.8"),
+        ),
+        agent_runs_disabled_global=parse_bool_env(
+            os.environ.get("AGENT_RUNS_DISABLED_GLOBAL"),
+        ),
+        agent_runs_disabled_tenants=os.environ.get(
+            "AGENT_RUNS_DISABLED_TENANTS",
+            "",
         ),
         scheduler_tick_interval_seconds=int(
             os.environ.get("SCHEDULER_TICK_INTERVAL_SECONDS", "30"),

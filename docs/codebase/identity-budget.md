@@ -22,8 +22,10 @@ on a `(tenant, principal, window-kind, window-start)` tuple. Task #1079
   atomically in the same transaction as the `succeed_run` transition.
 
 Enforcement (the *"refuse at the cap, downgrade at the threshold"*
-half) lands in Task #1080 (G11.5-T6 / C3-b). This task is intentionally
-**observational only** — it records, it does not block.
+half) is Task #1080 (G11.5-T6 / C3-b) — see "Enforcement" below.
+This module is intentionally **observational only** — it records, it
+does not block; `budget_enforcement.py` is the decider companion that
+reads the same rows.
 
 ## Key types
 
@@ -170,10 +172,76 @@ The `(window_kind)` filter on top of the b-tree is cheap in-memory because the r
 
 - **Upstream:** `agent_run` table (#813), `agent_principal` table (#815),
   `tenant` table (G0.1). All present on `main`.
-- **Downstream consumer (sibling):** G11.5-T6 / C3-b (#1080) — the
-  pre-execution enforcement gate + degradation policy. Reads
-  `BudgetReading` from `get_remaining` and decides
-  `auto-execute | downgrade-tier | refuse`.
+- **Downstream consumer (sibling):** G11.5-T6 / C3-b (#1080) — landed
+  on `main`. See "Enforcement" below.
+
+## Enforcement (G11.5-T6 #1080)
+
+`budget_enforcement.py` is the **decider** companion to this
+**recorder** module. Per Initiative #806's *"at 80% drop to a cheaper
+tier; at 100% refuse"* DoD, it adds a single
+`evaluate_pre_run_budget` call at the agent-run dispatch seam
+(`AgentInvoker.run` / `AgentInvoker.run_scheduled` /
+`AgentInvoker.stream_events`, plus `ensure_runnable` for the SSE
+pre-check) that produces a `BudgetDecision`:
+
+- **REFUSE** — the runtime raises `BudgetExceededError` (subclass of
+  `AgentRunError`); no `agent_run` row is created.
+- **ALLOW (no change)** — the run proceeds against the requested tier.
+- **ALLOW (downgraded)** — the runtime resolves the cheaper tier
+  one rung down `TIER_DOWNGRADE_LADDER`
+  (INVESTIGATE → SUMMARIZE → TRIAGE) before building the model.
+
+### Knobs
+
+| Setting | Default | Role |
+|---|---|---|
+| `AGENT_BUDGET_DEGRADE_THRESHOLD` | `0.8` | Ratio at which a window flips to "downgrade tier" |
+| `AGENT_RUNS_DISABLED_GLOBAL` | `false` | Hard global kill switch (refuse every run) |
+| `AGENT_RUNS_DISABLED_TENANTS` | `""` | Comma-separated tenant UUIDs refused |
+
+The **per-identity kill switch** is the existing
+`IdentityBudget.request_limit = 0` row (set via the consumption
+service's `set_limits`); the enforcement gate's cap-breach branch
+picks it up alongside cap-by-use, and the reason string distinguishes
+the two for the audit row.
+
+### Boundary mapping
+
+| Surface | On `BudgetExceededError` |
+|---|---|
+| REST `POST /api/v1/agents/{name}/run` | `HTTP 429` with body `{"detail": {"error": "budget_exceeded", "reason": "..."}}` |
+| REST `POST /api/v1/agents/{name}/run/events` | Same `429` *before* the SSE stream opens (via `ensure_runnable`) |
+| MCP `meho.agents.run` | JSON-RPC `-32602` (invalid params) with message `budget_exceeded: <reason>` |
+| Scheduler fire | Logged at `WARN` and the trigger is *not* retried this tick (the cap is the contract) |
+
+### Why all three windows are checked
+
+The gate inspects the daily + weekly + monthly buckets and refuses on
+the worst-case across the three — a run can be under-budget for today
+but over-budget for the month. The conservative-read is the right
+answer for the Initiative DoD *"total cost stays under the configured
+budget"*.
+
+### What does **not** trigger degradation
+
+The threshold branch fires on the **tokens** and **cost** dimensions
+only — not requests. A cheaper tier doesn't help with a "you used 9
+of 10 daily request slots" cap (each run is still one request), so
+degradation on requests would be semantically wrong; the request cap
+fires only at the hard refusal.
+
+### What is **deferred**
+
+- **M1 persistence wiring + enum unification.** The persisted
+  `AgentModelTier` (`standard` / `fast` / `deep`) and the
+  resolver's `AgentTier` (`triage` / `investigate` / `summarize`)
+  remain orthogonal. `_to_agent_definition` keeps its TODO; until
+  the unification lands, the enforcement gate runs against
+  `definition.tier` (still `None` for persisted definitions, set
+  by tests + the resolver path). The threshold-degradation path
+  exercises directly via programmatic `AgentDefinition`
+  construction in tests.
 
 ## Known issues
 

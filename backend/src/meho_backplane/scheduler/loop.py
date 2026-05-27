@@ -127,6 +127,7 @@ from meho_backplane.agent.invocation import (
     AgentInvocationError,
     AgentInvoker,
     AgentNotFoundError,
+    BudgetExceededError,
     get_agent_invoker,
 )
 from meho_backplane.auth.agent_token import AgentTokenError
@@ -520,17 +521,33 @@ async def _dispatch_invocation(
             agent_client_id=prepared.agent_client_id,
             agent_client_secret=prepared.agent_client_secret,
         )
-    except (AgentNotFoundError, AgentDisabledError, AgentInvocationError) as exc:
+    except (
+        AgentNotFoundError,
+        AgentDisabledError,
+        AgentInvocationError,
+        BudgetExceededError,
+    ) as exc:
         # AgentInvocationError covers the identity-binding refusal
         # (the agent's credentials don't own the definition name) the
         # scheduler must not retry blindly -- a misconfigured trigger
-        # would otherwise log-spam every tick.
-        _log.warning(
-            "scheduler_invoke_refused",
-            trigger_id=str(row.id),
-            agent_name=prepared.name,
-            reason=type(exc).__name__,
-        )
+        # would otherwise log-spam every tick. BudgetExceededError
+        # (G11.5-T6 #1080) is the per-identity / per-tenant / global
+        # pre-execution budget refusal; treated the same way -- the
+        # scheduler must not blast through a kill switch on every
+        # tick, the cap is the contract. When the refusal is a budget
+        # gate, also surface ``exc.reason`` (machine-readable refusal
+        # tag: ``per_identity_*``, ``per_tenant_kill_switch``,
+        # ``global_kill_switch``) so on-call can tell from a single
+        # log line which gate fired, without grepping for the
+        # exception's text.
+        log_kwargs = {
+            "trigger_id": str(row.id),
+            "agent_name": prepared.name,
+            "reason": type(exc).__name__,
+        }
+        if isinstance(exc, BudgetExceededError):
+            log_kwargs["budget_reason"] = exc.reason
+        _log.warning("scheduler_invoke_refused", **log_kwargs)
         return False
     except AgentTokenError as exc:
         # Network / Keycloak failure on the client_credentials grant.

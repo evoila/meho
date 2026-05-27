@@ -1,0 +1,21 @@
+{
+  "_comment": "Sample AgentPermission grants for the demo agent. Each row is one INSERT into backend/src/meho_backplane/db/models.py:AgentPermission. Substitute <agent-principal-sub> with the Keycloak sub from agent_definition.json's identity_ref. Apply via the /api/v1/agent-grants surface (G11.2-T6 #819) or `meho agent-permissions apply permissions.json`.",
+  "_note_on_specificity": "These two rows together demonstrate the resolver's specificity tie-break: row 1 grants needs-approval on the exact revert op_id; row 2 grants auto-execute on the broader vmware.composite.vm.* glob. The exact-match row wins for the revert op (longer literal prefix), so the revert pauses for approval even though the broader grant would auto-execute. See backend/src/meho_backplane/auth/permissions.py:_pattern_specificity.",
+  "_note_on_safety_ceiling": "Row 2's auto-execute on vmware.composite.vm.* would still be tightened to needs-approval for any op the connector flagged requires_approval=True (the safety_level ceiling — see permissions.py:_apply_ceiling). Destructive ops are never auto-executed; an explicit grant only lifts deny to needs-approval, never to auto-execute.",
+  "permissions": [
+    {
+      "principal_sub": "<agent-principal-sub>",
+      "op_pattern": "vmware.composite.vm.snapshot.revert",
+      "target_scope": "*",
+      "verdict": "needs-approval",
+      "_purpose": "The change-class op the demo exercises. Exact op_id match keeps the resolver pinning on this row regardless of any broader glob."
+    },
+    {
+      "principal_sub": "<agent-principal-sub>",
+      "op_pattern": "vmware.composite.vm.*",
+      "target_scope": "*",
+      "verdict": "auto-execute",
+      "_purpose": "Optional second row demonstrating the specificity / safety-level interplay. Read/info ops under the same prefix auto-execute; destructive ops (snapshot.revert, lifecycle, etc.) still land on needs-approval because row 1 is more specific AND the safety ceiling tightens auto-execute on dangerous ops."
+    }
+  ]
+}

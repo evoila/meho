@@ -416,7 +416,88 @@ so the operator's draft persists without a hidden-textarea seed.
 `max-width: 100%` and scroll inside their own box; tables use
 `display: block; overflow-x: auto`; images cap at `max-width: 100%`.
 
-Upload (T2) may add further routes to the same package.
+## KB upload surface (G10.2-T2 #871)
+
+Task [#871](https://github.com/evoila/meho/issues/871) extends
+`meho_backplane.ui.routes.kb` with the upload surface. All upload
+routes require `tenant_admin` role enforced by the new
+`require_ui_admin` dependency in `meho_backplane.ui.auth.middleware`.
+
+### Routes
+
+| Route | Renders |
+| ----- | ------- |
+| `GET /ui/kb/upload` | Upload page (`kb/upload.html`) with Alpine.js drag-and-drop zone. Mints a CSRF token and sets the `meho_csrf` cookie. `tenant_admin` required. |
+| `POST /ui/kb/upload` | Single-file upload. Accepts one `.md` file (field `file`) via `multipart/form-data`. Optional `slug` field overrides the filename-derived slug. Calls `KbService.create_entry` (idempotent on same body_hash). Returns `kb/_upload_progress.html` partial with `alert-success` or `alert-error`. |
+| `POST /ui/kb/upload/bulk` | Bulk upload. Accepts multiple `.md` files under the `file` field. Processes each independently (partial failure allowed). Returns the same `kb/_upload_progress.html` partial with a per-file results table. |
+
+**Route ordering:** `GET /ui/kb/upload` is registered before
+`GET /ui/kb/{slug}` in `build_kb_router()` so FastAPI's first-match-wins
+routing does not swallow the literal "upload" path segment as a slug.
+
+### RBAC gate (`require_ui_admin`)
+
+`UISessionContext` (the context returned by `require_ui_session`)
+deliberately omits the tenant role to keep read-only routes free of
+JWT-decode overhead. Upload routes chain `require_ui_admin` on top:
+
+1. Loads the `DecryptedSession` from the DB (Fernet-decrypted
+   `access_token`).
+2. Calls `verify_jwt_for_audience` to decode the JWT and extract
+   `TenantRole`.
+3. Compares rank against `TENANT_ADMIN`; raises HTTP 403 with
+   `detail="tenant_admin_required"` if insufficient.
+4. Returns the same `UISessionContext` so callers use `tenant_id` /
+   `operator_sub` without a second dependency.
+
+`operator` and `read_only` roles receive a 403, not a redirect.
+Unauthenticated requests still get the standard 302 → login from
+`require_ui_session`.
+
+### File validation
+
+`_process_upload_files()` enforces the following per file before
+calling `KbService.create_entry`:
+
+- Extension must be `.md` (case-insensitive).
+- Size cap: 512 KiB (`_MAX_UPLOAD_BYTES`). Enforced by reading only
+  `_MAX_UPLOAD_BYTES + 1` bytes and checking the length.
+- Content must decode as valid UTF-8.
+- Slug derivation: strips `.md`, NFKD-normalises, lower-cases,
+  replaces non-alphanumeric runs with hyphens, strips leading/trailing
+  hyphens, caps at 200 chars (`_filename_to_slug()`).
+- Slug is validated by `KbService.create_entry` (raises
+  `InvalidKbSlugError` on invalid shape).
+
+Errors are caught per-file; the list always has one entry per uploaded
+file so the template renders every row.
+
+### OOB live-list update
+
+On success, `kb/_upload_progress.html` emits a bare `<tr
+hx-swap-oob="afterbegin:#kb-results-body">` element for each
+newly created entry. HTMX 2 picks this up and prepends the row into
+the visible KB list table (`#kb-results-body` in `_results.html`)
+without a page reload. If the operator navigated directly to
+`/ui/kb/upload` (so the list table is not rendered), HTMX silently
+ignores the OOB swap because the target element does not exist in the
+active DOM.
+
+### Idempotency
+
+`KbService.create_entry` is body-hash idempotent: re-uploading the
+same Markdown content returns the existing entry rather than creating a
+duplicate. The upload endpoint reports `status="success"` on both the
+first ingest and subsequent identical re-uploads.
+
+### Tests
+
+`backend/tests/test_ui_kb_upload.py` covers: route-ordering regression,
+auth boundary (unauthenticated → 302), RBAC (operator → 403), upload
+page render, single-file success + OOB row, slug override, non-`.md`
+rejection, oversized rejection, binary/non-UTF-8 rejection, invalid slug
+override, bulk upload with partial failure, idempotent re-upload, and
+CSRF enforcement.
 
 The chassis smoke test
 [`backend/tests/test_ui_chassis_smoke.py`](../../backend/tests/test_ui_chassis_smoke.py)

@@ -7629,6 +7629,68 @@
         }
       }
     },
+    "/ui/kb/upload": {
+      "get": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Upload Page",
+        "description": "Render the KB upload page with the Alpine drag-and-drop component.\n\n``tenant_admin`` role required (enforced by\n:func:`~meho_backplane.ui.auth.middleware.require_ui_admin`).\nMints a fresh CSRF token and sets the ``meho_csrf`` cookie so\nthe Alpine component can echo it in ``X-CSRF-Token`` on every\n``hx-post``.",
+        "operationId": "kb_upload_page_ui_kb_upload_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Upload Single",
+        "description": "Single-file upload endpoint. Returns the ``_upload_progress.html`` partial.\n\nAccepts one ``.md`` file via ``multipart/form-data``. The ``slug``\nform field overrides the filename-derived slug when non-empty. The\nresponse fragment carries ``hx-swap-oob`` so HTMX inserts the new\nentry row into ``#kb-results`` on success.\n\nCSRF enforced by the chassis :class:`~meho_backplane.ui.csrf.CSRFMiddleware`\nvia the ``X-CSRF-Token`` header the Alpine component injects.",
+        "operationId": "kb_upload_single_ui_kb_upload_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_kb_upload_single_ui_kb_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/kb/{slug}": {
       "get": {
         "tags": [
@@ -7779,6 +7841,48 @@
             "application/x-www-form-urlencoded": {
               "schema": {
                 "$ref": "#/components/schemas/Body_kb_editor_save_ui_kb_new_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/upload/bulk": {
+      "post": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Upload Bulk",
+        "description": "Bulk upload endpoint. Returns the ``_upload_progress.html`` partial.\n\nAccepts multiple ``.md`` files under the ``file`` field. Per-file\nslug is derived from the filename; no override available in bulk\nmode (the upload page does not render slug override inputs for bulk\npaths). Partial failures are allowed \u2014 each file is processed\nindependently; a failure on one file does not abort the others.\n\nCSRF enforced by the chassis :class:`~meho_backplane.ui.csrf.CSRFMiddleware`.",
+        "operationId": "kb_upload_bulk_ui_kb_upload_bulk_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_kb_upload_bulk_ui_kb_upload_bulk_post"
               }
             }
           },
@@ -8974,6 +9078,42 @@
         },
         "type": "object",
         "title": "Body_kb_search_ui_kb_search_post"
+      },
+      "Body_kb_upload_bulk_ui_kb_upload_bulk_post": {
+        "properties": {
+          "file": {
+            "items": {
+              "type": "string",
+              "contentMediaType": "application/octet-stream"
+            },
+            "type": "array",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_kb_upload_bulk_ui_kb_upload_bulk_post"
+      },
+      "Body_kb_upload_single_ui_kb_upload_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_kb_upload_single_ui_kb_upload_post"
       },
       "Body_ui_connectors_create_submit_ui_connectors_create_post": {
         "properties": {

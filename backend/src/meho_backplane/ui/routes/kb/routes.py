@@ -3,7 +3,8 @@
 
 """KB UI routes: list/search + entry detail + hover preview partial + editor.
 
-Initiative #339 (G10.2 Knowledge base UI). Tasks #870 (T1) + #872 (T3).
+Initiative #339 (G10.2 Knowledge base UI). Tasks #870 (T1) + #872 (T3)
++ #871 (T2).
 
 T1 routes (read surface):
 
@@ -50,7 +51,32 @@ T3 routes (editor + mobile reflow):
   :meth:`~meho_backplane.kb.KbService.create_entry`. Returns an HTMX
   redirect (``HX-Redirect``) to the new entry's detail page on success,
   or re-renders the editor modal with a visible error message on failure.
+Upload routes (T2, #871):
 
+* ``GET /ui/kb/upload`` — upload page. Renders the Alpine.js
+  drag-and-drop component (``kb/upload.html``). ``tenant_admin`` role
+  required; ``operator`` gets 403. A CSRF token is minted and set on
+  the cookie; the Alpine component echoes it via ``X-CSRF-Token``.
+
+* ``POST /ui/kb/upload`` — single-file upload endpoint. Accepts one
+  ``.md`` file via ``multipart/form-data`` (field name ``file``).
+  The ``slug`` form field overrides the filename-derived slug if
+  provided. Calls :meth:`~meho_backplane.kb.KbService.create_entry`
+  (idempotent on same ``body_hash``). On success returns the
+  ``kb/_upload_progress.html`` fragment with ``status="success"``
+  plus an ``hx-swap-oob`` to insert the new entry row into the
+  ``#kb-results`` table; on failure returns the same fragment with
+  ``status="error"`` and the error message. CSRF enforced via the
+  chassis ``CSRFMiddleware``.
+
+* ``POST /ui/kb/upload/bulk`` — bulk upload endpoint. Accepts
+  multiple ``.md`` files under the same ``file`` field (the browser
+  ``<input multiple>`` shape). Processes each file independently;
+  partial failures are allowed (some succeed, some report errors).
+  Returns the ``kb/_upload_progress.html`` partial with per-file
+  progress rows (``status="success"`` / ``status="error"`` per file).
+  On success rows the entry is also added to ``#kb-results`` via
+  ``hx-swap-oob``. CSRF enforced.
 Tenant scoping
 --------------
 
@@ -73,6 +99,11 @@ the access token through
 403 if the operator's ``tenant_role`` is below ``TENANT_ADMIN``. This
 mirrors the ``/api/v1/kb POST`` RBAC posture without adding a separate
 auth middleware layer.
+Read routes (T1): ``operator`` role minimum (enforced by
+:func:`~meho_backplane.ui.auth.middleware.require_ui_session`).
+Upload routes (T2): ``tenant_admin`` required, enforced by
+:func:`~meho_backplane.ui.auth.middleware.require_ui_admin` which
+loads the session's access token and decodes the role claim.
 
 HTMX conventions
 ----------------
@@ -105,10 +136,11 @@ References
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Final
 
 import structlog
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response
 
 from meho_backplane.auth.jwt import verify_jwt_for_audience
@@ -117,7 +149,11 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.kb import KbEntry, KbEntrySearchHit, KbService
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.auth.middleware import (
+    UISessionContext,
+    require_ui_admin,
+    require_ui_session,
+)
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
@@ -150,10 +186,20 @@ _MAX_EDITOR_BODY_LENGTH: Final[int] = 65_536
 
 #: Maximum length of the comma-separated tags field on the editor save form.
 _MAX_TAGS_LENGTH: Final[int] = 500
-
+#: Maximum size of a single uploaded ``.md`` file in bytes. 512 KiB is
+#: well above the consumer kb's typical entry size (~5-10 KiB) while
+#: preventing a single oversized upload from exhausting worker memory on
+#: the embedding path (the indexer holds the body in-process during
+#: embedding). Bulk uploads apply this limit per file.
+_MAX_UPLOAD_BYTES: Final[int] = 512 * 1024
 #: Module-level Depends closure for the require_ui_session gate.
 #: Matches the ruff B008 idiom the topology and dashboard routes use.
 _require_session = Depends(require_ui_session)
+
+#: Module-level Depends closure for the require_ui_admin gate (T2 upload).
+#: Chains require_ui_admin which itself chains require_ui_session; callers
+#: declare only this dependency to get both session + admin-role checks.
+_require_admin = Depends(require_ui_admin)
 
 
 async def _require_tenant_admin(session_ctx: UISessionContext) -> None:
@@ -245,6 +291,33 @@ def _make_snippet(body: str, max_chars: int = 200) -> str:
     if last_space > max_chars // 2:
         truncated = truncated[:last_space]
     return truncated + "…"
+
+
+def _filename_to_slug(filename: str) -> str:
+    """Derive a kb slug from an uploaded filename.
+
+    Strips the ``.md`` extension, lower-cases, normalises unicode to
+    ASCII (NFKD + ASCII encode with ignore), replaces runs of
+    whitespace or non-alphanumeric characters with hyphens, and strips
+    leading/trailing hyphens. Returns the first 200 characters so an
+    absurdly long filename does not hit the slug validator's length cap
+    by accident.
+
+    The caller still validates the derived slug via
+    :func:`~meho_backplane.kb.schemas.validate_slug`; this function only
+    applies a best-effort normalisation, not a guarantee of validity.
+    """
+    stem = filename
+    if stem.lower().endswith(".md"):
+        stem = stem[:-3]
+    # NFKD + ASCII-encode strips accents + non-ASCII.
+    nfkd = unicodedata.normalize("NFKD", stem)
+    ascii_stem = nfkd.encode("ascii", "ignore").decode("ascii")
+    lowered = ascii_stem.lower()
+    # Replace any run of chars outside [a-z0-9] with a single hyphen.
+    hyphenated = re.sub(r"[^a-z0-9]+", "-", lowered)
+    slug = hyphenated.strip("-")
+    return slug[:200]
 
 
 def build_kb_router() -> APIRouter:
@@ -373,6 +446,42 @@ def build_kb_router() -> APIRouter:
             "active_surface": "knowledge",
         }
         return get_templates().TemplateResponse(request, "kb/_results.html", context)
+
+    # NOTE: /ui/kb/upload (GET) is registered here — BEFORE /ui/kb/{slug} —
+    # so FastAPI's first-match-wins routing does not swallow the literal
+    # "upload" segment as a slug parameter.
+
+    @router.get("/ui/kb/upload", response_class=HTMLResponse)
+    async def kb_upload_page(
+        request: Request,
+        session: UISessionContext = _require_admin,
+    ) -> HTMLResponse:
+        """Render the KB upload page with the Alpine drag-and-drop component.
+
+        ``tenant_admin`` role required (enforced by
+        :func:`~meho_backplane.ui.auth.middleware.require_ui_admin`).
+        Mints a fresh CSRF token and sets the ``meho_csrf`` cookie so
+        the Alpine component can echo it in ``X-CSRF-Token`` on every
+        ``hx-post``.
+        """
+        csrf_token = mint_csrf_token(str(session.session_id))
+        context = {
+            "operator_sub": session.operator_sub,
+            "csrf_token": csrf_token,
+            "active_surface": "knowledge",
+            "page_title": "Upload · Knowledge",
+            "ready": False,
+        }
+        response = get_templates().TemplateResponse(request, "kb/upload.html", context)
+        response.set_cookie(
+            key=CSRF_COOKIE_NAME,
+            value=csrf_token,
+            httponly=False,
+            secure=True,
+            samesite="strict",
+            path="/ui",
+        )
+        return response
 
     @router.get("/ui/kb/{slug}", response_class=HTMLResponse)
     async def kb_entry_detail(
@@ -576,5 +685,194 @@ def build_kb_router() -> APIRouter:
             path="/ui",
         )
         return response
+
+    # -----------------------------------------------------------------
+    # T2 upload routes (#871) — tenant_admin required
+    # (GET /ui/kb/upload is registered above, before /ui/kb/{slug})
+    # -----------------------------------------------------------------
+
+    @router.post("/ui/kb/upload", response_class=HTMLResponse)
+    async def kb_upload_single(
+        request: Request,
+        session: UISessionContext = _require_admin,
+        file: UploadFile = File(...),
+        slug: str = Form(default=""),
+    ) -> HTMLResponse:
+        """Single-file upload endpoint. Returns the ``_upload_progress.html`` partial.
+
+        Accepts one ``.md`` file via ``multipart/form-data``. The ``slug``
+        form field overrides the filename-derived slug when non-empty. The
+        response fragment carries ``hx-swap-oob`` so HTMX inserts the new
+        entry row into ``#kb-results`` on success.
+
+        CSRF enforced by the chassis :class:`~meho_backplane.ui.csrf.CSRFMiddleware`
+        via the ``X-CSRF-Token`` header the Alpine component injects.
+        """
+        rows = await _process_upload_files(
+            [file],
+            [slug],
+            tenant_id=session.tenant_id,
+        )
+        context = {
+            "rows": rows,
+            "bulk": False,
+        }
+        return get_templates().TemplateResponse(request, "kb/_upload_progress.html", context)
+
+    @router.post("/ui/kb/upload/bulk", response_class=HTMLResponse)
+    async def kb_upload_bulk(
+        request: Request,
+        session: UISessionContext = _require_admin,
+        file: list[UploadFile] = File(...),
+    ) -> HTMLResponse:
+        """Bulk upload endpoint. Returns the ``_upload_progress.html`` partial.
+
+        Accepts multiple ``.md`` files under the ``file`` field. Per-file
+        slug is derived from the filename; no override available in bulk
+        mode (the upload page does not render slug override inputs for bulk
+        paths). Partial failures are allowed — each file is processed
+        independently; a failure on one file does not abort the others.
+
+        CSRF enforced by the chassis :class:`~meho_backplane.ui.csrf.CSRFMiddleware`.
+        """
+        rows = await _process_upload_files(
+            file,
+            [""] * len(file),
+            tenant_id=session.tenant_id,
+        )
+        context = {
+            "rows": rows,
+            "bulk": True,
+        }
+        return get_templates().TemplateResponse(request, "kb/_upload_progress.html", context)
+
+    async def _process_upload_files(
+        files: list[UploadFile],
+        slug_overrides: list[str],
+        *,
+        tenant_id: object,
+    ) -> list[dict[str, object]]:
+        """Process a list of uploaded files and return per-file result rows.
+
+        Each entry in the returned list is a dict with:
+        ``filename``, ``slug``, ``status`` (``"success"`` / ``"error"``),
+        ``message`` (human-readable detail), and optionally ``entry``
+        (:class:`~meho_backplane.kb.KbEntry`) on success for the OOB swap.
+
+        Errors are caught per-file; the list length always equals
+        ``len(files)`` so the template can render every row.
+        """
+        rows: list[dict[str, object]] = []
+        for upload_file, slug_override in zip(files, slug_overrides, strict=False):
+            filename = upload_file.filename or "upload.md"
+
+            # Reject non-.md files early; don't read the body at all.
+            if not filename.lower().endswith(".md"):
+                rows.append(
+                    {
+                        "filename": filename,
+                        "slug": "",
+                        "status": "error",
+                        "message": "Only .md files are accepted",
+                        "entry": None,
+                    }
+                )
+                continue
+
+            # Read the file body, enforcing the size cap.
+            raw = await upload_file.read(_MAX_UPLOAD_BYTES + 1)
+            if len(raw) > _MAX_UPLOAD_BYTES:
+                rows.append(
+                    {
+                        "filename": filename,
+                        "slug": "",
+                        "status": "error",
+                        "message": f"File exceeds {_MAX_UPLOAD_BYTES // 1024} KiB limit",
+                        "entry": None,
+                    }
+                )
+                continue
+
+            try:
+                body = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                rows.append(
+                    {
+                        "filename": filename,
+                        "slug": "",
+                        "status": "error",
+                        "message": "File is not valid UTF-8",
+                        "entry": None,
+                    }
+                )
+                continue
+
+            # Determine slug: use override if non-empty, else derive from filename.
+            effective_slug = slug_override.strip() if slug_override else _filename_to_slug(filename)
+
+            if not effective_slug:
+                rows.append(
+                    {
+                        "filename": filename,
+                        "slug": effective_slug,
+                        "status": "error",
+                        "message": "Could not derive a valid slug from filename",
+                        "entry": None,
+                    }
+                )
+                continue
+
+            # Bind audit contextvars so AuditMiddleware writes a row with
+            # the correct op_id / op_class for this write operation.
+            structlog.contextvars.bind_contextvars(
+                audit_op_id="kb.ui_upload",
+                audit_op_class="write",
+            )
+            try:
+                entry = await kb.create_entry(
+                    tenant_id,  # type: ignore[arg-type]
+                    effective_slug,
+                    body,
+                    metadata={"source_filename": filename},
+                )
+            except InvalidKbSlugError as exc:
+                rows.append(
+                    {
+                        "filename": filename,
+                        "slug": effective_slug,
+                        "status": "error",
+                        "message": str(exc),
+                        "entry": None,
+                    }
+                )
+                continue
+            except Exception as exc:
+                log.exception(
+                    "kb_ui_upload_failed",
+                    filename=filename,
+                    slug=effective_slug,
+                )
+                rows.append(
+                    {
+                        "filename": filename,
+                        "slug": effective_slug,
+                        "status": "error",
+                        "message": f"Upload failed: {type(exc).__name__}",
+                        "entry": None,
+                    }
+                )
+                continue
+
+            rows.append(
+                {
+                    "filename": filename,
+                    "slug": effective_slug,
+                    "status": "success",
+                    "message": "Uploaded successfully",
+                    "entry": entry,
+                }
+            )
+
+        return rows
 
     return router

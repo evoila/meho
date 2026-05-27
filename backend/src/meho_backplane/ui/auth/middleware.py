@@ -81,7 +81,7 @@ from typing import Final, cast
 from urllib.parse import quote
 
 import structlog
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.db.engine import get_sessionmaker
@@ -93,6 +93,7 @@ __all__ = [
     "STATIC_PREFIX",
     "UISessionContext",
     "UISessionMiddleware",
+    "require_ui_admin",
     "require_ui_session",
 ]
 
@@ -338,3 +339,104 @@ def require_ui_session(request: Request) -> UISessionContext:
     # ``getattr`` return so the dependency's typed return survives
     # the dynamic attribute access.
     return cast(UISessionContext, context)
+
+
+async def require_ui_admin(
+    request: Request,
+    session: UISessionContext = Depends(require_ui_session),
+) -> UISessionContext:
+    """FastAPI dependency: assert ``tenant_admin`` role for the BFF session.
+
+    Loads the :class:`~meho_backplane.ui.auth.session_store.DecryptedSession`
+    to read the stored access token, then validates it via
+    :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience` to extract the
+    :class:`~meho_backplane.auth.operator.TenantRole`. Raises ``403
+    Forbidden`` when the role is below ``tenant_admin`` (i.e. ``operator``
+    or ``read_only``). Raises ``401`` when the session's access token is
+    missing or fails JWT validation (which should not happen in normal flow
+    since the middleware already verified the session is alive, but can occur
+    if the access token expired between session load and this call).
+
+    This is the T2 upload-RBAC gate: the :class:`UISessionContext` returned
+    by :func:`require_ui_session` deliberately omits the role to keep the
+    read-only surfaces free of JWT-decode overhead. State-changing upload
+    routes add this dependency on top of ``require_ui_session`` to enforce
+    ``tenant_admin``.
+
+    Returns the same ``UISessionContext`` so callers can use it for
+    ``tenant_id`` / ``operator_sub`` without a second dependency.
+    """
+    # Deferred import avoids a circular dependency: auth.middleware →
+    # auth.jwt (ok) but auth.jwt → settings → (no ui module import).
+    # The lazy import is inside the async function body (not module-level)
+    # so it runs once per request; the overhead is negligible compared to
+    # a DB round-trip + JWT decode.
+    from meho_backplane.auth.jwt import verify_jwt_for_audience
+    from meho_backplane.auth.operator import TenantRole
+    from meho_backplane.settings import get_settings
+
+    log = structlog.get_logger(__name__)
+    settings = get_settings()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session, db_session.begin():
+        from meho_backplane.ui.auth.session_store import load_session as _load_session
+
+        decrypted = await _load_session(db_session, session.session_id)
+
+    if decrypted is None:
+        # Session disappeared between middleware check and here (revoked /
+        # expired in the gap). Treat as unauthenticated.
+        log.info(
+            "ui_admin_gate_session_gone",
+            session_id=str(session.session_id),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="ui_session_required",
+        )
+
+    try:
+        operator = await verify_jwt_for_audience(
+            f"Bearer {decrypted.access_token}",
+            expected_audience=settings.keycloak_audience,
+        )
+    except HTTPException as exc:
+        log.info(
+            "ui_admin_gate_jwt_invalid",
+            session_id=str(session.session_id),
+            status_code=exc.status_code,
+        )
+        raise
+
+    _role_order: tuple[TenantRole, ...] = (
+        TenantRole.READ_ONLY,
+        TenantRole.OPERATOR,
+        TenantRole.TENANT_ADMIN,
+    )
+    try:
+        actual_rank = _role_order.index(operator.tenant_role)
+        required_rank = _role_order.index(TenantRole.TENANT_ADMIN)
+    except ValueError:
+        actual_rank = -1
+        required_rank = len(_role_order)
+
+    if actual_rank < required_rank:
+        log.info(
+            "ui_admin_gate_forbidden",
+            session_id=str(session.session_id),
+            actual_role=operator.tenant_role.value,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="tenant_admin_required",
+        )
+
+    # Bind operator identity into structlog contextvars so AuditMiddleware
+    # can attribute the write operation (reads operator_sub + tenant_id from
+    # contextvars to decide whether to write an audit row).
+    structlog.contextvars.bind_contextvars(
+        operator_sub=session.operator_sub,
+        tenant_id=str(session.tenant_id),
+    )
+
+    return session

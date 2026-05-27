@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""KB UI routes: list/search + entry detail + hover-preview partial + editor.
+"""KB UI routes: list/search + entry detail + hover-preview + editor + upload.
 
-Initiative #339 (G10.2 Knowledge base UI). Tasks #870 (T1) + #872 (T3).
-Ships the read surface at ``/ui/kb`` (T1) plus the editor modal (T3):
+Initiative #339 (G10.2 Knowledge base UI). Tasks #870 (T1) + #872 (T3)
++ #871 (T2).
 
 T1 (read surface):
 
@@ -30,11 +30,20 @@ T3 (editor modal + mobile reflow):
   ``HX-Redirect`` to the new entry's detail page on success or
   re-renders the modal with an inline error message on failure.
 
+T2 (upload surface):
+
+* ``GET /ui/kb/upload`` -- upload page with Alpine.js drag-and-drop
+  component. ``tenant_admin`` role required.
+* ``POST /ui/kb/upload`` -- single-file upload endpoint. Returns the
+  ``kb/_upload_progress.html`` HTMX partial.
+* ``POST /ui/kb/upload/bulk`` -- bulk upload endpoint. Returns the
+  same partial with per-file progress rows.
+
 The router is mounted **before**
 :func:`meho_backplane.ui.routes.stubs.build_stubs_router` in
 :func:`meho_backplane.ui.routes.build_router` so the real ``/ui/kb``
 handler wins the first-match-wins path lookup (the ``knowledge`` stub
-is retired by T1). Upload (T2) may add further routes to this package.
+is retired by T1).
 """
 
 from __future__ import annotations

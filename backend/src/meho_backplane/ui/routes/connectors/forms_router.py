@@ -18,6 +18,9 @@ Route inventory (all tenant_admin-gated server-side via
 * ``POST  /ui/connectors/create``        -- create submit handler.
 * ``GET   /ui/connectors/{name}/edit``   -- HTMX-loaded edit modal.
 * ``PATCH /ui/connectors/{name}``        -- edit submit handler.
+* ``GET   /ui/connectors/{name}/delete`` -- HTMX-loaded delete-confirm
+  modal (G0.15-T10 #1218; v0.7.0 dogfood signal #6 closure UI follow-up).
+* ``POST  /ui/connectors/{name}/delete`` -- delete submit handler.
 
 Registration order is **load-bearing**: the literal-prefix routes
 (``/ui/connectors/create``, ``/ui/connectors/{name}/edit``) are
@@ -30,7 +33,7 @@ target ``name`` by the detail handler.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,8 +42,10 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.routes.connectors.forms import (
     render_create_modal,
+    render_delete_modal,
     render_edit_modal,
     submit_create,
+    submit_delete,
     submit_edit,
 )
 from meho_backplane.ui.routes.connectors.operator import resolve_operator_or_403
@@ -134,6 +139,51 @@ async def _edit_modal_handler(
     return await render_edit_modal(request, session_ctx, db_session, target_name=name)
 
 
+async def _delete_modal_handler(
+    request: Request,
+    name: str,
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_admin_dep,
+    db_session: AsyncSession = _get_session_dep,
+) -> HTMLResponse:
+    """``GET /ui/connectors/{name}/delete`` -- HTMX-loaded confirm modal.
+
+    G0.15-T10 #1218. Pre-checks the cascade count so the modal can
+    show the operator how many topology rows reference the target
+    (the REST DELETE handler 409s when non-zero without ``?force=true``;
+    surfacing the count here lets the modal pre-set the force flag).
+    """
+    del operator  # gate only.
+    return await render_delete_modal(request, session_ctx, db_session, target_name=name)
+
+
+async def _delete_submit_handler(
+    name: str,
+    force: bool = Query(default=False),
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_admin_dep,
+    db_session: AsyncSession = _get_session_dep,
+) -> HTMLResponse:
+    """``POST /ui/connectors/{name}/delete[?force=true]`` -- submit handler.
+
+    G0.15-T10 #1218. Delegates to
+    :func:`~meho_backplane.api.v1.targets.delete_target` (the same
+    in-process handler the REST surface exposes) so the UI write and
+    the REST write share one validation + cascade-count + audit code
+    path. Success -> 204 + ``HX-Redirect: /ui/connectors``; a 409 from
+    a missing ``?force=true`` flag is the REST contract -- the modal
+    pre-sets ``force=true`` when the GET pre-check showed cascade refs,
+    so the typical submit lands clean.
+    """
+    return await submit_delete(
+        session_ctx,
+        operator,
+        db_session,
+        target_name=name,
+        force=force,
+    )
+
+
 async def _edit_submit_handler(
     request: Request,
     name: str,
@@ -202,6 +252,20 @@ def build_forms_router() -> APIRouter:
         _edit_modal_handler,
         methods=["GET"],
         name="ui_connectors_edit_modal",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/connectors/{name}/delete",
+        _delete_modal_handler,
+        methods=["GET"],
+        name="ui_connectors_delete_modal",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/connectors/{name}/delete",
+        _delete_submit_handler,
+        methods=["POST"],
+        name="ui_connectors_delete_submit",
         response_class=HTMLResponse,
     )
     router.add_api_route(

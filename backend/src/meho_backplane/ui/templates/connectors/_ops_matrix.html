@@ -111,17 +111,51 @@
         </p>
       {% endif %}
     {% elif connector_label == "no_connector" %}
-      <div role="alert" class="alert alert-warning">
+      <div role="alert" class="alert alert-warning" data-no-connector-cause="{{ no_connector_cause or 'product_mismatch' }}">
         <div>
           <h3 class="font-semibold text-sm">No matching connector</h3>
           <p class="text-xs">
             {{ connector_message or "no connector matches the target's (product, version)" }}
           </p>
-          {% if is_tenant_admin %}
+          {% if no_connector_cause == "missing_fingerprint" %}
+            {# The target's product slug *is* registered but its fingerprint
+               hasn't been captured yet -- the resolver's versioned-match
+               ladder needs ``fingerprint.version`` to pick the right
+               connector. Re-probe is the correct verb here. #}
+            {% if is_tenant_admin %}
+              <p class="text-xs mt-1 opacity-80">
+                Re-probe the target to capture its fingerprint, then this
+                surface will pick a connector automatically.
+              </p>
+            {% else %}
+              <p class="text-xs mt-1 opacity-80">
+                A tenant_admin can capture one via the Re-probe action on
+                the Fingerprint card.
+              </p>
+            {% endif %}
+          {% else %}
+            {# product_mismatch: the target's product slug doesn't match any
+               registered connector (e.g. ``kubernetes`` vs the connector-
+               advertised ``k8s``). Re-probe would re-dispatch through the
+               same resolver with the same tuple and fail the same way;
+               Edit (PATCH product) or Delete is the correct verb. This is
+               the v0.7.0 dogfood signal #6 closure (RDC #753 / #1218). #}
             <p class="text-xs mt-1 opacity-80">
-              Re-probe the target to refresh its fingerprint, or register a
-              connector for this product/version.
+              The target's <code>product</code> slug
+              {% if target.product %}(<code>{{ target.product }}</code>){% endif %}
+              doesn't match any registered connector. Re-probing won't help
+              here. {% if is_tenant_admin %}<strong>Edit</strong> the
+              target's <code>product</code> to one of the valid values
+              below, or <strong>Delete</strong> the target.{% else %}A
+              tenant_admin can Edit or Delete the target from the page
+              header.{% endif %}
             </p>
+            {% if valid_products %}
+              <p class="text-xs mt-1">
+                <span class="opacity-60">Valid products:</span>
+                {% for option in valid_products %}<code>{{ option }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+              </p>
+            {% endif %}
           {% endif %}
         </div>
       </div>

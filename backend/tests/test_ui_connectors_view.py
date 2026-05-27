@@ -505,7 +505,11 @@ def test_list_full_page_renders_seeded_targets() -> None:
         response = client.get("/ui/connectors")
     assert response.status_code == 200, response.text
     body = response.text
-    assert "<title>Connectors" in body
+    # G0.15-T10 #1218 -- page title uses the backend taxonomy "Targets"
+    # so the noun on the page matches the row's underlying table; the
+    # sidebar label stays "Connectors" for operator-facing parity with
+    # the URL path (Option B in the issue body).
+    assert "<title>Targets" in body
     assert "vmware-prod" in body
     assert "vmware-dev" in body
     # Sidebar link to /ui/connectors carries the active highlight.
@@ -868,6 +872,157 @@ def test_detail_renders_no_connector_alert_when_no_match() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert "No matching connector" in body
+
+
+def test_detail_no_connector_product_mismatch_surfaces_edit_delete_hint() -> None:
+    """G0.15-T10 #1218 -- the ``product_mismatch`` branch surfaces the
+    Edit / Delete remediation + the valid-products enum.
+
+    Target's product slug (``unknown-product``) doesn't match any
+    registered connector, so re-probing would re-dispatch through the
+    same resolver with the same tuple and fail the same way. The
+    remediation message must name Edit / Delete (not Re-probe) and
+    surface the registered-product enum so the operator knows what
+    values are acceptable for a PATCH.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    # Register one connector so ``registered_product_tokens()`` is
+    # non-empty; ``unknown-product`` is intentionally NOT in the set.
+    register_connector_v2(product="fakeprod", version="1.0", impl_id="fakeprod", cls=_FakeConnector)
+    _seed_target(
+        tenant_id=_TENANT_A,
+        name="mis-registered",
+        product="unknown-product",
+        fingerprint={"version": "1.0"},
+    )
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/mis-registered")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "No matching connector" in body
+    # The product_mismatch hint names the Edit + Delete remediation; the
+    # Re-probe verb must not be the only call to action in this branch.
+    assert 'data-no-connector-cause="product_mismatch"' in body
+    # Apostrophe may render escaped (``&#39;``) or raw depending on the
+    # Jinja autoescape settings -- accept either.
+    assert (
+        "doesn&#39;t match any registered connector" in body
+        or "doesn't match any registered connector" in body
+    )
+    assert "Edit" in body
+    assert "Delete" in body
+    # Valid-products enum is surfaced so the operator knows what to PATCH to.
+    assert "Valid products:" in body
+    assert "<code>fakeprod</code>" in body
+
+
+def test_detail_no_connector_missing_fingerprint_surfaces_reprobe_hint() -> None:
+    """G0.15-T10 #1218 -- the ``missing_fingerprint`` branch keeps the
+    Re-probe remediation (and does NOT surface Edit / Delete copy).
+
+    Target's product slug IS in the registered set, but the only
+    matching connector advertises a versioned ``supported_version_range``;
+    without ``fingerprint.version`` the resolver returns ``no_connector``
+    on the versioned-match ladder. Re-probe is the correct verb here.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+
+    class _VersionedFake(Connector):
+        product = "fakeprod"
+        version = "1.0"
+        impl_id = "fakeprod"
+        # Versioned advertisement -- requires a target version (fingerprint)
+        # before the resolver can match. Without ``fingerprint.version``,
+        # the resolver returns ``no_connector`` -- the missing_fingerprint
+        # case.
+        supported_version_range = ">=1.0"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # pragma: no cover
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> Any:  # pragma: no cover
+            raise NotImplementedError
+
+        async def execute(  # pragma: no cover
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(product="fakeprod", version="1.0", impl_id="fakeprod", cls=_VersionedFake)
+    _seed_target(tenant_id=_TENANT_A, name="never-probed", product="fakeprod")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/connectors/never-probed")
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "No matching connector" in body
+    # missing_fingerprint cause -- Re-probe is the right verb, no Edit /
+    # Delete remediation copy + no valid-products enum.
+    assert 'data-no-connector-cause="missing_fingerprint"' in body
+    assert "Re-probe" in body
+    assert "doesn&#39;t match any registered connector" not in body
+    assert "doesn't match any registered connector" not in body
+    assert "Valid products:" not in body
+
+
+# ---------------------------------------------------------------------------
+# Detail view -- Delete button visibility (G0.15-T10 #1218)
+# ---------------------------------------------------------------------------
+
+
+def test_detail_renders_delete_button_for_tenant_admin() -> None:
+    """G0.15-T10 #1218 -- the Delete button is visible to tenant_admin.
+
+    Same RBAC gate as the Edit + Re-probe buttons: the server-side
+    authority is :func:`resolve_operator_or_403` on the POST handler;
+    the template hide is the UX affordance. Asserts the aria-label
+    naming the target so a renderer typo can't silently break the
+    affordance.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="del-me", product="ssh")
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/del-me")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The aria-label names the target -- present only on tenant_admin
+    # renders. Also assert the HTMX hx-get points at the delete modal
+    # route so a re-binding to a stale URL would fail visibly.
+    assert 'aria-label="Delete del-me"' in body
+    assert 'hx-get="/ui/connectors/del-me/delete"' in body
+
+
+def test_detail_hides_delete_button_for_operator_role() -> None:
+    """G0.15-T10 #1218 -- an operator (not tenant_admin) does NOT see Delete."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="op-no-del", product="ssh")
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        response = client.get("/ui/connectors/op-no-del")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    # Same aria-label discipline as the re-probe button gate test.
+    assert "Delete op-no-del" not in response.text
 
 
 # ---------------------------------------------------------------------------

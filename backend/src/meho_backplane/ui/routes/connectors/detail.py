@@ -73,15 +73,16 @@ from typing import Any, Final
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.connectors.registry import all_connectors_v2
+from meho_backplane.connectors.registry import all_connectors_v2, registered_product_tokens
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import (
     AuditLog,
     EndpointDescriptor,
+    GraphNode,
     OperationGroup,
 )
 from meho_backplane.db.models import (
@@ -302,6 +303,57 @@ async def _load_ops_matrix(
     )
 
 
+async def _count_graph_node_refs(
+    db_session: AsyncSession,
+    *,
+    target_id: uuid.UUID,
+) -> int:
+    """Return the number of ``graph_node`` rows referencing this target.
+
+    Mirrors the cascade count :func:`~meho_backplane.api.v1.targets.delete_target`
+    runs before deciding 409-vs-204; surfaced on the detail page so the
+    Delete confirm modal can show the operator the cascade impact before
+    they click through (the REST handler is still the authority -- the
+    modal-side count is a UX hint, the 409+``?force=true`` flow remains
+    the contract). Counting ``graph_node`` only matches the REST handler:
+    the ``audit_log`` table accumulates rows per request and would block
+    every delete forever if counted.
+    """
+    stmt = select(func.count()).select_from(GraphNode).where(GraphNode.target_id == target_id)
+    return int((await db_session.execute(stmt)).scalar_one())
+
+
+def _classify_no_connector_cause(target: TargetORM) -> str:
+    """Distinguish "no fingerprint cached" from "product slug unmatched".
+
+    The resolver returns ``no_connector`` for two visually-identical but
+    operationally-distinct cases:
+
+    * **``missing_fingerprint``** -- ``target.fingerprint`` is ``None``
+      *and* the target's ``product`` slug **is** in the registered set
+      *and* no wildcard (`version == ""`) registration covers it. The
+      operator's correct verb is **Re-probe** (capture the fingerprint
+      so the resolver's versioned-match ladder can pick a connector).
+    * **``product_mismatch``** -- ``target.product`` is not in the
+      registered-product set (the slug doesn't match any connector --
+      e.g. ``"kubernetes"`` when the K8s connector advertises ``"k8s"``).
+      Re-probing here re-dispatches through the same resolver with the
+      same ``(product, version)`` tuple and fails the same way; the
+      correct verbs are **Edit** (PATCH product to a valid value) or
+      **Delete**. This is the v0.7.0 dogfood signal #6 closure
+      (``claude-rdc-hetzner-dc#753``).
+
+    Returns one of the two literals above so the template can pick the
+    right message + remediation hint. Returns ``"product_mismatch"`` as
+    a safe default for the genuinely-pathological case (defensive --
+    the resolver returned no_connector but neither branch fits).
+    """
+    valid_products = registered_product_tokens()
+    if target.product in valid_products and target.fingerprint is None:
+        return "missing_fingerprint"
+    return "product_mismatch"
+
+
 async def _load_recent_ops(
     db_session: AsyncSession,
     *,
@@ -450,14 +502,27 @@ async def _render_detail(
         target_id=target.id,
     )
 
+    # The ``no_connector`` resolver verdict conflates two operationally
+    # distinct cases (G0.15-T10 #1218): "fingerprint not cached yet"
+    # (Re-probe is the right verb) vs "product slug doesn't match any
+    # registered connector" (Edit / Delete is the right verb). Classify
+    # here so the template can render the right remediation hint.
+    no_connector_cause: str | None = None
+    valid_products: tuple[str, ...] = ()
+    if resolution.label == "no_connector":
+        no_connector_cause = _classify_no_connector_cause(target)
+        valid_products = tuple(sorted(registered_product_tokens()))
+
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
     context = {
-        "page_title": f"Connector · {target.name}",
+        "page_title": f"Targets · {target.name}",
         "active_surface": "connectors",
         "target": _project_target(target),
         "connector_id": resolution.connector_id,
         "connector_label": resolution.label,
         "connector_message": resolution.message,
+        "no_connector_cause": no_connector_cause,
+        "valid_products": valid_products,
         "ops_matrix": ops_matrix,
         "recent_ops": _project_audit_rows(recent_ops),
         "recent_ops_dom_cap": _RECENT_OPS_DOM_CAP,

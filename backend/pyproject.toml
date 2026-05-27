@@ -380,6 +380,14 @@ disable_error_code = ["no-untyped-call", "arg-type"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Make sibling-of-``src/`` packages (currently ``scripts/`` — the
+# operator-run one-shot migrations) importable from tests without
+# per-file ``sys.path`` bootstrap. The wheel build target excludes
+# ``scripts/`` (see ``[tool.hatch.build.targets.wheel] packages``
+# above), so this is **test-only** — operators invoke the scripts
+# via ``cd backend && uv run python -m scripts.<name>``, which puts
+# ``backend/`` on ``sys.path`` through ``-m``'s implicit handling.
+pythonpath = ["."]
 # Default-exclude the ``load`` marker so the always-on lane never
 # spends the resolver-microbenchmark wall-clock budget. CLI ``-m
 # load`` overrides this -- pytest's argparse takes the last ``-m``

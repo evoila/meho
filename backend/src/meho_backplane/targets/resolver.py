@@ -102,7 +102,10 @@ class AmbiguousTargetError(HTTPException):
         )
 
 
-# code-quality-allow: function-size — linear three-phase resolver (exact → alias → near-miss) where each phase consumes the prior's None result and the trailing bind requires the resolved row; decomposition forces sentinel returns or raise-mid-helper.
+# code-quality-allow: function-size — linear three-phase resolver
+# (exact → alias → near-miss) where each phase consumes the prior's None
+# result and the trailing bind requires the resolved row; decomposition
+# forces sentinel returns or raise-mid-helper.
 async def resolve_target(
     session: AsyncSession,
     tenant_id: UUID,

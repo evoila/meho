@@ -554,13 +554,17 @@ async def test_reducing_dispatch_writes_handle_metadata_into_audit_payload(
 ) -> None:
     """A reducing dispatch hoists ``handle_id`` / ``total_rows`` / ``sample_rows_returned``.
 
-    G0.15-T8 (#1219). The reducer binds three ``audit_*`` contextvars
-    and the dispatcher's audit writer hoists them into the
-    ``audit_log.payload`` JSON via the existing
-    ``_resolve_audit_extras_from_contextvars`` sweep -- a consumer
-    reading the audit row attributes *"what the agent saw"* (the
-    handle id + total rows + the bounded sample size) without
-    joining against the reducer's in-memory state.
+    G0.15-T8 (#1219). After the reducer materializes, the dispatcher
+    derives the audit-payload hoist dict via
+    ``_handle_metadata_for_audit(handle)`` and threads it through
+    ``audit_and_broadcast_safe(..., handle_metadata=...)`` →
+    ``write_audit_row(..., handle_metadata=...)`` →
+    ``_build_audit_payload(..., handle_metadata=...)``, where
+    ``payload.update(handle_metadata)`` merges the three keys onto the
+    ``audit_log.payload`` JSON. A consumer reading the audit row
+    attributes *"what the agent saw"* (the handle id + total rows +
+    the bounded sample size) without joining against the reducer's
+    in-memory state.
     """
     set_default_reducer(JsonFluxReducer(sample_size=5))
     try:

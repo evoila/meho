@@ -131,7 +131,7 @@ async def test_preflight_missing_sub_op_raises_with_full_missing_list(
         "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs",
         "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews",
     )
-    assert exc.catalog_command == "meho connector ingest --catalog gh/v3"
+    assert exc.catalog_command == "meho connector ingest --catalog gh/3"
     # Negative result NOT cached: a retry after operator ingestion must
     # re-walk and pass.
     assert "gh.composite.pr_status_summary" not in _preflight._PREFLIGHT_CACHE

@@ -53,15 +53,20 @@ from meho_backplane.operations.ingest.catalog import (
 )
 
 # The eight catalog entries currently shipped. The seven v0.3.0
-# connectors plus ``gh/v3`` (G3.11-T3 #1223 -- the GitHub REST API
-# v3 entry that consumes the GitHubRestConnector class shipped by
-# G3.11-T1 #1221).
+# connectors plus ``gh/3`` (G3.11-T3 #1223 -- the GitHub REST API
+# entry that consumes the GitHubRestConnector class shipped by
+# G3.11-T1 #1221). The ``gh`` row's ``version`` field stores the
+# digit-prefix ``"3"`` (G3.11-T8 #1242 reconciled the catalog with
+# the registry's parse-friendly form -- the dispatcher's
+# parse_connector_id pins version to ``^[0-9][A-Za-z0-9._]*$``);
+# the upstream "v3" label lives in the row's ``notes`` and in
+# docs/cross-repo/github-connector.md.
 _EXPECTED_PRODUCT_VERSION = {
     ("vmware", "9.0"),
     ("sddc-manager", "9.0"),
     ("harbor", "2.x"),
     ("nsx", "4.2"),
-    ("gh", "v3"),
+    ("gh", "3"),
     ("vault", "1.x"),
     ("k8s", "1.x"),
     ("bind9", "9.x"),

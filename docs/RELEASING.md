@@ -245,9 +245,12 @@ Walk the four gates in the order an operator hits them:
   `approval_queue.depends_on: "agent_runtime"` so operators know
   there is no second admin client to provision.
 
-- [ ] **GitHub `gh-rest-v3` connector credential** (optional;
-  enables the `gh/v3` typed connector landed by Initiative
-  [#1220](https://github.com/evoila/meho/issues/1220)). No backplane
+- [ ] **GitHub `gh-rest-3` connector credential** (optional;
+  enables the `gh/3` typed connector landed by Initiative
+  [#1220](https://github.com/evoila/meho/issues/1220); the catalog
+  ``version`` field was canonicalised from ``v3`` to ``3`` by
+  G3.11-T8 #1242 so the dispatcher's tuple lookup resolves cleanly).
+  No backplane
   env vars — the credential lives per-target in Vault. Provision a
   GitHub App (preferred) or fine-grained PAT (fallback) per
   [`docs/cross-repo/github-app-credential.md`](cross-repo/github-app-credential.md),

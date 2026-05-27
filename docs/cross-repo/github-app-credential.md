@@ -3,10 +3,10 @@ SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 evoila Group
 -->
 
-# GitHub App credential recipe — machine-identity for the `gh-rest-v3` connector
+# GitHub App credential recipe — machine-identity for the `gh-rest-3` connector
 
 > Cross-repo handshake between `evoila/meho` (this repo, producer of
-> the `gh-rest-v3` typed connector under
+> the `gh-rest-3` typed connector under
 > [Initiative #1220](https://github.com/evoila/meho/issues/1220)) and
 > the operator's GitHub organization (consumer side; not a single
 > repo — every MEHO deployment talks to its own GitHub org / set of
@@ -23,7 +23,7 @@ Copyright (c) 2026 evoila Group
 ## Why this doc exists
 
 The G3.11 Initiative ([#1220](https://github.com/evoila/meho/issues/1220))
-ships a `gh-rest-v3` typed connector — the first GitHub REST surface
+ships a `gh-rest-3` typed connector — the first GitHub REST surface
 under Goal #214's "RDC operators progressively retire local wrappers
 in favour of `meho <connector> <op>`" charter. The connector reaches
 GitHub through one of two credential paths, picked per target:
@@ -52,7 +52,7 @@ configuration must look like so the connector reaches steady state.
 - **A GitHub organization** (or a personal account) you control where
   the App will be created and the target repo(s) live. `github.com`
   only — GitHub Enterprise Server (GHES) is out of scope for the
-  v0.x `gh-rest-v3` connector.
+  v0.x `gh-rest-3` connector.
 - **Owner / admin rights** in that org if you intend to install the
   App org-wide. Repo-admin rights suffice for single-repo
   installations.
@@ -66,7 +66,7 @@ configuration must look like so the connector reaches steady state.
   `meho login <backplane-url>` writes a session token the CLI reuses
   across every verb. The `targets import / probe / describe` verbs
   need `tenant_admin`; the `operation call` verbs need `operator`.
-- **`gh-rest-v3` connector registered.** Initiative #1220's T1
+- **`gh-rest-3` connector registered.** Initiative #1220's T1
   ([#1221](https://github.com/evoila/meho/issues/1221)) ships the
   `GitHubRestConnector` class + credential loader. The recipe below
   assumes T1 has landed in the backplane image the operator is
@@ -92,7 +92,7 @@ account that will own the App):
 3. **Homepage URL:** any URL identifying the deployment (e.g. the
    backplane's public URL). GitHub requires this field but does not
    verify it.
-4. **Webhook:** **uncheck "Active"**. The `gh-rest-v3` connector is
+4. **Webhook:** **uncheck "Active"**. The `gh-rest-3` connector is
    pull-based; it does not receive webhooks. Leaving webhooks enabled
    with no `Webhook URL` produces a GitHub warning banner on every
    App page but is otherwise harmless; unchecking removes the noise.
@@ -205,7 +205,7 @@ targets:
 
 Notes on the column choices:
 
-- **`product: gh`** — the product slug for the `gh-rest-v3`
+- **`product: gh`** — the product slug for the `gh-rest-3`
   connector (named per the no-AI-tool-name + no-customer-name
   convention; `gh` is the generic, no-ambiguity short form).
 - **`host: api.github.com`** — the connector's HTTP base URL. GHES
@@ -317,7 +317,7 @@ catalogue. The T5 per-op annotation
 ([#1225](https://github.com/evoila/meho/issues/1225)) declares
 which permission each op needs; the operator can run with a strict
 subset by disabling the un-needed ops via
-`meho connector edit-op gh-rest-v3 '<op-id>' --disable` after the
+`meho connector edit-op gh-rest-3 '<op-id>' --disable` after the
 T3 ingest ([#1223](https://github.com/evoila/meho/issues/1223))
 lands the full catalogue.
 
@@ -455,14 +455,14 @@ the meho side (target row + connector registered); Check 2 proves
 the GitHub side (App or PAT can actually reach the API); Check 3
 proves the end-to-end contract.
 
-### Check 1 — `gh-rest-v3` connector + target registered
+### Check 1 — `gh-rest-3` connector + target registered
 
 Confirm both halves of the substrate exist:
 
 ```bash
 # The connector itself.
-meho connector list | grep gh-rest-v3
-# Expected: a row with `connector_id=gh-rest-v3` and
+meho connector list | grep gh-rest-3
+# Expected: a row with `connector_id=gh-rest-3` and
 # `review_status=enabled`.
 
 # The target row.
@@ -475,7 +475,7 @@ meho targets describe github-meho
 #   auth_model:  shared_service_account
 ```
 
-`connector list` returns nothing for `gh-rest-v3` → T1
+`connector list` returns nothing for `gh-rest-3` → T1
 ([#1221](https://github.com/evoila/meho/issues/1221)) hasn't landed
 in the backplane image you're running; pin a later image or wait
 for T1 to merge.
@@ -530,7 +530,7 @@ operator already knows the state of (e.g. PR #1193 in `evoila/meho`,
 the v0.7.0 changelog roll-up):
 
 ```bash
-meho operation call gh-rest-v3 'GET:/repos/{owner}/{repo}/pulls/{pull_number}' \
+meho operation call gh-rest-3 'GET:/repos/{owner}/{repo}/pulls/{pull_number}' \
   --target github-meho \
   --params '{"owner":"evoila","repo":"meho","pull_number":1193}' \
   --json \
@@ -557,7 +557,7 @@ operator can dispatch any other enabled op from the catalogue.
 
 > **Note on T3:** the `meho operation call` verb above assumes
 > Initiative #1220's T3 ([#1223](https://github.com/evoila/meho/issues/1223))
-> has landed the `gh/v3` catalogue ingest. Pre-T3 the verb returns
+> has landed the `gh/3` catalogue ingest. Pre-T3 the verb returns
 > `op_not_found` for every GitHub op_id. Run Checks 1 and 2 anyway
 > — those work the moment T1 ships.
 
@@ -767,7 +767,7 @@ fallback PAT.
 | --- | --- | --- |
 | Recipe (this doc) | producer | landed in this PR ([`./github-app-credential.md`](./github-app-credential.md)) |
 | `GitHubRestConnector` reads App ID + private key from Vault | producer | tracked at T1 [#1221](https://github.com/evoila/meho/issues/1221) |
-| `gh/v3` catalogue ingested + dispatchable | producer | tracked at T3 [#1223](https://github.com/evoila/meho/issues/1223) |
+| `gh/3` catalogue ingested + dispatchable | producer | tracked at T3 [#1223](https://github.com/evoila/meho/issues/1223) |
 | Operator-side runbook ties this credential doc into the full first-day on-ramp | producer | tracked at T6 [#1226](https://github.com/evoila/meho/issues/1226) |
 | `meho-prod` App provisioned on the `evoila` org | consumer | pending — applied by the dogfooding lab operator before standing up `github-meho` |
 | Vault path `secret/<tenant>/github-meho/github-app` populated | consumer | pending — same operator step |
@@ -779,7 +779,7 @@ fallback PAT.
 - Parent Goal: [#214 — G-connector-parity](https://github.com/evoila/meho/issues/214) — RDC operators progressively retire local wrappers
 - Sibling Task — code: [T1 #1221](https://github.com/evoila/meho/issues/1221) — `GitHubRestConnector` skeleton + credential loader (this doc precedes T1's merge)
 - Sibling Task — first-day on-ramp recipe: [T6 #1226](https://github.com/evoila/meho/issues/1226) — `docs/cross-repo/github-connector.md` (cross-links into this doc once landed)
-- Sibling Task — catalogue ingest: [T3 #1223](https://github.com/evoila/meho/issues/1223) — `gh/v3` Layer-2 ingest acceptance
+- Sibling Task — catalogue ingest: [T3 #1223](https://github.com/evoila/meho/issues/1223) — `gh/3` Layer-2 ingest acceptance
 - Sibling Task — write-op annotation: [T5 #1225](https://github.com/evoila/meho/issues/1225) — `requires_approval=true` on the 4 write ops
 - Companion shape: [`./keycloak-web-client.md`](./keycloak-web-client.md) — the v0.7.0 G10.0 client recipe this doc mirrors in shape
 - Companion shape: [`./keycloak-agent-client.md`](./keycloak-agent-client.md) — the agent-runtime confidential client recipe

@@ -116,7 +116,7 @@ entries:
       pending first verified ingest. See #743.
 
   - product: gh
-    version: v3
+    version: "3"
     impl_id: gh-rest
     requires_connector_class: GitHubRestConnector
     upstream:
@@ -124,22 +124,31 @@ entries:
     spec_info_version: "1.1.4"
     sha256: null
     notes: >-
-      Generic-ingested. GitHub REST API v3 (Apache-2.0,
-      machine-generated from production at
-      https://github.com/github/rest-api-description). The upstream is
-      OpenAPI 3.0.3 -- direct-resolvable raw.githubusercontent.com JSON
-      (not HTML-portal-templated like vmware/9.0), so it works with the
-      G0.14-T9 #1182 {catalog_entry} server-resolve flow without
-      preprocessing. spec_info_version 1.1.4 observed 2026-05-27 against
-      the main branch tip; ~784 paths grouped into ~49 tags (repos,
-      pulls, issues, actions, projects, releases, ...). Auth shape:
-      GitHub App installation tokens (preferred, machine-identity,
-      audit-attributable) or fine-grained PAT fallback -- see
-      docs/cross-repo/github-app-credential.md (G3.11-T2) and
-      docs/cross-repo/github-connector.md (G3.11-T6). VERSION-BUMP
-      PROCEDURE: upstream pins the rest-api-description repo's main
-      branch (not a release tag) because the public release cadence
-      lags by years (v2.1.0 was published 2022-10; the spec is
+      Generic-ingested. GitHub REST API (Apache-2.0, machine-generated
+      from production at https://github.com/github/rest-api-description).
+      The upstream is OpenAPI 3.0.3 -- direct-resolvable
+      raw.githubusercontent.com JSON (not HTML-portal-templated like
+      vmware/9.0), so it works with the G0.14-T9 #1182 {catalog_entry}
+      server-resolve flow without preprocessing. spec_info_version
+      1.1.4 observed 2026-05-27 against the main branch tip; ~784 paths
+      grouped into ~49 tags (repos, pulls, issues, actions, projects,
+      releases, ...). VERSION-FIELD CONVENTION (G3.11-T8 #1242): the
+      version field stores the digit-prefix form "3" (Resolution A as
+      of 2026-05-27), matching the registry triple
+      ("gh", "3", "gh-rest"). The dispatcher's parse_connector_id pins
+      version to ^[0-9][A-Za-z0-9._]*$ (rejects "v3"), so the catalog
+      and registry must agree on the digit form for the (product,
+      version, impl_id) tuple lookup to resolve cleanly. The upstream
+      label "v3" -- which is what github.com itself calls the API in
+      its own docs -- is preserved in FingerprintResult.version and in
+      docs/cross-repo/github-connector.md (G3.11-T6) for operator
+      recognition. Auth shape: GitHub App installation tokens
+      (preferred, machine-identity, audit-attributable) or fine-grained
+      PAT fallback -- see docs/cross-repo/github-app-credential.md
+      (G3.11-T2) and docs/cross-repo/github-connector.md (G3.11-T6).
+      VERSION-BUMP PROCEDURE: upstream pins the rest-api-description
+      repo's main branch (not a release tag) because the public release
+      cadence lags by years (v2.1.0 was published 2022-10; the spec is
       regenerated daily on main from production). Refresh
       spec_info_version + ingest output on operator-cadenced re-ingest
       (typically quarterly, or when a CI canary detects info.version

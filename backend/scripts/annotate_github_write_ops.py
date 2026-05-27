@@ -3,7 +3,7 @@
 
 """One-shot annotation of the 4 high-blast-radius GitHub write ops (G3.11-T5).
 
-Run **once** by an operator after the ``gh-rest-v3`` connector has
+Run **once** by an operator after the ``gh-rest-3`` connector has
 been ingested (Initiative #1220, Task #1223), to opt the 4 highest-
 blast-radius write operations into the G11.2 approval queue. Idempotent:
 re-running is a no-op for already-annotated rows.
@@ -141,8 +141,14 @@ class _GithubWriteOp:
 
 #: The :class:`_GithubWriteOp` records the script flips. The
 #: ``(product, version, impl_id)`` triple is fixed at
-#: ``("gh", "v3", "gh-rest")`` -- the catalog's gh/v3 entry (see
+#: ``("gh", "3", "gh-rest")`` -- the catalog's gh/3 entry (see
 #: ``backend/src/meho_backplane/operations/ingest/catalog.yaml``).
+#: The triple matches the registry entry registered by
+#: ``backend/src/meho_backplane/connectors/github/__init__.py``;
+#: G3.11-T8 (#1242) reconciled the catalog ``version`` field from
+#: ``"v3"`` to ``"3"`` (Resolution A) so the dispatcher's tuple-lookup
+#: against the ingested rows resolves cleanly. The upstream "v3"
+#: label is preserved in docs/cross-repo/github-connector.md.
 #: All 4 ops are annotated with ``requires_approval=True`` and
 #: ``safety_level="dangerous"`` -- see the module docstring's
 #: "Schema-vocabulary deviation" section for the ``"write"``
@@ -171,10 +177,14 @@ GITHUB_WRITE_OPS: tuple[_GithubWriteOp, ...] = (
 )
 
 #: The connector triple of the rows this script touches. Must match
-#: what ``catalog.yaml`` registers and what ``ingest --catalog gh/v3``
-#: writes into ``endpoint_descriptor``.
+#: what ``catalog.yaml`` registers and what ``ingest --catalog gh/3``
+#: writes into ``endpoint_descriptor``. G3.11-T8 (#1242) reconciled
+#: ``GH_VERSION`` from ``"v3"`` (the upstream API label) to ``"3"``
+#: (the dispatcher's parse-friendly digit form) so the
+#: ``(product, version, impl_id)`` tuple matches both the catalog and
+#: the in-process registry the dispatcher resolves against.
 GH_PRODUCT = "gh"
-GH_VERSION = "v3"
+GH_VERSION = "3"
 GH_IMPL_ID = "gh-rest"
 
 #: The annotation values written to every targeted row. ``"dangerous"``
@@ -392,7 +402,7 @@ def _print_report(report: AnnotationReport, *, dry_run: bool) -> None:
     if report.missing:
         print(
             f"\n{len(report.missing)} op(s) absent from endpoint_descriptor. "
-            "Run `meho connector ingest --catalog gh/v3` first (gated on "
+            "Run `meho connector ingest --catalog gh/3` first (gated on "
             "the G0.7 #/components/responses/* ref-bucket follow-up).",
         )
 

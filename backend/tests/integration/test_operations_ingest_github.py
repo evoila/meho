@@ -41,12 +41,14 @@ test fetches the same URL the catalog ships
 (``raw.githubusercontent.com/github/rest-api-description/main/...``).
 
 The full ingest round-trip against a running backplane (``POST
-/api/v1/connectors/ingest`` with ``catalog_entry: gh/v3``, asserting
+/api/v1/connectors/ingest`` with ``catalog_entry: gh/3``, asserting
 ``staged_count >= 700`` and ``review_status=staged``) is exercised by
 the operator runbook in ``docs/cross-repo/github-connector.md``
 (G3.11-T6) -- it requires a backplane + DB + GitHub App credential
 chain end-to-end and is out of scope for the unit/integration test
-boundary.
+boundary. (G3.11-T8 #1242 canonicalised the catalog ``version``
+field from ``v3`` to ``3``; the ``spec_source`` tag below tracks the
+catalog form.)
 """
 
 from __future__ import annotations
@@ -101,7 +103,7 @@ def test_parse_github_rest_spec_lands_700_plus_rows() -> None:
     """
     spec_url = _resolve_gh_spec()
     assert spec_url is not None  # guarded by skipif above
-    rows = parse_openapi(spec_url, spec_source="spec:gh/v3")
+    rows = parse_openapi(spec_url, spec_source="spec:gh/3")
     distinct_paths = {row.path for row in rows}
     assert len(rows) >= 700, f"got {len(rows)} rows; acceptance threshold is 700"
     assert len(distinct_paths) >= 600, (
@@ -118,4 +120,4 @@ def test_parse_github_rest_spec_lands_700_plus_rows() -> None:
     assert all(r.safety_level == "caution" for r in caution[:5])
     assert all(r.safety_level == "dangerous" for r in dangerous[:5])
     # spec_source threading.
-    assert all("spec:gh/v3" in row.tags for row in rows)
+    assert all("spec:gh/3" in row.tags for row in rows)

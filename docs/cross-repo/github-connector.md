@@ -32,7 +32,9 @@ end to end:
   [`github-app-credential.md`](./github-app-credential.md), the
   credential recipe.
 - **T3** ([#1223](https://github.com/evoila/meho/issues/1223)) —
-  `gh/v3` catalog entry; ~700 ops grouped into ~40 tags ingest
+  `gh/3` catalog entry (post-T8 #1242 canonical form; the upstream
+  API label "v3" lives in the catalog row's ``notes`` and in the
+  fingerprint payload); ~700 ops grouped into ~40 tags ingest
   through the G0.7 generic pipeline.
 - **T4** ([#1224](https://github.com/evoila/meho/issues/1224)) —
   first L1 composite `gh.composite.pr_status_summary`.
@@ -64,9 +66,13 @@ substrate into a working agent path.
   registered against the registry triple
   `(product="gh", version="3", impl_id="gh-rest")`; the operator-
   visible connector class is `gh-rest-3` (the digit-prefix slot
-  the dispatcher's connector-id parser requires; GitHub's own "v3"
-  label lives in upstream docs and in the catalog YAML, which uses
-  `version: v3` for the `--catalog gh/v3` lookup key). See
+  the dispatcher's connector-id parser requires). GitHub's own
+  "v3" upstream label lives in the connector's `FingerprintResult.
+  version` and in the catalog row's `notes`; the catalog
+  `version` field itself stores the digit-prefix `"3"` (G3.11-T8
+  #1242 reconciled the catalog with the registry so the
+  `(product, version, impl_id)` tuple-lookup resolves cleanly).
+  Operators ingest with `--catalog gh/3`. See
   [§ Connector identifier conventions](#connector-identifier-conventions)
   below for the full distinction.
 - Read ops — repo metadata, PR / issue / workflow-run reads,
@@ -256,15 +262,15 @@ is `gh-rest-3`. The two labels intentionally differ; see
 
 ### Step 4 — Ingest the catalog
 
-Ingest the `gh/v3` catalog entry to populate the `endpoint_descriptor`
+Ingest the `gh/3` catalog entry to populate the `endpoint_descriptor`
 table with the ~700 GitHub REST ops and run the LLM-summarised
 grouping pass:
 
 ```bash
-meho connector ingest --catalog gh/v3 --json
+meho connector ingest --catalog gh/3 --json
 ```
 
-The `--catalog gh/v3` shape (G0.14-T9 #1150) resolves the curated
+The `--catalog gh/3` shape (G0.14-T9 #1150) resolves the curated
 entry from
 [`backend/src/meho_backplane/operations/ingest/catalog.yaml`](../../backend/src/meho_backplane/operations/ingest/catalog.yaml)
 server-side and dispatches the multi-spec ingest pipeline against
@@ -273,15 +279,15 @@ the GitHub REST API description repository.
 Expected output on first ingest (abbreviated):
 
 ```
-ingest gh/v3/gh-rest — connector_id=gh-rest-v3
+ingest gh/3/gh-rest — connector_id=gh-rest-3
   operations: 784 total (784 inserted / 0 updated / 0 skipped)
   connector_registered: true
   operations_grouped: true
   grouping: 49 groups, 760 ops assigned, 24 unassigned (16 LLM call(s), 38000ms)
 
 Connector is in review_status=staged. Next:
-  meho connector review gh-rest-v3
-  meho connector enable gh-rest-v3 --confirm
+  meho connector review gh-rest-3
+  meho connector enable gh-rest-3 --confirm
 ```
 
 > **Known limitation — live ingest blocked pre-parser-extension.**
@@ -304,14 +310,15 @@ Connector is in review_status=staged. Next:
 > independently of the ingest path; if you only need the composite
 > use case, jump to [§ Step 7 — Smoke-test with the composite](#step-7--smoke-test-with-the-composite).
 
-The catalog-resolved connector_id is `gh-rest-v3` (from
-`<impl_id>-<version>` with the catalog's `version: v3`). The
-**registered class** in memory (the substrate T1 ships) uses
-`version="3"` (digit-prefix) and resolves as the dispatch class
-for both `gh-rest-3` and `gh-rest-v3` via the G0.15-T6 wildcard
-tie-break. Operators see `gh-rest-v3` in connector-list rows
-post-ingest; the typed-op composite paths reference
-`gh.composite.*` directly without a version slug.
+The catalog-resolved connector_id is `gh-rest-3` (from
+`<impl_id>-<version>` with the catalog's `version: "3"` — G3.11-T8
+#1242 canonicalised the catalog ``version`` field to match the
+registry's digit-prefix slot, so the dispatcher's
+``(product, version, impl_id)`` tuple-lookup against ingested rows
+resolves the registered :class:`GitHubRestConnector` cleanly).
+Operators see `gh-rest-3` in connector-list rows post-ingest; the
+typed-op composite paths reference `gh.composite.*` directly
+without a version slug.
 
 ### Step 5 — Review the LLM-summarised groups
 
@@ -319,7 +326,7 @@ Once Step 4 lands rows in the staged state, audit the grouping
 output before enabling anything:
 
 ```bash
-meho connector review gh-rest-v3
+meho connector review gh-rest-3
 ```
 
 The review payload renders ~49 groups with `name`, `when_to_use`,
@@ -334,7 +341,7 @@ actionable; "Operations related to pull requests" is not.
 Polish weak group hints with `meho connector edit-group`:
 
 ```bash
-meho connector edit-group gh-rest-v3 pulls \
+meho connector edit-group gh-rest-3 pulls \
   --when-to-use "Use these operations for any pull-request workflow: list open / closed PRs, inspect status / checks / reviews, request review, request changes, merge, or otherwise drive PR state."
 ```
 
@@ -353,13 +360,13 @@ annotate` verb; the canonical write-op flag toggle is
 `connector edit-op`:
 
 ```bash
-meho connector edit-op gh-rest-v3 'POST:/repos/{owner}/{repo}/issues' \
+meho connector edit-op gh-rest-3 'POST:/repos/{owner}/{repo}/issues' \
   --safety dangerous --requires-approval
-meho connector edit-op gh-rest-v3 'PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge' \
+meho connector edit-op gh-rest-3 'PUT:/repos/{owner}/{repo}/pulls/{pull_number}/merge' \
   --safety dangerous --requires-approval
-meho connector edit-op gh-rest-v3 'POST:/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches' \
+meho connector edit-op gh-rest-3 'POST:/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches' \
   --safety dangerous --requires-approval
-meho connector edit-op gh-rest-v3 'POST:/repos/{owner}/{repo}/releases' \
+meho connector edit-op gh-rest-3 'POST:/repos/{owner}/{repo}/releases' \
   --safety dangerous --requires-approval
 ```
 
@@ -377,7 +384,7 @@ exactly which operator annotated which op at which time.
 Enable the connector now that the per-op annotations are pinned:
 
 ```bash
-meho connector enable gh-rest-v3 --confirm
+meho connector enable gh-rest-3 --confirm
 ```
 
 `enable` cascades every group to `review_status='enabled'` and every
@@ -803,16 +810,16 @@ be widened in place.
 
 ## Connector identifier conventions
 
-The `gh-rest` connector lives at three different identifier shapes;
-operators see all three during onboarding and the differences trip
-up first-day readers regularly. Pinning them all in one place:
+The `gh-rest` connector exposes the same `(product, version,
+impl_id)` triple in three identifier surfaces; pinning them all
+in one place:
 
 | Identifier | Source | Example value |
 | --- | --- | --- |
 | Registry triple | `register_connector_v2(product=, version=, impl_id=, ...)` in [`backend/src/meho_backplane/connectors/github/__init__.py`](../../backend/src/meho_backplane/connectors/github/__init__.py) | `("gh", "3", "gh-rest")` |
 | Registered connector_id | `<impl_id>-<version>` of the registry triple; the digit-prefix the dispatcher's `parse_connector_id` regex accepts | `gh-rest-3` |
-| Catalog connector_id | `<impl_id>-<version>` of the **catalog** entry from `catalog.yaml` (where `version: v3` matches the upstream API label) | `gh-rest-v3` |
-| Upstream API label | GitHub's own documentation; mirrored in the connector's `FingerprintResult.version` | `v3` |
+| Catalog connector_id | `<impl_id>-<version>` of the **catalog** entry from `catalog.yaml`. As of 2026-05-27 (G3.11-T8 #1242, Resolution A) the catalog ``version`` field is the canonical digit-prefix form ``"3"`` -- matches the registry triple so the dispatcher's tuple lookup resolves cleanly | `gh-rest-3` |
+| Upstream API label | GitHub's own documentation; mirrored in the connector's `FingerprintResult.version` and in the catalog row's ``notes`` for operator recognition | `v3` |
 | Target row `product` | The `product` column on `targets.yaml`; matches the registry's `product` slot | `gh` |
 
 The **registry uses `version="3"`** because the dispatcher's
@@ -820,30 +827,38 @@ The **registry uses `version="3"`** because the dispatcher's
 [`backend/src/meho_backplane/operations/ingest/parser.py`](../../backend/src/meho_backplane/operations/ingest/parser.py))
 splits `connector_id` on the first dash-followed-by-digit and
 requires the version segment to start with a digit; `"v3"` fails
-that regex. The **catalog uses `version: v3`** because the
-upstream API label is "v3" and the catalog is operator-facing
-(operators read `gh/v3` and recognise it from github.com's own
-docs). The G0.15-T6 wildcard tie-break ladder reconciles the two
-at dispatch time — a target with `(product="gh", version=None)`
-or `(product="gh", version="3")` or `(product="gh", version="v3")`
-all resolve to the same `GitHubRestConnector` class.
+that regex. **As of 2026-05-27 this is the canonical form for the
+catalog ``version`` field too** -- G3.11-T8 (#1242, Resolution A)
+reconciled the catalog with the registry after the initial T3
+shipped with ``version: v3`` (a drift caught by T5's worker
+running a triple lookup that bypassed ``parse_connector_id``).
+The upstream "v3" label remains visible in the
+`FingerprintResult.version` payload and in the catalog row's
+``notes`` so operators reading github.com's docs still recognise
+the API generation.
+
+The G0.15-T6 wildcard tie-break ladder is still load-bearing for
+**unfingerprinted** targets: a target with
+`(product="gh", version=None)` resolves to the registered class
+via the ``("gh", "", "")`` wildcard entry; a target with
+`(product="gh", version="3")` resolves via the versioned entry
+``("gh", "3", "gh-rest")``. There is no longer a separate "v3"
+form that needs reconciling at dispatch time -- both the
+catalog-driven and registry-driven paths converge on ``"3"``.
 
 **As an operator, you'll see:**
 
 - `gh-rest-3` in `meho connector list` rows (registered class /
   in-memory) and in `audit_query` `connector_id` cells.
-- `gh-rest-v3` in `meho connector ingest --catalog gh/v3` outputs
+- `gh-rest-3` in `meho connector ingest --catalog gh/3` outputs
   and in connector-list rows **after** the catalog ingest lands
-  the DB row.
-- `gh/v3` in `meho connector catalog list` and the `--catalog`
+  the DB row (same form as the in-memory registered class).
+- `gh/3` in `meho connector catalog list` and the `--catalog`
   CLI flag.
 - `gh` in the `product` column of `targets.yaml`.
-- `v3` in the `version` field of the probe / fingerprint response.
-
-This is not pleasant but it is internally consistent, and the
-team made the call to favor operator-recognisable upstream labels
-over single-form purity. The follow-up to converge the two onto
-a single form is filed as an adjacent Initiative-#1220 follow-up.
+- `v3` in the `version` field of the probe / fingerprint response
+  and in the ``notes`` field of the catalog row -- the upstream
+  API generation label, preserved for operator recognition.
 
 ## Sample agent definition
 
@@ -877,16 +892,16 @@ agent_definition:
 
   permitted_op_groups:
     # Read groups -- no approval queue, no rate friction.
-    - gh-rest-v3/pulls
-    - gh-rest-v3/issues
-    - gh-rest-v3/checks
-    - gh-rest-v3/repos
+    - gh-rest-3/pulls
+    - gh-rest-3/issues
+    - gh-rest-3/checks
+    - gh-rest-3/repos
 
   permitted_op_ids:
     # The one write op the agent is allowed to reach for. Carries
     # requires_approval=true; every weekly run queues an approval
     # the on-call operator clears.
-    - gh-rest-v3/POST:/repos/{owner}/{repo}/issues/{issue_number}/comments
+    - gh-rest-3/POST:/repos/{owner}/{repo}/issues/{issue_number}/comments
 
   resources:
     target_owner: evoila
@@ -934,7 +949,7 @@ log — the same pattern every meho agent runtime uses.
 | Recipe (this doc) | producer | landed in this PR ([`./github-connector.md`](./github-connector.md)) |
 | `GitHubRestConnector` substrate (`gh-rest-3`) | producer | landed at T1 [#1221](https://github.com/evoila/meho/issues/1221) |
 | `github-app-credential.md` operator recipe | producer | landed at T2 [#1222](https://github.com/evoila/meho/issues/1222) |
-| `gh/v3` catalog entry | producer | landed at T3 [#1223](https://github.com/evoila/meho/issues/1223) (live ingest gated on parser-scope follow-up) |
+| `gh/3` catalog entry | producer | landed at T3 [#1223](https://github.com/evoila/meho/issues/1223); reconciled to digit-prefix form at T8 [#1242](https://github.com/evoila/meho/issues/1242) (live ingest gated on parser-scope follow-up T7 [#1241](https://github.com/evoila/meho/issues/1241)) |
 | `gh.composite.pr_status_summary` | producer | tracked at T4 [#1224](https://github.com/evoila/meho/issues/1224) |
 | `requires_approval=true` on 4 write ops | producer | tracked at T5 [#1225](https://github.com/evoila/meho/issues/1225) |
 | Parser extension to inline `#/components/responses/*` | producer | sibling follow-up — gates Step 4's live ingest |
@@ -947,7 +962,7 @@ log — the same pattern every meho agent runtime uses.
 - Parent Goal: [#214 — Connector parity with ClaudeVCF wrapper set](https://github.com/evoila/meho/issues/214)
 - Sibling Task — substrate: [T1 #1221](https://github.com/evoila/meho/issues/1221) — `GitHubRestConnector` skeleton + credential loader
 - Sibling Task — credential recipe: [T2 #1222](https://github.com/evoila/meho/issues/1222) — [`github-app-credential.md`](./github-app-credential.md)
-- Sibling Task — catalog entry: [T3 #1223](https://github.com/evoila/meho/issues/1223) — `gh/v3` Layer-2 ingest acceptance
+- Sibling Task — catalog entry: [T3 #1223](https://github.com/evoila/meho/issues/1223) — `gh/3` Layer-2 ingest acceptance (canonical digit-prefix form per T8 #1242)
 - Sibling Task — first composite: [T4 #1224](https://github.com/evoila/meho/issues/1224) — `gh.composite.pr_status_summary`
 - Sibling Task — write-op annotations: [T5 #1225](https://github.com/evoila/meho/issues/1225) — `requires_approval=true` on 4 write ops
 - Companion shape: [`./keycloak-web-client.md`](./keycloak-web-client.md) — the v0.7.0 G10.0 client recipe this doc mirrors in shape

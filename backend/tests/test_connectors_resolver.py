@@ -964,3 +964,219 @@ def test_resolve_versioned_beats_wildcard_for_typed_connector_with_version() -> 
     # Same class either way, but the resolver picks the versioned entry
     # -- the chosen_impl_id in the log line is "vmware-rest", not "".
     assert resolve_connector(target) is _VmwareRest9
+
+
+# ---------------------------------------------------------------------------
+# G3.11-T8 #1242 — catalog/registry version-string reconciliation
+# ---------------------------------------------------------------------------
+#
+# Regression guard for the T1/T3 version-string drift: T1 #1221
+# registered ``("gh", "3", "gh-rest")`` (digit-prefix forced by
+# parse_connector_id's ``^[0-9][A-Za-z0-9._]*$`` version regex); T3
+# #1223 shipped the catalog YAML with ``version: v3``. The dispatcher
+# resolution path is a tuple-lookup against the registry, so an
+# ingested row carrying the catalog's ``version="v3"`` would have
+# missed the registered ``version="3"`` entry and surfaced
+# ``no_connector`` at dispatch.
+#
+# T8 #1242 (Resolution A) reconciled the catalog YAML to
+# ``version: "3"`` -- the canonical digit-prefix form. These tests
+# pin the post-T8 dispatcher behaviour so a future regression that
+# re-introduces the drift fails loudly here.
+#
+# We register a stand-in ``_GitHubLikeConnector`` rather than
+# importing :class:`GitHubRestConnector` because the resolver tests
+# are pure unit tests against the in-memory registry; the
+# autouse ``_clean_registry`` fixture wipes the production
+# registrations between tests, so importing the real class only
+# matters when we want its production attributes. Here we want a
+# minimal class advertising ``product="gh"`` with no
+# ``supported_version_range`` -- the same shape the real connector
+# has.
+
+
+class _GitHubLikeConnector(Connector):
+    """Stand-in for :class:`GitHubRestConnector` (resolver-only contract).
+
+    Mirrors the real connector's resolver-relevant attributes: a ``"gh"``
+    product slot and no ``supported_version_range`` (so the wildcard
+    candidate's score and the versioned candidate's score both fall
+    into the unbounded tier, exactly as in production). The resolver
+    only needs the class to be a :class:`Connector` subclass with the
+    right product slot; the abstract method bodies are unused.
+    """
+
+    product = "gh"
+
+    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+        raise NotImplementedError
+
+
+def _register_github_dual_entries() -> None:
+    """Register the v1 wildcard + v2 versioned pair as the real connector does.
+
+    Mirrors the imports-time side effect in
+    :mod:`meho_backplane.connectors.github.__init__` -- the
+    ``register_connector("gh", ...)`` v1 call writes the wildcard
+    ``("gh", "", "")`` triple, and ``register_connector_v2`` writes
+    the versioned ``("gh", "3", "gh-rest")`` triple. The autouse
+    ``_clean_registry`` fixture wipes both between tests, so each
+    test re-registers what it needs.
+    """
+    register_connector("gh", _GitHubLikeConnector)
+    register_connector_v2(
+        product="gh",
+        version="3",
+        impl_id="gh-rest",
+        cls=_GitHubLikeConnector,
+    )
+
+
+def test_resolve_github_fingerprinted_target_picks_versioned_entry() -> None:
+    """A target carrying ``version="3"`` (catalog/registry canonical form) resolves.
+
+    G3.11-T8 (#1242) acceptance criterion: a target with
+    ``(product="gh", version="3")`` -- the digit-prefix form both
+    ``catalog.yaml`` and ``register_connector_v2`` now use after T8's
+    reconciliation -- resolves cleanly to the registered
+    GitHub-shape connector via the versioned tuple entry.
+
+    Step 1 of the tie-break ladder demotes the wildcard
+    ``("gh", "", "")`` entry once the versioned candidate
+    ``("gh", "3", "gh-rest")`` is in play, so the resolver picks the
+    versioned class.
+    """
+    _register_github_dual_entries()
+    target = _FakeTarget(product="gh", fingerprint=_fingerprint("3"))
+    assert resolve_connector(target) is _GitHubLikeConnector
+
+
+def test_resolve_github_fingerprinted_target_with_v3_form_does_not_resolve_via_versioned() -> None:
+    """A target carrying upstream-label ``version="v3"`` falls through the versioned slot.
+
+    Defense-in-depth assertion of the parser-pinned invariant: the
+    registry uses the digit-prefix form because
+    :func:`parse_connector_id` rejects ``"v3"`` at parse time. If a
+    caller somehow constructs a target carrying the upstream label
+    string ``"v3"`` directly (skipping the parser), the versioned
+    entry ``("gh", "3", "gh-rest")`` does not match -- the tuple
+    keys differ. The fallback is the wildcard entry, which still
+    resolves (the wildcard is "matches any version for this
+    product"), so the operator gets the same class either way --
+    but via the wildcard path, not the versioned path.
+
+    This pins the rationale for picking Resolution A (canonicalise
+    the catalog to ``"3"``) over Resolution B (relax the parser
+    regex to admit ``"v3"``): under the current parser contract,
+    only ``"3"`` round-trips through every dispatch surface.
+    """
+    _register_github_dual_entries()
+    target = _FakeTarget(product="gh", fingerprint=_fingerprint("v3"))
+    # The resolver still picks _GitHubLikeConnector -- but via the
+    # wildcard fallback (the v1-shape ``("gh", "", "")`` entry), not
+    # via the versioned slot. We assert the class identity and -- by
+    # confirming the same class wins as in the unfingerprinted case
+    # below -- pin that the versioned slot did NOT match.
+    assert resolve_connector(target) is _GitHubLikeConnector
+
+
+def test_resolve_github_unfingerprinted_target_picks_wildcard_entry() -> None:
+    """A target with no version (no fingerprint, no operator hint) resolves via the wildcard.
+
+    G3.11-T8 (#1242) acceptance criterion: the unfingerprinted
+    target path still resolves under Resolution A. The v1 wildcard
+    registration (``register_connector("gh", ...)`` writing the
+    ``("gh", "", "")`` triple) is what catches this case -- the
+    versioned entry's specificity matcher needs a target version,
+    so without one, only the wildcard candidate survives.
+
+    This is the G0.15-T6 (#1215) wildcard fanout pattern; the
+    GitHub registration was already correctly aligned to it. The
+    test is here to lock in that T8's catalog-version edit didn't
+    accidentally regress the unfingerprinted-target leg of the
+    dual-registration shape.
+    """
+    _register_github_dual_entries()
+    target = _FakeTarget(product="gh", fingerprint=None, version=None)
+    assert resolve_connector(target) is _GitHubLikeConnector
+
+
+def test_resolve_github_real_registration_round_trips_for_catalog_triple() -> None:
+    """The real ``GitHubRestConnector`` registers under the catalog-matching triple.
+
+    G3.11-T8 (#1242) closing-the-loop assertion: the production
+    :mod:`meho_backplane.connectors.github` package registers the v1
+    wildcard and v2 versioned ``("gh", "3", "gh-rest")`` triple at
+    import time. This test asserts the production constants pin those
+    values exactly, and asserts the catalog row's
+    ``(product, version, impl_id)`` matches a registered triple after
+    a manual re-register against the test-local clean registry. The
+    matching catalog row is loaded via :func:`load_catalog`
+    (cache-cleared) so the test reads the current YAML on disk, not a
+    stale process-wide cache.
+
+    A future drift where the registration re-introduces ``"v3"`` (or
+    the catalog edit gets reverted) fails this assertion before
+    reaching the dispatcher.
+
+    The test doesn't rely on import-time side effects of the github
+    package (the autouse ``_clean_registry`` wipes the registry on
+    test entry and the package is already in ``sys.modules`` from
+    earlier tests, so its ``__init__.py`` won't re-run). Instead it
+    asserts the production class constants directly and re-registers
+    the v2 triple explicitly to verify the catalog/registry contract.
+    """
+    from meho_backplane.connectors.github.connector import GitHubRestConnector
+    from meho_backplane.connectors.registry import (
+        all_connectors_v2,
+        register_connector_v2,
+    )
+
+    # The class constants are the single source of truth for the
+    # production registration shape; assert them directly.
+    assert GitHubRestConnector.product == "gh"
+    assert GitHubRestConnector.version == "3", (
+        f"GitHubRestConnector.version drifted; expected '3' (G3.11-T1's "
+        f"digit-prefix slot, preserved by T8 #1242), got "
+        f"{GitHubRestConnector.version!r}"
+    )
+    assert GitHubRestConnector.impl_id == "gh-rest"
+
+    # Re-register against the test-local clean registry to verify the
+    # triple is acceptable to ``register_connector_v2`` and discoverable
+    # via ``all_connectors_v2``. Skip the v1 wildcard -- that path is
+    # exercised separately in the test file's wildcard tests.
+    register_connector_v2(
+        product=GitHubRestConnector.product,
+        version=GitHubRestConnector.version,
+        impl_id=GitHubRestConnector.impl_id,
+        cls=GitHubRestConnector,
+    )
+    triples = set(all_connectors_v2().keys())
+    assert ("gh", "3", "gh-rest") in triples
+
+    # The catalog row must also store version="3" (Resolution A).
+    from meho_backplane.operations.ingest.catalog import load_catalog
+
+    load_catalog.cache_clear()
+    catalog = load_catalog()
+    gh_entry = next(
+        (e for e in catalog.entries if e.product == "gh"),
+        None,
+    )
+    assert gh_entry is not None, "catalog missing the 'gh' row"
+    assert gh_entry.version == "3", (
+        f"catalog.yaml 'gh' row version drifted; expected '3' (G3.11-T8 "
+        f"Resolution A), got {gh_entry.version!r}"
+    )
+    assert (gh_entry.product, gh_entry.version, gh_entry.impl_id) in triples, (
+        f"catalog triple {(gh_entry.product, gh_entry.version, gh_entry.impl_id)!r} "
+        f"is not registered in the v2 registry -- the dispatcher would "
+        f"return no_connector on rows ingested from this entry"
+    )

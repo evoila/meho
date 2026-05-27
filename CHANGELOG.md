@@ -92,6 +92,29 @@ connector-related release-notes line.
 
 ### Added
 
+- **BFF audit-thread — every ``/ui/*`` GET writes an audit row
+  (G0.15-T7 #1216).** Closes the governance product-completeness gap
+  ``claude-rdc-hetzner-dc#753`` surfaced in the v0.7.0 closed-loop
+  dogfood: an operator browsing five UI surfaces generated **zero**
+  ``audit_log`` rows under their ``principal_sub``. Root cause: the
+  chassis :class:`AuditMiddleware` skip rule keys on the
+  ``operator_sub`` structlog contextvar, and ``UISessionMiddleware``
+  resolved the operator into ``request.state`` but didn't bind it into
+  structlog — so every read GET through ``require_ui_session`` left
+  zero audit footprint. ``require_ui_session`` (now ``async``) calls
+  :func:`meho_backplane.ui.audit.bind_ui_view_audit` which binds four
+  contextvars: ``operator_sub`` + ``tenant_id`` (lift the skip rule
+  and populate the typed columns) plus ``audit_op_id="ui.view.<surface>"``
+  / ``audit_op_class="ui_view"`` (the chassis middleware reads both
+  into the row's payload). ``op_class="ui_view"`` is a new class
+  distinct from agent ``read`` / ``write`` so operators query / prune
+  UI page views independently of agent dispatch — the consumer's
+  Option B. Target-scoped pages (``/ui/connectors/<name>``) populate
+  the typed ``target_id`` column via the existing G0.3-T4 binding in
+  :func:`resolve_target`. The single source of truth for the surface
+  mapping lives in ``backend/src/meho_backplane/ui/audit.py`` so a
+  future surface Initiative cannot accidentally ship a route without
+  audit coverage. (#1216)
 - **VCF Private AI Foundation backend behind the tier resolver
   (G11.5-T4 #1078).** Closes the **zero-egress** path for the
   G11.5 multi-provider seam. PAIF is OpenAI-compatible at a fixed

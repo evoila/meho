@@ -901,12 +901,17 @@ async def test_computed_op_class_classifies_audit_query(session: AsyncSession) -
 
 
 @pytest.mark.asyncio
-async def test_placeholders_always_none(session: AsyncSession) -> None:
-    """The two remaining v0.2 placeholder fields are always None on the entry.
+async def test_placeholders_default_to_none_when_payload_lacks_them(
+    session: AsyncSession,
+) -> None:
+    """Empty-payload rows return ``principal_name=None`` / ``broadcast_event_id=None``.
 
     ``parent_audit_id`` (#398) and ``agent_session_id`` (#1009) are now real
-    columns surfaced on the row (see ``test_lineage_populated_from_row``);
-    ``principal_name`` and ``broadcast_event_id`` stay None in v0.2.
+    columns surfaced on the row (see ``test_lineage_populated_from_row``).
+    ``broadcast_event_id`` stays unconditionally None in v0.2 (FK direction
+    is reversed). ``principal_name`` is now conditionally surfaced from
+    ``payload['principal_name']`` (G0.15-T3 #1212) — when the writer didn't
+    land one (chassis HTTP rows, or pre-#1212 rows), the field is None.
     """
     tenant_id = uuid.uuid4()
     await _seed_audit_row(
@@ -920,6 +925,31 @@ async def test_placeholders_always_none(session: AsyncSession) -> None:
     entry = result.rows[0]
     assert entry.principal_name is None
     assert entry.broadcast_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_principal_name_surfaced_from_payload(session: AsyncSession) -> None:
+    """G0.15-T3 #1212: ``payload['principal_name']`` populates the entry field.
+
+    MCP-side audit rows carry the JWT-derived operator name in the payload
+    since #1212 (the writer merges ``Operator.name`` into ``payload``); the
+    query handler must hoist it onto :class:`AuditEntry.principal_name`
+    so operators running ``meho audit query`` see the human-readable name
+    alongside the OIDC ``sub`` UUID. A non-string ``principal_name`` payload
+    value falls back to ``None`` (the isinstance defence on the handler).
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        payload={"op_id": "meho.status", "principal_name": "Damir Topic"},
+    )
+    await session.commit()
+
+    result = await query_audit(AuditQueryFilters(), tenant_id=tenant_id, session=session)
+    entry = result.rows[0]
+    assert entry.principal_name == "Damir Topic"
 
 
 @pytest.mark.asyncio

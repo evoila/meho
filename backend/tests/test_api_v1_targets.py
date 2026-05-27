@@ -832,6 +832,237 @@ async def test_update_target_not_found_returns_404(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# G0.15-T6 (#1215) — operator-asserted version + preferred_impl_id validation
+# ---------------------------------------------------------------------------
+
+
+def test_create_target_with_version_persisted(client: TestClient) -> None:
+    """POST with explicit ``version`` persists the value on the row.
+
+    G0.15-T6 (#1215) acceptance criterion: ``POST /api/v1/targets
+    {"name": "test-vc", "product": "vmware", "version": "9.0", ...}``
+    → 201 with ``version: "9.0"`` in the response body.
+
+    The replays the v0.7.0 dogfood signal-6 reproducer (RDC #753):
+    operator knows the target's product version up-front (consumer
+    deployed vCenter 9.0 in `rdc-hetzner-dc`) and seeds it at create
+    time so the very first dispatch resolves the versioned connector
+    without round-tripping through PATCH.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "test-vc",
+                "product": "k8s",
+                "version": "1.31.0",
+                "host": "10.0.0.10",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["version"] == "1.31.0"
+
+
+def test_create_target_without_version_defaults_to_null(client: TestClient) -> None:
+    """Omitting ``version`` lands ``null`` on the row (the wildcard-fallback shape).
+
+    Mirrors the dogfood-typical case: operator creates a fresh target
+    without knowing the version yet; the wildcard registration applied
+    to every typed connector in the same PR keeps the target
+    dispatchable.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "fresh-target",
+                "product": "k8s",
+                "host": "10.0.0.20",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["version"] is None
+
+
+def test_update_target_sets_version_from_null(client: TestClient) -> None:
+    """PATCH ``{"version": "9.0"}`` updates a target's version column.
+
+    G0.15-T6 (#1215) acceptance criterion: ``PATCH /api/v1/targets/
+    rdc-vcenter {"version": "9.0"}`` → 200 with the row's ``version``
+    updated from null to ``"9.0"``. Closes the dogfood foot-gun where
+    a fresh target with ``version=None`` had no operator-driven path
+    to set the version (TargetUpdate omitted the field).
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        # Create without version
+        post = client.post(
+            "/api/v1/targets",
+            json={"name": "version-bump", "product": "k8s", "host": "10.0.0.30"},
+            headers=headers,
+        )
+        assert post.status_code == 201
+        assert post.json()["version"] is None
+        # Patch version in
+        response = client.patch(
+            "/api/v1/targets/version-bump",
+            json={"version": "1.31.0"},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.json()["version"] == "1.31.0"
+
+
+def test_update_target_clears_version_to_null(client: TestClient) -> None:
+    """PATCH ``{"version": null}`` returns the row to the wildcard-fallback shape.
+
+    Clearing the operator-asserted version is the inverse of setting
+    it; the column is nullable so this is a legal PATCH (not a NOT NULL
+    constraint violation). Operators use this to roll back a typo or
+    to let the next probe re-fingerprint cleanly.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.post(
+            "/api/v1/targets",
+            json={
+                "name": "version-clear",
+                "product": "k8s",
+                "version": "1.31.0",
+                "host": "10.0.0.40",
+            },
+            headers=headers,
+        )
+        response = client.patch(
+            "/api/v1/targets/version-clear",
+            json={"version": None},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.json()["version"] is None
+
+
+def test_create_target_unknown_preferred_impl_id_returns_422(
+    client: TestClient,
+) -> None:
+    """POST with an unregistered ``preferred_impl_id`` returns a structured 422.
+
+    G0.15-T6 (#1215) acceptance criterion: the v0.7.0 dogfood (RDC
+    #753) caught operators PATCHing typo'd ``preferred_impl_id`` values
+    (e.g. ``"vmware-rest"`` instead of the full ``"vmware-rest-9.0"``)
+    and the resolver silently ignored them. This validator surfaces
+    the foot-gun at write time with the same error-message-shape as
+    ``unknown_product``.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "typo-impl",
+                "product": "k8s",
+                "host": "10.0.0.50",
+                "preferred_impl_id": "k8s-typo",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "unknown_preferred_impl_id"
+    assert detail["preferred_impl_id"] == "k8s-typo"
+    assert "k8s" in detail["valid_impl_ids"]
+
+
+def test_create_target_known_preferred_impl_id_succeeds(client: TestClient) -> None:
+    """POST with a registered ``preferred_impl_id`` is accepted."""
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "known-impl",
+                "product": "k8s",
+                "host": "10.0.0.51",
+                "preferred_impl_id": "k8s",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["preferred_impl_id"] == "k8s"
+
+
+def test_update_target_unknown_preferred_impl_id_returns_422(
+    client: TestClient,
+) -> None:
+    """PATCH with an unregistered ``preferred_impl_id`` returns a structured 422."""
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.post(
+            "/api/v1/targets",
+            json={"name": "patch-impl", "product": "k8s", "host": "10.0.0.60"},
+            headers=headers,
+        )
+        response = client.patch(
+            "/api/v1/targets/patch-impl",
+            json={"preferred_impl_id": "completely-unknown"},
+            headers=headers,
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "unknown_preferred_impl_id"
+    assert detail["preferred_impl_id"] == "completely-unknown"
+
+
+def test_update_target_clear_preferred_impl_id_succeeds(client: TestClient) -> None:
+    """PATCH ``{"preferred_impl_id": null}`` clears the override -- always valid."""
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.post(
+            "/api/v1/targets",
+            json={
+                "name": "clear-impl",
+                "product": "k8s",
+                "host": "10.0.0.61",
+                "preferred_impl_id": "k8s",
+            },
+            headers=headers,
+        )
+        response = client.patch(
+            "/api/v1/targets/clear-impl",
+            json={"preferred_impl_id": None},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.json()["preferred_impl_id"] is None
+
+
+# ---------------------------------------------------------------------------
 # Cross-tenant isolation
 # ---------------------------------------------------------------------------
 

@@ -154,8 +154,8 @@ def test_registry_v2_class_attrs() -> None:
     assert Bind9Connector.priority == 0
 
 
-def test_package_import_registers_v2_entry_only() -> None:
-    """Importing the package registers under the v2 triple, no v1 dual-write.
+def test_package_import_registers_versioned_plus_wildcard() -> None:
+    """Importing the package registers BOTH versioned and wildcard v2 entries.
 
     Drives the registry clear + reload itself so the assertion observes
     the **side-effect of importing the package** rather than a fixture's
@@ -165,6 +165,15 @@ def test_package_import_registers_v2_entry_only() -> None:
     ``register_connector_v2``. The reload pattern matches
     :func:`tests.test_connectors_vmware_rest_composites_register.test_importing_vmware_rest_subpackage_queues_composite_registrar`
     (#509) for the same reason.
+
+    Prior to G0.15-T6 (#1215) only the versioned entry was registered;
+    the v0.7.0 dogfood (RDC #753, signal 6) caught the chicken-and-egg
+    that left every typed connector unresolvable on a fresh target with
+    ``version=None``. The fix fans out the K8s sibling-wildcard pattern
+    to every typed connector: each ``__init__.py`` now calls
+    :func:`register_connector_v2` twice -- once for the versioned key
+    and once for the ``(product, "", "")`` wildcard. Both entries point
+    at the same :class:`Bind9Connector` class.
     """
     import importlib
 
@@ -181,11 +190,16 @@ def test_package_import_registers_v2_entry_only() -> None:
 
     v2 = all_connectors_v2()
     assert v2[("bind9", "9.x", "bind9-ssh")] is Bind9Connector
-    # Bind9 has no v1 chassis history (see ``__init__.py`` docstring);
-    # the v1 ``register_connector`` write is intentionally absent.
-    # ``register_connector`` would also dual-write a ``(product, "",
-    # "")`` v2 entry; that key must not be present.
-    assert ("bind9", "", "") not in v2
+    # G0.15-T6 (#1215) wildcard fanout -- a fresh target with
+    # ``version=None`` resolves to ``Bind9Connector`` through the
+    # wildcard, and the resolver's ``versioned_over_wildcard`` step
+    # keeps the versioned entry winning when the target carries a
+    # version.
+    assert v2[("bind9", "", "")] is Bind9Connector
+    # bind9 has no v1 chassis history (see ``__init__.py`` docstring);
+    # the v1 ``register_connector`` write is intentionally absent --
+    # the wildcard above lands via ``register_connector_v2`` directly,
+    # not the v1 dual-write surface.
 
 
 # ---------------------------------------------------------------------------

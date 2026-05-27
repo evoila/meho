@@ -39,6 +39,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from fastapi import FastAPI
@@ -2305,6 +2306,206 @@ def test_ingest_catalog_entry_templated_upstream_returns_422(
     assert detail["templated_upstream"] == [
         "https://<nsx-mgr-fqdn>/api/v1/spec/openapi/nsx_api.yaml",
     ]
+
+
+def test_ingest_catalog_entry_vmware_9_0_html_portal_returns_422(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G0.15-T2 (#1211): ``catalog_entry: vmware/9.0`` whose upstream serves
+    HTML returns a structured 422 ``catalog_entry_upstream_not_spec`` envelope.
+
+    Before this Task, the Broadcom Developer Portal landing page bytes fell
+    through to the YAML decoder and surfaced as ``could not decode spec:
+    while scanning for the next token found character that cannot start
+    any token in '<file>', line 33, column 1`` -- the HTML doctype on line
+    1, opening tags around line 33. The structured envelope replaces that
+    with a T11-compliant detail body the operator can act on without
+    cross-referencing the byte stream.
+    """
+    portal_url = "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/"
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "vmware-t1211",
+                "version": "9.0",
+                "impl_id": "vmware-rest-t1211",
+                "requires_connector_class": "VmwareRestConnector",
+                "upstream": (portal_url,),
+            },
+        ],
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        # The Broadcom Developer Portal returns HTML with a 200, not a
+        # spec-shaped media type. Mock the fetch so the test exercises
+        # the content-type guard without hitting the public internet.
+        mock_router.get(portal_url).mock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                content=(
+                    b"<!doctype html><html><head><title>Broadcom</title></head><body></body></html>"
+                ),
+            ),
+        )
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "vmware-t1211/9.0"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "catalog_entry_upstream_not_spec"
+    assert detail["catalog_entry"] == "vmware-t1211/9.0"
+    assert detail["upstream_url"] == portal_url
+    assert detail["content_type"] == "text/html; charset=utf-8"
+    # T11 convention: the human-readable message names the values, the
+    # remediation imperative, and the doc reference.
+    assert "explicit-quadruple shape" in detail["message"]
+    assert "error-message-shape" in detail["message"]
+
+
+def test_ingest_catalog_entry_sddc_manager_9_0_html_portal_returns_422(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G0.15-T2 (#1211): ``catalog_entry: sddc-manager/9.0`` has the same
+    HTML-portal trap as ``vmware/9.0`` and surfaces the same structured 422.
+
+    The two entries are the cycle's two confirmed offenders per
+    ``claude-rdc-hetzner-dc#753`` sub-signal B; pinning both shapes in
+    distinct tests guards against a future refactor that splits the
+    detection logic by product.
+    """
+    portal_url = "https://developer.broadcom.com/xapis/sddc-manager-api/latest/"
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "sddc-manager-t1211",
+                "version": "9.0",
+                "impl_id": "sddc-rest-t1211",
+                "requires_connector_class": "SddcManagerConnector",
+                "upstream": (portal_url,),
+            },
+        ],
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        mock_router.get(portal_url).mock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                content=b"<!doctype html><html></html>",
+            ),
+        )
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "sddc-manager-t1211/9.0"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "catalog_entry_upstream_not_spec"
+    assert detail["catalog_entry"] == "sddc-manager-t1211/9.0"
+    assert detail["upstream_url"] == portal_url
+    assert detail["content_type"] == "text/html; charset=utf-8"
+
+
+def test_ingest_explicit_quadruple_html_upstream_returns_422_without_catalog_field(
+    client: TestClient,
+) -> None:
+    """G0.15-T2 (#1211): an explicit-quadruple request whose spec URL serves
+    HTML returns the bare ``upstream_not_spec`` envelope (no ``catalog_entry``).
+
+    Same guard, different envelope shape -- the route layer picks
+    :func:`build_upstream_not_spec_detail` vs
+    :func:`build_catalog_entry_upstream_not_spec_detail` based on
+    whether the request started as catalog-driven. This test pins the
+    bare shape; the catalog-driven shape is covered by the two tests
+    above.
+    """
+    portal_url = "https://example.lab/not-a-spec.html"
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        mock_router.get(portal_url).mock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                content=b"<!doctype html><html></html>",
+            ),
+        )
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "explicit-quad",
+                "version": "1.0",
+                "impl_id": "explicit-quad",
+                "specs": [{"uri": portal_url}],
+                "dry_run": True,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "upstream_not_spec"
+    assert "catalog_entry" not in detail
+    assert detail["upstream_url"] == portal_url
+    assert detail["content_type"] == "text/html"
+
+
+def test_ingest_packaged_catalog_html_portal_entries_carry_warning_notes() -> None:
+    """G0.15-T2 (#1211) audit: every ``spec_info_version: null`` catalog
+    entry whose ``upstream`` would reach the fetch path carries the
+    "HTML-portal upstream; manual ingest required" warning in ``notes``.
+
+    Sweep over the packaged catalog confirms ``vmware/9.0`` and
+    ``sddc-manager/9.0`` -- the two confirmed offenders -- both carry
+    the warning mirroring the ``harbor/2.x`` Swagger-2.0 precedent. The
+    other ``spec_info_version: null`` entries are excluded by earlier
+    422 gates -- ``nsx/4.2`` via ``catalog_entry_templated_upstream``
+    (FQDN placeholder), the three typed connectors (``vault/1.x``,
+    ``k8s/1.x``, ``bind9/9.x``) via ``catalog_entry_typed_connector``
+    (``upstream: null``) -- so they never reach the fetch path the
+    HTML-portal guard sits on. Test exists so a future contributor
+    adding a third HTML-portal-style entry without the note tripping
+    catches the omission at PR-review time.
+    """
+    from meho_backplane.operations.ingest.catalog import load_catalog
+
+    catalog = load_catalog()
+
+    # An entry reaches the HTTP fetch path only if every upstream URL
+    # is non-templated; entries with any FQDN-templated URL (NSX) are
+    # refused earlier by ``catalog_entry_templated_upstream`` (422)
+    # before ``_load_spec_bytes`` runs, so they never trigger the
+    # HTML-portal guard.
+    def _reaches_fetch_path(urls: tuple[str, ...]) -> bool:
+        return all(("<" not in url and ">" not in url) for url in urls)
+
+    html_portal_entries = {
+        (e.product, e.version)
+        for e in catalog.entries
+        if e.spec_info_version is None
+        and e.upstream is not None
+        and _reaches_fetch_path(e.upstream)
+        and any(url.startswith("https://developer.broadcom.com/") for url in e.upstream)
+    }
+    assert ("vmware", "9.0") in html_portal_entries
+    assert ("sddc-manager", "9.0") in html_portal_entries
+    for product, version in html_portal_entries:
+        entry = catalog.get(product, version)
+        assert entry is not None
+        assert "catalog_entry_upstream_not_spec" in entry.notes, (
+            f"{product}/{version} upstream points at the Broadcom Developer "
+            f"Portal but notes don't reference the 422 error code -- mirror "
+            "the harbor/2.x Swagger-2.0 precedent."
+        )
 
 
 def test_ingest_explicit_quadruple_still_works_regression(

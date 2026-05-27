@@ -49,6 +49,7 @@ def _settings_with(**overrides: object) -> Settings:
         "keycloak_admin_client_secret": "",
         "ui_keycloak_client_id": "",
         "ui_keycloak_client_secret": "",
+        "ui_session_encryption_key": "",
         "mcp_require_session_id": False,
     }
     base.update(overrides)
@@ -110,24 +111,35 @@ def test_agent_runtime_partial_lists_only_unset_env_vars() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ui_surface_unconfigured_lists_both_missing_env_vars() -> None:
-    """Unset → ``configured=False`` and both UI_KEYCLOAK_* listed."""
+def test_ui_surface_unconfigured_lists_all_three_missing_env_vars() -> None:
+    """Unset → ``configured=False`` and all three UI_* env vars listed.
+
+    G0.15-T5 (#1214) added ``UI_SESSION_ENCRYPTION_KEY`` to the
+    enumerated set. Operators following the ``/ready`` self-doc were
+    previously told to set the two client vars and redeploy; the BFF
+    then 500'd on first session-cookie write because the Fernet key
+    was unset. The block now lists the full set the operator must
+    wire — matching :doc:`docs/cross-repo/keycloak-web-client.md`
+    Check 3.
+    """
     block = build_features_block(_settings_with())
     ui_surface = block["ui_surface"]
     assert ui_surface["configured"] is False
     assert ui_surface["missing_env"] == [
         "UI_KEYCLOAK_CLIENT_ID",
         "UI_KEYCLOAK_CLIENT_SECRET",
+        "UI_SESSION_ENCRYPTION_KEY",
     ]
     assert ui_surface["docs"] == "docs/cross-repo/keycloak-web-client.md"
 
 
-def test_ui_surface_configured_when_both_present() -> None:
-    """Both set → ``configured=True`` and empty ``missing_env``."""
+def test_ui_surface_configured_when_all_three_present() -> None:
+    """All three set → ``configured=True`` and empty ``missing_env``."""
     block = build_features_block(
         _settings_with(
             ui_keycloak_client_id="meho-web",
             ui_keycloak_client_secret="s3cret",
+            ui_session_encryption_key="non-empty-placeholder",
         )
     )
     ui_surface = block["ui_surface"]
@@ -135,17 +147,40 @@ def test_ui_surface_configured_when_both_present() -> None:
     assert ui_surface["missing_env"] == []
 
 
-def test_ui_surface_partial_lists_only_unset_env_var() -> None:
-    """One set, one unset → exactly one env var in ``missing_env``."""
+def test_ui_surface_partial_lists_only_unset_env_vars() -> None:
+    """Two set, one unset → exactly one env var in ``missing_env``."""
     block = build_features_block(
         _settings_with(
             ui_keycloak_client_id="meho-web",
-            ui_keycloak_client_secret="",
+            ui_keycloak_client_secret="s3cret",
+            ui_session_encryption_key="",
         )
     )
     ui_surface = block["ui_surface"]
     assert ui_surface["configured"] is False
-    assert ui_surface["missing_env"] == ["UI_KEYCLOAK_CLIENT_SECRET"]
+    assert ui_surface["missing_env"] == ["UI_SESSION_ENCRYPTION_KEY"]
+
+
+def test_ui_surface_only_session_key_present_lists_two() -> None:
+    """The session-key set on its own leaves the two Keycloak vars listed.
+
+    Guards against the regression where adding the third check
+    reorders or shadows the first two. The order must remain
+    declaration order: client-id, client-secret, session-key.
+    """
+    block = build_features_block(
+        _settings_with(
+            ui_keycloak_client_id="",
+            ui_keycloak_client_secret="",
+            ui_session_encryption_key="non-empty-placeholder",
+        )
+    )
+    ui_surface = block["ui_surface"]
+    assert ui_surface["configured"] is False
+    assert ui_surface["missing_env"] == [
+        "UI_KEYCLOAK_CLIENT_ID",
+        "UI_KEYCLOAK_CLIENT_SECRET",
+    ]
 
 
 # ---------------------------------------------------------------------------

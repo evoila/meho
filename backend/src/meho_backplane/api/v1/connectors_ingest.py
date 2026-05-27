@@ -143,10 +143,13 @@ from meho_backplane.operations.ingest import (
     SpecSource,
     UncoveredVersionLabel,
     UnsupportedSpecError,
+    UpstreamNotSpecError,
     VersionMismatchError,
     build_catalog_entry_malformed_detail,
     build_catalog_entry_not_found_detail,
     build_catalog_entry_typed_connector_detail,
+    build_catalog_entry_upstream_not_spec_detail,
+    build_upstream_not_spec_detail,
     build_version_mismatch_detail,
     default_llm_client_factory,
     list_ingested_connectors,
@@ -250,12 +253,25 @@ async def ingest_endpoint(
     by hitting :class:`IngestionPipelineService` directly with
     ``tenant_id=None``.
     """
+    # Remember the original ``catalog_entry`` (pre-resolution) so the
+    # ``UpstreamNotSpecError`` path -- raised deep inside the parser
+    # when an HTML developer-portal page comes back instead of an
+    # OpenAPI spec -- can include the catalog reference in its 422
+    # envelope. ``_resolve_catalog_entry_if_set`` returns an explicit-
+    # quadruple body with ``catalog_entry=None``, so we have to snapshot
+    # before resolution.
+    catalog_entry = body.catalog_entry
     resolved = _resolve_catalog_entry_if_set(body)
     service = IngestionPipelineService(
         operator=operator,
         llm_client_factory=llm_client_factory,
     )
-    result = await _run_ingest_with_http_mapping(service=service, body=resolved, operator=operator)
+    result = await _run_ingest_with_http_mapping(
+        service=service,
+        body=resolved,
+        operator=operator,
+        catalog_entry=catalog_entry,
+    )
     ingestion_model, grouping_model = result.to_api_models()
     return IngestResponse(ingestion=ingestion_model, grouping=grouping_model)
 
@@ -392,26 +408,66 @@ def _reject_unusable_entry(
         )
 
 
+def _upstream_not_spec_http_exception(
+    exc: UpstreamNotSpecError,
+    *,
+    catalog_entry: str | None,
+) -> HTTPException:
+    """Map :exc:`UpstreamNotSpecError` onto the 422 envelope shape.
+
+    G0.15-T2 (#1211). The HTTP fetch succeeded (2xx) but the upstream
+    URL returned non-spec content -- typically the Broadcom Developer
+    Portal landing page for ``vmware/9.0`` and ``sddc-manager/9.0``,
+    which serves HTML rather than OpenAPI YAML/JSON. Before this
+    branch, the bytes fell through to the YAML decoder and surfaced
+    as an opaque ``could not decode spec: ... line 33`` 400. The
+    structured 422 carries the catalog_entry (when the request
+    started as catalog-driven), the upstream URL, and the
+    Content-Type so an agent / operator can branch on the diagnostic
+    and switch to the explicit-quadruple shape with a local spec
+    file. Extracted from the mapping helper below so its body stays
+    inside the code-quality function-size budget.
+    """
+    if catalog_entry is not None:
+        detail: dict[str, object] = build_catalog_entry_upstream_not_spec_detail(
+            catalog_entry=catalog_entry,
+            upstream_url=exc.upstream_url,
+            content_type=exc.content_type,
+        )
+    else:
+        detail = build_upstream_not_spec_detail(
+            upstream_url=exc.upstream_url,
+            content_type=exc.content_type,
+        )
+    return HTTPException(
+        status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=detail,
+    )
+
+
 async def _run_ingest_with_http_mapping(
     *,
     service: IngestionPipelineService,
     body: IngestRequest,
     operator: Operator,
+    catalog_entry: str | None = None,
 ) -> IngestionPipelineResult:
     """Drive :meth:`IngestionPipelineService.ingest` and map domain errors to HTTP.
-
-    Extracted from :func:`ingest_endpoint` so the handler body stays
-    under the code-quality function-size threshold; the mapping
-    table itself is the load-bearing contract documented at the top
-    of the module.
 
     Pre-condition: ``body`` is in the explicit-quadruple shape
     (``product`` / ``version`` / ``impl_id`` / ``specs`` populated).
     The catalog-driven shape is resolved upstream by
     :func:`_resolve_catalog_entry_if_set`; the asserts below pin the
     invariant so a future refactor that bypasses that helper trips
-    at the boundary rather than landing a half-populated ingest
-    against ``product=None`` / ``version=None`` / ``impl_id=None``.
+    at the boundary rather than landing a half-populated ingest.
+
+    ``catalog_entry`` carries the operator's original
+    ``"<product>/<version>"`` reference when the request started as
+    the catalog-driven shape; ``None`` for explicit-quadruple
+    requests. Used only on the :exc:`UpstreamNotSpecError` path so
+    the 422 envelope can include the catalog reference
+    (G0.15-T2 / #1211). The full exception-to-status table is the
+    load-bearing contract documented at the top of the module.
     """
     assert body.product is not None, "post-resolution invariant: product must be set"
     assert body.version is not None, "post-resolution invariant: version must be set"
@@ -427,44 +483,30 @@ async def _run_ingest_with_http_mapping(
             dry_run=body.dry_run,
         )
     except LlmClientUnavailable as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(http_status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     except PermissionError as exc:
-        # Defence-in-depth — the route's _require_admin already
-        # gates this, but the service-level guard might catch a
-        # cross-tenant write that slipped through.
-        raise HTTPException(
-            status_code=http_status.HTTP_403_FORBIDDEN,
-            detail=str(exc),
-        ) from exc
+        # Defence-in-depth — the route's _require_admin already gates this,
+        # but the service-level guard might catch a cross-tenant write that
+        # slipped through.
+        raise HTTPException(http_status.HTTP_403_FORBIDDEN, str(exc)) from exc
     except VersionMismatchError as exc:
-        # G0.9-T8 (#740). 422 (not 400) because the request was
-        # syntactically valid but semantically refuses the spec-vs-label
-        # cross-check. The structured detail names both versions so the
-        # operator's error message tells them exactly what to fix. The
-        # detail builder is shared with the MCP path
-        # (:mod:`meho_backplane.operations.ingest.error_envelopes`,
-        # G0.9.1-T5 #777) so the REST 422 body and the MCP -32602
-        # ``data`` member can't drift.
+        # G0.9-T8 (#740). 422 (not 400) because the request was syntactically
+        # valid but semantically refuses the spec-vs-label cross-check.
+        # Detail builder is shared with the MCP path
+        # (operations/ingest/error_envelopes.py, G0.9.1-T5 #777) so the REST
+        # 422 body and the MCP -32602 ``data`` member can't drift.
         raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=build_version_mismatch_detail(exc),
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            build_version_mismatch_detail(exc),
         ) from exc
     except UncoveredVersionLabel as exc:
-        # G0.9-T9 (#741). The request body parsed fine (Pydantic
-        # accepted shape + length bounds), but the operator's
-        # ``version`` label is semantically outside every registered
-        # connector class's ``supported_version_range`` for the
-        # ``(product, impl_id)`` pair — orphan-at-ingest. 422
-        # Unprocessable Entity is the right code: structurally valid,
-        # semantically rejected. Listed BEFORE the generic ValueError-
+        # G0.9-T9 (#741). Structurally valid (Pydantic accepted), semantically
+        # rejected (label outside every registered class's
+        # ``supported_version_range``). Listed BEFORE the generic ValueError-
         # family catch below so the more-specific exception wins.
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(http_status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    except UpstreamNotSpecError as exc:
+        raise _upstream_not_spec_http_exception(exc, catalog_entry=catalog_entry) from exc
     except (
         InvalidSpecError,
         UnsupportedSpecError,
@@ -472,27 +514,23 @@ async def _run_ingest_with_http_mapping(
         OpIdCollision,
         LlmOutputInvalid,
     ) as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     except (yaml.YAMLError, JSONDecodeError) as exc:
-        # The parser passes malformed YAML / JSON bubble-up by design
-        # (per parse_openapi's docstring) so the loader's structured
-        # error message survives to the operator. Route maps to 400.
+        # The parser passes malformed YAML / JSON bubble-up by design (per
+        # parse_openapi's docstring) so the loader's structured error message
+        # survives to the operator. Route maps to 400.
         raise HTTPException(
-            status_code=http_status.HTTP_400_BAD_REQUEST,
-            detail=f"could not decode spec: {exc}",
+            http_status.HTTP_400_BAD_REQUEST,
+            f"could not decode spec: {exc}",
         ) from exc
     except httpx.HTTPError as exc:
-        # HTTP(S) fetch failures for URL specs surface as
-        # ``httpx.HTTPError`` per :func:`parse_openapi`'s contract.
-        # 502 Bad Gateway is the closest semantic fit: the operator's
-        # request is fine but an upstream the route had to reach
-        # didn't respond cleanly.
+        # HTTP(S) fetch failures for URL specs surface as ``httpx.HTTPError``
+        # per :func:`parse_openapi`'s contract. 502 Bad Gateway is the closest
+        # semantic fit: the operator's request is fine but an upstream the
+        # route had to reach didn't respond cleanly.
         raise HTTPException(
-            status_code=http_status.HTTP_502_BAD_GATEWAY,
-            detail=f"upstream spec fetch failed: {exc}",
+            http_status.HTTP_502_BAD_GATEWAY,
+            f"upstream spec fetch failed: {exc}",
         ) from exc
 
 

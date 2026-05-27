@@ -46,7 +46,9 @@ from meho_backplane.operations.ingest.error_envelopes import (
     build_catalog_entry_malformed_detail,
     build_catalog_entry_not_found_detail,
     build_catalog_entry_typed_connector_detail,
+    build_catalog_entry_upstream_not_spec_detail,
     build_uncovered_version_label_detail,
+    build_upstream_not_spec_detail,
     build_version_mismatch_detail,
 )
 from meho_backplane.operations.ingest.exceptions import (
@@ -58,6 +60,7 @@ from meho_backplane.operations.ingest.exceptions import (
     OpIdCollision,
     UncoveredVersionLabel,
     UnsupportedSpecError,
+    UpstreamNotSpecError,
     VersionMismatchError,
 )
 from meho_backplane.operations.ingest.list_connectors import (
@@ -137,11 +140,14 @@ __all__ = [
     "SpecSource",
     "UncoveredVersionLabel",
     "UnsupportedSpecError",
+    "UpstreamNotSpecError",
     "VersionMismatchError",
     "build_catalog_entry_malformed_detail",
     "build_catalog_entry_not_found_detail",
     "build_catalog_entry_typed_connector_detail",
+    "build_catalog_entry_upstream_not_spec_detail",
     "build_uncovered_version_label_detail",
+    "build_upstream_not_spec_detail",
     "build_version_mismatch_detail",
     "check_version_covered_by_registered_class",
     "default_llm_client_factory",

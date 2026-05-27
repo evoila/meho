@@ -54,6 +54,8 @@ class _FakeTarget:
 
     Mirrors the parts of :class:`~meho_backplane.db.models.Target` the
     resolver actually touches: ``.product`` (always set on a Target row),
+    ``.version`` (operator-asserted version added by G0.15-T6 #1215;
+    optional fallback when ``fingerprint.version`` is absent),
     ``.fingerprint.version`` (optional — populated after the connector
     fingerprints the endpoint), and ``.preferred_impl_id`` (optional —
     operator override added in the G0.3 amendments per #224, default
@@ -63,6 +65,7 @@ class _FakeTarget:
     product: str
     fingerprint: _FakeFingerprint | None = None
     preferred_impl_id: str | None = None
+    version: str | None = None
 
 
 def _fingerprint(version: str | None = None) -> _FakeFingerprint:
@@ -669,8 +672,18 @@ def test_resolve_v1_entry_matches_target_with_fingerprint_but_no_range() -> None
 
 
 def test_resolve_versioned_entry_skipped_when_target_lacks_fingerprint() -> None:
-    """A versioned connector can't match an unfingerprinted target — fall back to v1."""
-    register_connector("vmware", _VmwareWide)  # v1 entry, no range
+    """A versioned-only registration can't match an unfingerprinted target.
+
+    A connector whose ONLY registration is the versioned ``(product,
+    version, impl_id)`` shape (no sibling wildcard, and the class
+    advertises a ``supported_version_range``) cannot resolve a target
+    whose fingerprint is missing -- the resolver's
+    :func:`_filter_candidates` drops the versioned entry on the
+    "spec_str truthy + parsed_target_version is None" branch. This is
+    the gap G0.15-T6 (#1215) closes for every typed connector via a
+    sibling wildcard registration; here we pin the still-valid path
+    when the wildcard is absent.
+    """
     register_connector_v2(
         product="vmware",
         version="9.0",
@@ -678,14 +691,6 @@ def test_resolve_versioned_entry_skipped_when_target_lacks_fingerprint() -> None
         cls=_VmwareRest9,  # has a range
     )
     target = _FakeTarget(product="vmware", fingerprint=None)
-    # _VmwareRest9 has supported_version_range and the target has no
-    # fingerprint version, so only the v1 _VmwareWide entry (which has
-    # supported_version_range=None) is a candidate. Note: _VmwareWide is
-    # registered via v1 path so it lands in the v2 table as
-    # ('vmware', '', '') with the class's supported_version_range=">=6.5,<10.0"
-    # still set on the class — meaning it IS a versioned entry too and
-    # gets filtered out. The test asserts NoMatchingConnector in that
-    # case, which is the honest behavior.
     with pytest.raises(NoMatchingConnector):
         resolve_connector(target)
 
@@ -850,3 +855,112 @@ def test_resolve_or_label_returns_ambiguous_connector_label() -> None:
     # Resolver names the remediation step + the candidate set verbatim.
     assert "preferred_impl_id" in exc_message
     assert "vmware-a" in exc_message and "vmware-b" in exc_message
+
+
+# ---------------------------------------------------------------------------
+# G0.15-T6 (#1215) — operator-asserted ``target.version`` fallback + the
+# typed-connector wildcard fanout that lets ``version=None`` resolve.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_reads_operator_asserted_version_when_no_fingerprint() -> None:
+    """``target.version`` is consulted when the fingerprint is absent.
+
+    G0.15-T6 (#1215) -- operator sets ``version`` on a fresh target
+    before any probe runs, the resolver picks up the value and
+    resolves the versioned connector cleanly. Mirrors the dogfood
+    workflow where the operator knows the product version up-front
+    (e.g. ``"9.0"`` for a vCenter the consumer just deployed) and
+    seeds it via POST/PATCH.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareRest9,
+    )
+    target = _FakeTarget(product="vmware", fingerprint=None, version="9.0.2")
+    assert resolve_connector(target) is _VmwareRest9
+
+
+def test_resolve_fingerprint_version_beats_operator_asserted_version() -> None:
+    """The probed version is authoritative when both sources are set.
+
+    Once the connector has fingerprinted the live endpoint, the probe
+    result is the *reality check* -- the operator-asserted hint
+    becomes the *bootstrap* that got the dispatch off the ground.
+    Registering a connector that only matches the fingerprint range
+    proves the precedence: if ``target.version`` were preferred, the
+    resolver would pick up the operator's wrong-but-bootstrappy value
+    instead.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareRest9,  # range: ">=9.0,<10.0"
+    )
+    # Operator typed "8.0" (out of range) but the probe found "9.0.2".
+    # If fingerprint wins, the versioned connector resolves; if the
+    # operator hint wins, NoMatchingConnector fires.
+    target = _FakeTarget(
+        product="vmware",
+        fingerprint=_fingerprint("9.0.2"),
+        version="8.0",
+    )
+    assert resolve_connector(target) is _VmwareRest9
+
+
+def test_resolve_wildcard_matches_unfingerprinted_target_even_with_supported_range() -> None:
+    """A wildcard ``(product, "", "")`` entry resolves even when the class has a range.
+
+    G0.15-T6 (#1215) fans out the K8s wildcard pattern across every
+    typed connector -- including connectors like ``vmware-rest`` whose
+    class advertises a ``supported_version_range``. The registry-key
+    shape (``version="" and impl_id=""``) is the authoritative wildcard
+    signal; the class's range attribute applies only to the versioned
+    sibling entry.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareRest9,  # has range ">=9.0,<10.0"
+    )
+    # The G0.15-T6 fanout: sibling wildcard registration.
+    register_connector_v2(
+        product="vmware",
+        version="",
+        impl_id="",
+        cls=_VmwareRest9,
+    )
+    # Fresh target -- no fingerprint, no operator-asserted version.
+    target = _FakeTarget(product="vmware", fingerprint=None, version=None)
+    assert resolve_connector(target) is _VmwareRest9
+
+
+def test_resolve_versioned_beats_wildcard_for_typed_connector_with_version() -> None:
+    """Wildcard demotes when the target carries a matching version.
+
+    Even with both registrations present, a target whose version is
+    in the connector's ``supported_version_range`` resolves through
+    the *versioned* registry key, not the wildcard. Step 1 of the
+    tie-break ladder drops the wildcard before specificity scoring
+    runs.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareRest9,
+    )
+    register_connector_v2(
+        product="vmware",
+        version="",
+        impl_id="",
+        cls=_VmwareRest9,
+    )
+    target = _FakeTarget(product="vmware", fingerprint=_fingerprint("9.0.2"))
+    # Same class either way, but the resolver picks the versioned entry
+    # -- the chosen_impl_id in the log line is "vmware-rest", not "".
+    assert resolve_connector(target) is _VmwareRest9

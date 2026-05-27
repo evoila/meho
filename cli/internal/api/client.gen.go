@@ -770,8 +770,13 @@ type ApproveResponseBody_DispatchResult struct {
 //   - “op_id“ / “op_class“ / “result_status“ — computed at query time
 //   - “parent_audit_id“ ← “audit_log.parent_audit_id“ (lineage; #398)
 //   - “agent_session_id“ ← “audit_log.agent_session_id“ (MCP session; #1009)
-//   - “principal_name“ / “broadcast_event_id“ — v0.2 placeholders, always
-//     None
+//   - “principal_name“ ← “payload['principal_name']“ when set. The MCP
+//     audit-write helper (“write_mcp_audit_row“) populates it from
+//     “Operator.name“ since G0.15-T3 #1212; HTTP-chassis rows remain
+//     None pending a separate fix to bind “name“ to contextvars in
+//     “verify_jwt_and_bind“.
+//   - “broadcast_event_id“ — v0.2 placeholder, always None (FK direction
+//     is reversed: “BroadcastEvent.audit_id“ points at the audit row).
 type AuditEntry struct {
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
@@ -3055,6 +3060,21 @@ type SurfaceResultVerdict string
 // (JSON-safe dict from “model_dump(mode='json')“) or “None“ until
 // the first successful probe. “preferred_impl_id“ is the operator's
 // optional override for the G0.6 connector-impl resolver.
+//
+// “version“ is the operator-asserted product version (e.g.
+// “"9.0"“, “"1.x"“) shipped by G0.15-T6 (#1215). It is **operator-
+// editable** via :class:`TargetCreate` / :class:`TargetUpdate` so a
+// fresh target can carry a version *before* the first probe, breaking
+// the chicken-and-egg the v0.7.0 dogfood surfaced (RDC #753, signal
+// 6): every typed connector except K8s required “fingerprint.version“
+// to resolve, but the probe needed the resolver to find a connector
+// first. The G0.15-T6 fix adds operator-asserted “version“ as a
+// second source the resolver consults, with “fingerprint.version“
+// (probed reality) taking precedence when both are present. The K8s
+// pattern (sibling wildcard registration at
+// “connectors/kubernetes/__init__.py“) is fanned out across every
+// typed connector in the same PR so an unfingerprinted target with
+// “version=None“ *also* resolves through the wildcard.
 type Target struct {
 	Aliases []string `json:"aliases"`
 
@@ -3075,6 +3095,7 @@ type Target struct {
 	SecretRef       *string                 `json:"secret_ref"`
 	TenantId        openapi_types.UUID      `json:"tenant_id"`
 	UpdatedAt       time.Time               `json:"updated_at"`
+	Version         *string                 `json:"version"`
 	VpnRequired     bool                    `json:"vpn_required"`
 }
 
@@ -3090,6 +3111,15 @@ type Target struct {
 // so clients cannot seed the G0.6 resolver's tie-break input with
 // fabricated values. “preferred_impl_id“ is accepted as an optional
 // operator override.
+//
+// “version“ is accepted as an optional operator-asserted product
+// version (G0.15-T6 #1215). Operators who know the version up-front
+// (e.g. “"9.0"“ for a vCenter Hetzner-DC target the consumer just
+// deployed) can pass it at create time so the very first probe
+// dispatches against the versioned connector without round-tripping
+// through PATCH. Fresh targets still default to “None“ and resolve
+// via the sibling wildcard registration applied to every typed
+// connector in the same PR (K8s pattern fanned out).
 type TargetCreate struct {
 	Aliases *[]string `json:"aliases,omitempty"`
 
@@ -3106,6 +3136,7 @@ type TargetCreate struct {
 	// Product Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss.
 	Product     TargetCreateProduct `json:"product"`
 	SecretRef   *string             `json:"secret_ref"`
+	Version     *string             `json:"version"`
 	VpnRequired *bool               `json:"vpn_required,omitempty"`
 }
 
@@ -3152,6 +3183,14 @@ type TargetSummary struct {
 // and rewritten by every successful probe. Sending “fingerprint“
 // raises 422 via “extra='forbid'“ for the same reason
 // :class:`TargetCreate` rejects it. “preferred_impl_id“ is patchable.
+//
+// “version“ is patchable as of G0.15-T6 (#1215) — same fix-class as
+// G0.14-T4 #1145's PATCH-on-“product“. An operator who probes the
+// target manually (or has out-of-band knowledge of the product
+// version) can set it to flip the resolver from the wildcard fallback
+// to the versioned connector. Clearing it (“{"version": null}“) is
+// legal and returns the target to the wildcard-fallback shape — the
+// column is nullable so this is not a constraint violation.
 type TargetUpdate struct {
 	Aliases *[]string `json:"aliases"`
 
@@ -3165,6 +3204,7 @@ type TargetUpdate struct {
 	PreferredImplId *string                 `json:"preferred_impl_id"`
 	Product         *string                 `json:"product"`
 	SecretRef       *string                 `json:"secret_ref"`
+	Version         *string                 `json:"version"`
 	VpnRequired     *bool                   `json:"vpn_required"`
 }
 

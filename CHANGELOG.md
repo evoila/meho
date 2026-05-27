@@ -148,6 +148,25 @@ connector-related release-notes line.
   policy persistence + the `AgentModelTier` ↔ `AgentTier` enum
   unification remain the M1 follow-up — the `TODO(G11.5-T2)`
   marker stays. (#1078)
+- **OpenAPI parser inlines `#/components/responses/*` and
+  `#/components/requestBodies/*` refs (G3.11-T7 #1241).** Unblocks
+  the GitHub REST spec's live ingest: the upstream spec at
+  `raw.githubusercontent.com/github/rest-api-description/main/...`
+  uses `#/components/responses/*` refs extensively (1929 hits across
+  the spec; every shared envelope — `accepted`, `not_found`,
+  `validation_failed` etc — is a responses ref). The parser
+  previously raised `UnsupportedSpecError` on the first one,
+  short-circuiting the Initiative #1220 G3.11 ingest acceptance.
+  `resolve_shallow_ref` now opts into both new buckets via
+  `component_responses` / `component_request_bodies` kwargs (mirrors
+  the existing opt-in pattern for `component_parameters` from T11
+  #501); `parse_openapi` threads all four buckets uniformly. The
+  residual `UnsupportedSpecError` envelope is preserved for
+  remaining buckets (headers / securitySchemes / links / callbacks /
+  examples) so future gaps stay diagnosable. The xfail mark on
+  `tests/integration/test_operations_ingest_github.py` (G3.11-T3
+  #1223) was removed; the test runs cleanly under
+  `MEHO_GH_INGEST_LIVE=1`. (#1241)
 - **`gh/v3` catalog entry — GitHub REST API on-ramp for L2 ingest
   (G3.11-T3 #1223).** Adds `gh/v3` to the curated connector-spec
   catalog with `impl_id: gh-rest` and `requires_connector_class:

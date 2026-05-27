@@ -227,12 +227,25 @@ def parse_openapi(
         raise InvalidSpecError(
             f"'components.parameters' must be a mapping, got {type(component_parameters).__name__}"
         )
+    component_responses = components.get("responses") or {}
+    if not isinstance(component_responses, dict):
+        raise InvalidSpecError(
+            f"'components.responses' must be a mapping, got {type(component_responses).__name__}"
+        )
+    component_request_bodies = components.get("requestBodies") or {}
+    if not isinstance(component_request_bodies, dict):
+        raise InvalidSpecError(
+            f"'components.requestBodies' must be a mapping, got "
+            f"{type(component_request_bodies).__name__}"
+        )
 
     return list(
         _iter_operations(
             paths=paths,
             component_schemas=cast(dict[str, Any], component_schemas),
             component_parameters=cast(dict[str, Any], component_parameters),
+            component_responses=cast(dict[str, Any], component_responses),
+            component_request_bodies=cast(dict[str, Any], component_request_bodies),
             spec_source=spec_source,
         )
     )
@@ -419,6 +432,8 @@ def _iter_operations(
     paths: dict[str, Any],
     component_schemas: dict[str, Any],
     component_parameters: dict[str, Any],
+    component_responses: dict[str, Any],
+    component_request_bodies: dict[str, Any],
     spec_source: str | None,
 ) -> Iterable[EndpointDescriptorProto]:
     """Yield one :class:`EndpointDescriptorProto` per (method, path)."""
@@ -446,6 +461,8 @@ def _iter_operations(
                 path_level_params=path_level_params,
                 component_schemas=component_schemas,
                 component_parameters=component_parameters,
+                component_responses=component_responses,
+                component_request_bodies=component_request_bodies,
                 spec_source=spec_source,
             )
 
@@ -458,6 +475,8 @@ def _build_proto(
     path_level_params: list[Any],
     component_schemas: dict[str, Any],
     component_parameters: dict[str, Any],
+    component_responses: dict[str, Any],
+    component_request_bodies: dict[str, Any],
     spec_source: str | None,
 ) -> EndpointDescriptorProto:
     """Assemble a single :class:`EndpointDescriptorProto`."""
@@ -476,10 +495,12 @@ def _build_proto(
         request_body=operation.get("requestBody"),
         component_schemas=component_schemas,
         component_parameters=component_parameters,
+        component_request_bodies=component_request_bodies,
     )
     response_schema = _extract_response_schema(
         responses=operation.get("responses") or {},
         component_schemas=component_schemas,
+        component_responses=component_responses,
     )
 
     raw_tags = operation.get("tags")
@@ -539,6 +560,7 @@ def _build_parameter_schema(
     request_body: Any,
     component_schemas: dict[str, Any],
     component_parameters: dict[str, Any],
+    component_request_bodies: dict[str, Any],
 ) -> dict[str, object]:
     """Flatten path + operation parameters + request body into one JSON Schema object.
 
@@ -595,7 +617,7 @@ def _build_parameter_schema(
         if is_required and name not in required:
             required.append(name)
 
-    body_property = _build_body_property(request_body, component_schemas)
+    body_property = _build_body_property(request_body, component_schemas, component_request_bodies)
     if body_property is not None:
         body_schema = dict(body_property["schema"])
         body_schema["x-meho-param-loc"] = "body"
@@ -656,11 +678,24 @@ def _build_param_property(
 def _build_body_property(
     request_body: Any,
     component_schemas: dict[str, Any],
+    component_request_bodies: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Return the ``{"schema": ..., "required": bool}`` body slot, or ``None``."""
+    """Return the ``{"schema": ..., "required": bool}`` body slot, or ``None``.
+
+    The ``request_body`` argument may be an inline Request Body Object
+    or a ``{"$ref": "#/components/requestBodies/<name>"}`` pointer
+    (OpenAPI 3.0 §4.7.10 / 3.1 §4.8.13). The latter is uncommon in the
+    v0.x catalogue today but is a first-class component bucket per the
+    spec, so the resolver opts into the bucket via
+    ``component_request_bodies``.
+    """
     if not isinstance(request_body, dict):
         return None
-    resolved = _resolve_shallow_ref(request_body, component_schemas)
+    resolved = _resolve_shallow_ref(
+        request_body,
+        component_schemas,
+        component_request_bodies=component_request_bodies,
+    )
     if not isinstance(resolved, dict):
         return None
     content = resolved.get("content")
@@ -702,12 +737,25 @@ def _extract_response_schema(
     *,
     responses: dict[str, Any],
     component_schemas: dict[str, Any],
+    component_responses: dict[str, Any],
 ) -> dict[str, object] | None:
-    """Pick the success response's schema, preferring ``200`` over ``201`` over wildcard."""
+    """Pick the success response's schema, preferring ``200`` over ``201`` over wildcard.
+
+    Each ``responses.<code>`` entry may be an inline Response Object
+    or a ``{"$ref": "#/components/responses/<name>"}`` pointer
+    (OpenAPI 3.0 §4.7.7 / 3.1 §4.8.16). The GitHub REST API spec uses
+    response refs for every shared envelope (``accepted``,
+    ``not_found``, ``validation_failed`` etc), so the resolver opts
+    into the bucket via ``component_responses``.
+    """
     if not isinstance(responses, dict):
         return None
     for code in _collect_2xx_response_codes(responses):
-        response = _resolve_shallow_ref(responses[code], component_schemas)
+        response = _resolve_shallow_ref(
+            responses[code],
+            component_schemas,
+            component_responses=component_responses,
+        )
         if not isinstance(response, dict):
             continue
         content = response.get("content")

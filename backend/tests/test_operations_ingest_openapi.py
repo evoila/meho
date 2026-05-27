@@ -24,6 +24,7 @@ from meho_backplane.operations.ingest import (
     InvalidSchemaError,
     InvalidSpecError,
     UnsupportedSpecError,
+    UpstreamNotSpecError,
     detect_spec_format,
     parse_openapi,
     read_spec_info_version,
@@ -631,6 +632,112 @@ def test_http_fetch_404_raises() -> None:
         )
         with pytest.raises(httpx.HTTPStatusError):
             parse_openapi("https://example.test/missing.yaml")
+
+
+def test_http_fetch_html_content_type_raises_upstream_not_spec() -> None:
+    """G0.15-T2 (#1211): a 2xx response carrying ``text/html`` (Broadcom
+    Developer Portal) raises :exc:`UpstreamNotSpecError` instead of
+    falling through to the YAML decoder.
+
+    The carried ``upstream_url`` + ``content_type`` attributes are what
+    the route layer builds the structured 422 envelope from; they must
+    survive the exception flight intact.
+    """
+    portal_url = "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/"
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_router.get(portal_url).mock(
+            return_value=httpx.Response(
+                200,
+                content=b"<!doctype html><html></html>",
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+        )
+        with pytest.raises(UpstreamNotSpecError) as exc_info:
+            parse_openapi(portal_url)
+    assert exc_info.value.upstream_url == portal_url
+    assert exc_info.value.content_type == "text/html; charset=utf-8"
+
+
+def test_http_fetch_missing_content_type_raises_upstream_not_spec() -> None:
+    """G0.15-T2 (#1211): a 2xx response that omits ``Content-Type`` is
+    treated as non-spec.
+
+    Every legitimate spec host sets the header; absence is the
+    fingerprint of a misconfigured upstream (or a default file server),
+    so the guard fires fail-closed rather than guessing at the body.
+    """
+    url = "https://example.test/no-content-type.yaml"
+    with respx.mock(assert_all_called=False) as mock_router:
+        # ``httpx.Response(200, content=...)`` does not synthesize a
+        # ``Content-Type`` header at transport time -- the receiving
+        # side sees ``None``, which is exactly the missing-header case
+        # the guard fails closed on.
+        mock_router.get(url).mock(
+            return_value=httpx.Response(200, content=b"openapi: 3.0.3\n"),
+        )
+        with pytest.raises(UpstreamNotSpecError) as exc_info:
+            parse_openapi(url)
+    assert exc_info.value.upstream_url == url
+    assert exc_info.value.content_type is None
+
+
+def test_http_fetch_application_yaml_content_type_accepted(
+    tmp_path: Path,
+) -> None:
+    """G0.15-T2 (#1211): a 2xx response with ``application/yaml`` proceeds
+    through the parser unchanged.
+
+    Regression guard against the content-type allow-list being too
+    narrow. The companion happy-path test
+    :func:`test_http_fetch_round_trip` already pins this for
+    ``application/yaml``; the parametrised variants below pin the rest
+    of the allow-list so a future tightening of the allow-list can't
+    silently break a working spec host.
+    """
+    url = "https://example.test/spec.yaml"
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_router.get(url).mock(
+            return_value=httpx.Response(
+                200,
+                content=PETSTORE_31_YAML.read_bytes(),
+                headers={"content-type": "application/yaml; charset=utf-8"},
+            )
+        )
+        rows = parse_openapi(url)
+    assert rows  # any non-empty result is enough — happy path is covered elsewhere
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/json",
+        "application/yaml",
+        "application/x-yaml",
+        "text/yaml",
+        "text/x-yaml",
+        "text/plain",  # raw.githubusercontent.com
+        "Application/JSON",  # case-insensitivity
+    ],
+)
+def test_http_fetch_accepted_content_types_proceed(content_type: str) -> None:
+    """G0.15-T2 (#1211): every entry in the accepted content-type allow-list
+    survives the guard.
+
+    A YAML body with a varying ``Content-Type`` header proves the guard
+    only branches on the header value, not on the bytes -- the existing
+    sniffer in ``detect_spec_format`` handles the bytes downstream.
+    """
+    url = f"https://example.test/spec-{content_type.replace('/', '-')}.yaml"
+    with respx.mock(assert_all_called=False) as mock_router:
+        mock_router.get(url).mock(
+            return_value=httpx.Response(
+                200,
+                content=PETSTORE_31_YAML.read_bytes(),
+                headers={"content-type": content_type},
+            )
+        )
+        rows = parse_openapi(url)
+    assert rows
 
 
 # -- read_spec_info_version ------------------------------------------------

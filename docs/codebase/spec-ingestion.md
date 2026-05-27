@@ -113,13 +113,46 @@ catalog-driven body shape directly — one canonical resolution
 path, no client-side catalog cache to drift against the server's
 package data.
 
-The four catalog-side validation outcomes (`catalog_entry_malformed`,
-`catalog_entry_not_found`, `catalog_entry_typed_connector`,
-`catalog_entry_templated_upstream`) ship through
-`build_catalog_entry_*_detail` helpers in `error_envelopes.py` so
-the REST 422 envelope can't drift from any future MCP equivalent
-(same shared-builder pattern G0.9.1-T5 / #777 used for
-`VersionMismatchError`).
+The four pre-fetch catalog-side validation outcomes
+(`catalog_entry_malformed`, `catalog_entry_not_found`,
+`catalog_entry_typed_connector`, `catalog_entry_templated_upstream`)
+ship through `build_catalog_entry_*_detail` helpers in
+`error_envelopes.py` so the REST 422 envelope can't drift from any
+future MCP equivalent (same shared-builder pattern G0.9.1-T5 / #777
+used for `VersionMismatchError`).
+
+The fifth catalog-side outcome surfaces at fetch time:
+`catalog_entry_upstream_not_spec` (G0.15-T2 / #1211). The catalog's
+`vmware/9.0` and `sddc-manager/9.0` upstream URLs point at Broadcom
+Developer Portal landing pages -- HTML, not raw OpenAPI YAML/JSON --
+so the route's `httpx.get` succeeds with a 2xx response whose
+`Content-Type` is `text/html`. Before #1211 the bytes fell through to
+the YAML decoder and surfaced as `could not decode spec: while
+scanning for the next token found character that cannot start any
+token in '<file>', line 33, column 1` (HTML doctype at line 1,
+opening tags around line 33) -- a true statement about the bytes but
+a useless one for the operator. `_load_spec_bytes` in `openapi.py`
+now inspects `Content-Type` against an allow-list
+(`application/json`, `application/yaml`,
+`application/x-yaml`, `text/yaml`, `text/x-yaml`, `text/plain` for
+`raw.githubusercontent.com` mirrors) and raises
+`UpstreamNotSpecError` -- caught in the route and mapped to HTTP 422
+with the `build_catalog_entry_upstream_not_spec_detail` envelope
+(catalog reference, upstream URL, Content-Type, remediation: fetch
+the spec manually, pass via the explicit-quadruple shape).
+Explicit-quadruple requests that hit the same trap get the bare
+`build_upstream_not_spec_detail` envelope without the
+`catalog_entry` field.
+
+The catalog's `notes` on the two affected entries carry the
+"HTML-portal upstream; manual ingest required" warning, mirroring
+the `harbor/2.x` Swagger-2.0 precedent. The only other
+`spec_info_version: null` catalog entries (`nsx/4.2`, `vault/1.x`,
+`k8s/1.x`, `bind9/9.x`) refuse the catalog-driven shape earlier --
+NSX via `catalog_entry_templated_upstream` (the URL is FQDN-templated),
+the three typed connectors via `catalog_entry_typed_connector`
+(`upstream: null`) -- so they never reach the fetch path that
+`UpstreamNotSpecError` guards.
 
 T1 produces the proto shape every other stage consumes; T2 is the
 single write path into `endpoint_descriptor` for ingested rows; T3

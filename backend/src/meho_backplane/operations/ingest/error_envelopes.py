@@ -41,7 +41,9 @@ __all__ = [
     "build_catalog_entry_malformed_detail",
     "build_catalog_entry_not_found_detail",
     "build_catalog_entry_typed_connector_detail",
+    "build_catalog_entry_upstream_not_spec_detail",
     "build_uncovered_version_label_detail",
+    "build_upstream_not_spec_detail",
     "build_version_mismatch_detail",
 ]
 
@@ -168,6 +170,91 @@ def build_catalog_entry_typed_connector_detail(
             f"catalog_entry_typed_connector: {catalog_entry!r} is a typed "
             f"connector ({product}/{version}/{impl_id}) with no ingestable "
             "spec; nothing to ingest. See docs/cross-repo/connector-catalog.md. "
+            "See docs/codebase/error-message-shape.md."
+        ),
+    }
+
+
+def build_catalog_entry_upstream_not_spec_detail(
+    *,
+    catalog_entry: str,
+    upstream_url: str,
+    content_type: str | None,
+) -> dict[str, Any]:
+    """Structured 422 detail for catalog-driven ingest when the upstream URL
+    served non-spec content (HTML developer portal, etc.) -- G0.15-T2 / #1211.
+
+    Concrete trigger: ``vmware/9.0`` and ``sddc-manager/9.0`` upstream URLs
+    point at the Broadcom Developer Portal landing pages, which return HTML,
+    not OpenAPI YAML/JSON. Before this envelope, the route fell through to
+    the parser's generic ``could not decode spec`` 400 ("while scanning for
+    the next token found character that cannot start any token in '<file>',
+    line 33, column 1") -- a true statement about the bytes but a useless
+    one for the operator. T11 convention says: name the values, name the
+    remediation, point at the doc.
+
+    Body shape (T11 convention, see
+    :doc:`docs/codebase/error-message-shape.md`):
+
+    * ``detail`` -- stable ``snake_case`` classifier
+      ``"catalog_entry_upstream_not_spec"`` so callers branch without
+      re-parsing the message.
+    * ``catalog_entry`` -- the operator-supplied
+      ``"<product>/<version>"`` reference, echoed back so an agent does
+      not need to re-thread it from its own prompt.
+    * ``upstream_url`` -- the URL the route fetched and rejected.
+    * ``content_type`` -- the verbatim ``Content-Type`` header the
+      server returned (e.g. ``"text/html; charset=utf-8"``). ``null``
+      when the server omitted the header entirely.
+    * ``message`` -- the rendered human-readable detail with the
+      remediation step (fetch the spec manually, pass via the explicit-
+      quadruple shape) for clients that ignore the structured fields.
+    """
+    rendered_ct = repr(content_type) if content_type is not None else "<missing>"
+    return {
+        "detail": "catalog_entry_upstream_not_spec",
+        "catalog_entry": catalog_entry,
+        "upstream_url": upstream_url,
+        "content_type": content_type,
+        "message": (
+            f"catalog_entry_upstream_not_spec: {catalog_entry!r} upstream "
+            f"{upstream_url!r} returned non-spec content "
+            f"(Content-Type={rendered_ct}); the URL serves a developer-portal "
+            "landing page or other non-OpenAPI content, not raw YAML/JSON. "
+            "Fetch the spec manually and pass it via the explicit-quadruple "
+            "shape (product/version/impl_id/specs[]) -- the operator's "
+            "checked-out clone, an appliance URL, or a mirrored file path. "
+            "See docs/cross-repo/connector-catalog.md. "
+            "See docs/codebase/error-message-shape.md."
+        ),
+    }
+
+
+def build_upstream_not_spec_detail(
+    *,
+    upstream_url: str,
+    content_type: str | None,
+) -> dict[str, Any]:
+    """Structured 422 detail for explicit-quadruple ingest when an
+    operator-supplied spec URL served non-spec content -- G0.15-T2 / #1211.
+
+    Same diagnostic as :func:`build_catalog_entry_upstream_not_spec_detail`
+    but without the ``catalog_entry`` field -- explicit-quadruple requests
+    pass spec URIs directly via ``specs[]``, so there is no catalog reference
+    to echo back. The route layer picks whichever builder the request shape
+    produced.
+    """
+    rendered_ct = repr(content_type) if content_type is not None else "<missing>"
+    return {
+        "detail": "upstream_not_spec",
+        "upstream_url": upstream_url,
+        "content_type": content_type,
+        "message": (
+            f"upstream_not_spec: upstream {upstream_url!r} returned "
+            f"non-spec content (Content-Type={rendered_ct}); the URL serves "
+            "a developer-portal landing page or other non-OpenAPI content, "
+            "not raw YAML/JSON. Supply a URL that serves OpenAPI YAML/JSON "
+            "directly, or pass a local file path. "
             "See docs/codebase/error-message-shape.md."
         ),
     }

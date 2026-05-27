@@ -56,7 +56,13 @@ entries:
       connector triple: vcenter.yaml (modern REST automation API, ~961 paths)
       and vi-json.yaml (Performance Manager, snapshots, host ops, ~2,195
       paths). Both are served by the appliance at https://<vcenter-fqdn>/ and
-      mirrored on the Broadcom Developer Portal (links above). spec_info_version
+      mirrored on the Broadcom Developer Portal (links above). SHARP EDGE:
+      the upstream URLs above are HTML developer-portal landing pages, not
+      raw OpenAPI YAML/JSON, so catalog-driven ingest via
+      `meho connector ingest --catalog vmware/9.0` returns HTTP 422
+      `catalog_entry_upstream_not_spec` (G0.15-T2 #1211); fetch the raw
+      specs manually from the appliance (https://<vcenter-fqdn>/api/...)
+      and pass them via the explicit-quadruple shape. spec_info_version
       pending the first MEHO-verified ingest. See #743 / connector-ingestion.md.
 
   - product: sddc-manager
@@ -70,7 +76,13 @@ entries:
     notes: >-
       Generic-ingested. The SDDC Manager API is served by the appliance at
       https://<sddc-manager-fqdn>/v1/ and documented on the Broadcom Developer
-      Portal (link above). spec_info_version pending first verified ingest.
+      Portal (link above). SHARP EDGE: the upstream URL above is an HTML
+      developer-portal landing page, not raw OpenAPI YAML/JSON, so
+      catalog-driven ingest via
+      `meho connector ingest --catalog sddc-manager/9.0` returns HTTP 422
+      `catalog_entry_upstream_not_spec` (G0.15-T2 #1211); fetch the raw
+      spec manually from the appliance and pass it via the explicit-
+      quadruple shape. spec_info_version pending first verified ingest.
       See #743.
 
   - product: harbor

@@ -232,7 +232,6 @@ async def test_tools_call_search_memory_returns_ranked_hits(
     dispatcher's ``content[0].text`` JSON envelope.
     """
     client, op = client_with_operator
-    captured: dict[str, object] = {}
 
     ts = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
     fake_hit = RetrievalHit(
@@ -257,9 +256,15 @@ async def test_tools_call_search_memory_returns_ranked_hits(
         cosine_rank=1,
     )
 
+    calls: list[dict[str, object]] = []
+
     async def fake_retrieve(**kwargs: object) -> list[RetrievalHit]:
-        captured.update(kwargs)
-        return [fake_hit]
+        calls.append(dict(kwargs))
+        # Return the fake hit only for the user kind so the cross-scope
+        # fan-out (G4.4-T2 / #1179) produces exactly one result row.
+        if kwargs.get("kind") == "memory-user":
+            return [fake_hit]
+        return []
 
     with patch(
         "meho_backplane.memory.service.retrieve",
@@ -278,12 +283,17 @@ async def test_tools_call_search_memory_returns_ranked_hits(
             },
         )
 
-    assert captured["source"] == "memory"
-    assert captured["tenant_id"] == op.tenant_id
-    assert captured["query"] == "wine"
-    # No scope filter → kind passed as None to retrieve (service-side
-    # post-filter on `visible_kinds` is the matrix gate).
-    assert captured["kind"] is None
+    # Cross-scope recall (no ``scope`` arg) fans out one retrieve per
+    # visible kind so the substrate can take a kind-appropriate
+    # ``metadata_filters`` predicate (G4.4-T2 / #1179). The MCP
+    # wire-shape contract is captured by the response assertions below;
+    # the per-call wiring is the service-level concern asserted in
+    # ``test_memory_service``.
+    assert calls, "search_memory should issue at least one retrieve call"
+    for kwargs in calls:
+        assert kwargs["source"] == "memory"
+        assert kwargs["tenant_id"] == op.tenant_id
+        assert kwargs["query"] == "wine"
 
     assert response.status_code == 200
     body = response.json()

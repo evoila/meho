@@ -228,6 +228,42 @@ class McpInvalidParamsError(Exception):
 # ---------------------------------------------------------------------------
 
 
+def _log_protocol_version_mismatch(
+    client_request: InitializeRequest,
+    operator: Operator,
+) -> None:
+    """Emit the G0.14-T13 mismatch breadcrumb when client/server revisions differ.
+
+    Extracted out of :func:`_initialize` to keep the handler under the
+    code-quality function-size budget and to give the observability
+    semantics a single, grep-friendly home. The log shape mirrors
+    ``mcp_unsupported_protocol_version`` (the existing WARNING that
+    :func:`_validate_protocol_version_header` emits when a non-
+    ``initialize`` request carries a stale ``MCP-Protocol-Version``
+    header) — operators get a uniform event-name family for both
+    handshake-time and post-handshake mismatches.
+
+    The response body is unchanged: this helper is observability-only
+    (G0.14-T13 #1202). Multi-version negotiation (refusing, down-
+    negotiating, version-conditional capability advertisement) is
+    deliberately deferred until concrete operator demand evidence
+    accumulates from the events this WARNING surfaces.
+
+    Same failure-mode genus as the v0.6.0 ``add_to_memory`` ``content``
+    → ``body`` silent rename — operators and pinned clients shouldn't
+    have to read CHANGELOGs to discover when their assumed contract no
+    longer applies.
+    """
+    if client_request.protocolVersion == PROTOCOL_VERSION:
+        return
+    _log.warning(
+        "mcp_initialize_protocol_version_mismatch",
+        client_protocol_version=client_request.protocolVersion,
+        server_protocol_version=PROTOCOL_VERSION,
+        operator_sub=operator.sub,
+    )
+
+
 async def _initialize(
     operator: Operator,
     params: dict[str, Any] | None,
@@ -245,11 +281,15 @@ async def _initialize(
     omission is loud (silent truncation of an operational rule is a
     safety bug per the issue body).
 
-    The spec requires the server to echo the client's ``protocolVersion``
-    when it supports it, or respond with another supported version
-    otherwise; T1 supports only :data:`PROTOCOL_VERSION` and always
-    responds with that. Negotiation past v0.2 (e.g. supporting an older
-    revision for legacy clients) is a v0.3 concern.
+    MEHO supports only :data:`PROTOCOL_VERSION` and always responds
+    with that — spec-compliant on the response side, but
+    indistinguishable from a silent upgrade for a client pinned to an
+    older revision. G0.14-T13 (#1202) closes the observability gap
+    via :func:`_log_protocol_version_mismatch`: a mismatched client
+    revision triggers a structured ``mcp_initialize_protocol_version_mismatch``
+    WARNING, while the response body stays unchanged. Multi-version
+    negotiation behaviour is tracked as explicit follow-up work,
+    gated on concrete operator demand.
     """
     # ``params or {}`` deliberately collapses ``None`` and ``{}``. Spec-
     # aligned: a missing ``params`` field on the JSON-RPC request and an
@@ -258,11 +298,13 @@ async def _initialize(
     # validator will then surface a clean INVALID_PARAMS for the
     # required-but-missing ``protocolVersion``.
     try:
-        InitializeRequest.model_validate(params or {})
+        client_request = InitializeRequest.model_validate(params or {})
     except ValidationError as exc:
         raise McpInvalidParamsError(
             f"initialize: {exc.error_count()} validation error(s)",
         ) from exc
+
+    _log_protocol_version_mismatch(client_request, operator)
 
     # G7.1-T4 (#316): assemble the operator's tenant session preamble
     # from ``kind='operational'`` conventions and ship it as

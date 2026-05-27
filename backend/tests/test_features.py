@@ -207,16 +207,45 @@ def test_approval_queue_configured_when_agent_runtime_configured() -> None:
 
 
 # ---------------------------------------------------------------------------
+# mcp (G0.14-T13 #1202)
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_block_reports_server_pinned_protocol_version() -> None:
+    """The ``mcp`` block surfaces the build-time pinned MCP revision.
+
+    Acceptance criterion (G0.14-T13 #1202): ``/ready`` carries a
+    ``features.mcp`` sub-block whose ``protocol_version`` field matches
+    :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`. The shape
+    mirrors ``audit_replay`` (no env var is "missing" — the constant
+    is build-time, not deploy-time) and is independent of any
+    :class:`Settings` field, so the assertion works against the default
+    fixture without further env-var setup.
+    """
+    from meho_backplane.mcp.schemas import PROTOCOL_VERSION
+
+    block = build_features_block(_settings_with())
+    mcp = block["mcp"]
+    assert mcp["configured"] is True
+    assert mcp["protocol_version"] == PROTOCOL_VERSION
+    assert mcp["missing_env"] == []
+    # No ``docs`` field — the pinned version is a build-time constant,
+    # not an admin-configurable knob. Same reasoning as ``audit_replay``.
+    assert "docs" not in mcp
+
+
+# ---------------------------------------------------------------------------
 # Block-level shape
 # ---------------------------------------------------------------------------
 
 
-def test_features_block_carries_all_four_entries() -> None:
-    """The block enumerates the four gated features by exact key name.
+def test_features_block_carries_all_five_entries() -> None:
+    """The block enumerates the five gated features by exact key name.
 
     Operator tooling (and downstream alerting) keys off these names.
     Renaming any of them is a wire-compat break that this assertion
-    catches at test time rather than at integration time.
+    catches at test time rather than at integration time. The ``mcp``
+    entry was added in G0.14-T13 (#1202).
     """
     block = build_features_block(_settings_with())
     assert set(block.keys()) == {
@@ -224,12 +253,13 @@ def test_features_block_carries_all_four_entries() -> None:
         "ui_surface",
         "audit_replay",
         "approval_queue",
+        "mcp",
     }
 
 
 @pytest.mark.parametrize(
     "feature",
-    ["agent_runtime", "ui_surface", "audit_replay", "approval_queue"],
+    ["agent_runtime", "ui_surface", "audit_replay", "approval_queue", "mcp"],
 )
 def test_every_feature_has_configured_bool(feature: str) -> None:
     """Each entry carries a ``configured: bool`` — the load-bearing field."""

@@ -31,9 +31,11 @@ box on my deploy?". Each entry carries:
   surface still has the provenance trail to the doc that describes
   the setup). Absent on ``audit_replay`` (capture is feature-coupled
   to MCP itself, not to an admin-configurable knob — operators have
-  no separate setup doc to read) and on the transitive
-  ``approval_queue`` entry (which surfaces a ``depends_on`` field
-  pointing at ``agent_runtime`` instead).
+  no separate setup doc to read), on the ``mcp`` block (the pinned
+  ``protocol_version`` is a build-time constant, not a deploy-time
+  knob), and on the transitive ``approval_queue`` entry (which
+  surfaces a ``depends_on`` field pointing at ``agent_runtime``
+  instead).
 
 The audit-replay entry additionally exposes ``capture_mode`` —
 ``"enforced"`` until G0.14-T6 (#1147) decouples capture from
@@ -154,6 +156,58 @@ def _audit_replay_block() -> dict[str, Any]:
     }
 
 
+def _mcp_block() -> dict[str, Any]:
+    """MCP-layer runtime visibility for ``/ready``.
+
+    Today the only field is ``protocol_version`` — the spec revision the
+    server pins (currently :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`).
+    The block exists so an unauthenticated deploy operator can answer
+    "which MCP revision will this server negotiate with my clients?"
+    from a single GET, without an authenticated ``/api/v1/health`` call.
+    Mirrors the ``mcp_session_id_capture`` precedent (G0.14-T6 #1147):
+    single-field operator visibility into the MCP layer's runtime
+    state, with the matching field on
+    :class:`~meho_backplane.api.v1.health.HealthResponse` so both
+    surfaces stay consistent.
+
+    No env var is "missing" — :data:`PROTOCOL_VERSION` is a build-time
+    constant, not an admin-configurable knob; ``missing_env`` is
+    therefore always ``[]`` and ``configured`` is always ``True``. The
+    block does not carry a ``docs`` field for the same reason the
+    ``audit_replay`` block doesn't: there is no deploy-time setup
+    document an operator needs to read to "turn this on".
+
+    G0.14-T13 (#1202) shipped this as the **observability** half of the
+    MCP ``initialize`` mismatch handling — the behaviour half (refusing
+    / down-negotiating / version-conditional capability advertisement)
+    is explicit follow-up work, gated on demand evidence from real
+    deployments. Operators reading this field can see which revision a
+    given server pins; the matching
+    ``mcp_initialize_protocol_version_mismatch`` WARNING log (emitted
+    by :func:`~meho_backplane.mcp.server._initialize`) gives them the
+    converse — which clients are pinned to a different revision.
+    """
+    # Function-local import to break the
+    # ``features -> mcp.schemas -> mcp/__init__ -> mcp.handlers ->
+    # broadcast -> health -> features`` cycle. ``health.py`` imports
+    # ``build_features_block`` at module top-level (the ``/ready``
+    # route hands the result to ``JSONResponse``), and ``mcp/__init__.py``
+    # eagerly imports ``handlers`` to register the T3 JSON-RPC methods
+    # — both can't sit above this module without re-entering it
+    # during initial import. ``mcp.schemas`` itself is a leaf module
+    # (no imports from elsewhere in the package), so reaching for it
+    # function-locally is cheap and safe; the per-request cost of one
+    # already-cached ``import`` is negligible against the rest of
+    # ``/ready``'s probe-fanout work.
+    from meho_backplane.mcp.schemas import PROTOCOL_VERSION
+
+    return {
+        "configured": True,
+        "protocol_version": PROTOCOL_VERSION,
+        "missing_env": [],
+    }
+
+
 def _approval_queue_block(settings: Settings) -> dict[str, Any]:
     """Whether the agent-grant approval queue is operative.
 
@@ -181,14 +235,14 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
     the attribute values under test and assert against the returned
     dict.
 
-    The four entries (``agent_runtime``, ``ui_surface``,
-    ``audit_replay``, ``approval_queue``) match the four gated
-    features the v0.6.0 release ships. The block is **closed** by
-    design: adding a new gated feature is an additive change to this
-    function and the corresponding entry in the
-    ``docs/RELEASING.md`` post-deploy enablement section; renaming
-    one is a wire-compat break for operator tooling that reads
-    ``/ready``.
+    The five entries (``agent_runtime``, ``ui_surface``,
+    ``audit_replay``, ``approval_queue``, ``mcp``) match the gated
+    features the release ships plus the MCP-layer visibility block
+    (G0.14-T13 #1202). The block is **closed** by design: adding a new
+    gated feature is an additive change to this function and the
+    corresponding entry in the ``docs/RELEASING.md`` post-deploy
+    enablement section; renaming one is a wire-compat break for
+    operator tooling that reads ``/ready``.
 
     Shape (verified by the issue body):
 
@@ -198,7 +252,8 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
           "agent_runtime":  {"configured": <bool>, "missing_env": [...], "docs": "..."},
           "ui_surface":     {"configured": <bool>, "missing_env": [...], "docs": "..."},
           "audit_replay":   {"configured": true,   "capture_mode": "...", "missing_env": []},
-          "approval_queue": {"configured": <bool>, "depends_on": "agent_runtime"}
+          "approval_queue": {"configured": <bool>, "depends_on": "agent_runtime"},
+          "mcp":            {"configured": true,   "protocol_version": "...", "missing_env": []}
         }
     """
     return {
@@ -206,4 +261,5 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
         "ui_surface": _ui_surface_block(settings),
         "audit_replay": _audit_replay_block(),
         "approval_queue": _approval_queue_block(settings),
+        "mcp": _mcp_block(),
     }

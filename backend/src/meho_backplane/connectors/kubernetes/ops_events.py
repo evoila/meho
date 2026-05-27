@@ -331,6 +331,43 @@ K8S_EVENT_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``k8s.event.list`` does not surface a server-side ``_continue``
+#: token through this connector -- ``limit`` truncates the
+#: most-recent-first sort, so paging across older events is done by
+#: narrowing ``field_selector`` (event type / involved object / source
+#: component) rather than walking a cursor. G0.15-T8 (#1219). The hint
+#: documents that contract so consumers don't reach for
+#: ``continue_token`` here as they would on pod / deployment lists.
+K8S_EVENT_LIST_PAGINATION_HINT: dict[str, Any] = {
+    "params": {
+        "field_selector": (
+            "K8s field-selector string. Common narrowings: "
+            "'type=Warning' (operator-actionable events only), "
+            "'involvedObject.kind=Pod', 'involvedObject.name=<pod>', "
+            "'source.component=<controller>'. Multiple filters "
+            "comma-separated."
+        ),
+        "namespace": "Switch to a different namespace's event feed.",
+        "limit": (
+            f"Cap rows per response (default {DEFAULT_EVENT_LIMIT}, "
+            f"capped at {MAX_EVENT_LIMIT}). Sort + truncate keeps the "
+            "N most-recent."
+        ),
+    },
+    "example_next_call": {
+        "tool": "call_operation",
+        "args": {
+            "op_id": "k8s.event.list",
+            "params": {
+                "namespace": "kube-system",
+                "field_selector": "type=Warning",
+                "limit": 50,
+            },
+        },
+    },
+}
+
+
 K8S_EVENT_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Call when the operator asks 'what's recently happened in "
@@ -360,6 +397,7 @@ K8S_EVENT_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "times the event has fired; ``last_seen_seconds`` is how "
         "long ago the event was last observed."
     ),
+    "pagination_hint": K8S_EVENT_LIST_PAGINATION_HINT,
 }
 
 

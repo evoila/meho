@@ -41,10 +41,14 @@ __all__ = [
     "CandidateHint",
     "EdgeHint",
     "EdgeKind",
+    "FetchMore",
+    "FetchMoreDrillIn",
+    "FetchMoreNativePagination",
     "FingerprintResult",
     "NodeHint",
     "NodeKind",
     "OperationResult",
+    "PaginationHint",
     "ProbeResult",
     "ResultHandle",
     "TopologyHints",
@@ -129,6 +133,205 @@ class ProbeResult(BaseModel):
     probed_at: datetime
 
 
+class FetchMoreDrillIn(BaseModel):
+    """Drill-in branch of :class:`FetchMore` -- "can the agent fetch more rows from this handle?"
+
+    G0.15-T8 (#1219). The reducer mints a handle but the v0.2/0.7 substrate
+    exposes **no** drill-in surface (no MCP tool, resource URI, REST route,
+    or CLI verb), so ``available`` is currently always ``False`` -- the
+    field exists today so a future Task that ships the fetch-back path
+    can flip it to ``True`` and populate ``mcp_resource_uri`` /
+    ``mcp_tool`` / ``example_call`` / ``expires_at`` without breaking
+    any consumer that already parses the envelope. The contract is
+    self-documenting per the consumer's recommendation in
+    ``claude-rdc-hetzner-dc#753``: *"the reduced response itself should
+    tell the agent how to fetch more"*.
+
+    ``rationale`` is the operator/agent-facing string explaining the
+    current state -- for ``available=False`` it describes the
+    workaround (re-call with narrower params); for ``available=True``
+    a future Task would surface the addressable resource.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    available: bool
+    rationale: str = Field(
+        description=(
+            "Free-form prose explaining the current drill-in state. "
+            "For ``available=False`` this names the workaround (typically "
+            "re-call with native pagination); for ``available=True`` a "
+            "future Task surfaces the resource URI / tool name here."
+        ),
+    )
+
+
+class FetchMoreNativePagination(BaseModel):
+    """Native-pagination branch of :class:`FetchMore`.
+
+    Answers *"what params let the underlying op return the next slice?"*
+
+    G0.15-T8 (#1219). When the underlying op has documented native
+    pagination support (k8s server-side ``label_selector`` / ``limit`` /
+    ``_continue``, REST APIs with ``offset`` / ``cursor`` knobs, etc.),
+    the reducer surfaces those param names + a curated
+    ``example_next_call`` so an agent can keep iterating without
+    re-discovering the contract every time it sees a handle.
+
+    The reducer reads :class:`PaginationHint` from the op's registration
+    metadata (carried through the dispatcher via ``context``). When no
+    hint exists, ``available=False`` with the rationale "op has no
+    documented native pagination support" -- the same response shape so
+    consumers parse one branch regardless of source.
+
+    ``params`` and ``example_next_call`` are mappings so the wire format
+    is stable JSON; immutability is enforced via
+    :class:`types.MappingProxyType` in :meth:`_freeze_nested` per the
+    sibling pattern.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    available: bool
+    rationale: str | None = None
+    params: Mapping[str, str] | None = Field(
+        default=None,
+        description=(
+            "Mapping of pagination-param name -> short description. The "
+            "agent picks the relevant subset when constructing the next "
+            "call. Omitted when ``available=False``."
+        ),
+    )
+    example_next_call: Mapping[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Curated next-call template the agent can adapt. Shape is "
+            "free-form by design (each connector picks the surface it "
+            "wants to teach -- MCP tool name + args, REST verb + path, "
+            "CLI invocation). Omitted when ``available=False``."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _freeze_nested(self) -> "FetchMoreNativePagination":
+        if self.params is not None:
+            object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        if self.example_next_call is not None:
+            object.__setattr__(
+                self,
+                "example_next_call",
+                MappingProxyType(dict(self.example_next_call)),
+            )
+        return self
+
+    @field_serializer("params")
+    def _serialize_params(self, value: Mapping[str, str] | None) -> dict[str, str] | None:
+        if value is None:
+            return None
+        return dict(value)
+
+    @field_serializer("example_next_call")
+    def _serialize_example_next_call(
+        self, value: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        return dict(value)
+
+
+class FetchMore(BaseModel):
+    """Self-documenting "how do I fetch more rows from this handle?" envelope.
+
+    G0.15-T8 (#1219). Shipped on every :class:`ResultHandle` the reducer
+    mints so an agent reading the envelope can answer
+    *"how do I get the next slice"* from the response itself -- without
+    a discovery dance across MCP tools / resource URIs / REST routes /
+    CLI verbs. Two branches because the answer has two independent
+    parts:
+
+    * :class:`FetchMoreDrillIn` -- can the agent fetch more rows from
+      the handle directly (resource URI / tool name)? Currently always
+      ``available=False`` in v0.7.x; flips to ``True`` when the drill-in
+      route ships (deferred to v0.8/0.9 per the issue body's
+      out-of-scope clause).
+    * :class:`FetchMoreNativePagination` -- can the agent re-call the
+      original op with narrower params (k8s ``label_selector``,
+      ``_continue`` token, etc.)? Populated from the op's
+      :class:`PaginationHint` registration metadata; ``available=False``
+      with rationale when no hint exists.
+
+    The shape is documentation-as-data, matching the established
+    precedents the consumer cited:
+    :attr:`~meho_backplane.db.models.ConnectorRegistration.next_step`
+    (G0.13-T3 #1153), ``/ready.features`` (G0.14-T7),
+    ``/retrieve/usage.counted_surfaces`` -- every reduced response
+    teaches the agent how to act on it next.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    drill_in: FetchMoreDrillIn
+    native_pagination: FetchMoreNativePagination
+
+
+class PaginationHint(BaseModel):
+    """Op-registration metadata describing the underlying op's native pagination contract.
+
+    G0.15-T8 (#1219). Connectors that ship pagination-aware ops attach
+    a :class:`PaginationHint` to the op's ``llm_instructions`` payload
+    under the ``pagination_hint`` key; the dispatcher forwards it to
+    the reducer via the reduce ``context``, and the reducer emits the
+    :attr:`FetchMore.native_pagination` block from it. Ops without a
+    hint emit ``native_pagination.available=False`` with a rationale.
+
+    Reading from ``llm_instructions`` (rather than a new column) keeps
+    the contract additive: no DB migration, no
+    :class:`~meho_backplane.db.models.EndpointDescriptor` schema
+    change. The validation lives at the Pydantic boundary so a malformed
+    hint surfaces at op-registration time, not first reduce.
+
+    ``params`` and ``example_next_call`` mirror the wire shape of
+    :class:`FetchMoreNativePagination`; the reducer copies the validated
+    hint into the envelope verbatim.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    params: Mapping[str, str] = Field(
+        description=(
+            "Mapping of pagination-param name -> short description. "
+            "Surfaced verbatim by the reducer's "
+            ":attr:`FetchMore.native_pagination.params` envelope."
+        ),
+    )
+    example_next_call: Mapping[str, Any] = Field(
+        description=(
+            "Curated next-call template the reducer surfaces verbatim "
+            "via :attr:`FetchMore.native_pagination.example_next_call`. "
+            "Free-form shape; connectors pick the surface (MCP tool, "
+            "REST verb, CLI invocation) the most-likely consumer reads."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _freeze_nested(self) -> "PaginationHint":
+        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        object.__setattr__(
+            self,
+            "example_next_call",
+            MappingProxyType(dict(self.example_next_call)),
+        )
+        return self
+
+    @field_serializer("params")
+    def _serialize_params(self, value: Mapping[str, str]) -> dict[str, str]:
+        return dict(value)
+
+    @field_serializer("example_next_call")
+    def _serialize_example_next_call(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(value)
+
+
 class ResultHandle(BaseModel):
     """Reference to a set-shaped payload stored out-of-band (MinIO / S3 / …).
 
@@ -153,6 +356,14 @@ class ResultHandle(BaseModel):
     ``sample_rows`` list (mirrors the sibling-models'
     :attr:`FingerprintResult.extras` / :attr:`OperationResult.extras`
     pattern).
+
+    ``fetch_more`` is the G0.15-T8 self-documenting drill-in / pagination
+    envelope -- every handle the reducer mints carries it so an agent
+    reading the response can answer *"how do I get more rows"* without a
+    discovery dance. ``None`` only on legacy code paths that construct
+    a :class:`ResultHandle` directly without going through the reducer
+    (test fixtures, future spill backends that have already enriched
+    the envelope); production reduce paths always populate it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -165,6 +376,7 @@ class ResultHandle(BaseModel):
     total_rows: int | None = None
     sample_rows: tuple[Mapping[str, Any], ...] | None = None
     ttl_seconds: int
+    fetch_more: FetchMore | None = None
 
     @model_validator(mode="after")
     def _freeze_nested(self) -> "ResultHandle":

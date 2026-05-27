@@ -546,6 +546,7 @@ async def _reduce_and_audit_success(
         raw_payload=redaction.raw,
         redaction_manifest=serialised_manifest,
         redaction_policy_id=redaction.policy_id,
+        handle_metadata=_handle_metadata_for_audit(handle),
     )
     return wrap_ok_result(op_id, summary, duration_ms, handle)
 
@@ -674,6 +675,59 @@ def _apply_redaction_middleware(
         return result_connector_error(op_id, exc, 0.0)
 
 
+def _handle_metadata_for_audit(handle: ResultHandle | None) -> dict[str, Any] | None:
+    """Build the audit-payload hoist dict for a reducer's ``ResultHandle``.
+
+    G0.15-T8 (#1219). Returns the ``handle_id`` (canonical UUID string),
+    ``total_rows`` (int), and ``sample_rows_returned`` (int) the audit
+    writer hoists into ``audit_log.payload``. ``None`` when the reducer
+    did not materialize -- a pass-through reduce leaves the audit row's
+    handle keys absent, which is the right signal for downstream
+    consumers (audit-replay G8.2, the audit-query API) that "the
+    operator/agent saw the full payload inline; no handle was minted".
+
+    Pulled into a dispatcher helper rather than the reducer so the
+    reducer stays decoupled from the audit-write contract (the
+    :class:`~meho_backplane.operations.reducer.Reducer` Protocol does
+    not surface audit metadata, and the dispatcher already owns the
+    redact-reduce-audit ordering).
+    """
+    if handle is None:
+        return None
+    sample_count = len(handle.sample_rows) if handle.sample_rows is not None else 0
+    return {
+        "handle_id": str(handle.handle_id),
+        "total_rows": handle.total_rows,
+        "sample_rows_returned": sample_count,
+    }
+
+
+def _pagination_hint_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``pagination_hint`` from a descriptor's ``llm_instructions``.
+
+    G0.15-T8 (#1219). Connectors that ship pagination-aware ops attach
+    a :class:`~meho_backplane.connectors.schemas.PaginationHint`-shaped
+    dict under ``llm_instructions.pagination_hint``; the reducer reads
+    it via the dispatcher-supplied context to build the
+    ``fetch_more.native_pagination`` envelope. Returning a plain dict
+    (rather than the validated :class:`PaginationHint`) keeps this
+    layer free of a Pydantic-import dependency on the connectors
+    schema; the reducer validates at consumption time.
+
+    ``None`` outcomes (op didn't register a hint, ``llm_instructions``
+    itself is ``None``, or the slot's value is not a dict) all flow
+    to the reducer as "no hint" -- the reducer emits the unavailable
+    branch with a curated rationale.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("pagination_hint")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _reduce_or_error(
     *,
     op_id: str,
@@ -719,6 +773,17 @@ async def _reduce_or_error(
     target_id = getattr(target, "id", None)
     if target_id is not None:
         reducer_context["target_id"] = str(target_id)
+    # G0.15-T8 (#1219): forward the op's pagination hint (when the
+    # connector author registered one via ``llm_instructions``) into
+    # the reducer context so :class:`JsonFluxReducer` can emit the
+    # ``fetch_more.native_pagination`` envelope verbatim. ``None`` on
+    # ops without a hint -- the reducer falls back to
+    # ``available=False`` with a curated rationale. Pulled here (vs.
+    # in the reducer) so the reducer stays decoupled from
+    # :class:`EndpointDescriptor`'s shape.
+    pagination_hint = _pagination_hint_from_descriptor(descriptor)
+    if pagination_hint is not None:
+        reducer_context["pagination_hint"] = pagination_hint
     try:
         return await _DEFAULT_REDUCER.reduce(
             raw,

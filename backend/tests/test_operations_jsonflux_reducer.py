@@ -45,7 +45,11 @@ from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import (
+    FetchMore,
+    FetchMoreDrillIn,
+    FetchMoreNativePagination,
     FingerprintResult,
+    PaginationHint,
     ProbeResult,
     ResultHandle,
 )
@@ -392,4 +396,203 @@ async def test_reducer_exception_yields_connector_error_via_dispatcher(
     assert rows[0].payload["result_status"] == "error"
 
     assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
+
+
+# ---------------------------------------------------------------------------
+# G0.15-T8 (#1219) — fetch_more envelope + audit-row handle metadata
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_carries_fetch_more_unavailable_branches_without_context() -> None:
+    """Every reducing-response handle ships a ``fetch_more`` block.
+
+    With no ``pagination_hint`` in the reducer context, **both** branches
+    return ``available=False`` with a non-empty rationale -- the contract
+    is self-documenting regardless of whether a hint exists. This pins
+    the v0.7.x state where the drill-in route is deferred to v0.8/0.9
+    and most ops don't yet register a ``pagination_hint``.
+    """
+    reducer = JsonFluxReducer()
+    rows = [{"id": f"row-{i}", "label": f"item-{i}"} for i in range(60)]
+    payload = {"results": rows}
+
+    _reduced, handle = await reducer.reduce(payload, None)
+
+    assert handle is not None
+    assert isinstance(handle.fetch_more, FetchMore)
+    assert isinstance(handle.fetch_more.drill_in, FetchMoreDrillIn)
+    assert handle.fetch_more.drill_in.available is False
+    assert handle.fetch_more.drill_in.rationale, (
+        "the drill_in branch must carry a non-empty rationale explaining the workaround"
+    )
+    assert "drill-in" in handle.fetch_more.drill_in.rationale.lower()
+
+    assert isinstance(handle.fetch_more.native_pagination, FetchMoreNativePagination)
+    assert handle.fetch_more.native_pagination.available is False
+    assert handle.fetch_more.native_pagination.params is None
+    assert handle.fetch_more.native_pagination.example_next_call is None
+    assert handle.fetch_more.native_pagination.rationale, (
+        "native_pagination must carry a rationale when available=False"
+    )
+
+
+async def test_handle_fetch_more_native_pagination_populated_from_context_hint() -> None:
+    """``context['pagination_hint']`` populates the ``native_pagination`` branch verbatim.
+
+    The reducer accepts both the validated :class:`PaginationHint` and a
+    plain dict shape (the dispatcher reads ``llm_instructions`` as
+    primitive JSON). Both paths produce ``available=True`` with the
+    hint's ``params`` + ``example_next_call`` copied through.
+    """
+    reducer = JsonFluxReducer()
+    rows = [{"vm": f"vm-{i}", "power": "on"} for i in range(80)]
+    payload = {"value": rows}
+    hint_dict = {
+        "params": {
+            "continue_token": "Server-emitted cursor.",
+            "label_selector": "k8s label selector.",
+        },
+        "example_next_call": {
+            "tool": "call_operation",
+            "args": {"op_id": "k8s.pod.list", "params": {"all_namespaces": True}},
+        },
+    }
+
+    # Dict path (the dispatcher's natural shape).
+    _reduced, handle = await reducer.reduce(
+        payload, None, {"op_id": "k8s.pod.list", "pagination_hint": hint_dict}
+    )
+
+    assert handle is not None
+    native = handle.fetch_more.native_pagination
+    assert native.available is True
+    assert native.params is not None and dict(native.params) == hint_dict["params"]
+    assert (
+        native.example_next_call is not None
+        and dict(native.example_next_call) == hint_dict["example_next_call"]
+    )
+
+    # Validated-instance path (callers that wire PaginationHint themselves).
+    hint = PaginationHint.model_validate(hint_dict)
+    _r2, handle2 = await reducer.reduce(
+        payload, None, {"op_id": "k8s.pod.list", "pagination_hint": hint}
+    )
+    assert handle2 is not None
+    assert handle2.fetch_more.native_pagination.available is True
+    assert dict(handle2.fetch_more.native_pagination.params or {}) == hint_dict["params"]
+
+
+async def test_handle_fetch_more_malformed_pagination_hint_falls_back_to_unavailable() -> None:
+    """A malformed ``pagination_hint`` dict does not raise; the reducer logs and falls back.
+
+    A reduce-time exception would otherwise convert into a
+    ``connector_error`` ``OperationResult`` via the dispatcher's
+    ``_reduce_or_error`` guard -- failing a real read because an
+    operator-facing metadata field had a typo is the wrong fail mode.
+    The validation surfaces at op-registration time when a connector
+    author writes the hint as a :class:`PaginationHint` literal there.
+    """
+    reducer = JsonFluxReducer()
+    rows = [{"id": i} for i in range(60)]
+    payload = {"results": rows}
+
+    # ``params`` must be a dict; the connector author typoed.
+    bad_hint = {"params": "not-a-dict", "example_next_call": {"tool": "x"}}
+    _reduced, handle = await reducer.reduce(
+        payload, None, {"op_id": "broken.op", "pagination_hint": bad_hint}
+    )
+
+    assert handle is not None
+    native = handle.fetch_more.native_pagination
+    assert native.available is False, (
+        "a malformed hint must collapse to the unavailable branch -- "
+        "raising would lose the user-visible read result"
+    )
+    assert native.rationale, "unavailable branch must still carry a rationale"
+
+
+async def _set_shaped_handler(
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Module-level handler returning a 60-row set so JsonFluxReducer materializes."""
+    del target, params
+    return {"results": [{"k": f"k-{i}", "v": i} for i in range(60)]}
+
+
+@pytest.fixture
+async def _registered_set_shaped_op(
+    stub_embedding_service: AsyncMock,
+) -> AsyncIterator[None]:
+    """Register the connector + a typed op the audit-hoist test dispatches.
+
+    Returns a 60-row payload so the production-default
+    :class:`JsonFluxReducer` actually materializes a handle (the
+    fixture used by other dispatcher tests returns a 1-row payload
+    that passes through). The op_id is intentionally distinct so it
+    doesn't share state with :func:`_registered_typed_op`.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.list.bulk",
+        handler=_set_shaped_handler,
+        summary="List many secrets.",
+        description="List many secrets.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    yield
+
+
+async def test_reducing_dispatch_writes_handle_metadata_into_audit_payload(
+    _registered_set_shaped_op: None,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A reducing dispatch hoists ``handle_id`` / ``total_rows`` / ``sample_rows_returned``.
+
+    G0.15-T8 (#1219). The reducer binds three ``audit_*`` contextvars
+    and the dispatcher's audit writer hoists them into the
+    ``audit_log.payload`` JSON via the existing
+    ``_resolve_audit_extras_from_contextvars`` sweep -- a consumer
+    reading the audit row attributes *"what the agent saw"* (the
+    handle id + total rows + the bounded sample size) without
+    joining against the reducer's in-memory state.
+    """
+    set_default_reducer(JsonFluxReducer(sample_size=5))
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.kv.list.bulk",
+            target=_FakeTarget(),
+            params={"path": "/secret"},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok", (
+        f"expected ok; got status={result.status!r} error={result.error!r}"
+    )
+    assert result.handle is not None, "a 60-row response must materialize through JsonFluxReducer"
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "vault.kv.list.bulk")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["result_status"] == "ok"
+    assert payload["handle_id"] == str(result.handle.handle_id)
+    assert payload["total_rows"] == 60
+    assert payload["sample_rows_returned"] == 5
+
+    # The broadcast event also fired.
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "ok"

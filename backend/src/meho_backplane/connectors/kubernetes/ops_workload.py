@@ -928,6 +928,46 @@ K8S_DEPLOYMENT_INFO_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: Pagination hint surfaced by the JsonFlux reducer on every reducing
+#: ``k8s.pod.list`` response. G0.15-T8 (#1219): consumers reading the
+#: reduced envelope's ``fetch_more.native_pagination`` block see the
+#: param vocabulary + a curated example next call without re-deriving
+#: the contract. ``continue_token`` is the connector-side name for the
+#: server's ``_continue`` cursor (the connector renames it on the way
+#: out so the operator-facing surface stays kubectl-shaped); the hint
+#: documents both so a consumer can map either direction.
+K8S_POD_LIST_PAGINATION_HINT: dict[str, Any] = {
+    "params": {
+        "continue_token": (
+            "Server-emitted pagination cursor from the prior response's "
+            "``next_continue`` field. Pass back unchanged to fetch the "
+            "next page; stale tokens (>5..15 min) return 410 -- restart "
+            "the list without it."
+        ),
+        "label_selector": (
+            "Standard k8s label selector (e.g. ``app=argocd-server``, "
+            "``app in (frontend,backend)``). Forwarded server-side."
+        ),
+        "field_selector": (
+            "Standard k8s field selector (e.g. ``status.phase=Running``, "
+            "``spec.nodeName=node-1``). Forwarded server-side."
+        ),
+        "namespace": "Narrow to one namespace.",
+        "limit": "Server-side page size (1..1000).",
+    },
+    "example_next_call": {
+        "tool": "call_operation",
+        "args": {
+            "op_id": "k8s.pod.list",
+            "params": {
+                "all_namespaces": True,
+                "field_selector": "status.phase!=Running",
+            },
+        },
+    },
+}
+
+
 K8S_POD_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Call when the operator asks 'what pods are running?' or wants "
@@ -954,6 +994,7 @@ K8S_POD_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "``restarts`` is the sum across main containers. "
         "``next_continue`` is present iff the server has more pages."
     ),
+    "pagination_hint": K8S_POD_LIST_PAGINATION_HINT,
 }
 
 
@@ -980,6 +1021,36 @@ K8S_POD_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
+#: Same shape as :data:`K8S_POD_LIST_PAGINATION_HINT` -- the k8s server-
+#: side pagination contract is identical across list ops. G0.15-T8
+#: (#1219). The example_next_call uses a deployment-shaped narrowing
+#: filter so an agent reading this hint doesn't carry pod-shaped
+#: intuition over.
+K8S_DEPLOYMENT_LIST_PAGINATION_HINT: dict[str, Any] = {
+    "params": {
+        "continue_token": (
+            "Server-emitted pagination cursor from the prior response's "
+            "``next_continue`` field. Pass back unchanged to fetch the "
+            "next page; stale tokens return 410."
+        ),
+        "label_selector": "Standard k8s label selector. Forwarded server-side.",
+        "field_selector": "Standard k8s field selector. Forwarded server-side.",
+        "namespace": "Narrow to one namespace.",
+        "limit": "Server-side page size (1..1000).",
+    },
+    "example_next_call": {
+        "tool": "call_operation",
+        "args": {
+            "op_id": "k8s.deployment.list",
+            "params": {
+                "namespace": "kube-system",
+                "label_selector": "app in (coredns,kube-proxy)",
+            },
+        },
+    },
+}
+
+
 K8S_DEPLOYMENT_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Call when the operator asks 'what's deployed in <ns>?' or "
@@ -1001,6 +1072,7 @@ K8S_DEPLOYMENT_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
         "'next_continue'?}. ``image`` is the first container's image "
         "(kubectl convention); full template is on the info path."
     ),
+    "pagination_hint": K8S_DEPLOYMENT_LIST_PAGINATION_HINT,
 }
 
 

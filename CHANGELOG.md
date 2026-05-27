@@ -90,6 +90,47 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-27
+
+**MVP6 — agent runtime floor (P1 + P2 + P3) + safety (C1 sanitization)
++ operator web UI surfaces (KB, memory, targets) + v0.6.0
+closed-loop dogfood hardening.** v0.7.0 closes the **G11 agentic-ops
+floor**: G11.1 lands its final P1 piece (agent runs that park on a
+`requires_approval` op now resume on the broadcast decision event,
+not only on the REST `/approve+params` express lane), the entire **G11.3
+P2 scheduler** ships (cron + one-off + event-outbox triggers, advisory-
+lock + SKIP-LOCKED replica-safety, lease/heartbeat + reaper for
+restart-durability, admin surface on CLI/MCP/REST), and the whole
+**G11.4 C1 sanitization wave** ships in one release window (declarative
+policy schema + Tier-1 regex engine, connector-boundary middleware that
+captures raw → audit-stores raw → redacts → reduces, Tier-2 Microsoft
+Presidio NER for free-text fields, round-trip fixture CI gate +
+shadow-mode policy flag, agent-invocation audit row tying per-tool-call
+redaction back to the run's model + provider + cost). The **G11.2
+identity/RBAC tail** closes the MCP-client on-ramp (Keycloak CIMD docs +
+`offline_access` optional scope on the MCP browser-flow client,
+dissolving the W6 + W7 walls), plus follow-up polish (TOCTOU honesty in
+the identity_ref validator, negative RBAC tests, route-shadow fix,
+auto-coverage guard for new tenant.id FKs in TRUNCATE lists,
+`approval.expired` as the fourth broadcast lifecycle event).
+
+The **G10 operator web UI** moves from "two surfaces" to "five
+production surfaces": KB read + Markdown editor, targets list +
+forms + bulk YAML import, memory list + create + scope-promotion +
+expiry/bulk. Substrate hardens against the v0.6.0 RDC dogfood
+(`claude-rdc-hetzner-dc#697`) across both **G0.13** (auth classifier
+DecodeError extension, `/connectors/{id}/review` global-scope fallback,
+catalog-driven REST ingest, `add_to_memory` content shim with v0.6.0
+breaking-change callout, release-body path-freshness CI gate) and
+**G0.14** (T11 error-message-shape convention codified; T1 dispatcher
+ambiguity → structured surface; T2 versioned-beats-wildcard resolver
+tie-break; T3+T4 target product enum + DELETE route; T5 SSE feed-error;
+T6 audit-session capture decoupled; T7 /ready features block; T8
+conventions preamble_status; T9 catalog_entry server resolve;
+T10 vmware composite L2 pre-flight). No breaking changes in v0.7.0 —
+the v0.6.0-announced `add_to_memory` `content` shim continues through
+the v0.7.x line; v0.8 will land the removal.
+
 ### Added
 
 - **`meho admin keycloak bootstrap-clients` assigns the
@@ -111,7 +152,8 @@ connector-related release-notes line.
   the operator. `deploy/values-examples/README.md`'s troubleshooting
   matrix grows from four to five walls (W7 added) and the MCP-client
   recipe surfaces the optional scope with the CLI-asymmetry
-  rationale. (#912)
+  rationale. (#912 / #1188)
+
 - **Per-write preamble-inclusion feedback on the conventions write
   surface (G0.14-T8 #1149).** `POST /api/v1/conventions` and
   `PATCH /api/v1/conventions/{slug}` now attach a `preamble_status`
@@ -129,7 +171,8 @@ connector-related release-notes line.
   same round-trip. `preamble_status` is `null` on `GET /{slug}`
   (the aggregate budget signal lives on the list response's
   `budget_status`) and `null` for writes against `workflow` /
-  `reference` kinds. (#1149)
+  `reference` kinds. (#1149 / #1175)
+
 - **`/ready` features block + agent-runtime 503 symmetry +
   `docs/RELEASING.md` post-deploy enablement** (G0.14-T7 #1148).
   `GET /ready` now carries a structured `features` block enumerating
@@ -146,7 +189,586 @@ connector-related release-notes line.
   `docs/RELEASING.md` gains §6a "Post-deploy enablement" walking
   operators through each gate. T11-convention-compliant per
   `docs/codebase/error-message-shape.md` (audit table updated).
-  Closes `claude-rdc-hetzner-dc#697` signals 16 + 17.
+  Closes `claude-rdc-hetzner-dc#697` signals 16 + 17. (#1173)
+
+- **Agent runtime — `awaiting_approval` runs resume on broadcast
+  (G11.1-T9 #1171).** Closes the operator/agent split G11.2 #803
+  established. When a `requires_approval` op parks an agent run,
+  the wrapped `call_operation` tool now subscribes to the
+  per-tenant broadcast feed for `approval.{approved,rejected}` keyed
+  on its request id and either re-dispatches with `_approved=True`
+  (on approval), surfaces the rejection to the model (on rejection),
+  or returns an `awaiting_approval_timeout`-tagged envelope (on
+  timeout / broadcast outage). New `backend/src/meho_backplane/agent/
+  approval_wait.py` module hosts the read-side primitive
+  (`wait_for_approval_decision`) and the agent-facing entry point
+  (`resume_or_surface_awaiting_approval`); wraps `call_operation` in
+  both `agent/run.py` (T1 default surface) and `agent/toolset.py`
+  (T3 resolved surface); `call_operation_with_approval` in
+  `operations/meta_tools.py` is the gate-bypass re-dispatch entry.
+  Preserves the REST `/approve+params` express lane untouched (the
+  human-driven path that re-dispatches inline). Closes the last
+  open Task of G11.1 #802. (#1171)
+
+- **Scheduler P2 — cron + one-off triggers fire agent runs
+  (G11.3-T2 #1065).** New `scheduler` package + Alembic 0018
+  `scheduled_trigger` table host the two simplest P2 trigger shapes
+  that fire P1 agent runs: **cron** and **one-off**. Lifespan-owned
+  `asyncio` loop on a configurable tick (default 30 s, settable via
+  `SCHEDULER_TICK_INTERVAL_SECONDS`). **Replica-safe**: each tick
+  claims a process-wide `pg_try_advisory_lock` (mirrors
+  `topology/scheduler.py`), then `SELECT ... FOR UPDATE SKIP LOCKED`
+  the due rows. The "advance/mark-fired BEFORE invoke" discipline
+  plus a conditional `UPDATE` (`WHERE status='active' AND
+  next_fire_at=:previous`) is belt-and-braces single-fire even if
+  the advisory lock were removed. **Restart-durable**: state lives
+  in the row; a long outage fires the trigger exactly once on
+  resume and re-anchors to the next scheduled instant — no catch-up
+  storm. `AgentInvoker.run()` grew a `trigger` kwarg so the durable
+  `agent_run` row's provenance column shows `scheduled` for
+  cron/one-off fires. (#1065)
+
+- **Scheduler P2 — event-outbox + drain; agent-run completion fires
+  next agent (G11.3-T3 #1129).** Third durable trigger shape
+  (event-subscription) so a MEHO-internal event (agent-run reaching
+  a terminal state; future: audit predicates, connector alerts)
+  durably fires a subscribed agent run, surviving process restarts
+  where plain `LISTEN/NOTIFY` would lose the signal. Producer-side
+  `publish()` writes the outbox row in the caller's open session
+  (same-transaction discipline: a producer rollback discards the
+  event); a post-commit `NOTIFY event_outbox_new` fires from a
+  short-lived connection as a sub-second wake hint. Durability is
+  the outbox row, not the notification. Replica-safe drain via
+  `pg_try_advisory_lock` + `SELECT FOR UPDATE SKIP LOCKED`; 10 s
+  polled cadence (`EVENT_DRAIN_ENABLED` gate mirrors the
+  scheduler) with a parallel asyncpg `LISTEN` task that wakes the
+  drain's sleep on every notification. `transition()` in
+  `operations/agent_run.py` publishes `agent_run.completed` onto
+  the outbox on every terminal-status entry (`succeeded` / `failed`
+  / `cancelled`) in the same session as the status write. Subscription
+  matcher (`scheduled_trigger.kind='event'` lookup) deferred to
+  follow-up once T5 admin surface ships. (#1129)
+
+- **Scheduler P2 — `agent_run` lease/heartbeat + reaper; no run
+  silently lost (G11.3-T4 #1125).** Adds `lease_owner` /
+  `lease_expires_at` / `in_flight_policy` columns to `agent_run`
+  (migration 0025) and five lifecycle helpers (`claim_lease`,
+  `heartbeat`, `release_lease`, `snapshot_in_flight_policy`, plus a
+  `LeaseLostError` exception). New `agent_run_reaper` background
+  task at `backend/src/meho_backplane/agent/reaper.py` —
+  `asyncio` lifespan-owned, single-flighted across replicas via
+  `pg_try_advisory_lock`, per-tick LIMIT bounded, per-row failure
+  isolation. Applies the per-run policy (`fail_into_audit` →
+  terminal `failed` + audit row; `resume` → clear lease + audit row
+  so dispatcher re-claims). Audit row staged in the same
+  transaction as the lifecycle transition. Acceptance contract
+  honoured: a run killed mid-flight ends in a terminal audited
+  state — never silently lost. (#1125)
+
+- **Scheduler admin surface (CLI + MCP + REST) + durability test
+  (G11.3-T5 #1128).** Three transports over the `scheduled_trigger`
+  model from #1065. **REST**: `POST/GET/DELETE
+  /api/v1/scheduler/triggers`, tenant-scoped via the JWT;
+  tenant_admin may pass `tenant_filter` / body `tenant_id` to act
+  cross-tenant. `list` is operator-level; `create` / `cancel`
+  require tenant_admin. **MCP**: three `meho.scheduler.*` tools
+  (list / create / cancel) — picked three verbs over one
+  parametric `manage_scheduled_trigger` to match the
+  `meho.agents.*` discoverability shape. **CLI**: `meho scheduler
+  {list,create,cancel}` cobra tree wraps the REST surface with
+  discriminated-union pre-checks for `kind=cron|one_off|event`.
+  Service-layer `SchedulerAdminService` is the single code path
+  the three transports share (mirrors `AgentDefinitionService`);
+  Pydantic schema enforces the discriminated-union invariant at
+  the wire so a malformed body surfaces as 422 (not a flush-time
+  `IntegrityError`). Cancel uses a conditional `UPDATE` on `status
+  IN (active, paused)` so a concurrent scheduler fire cannot race
+  it into an invalid state; terminal-fired one-off → 409
+  `trigger_already_fired`. Every create/cancel writes
+  `op_class='write'`, `op_id='scheduler.{create,cancel}'`;
+  `audit_tenant_scope='self'|'other'` records cross-tenant admin
+  activity. Closes Initiative #804 (G11.3). (#1128)
+
+- **Redaction — declarative policy schema + Tier-1 regex engine
+  (G11.4-T1 #1170).** First Task of Initiative #805 (G11.4 Safety,
+  C1). Ships the foundation of the sanitization middleware:
+  declarative YAML policy schema, Tier-1 deterministic regex
+  engine, and the named-pattern library. The engine is pure and
+  side-effect-free (no I/O, no clocks, no logging) so the C1-d
+  round-trip CI gate (#1185) can pin determinism; YAML loading
+  uses `importlib.resources` mirroring the
+  `operations/ingest/catalog.py` precedent. Middleware wiring
+  (C1-b, #1180), Tier-2 Microsoft Presidio NER (C1-c, #1184), and
+  the round-trip CI gate (C1-d, #1185) land on top of this
+  surface. (#1170)
+
+- **Redaction — connector-boundary middleware + manifest into
+  audit (G11.4-T2 #1180).** Wires the Tier-1 redaction engine
+  (#1170) into `dispatcher._execute_and_audit` so every dispatch
+  — user-path **and** agent-path — runs **capture-raw →
+  audit-raw → redact → reduce → return**. The caller and LLM see
+  only the redacted view; the audit row holds the raw payload plus
+  the engine's manifest for forensic recovery. Adds the
+  connector-boundary middleware (`meho_backplane.redaction.middleware`)
+  + a policy resolver with a six-step specificity ladder (per-
+  `connector_id`, per-tenant, per-op → packaged conservative
+  default). **Default-safe**: an un-configured connector still
+  gets credentials stripped — never pass-through. Migration `0030`
+  adds two nullable JSON columns to `audit_log` (`raw_payload`,
+  `redaction_manifest`); the resolved policy id mirrors into
+  `payload['redaction_policy_id']` for broadcast-event attribution.
+  Migration is purely additive (backward-compat guard green).
+  (#1180)
+
+- **Redaction — Tier-2 Microsoft Presidio NER for free-text
+  fields (G11.4-T3 #1184).** Capability-flagged per policy. A
+  `RedactionPolicy` with a `tier2:` block opts into
+  `AnalyzerEngine` → `AnonymizerEngine` over policy-flagged
+  free-text fields; manifest entries merge into the Tier-1
+  manifest with `pattern` prefixed `presidio:` so audit consumers
+  can bin Tier-1 vs Tier-2 firings. **Capability-flag guarantee**:
+  a Tier-1-only policy never imports `presidio_*` at runtime —
+  the middleware checks `policy_uses_tier2(policy)` before any
+  Presidio code path runs; `get_engines` does the import + spaCy
+  model load lazily on first opt-in. Pins
+  `presidio-analyzer==2.2.362` + `presidio-anonymizer==2.2.362`
+  (the 2026-03-15 release). CI provisions `en_core_web_sm`
+  (12 MB) for the unit lane; the adapter reads
+  `MEHO_REDACTION_SPACY_MODEL` so production images can bake the
+  heavier `en_core_web_lg` (Presidio's documented default)
+  out-of-band. Path-glob matcher (`*` = one segment, `**` = any
+  depth) extracted to `redaction/path_glob.py`. (#1184)
+
+- **Redaction — round-trip fixture CI gate + shadow mode
+  (G11.4-T4 #1185).** Round-trip fixture suite + harness re-runs
+  the active redaction policy against captured raw payloads and
+  asserts the engine's output equals `expected.json` exactly —
+  same `==` catches both leaks (under-redaction) and
+  over-redaction, satisfying Initiative #805's DoD bullet
+  "redaction policy round-trips ... enforced in CI". Four
+  fixtures cover enforce-mode redact, scoped UUID mask,
+  shadow-mode detection, and mask+hash action shapes. Adds
+  **shadow / detection-only mode** as a policy-level flag
+  (`mode: shadow` in YAML; `RedactionPolicy.mode: Literal["enforce",
+  "shadow"]`). The engine still walks the payload and emits the
+  full manifest but suppresses in-leaf substitution. No middleware
+  re-plumbing or per-call args — flag travels with the policy
+  YAML. The **CI gate** is the existing `python-lint-test` job in
+  `.github/workflows/ci.yml`: pytest auto-discovers the harness
+  file, so a round-trip mismatch blocks merge by branch
+  protection without a new workflow step. Meta-tests prove the
+  gate fails on both injected-leak and injected-over-redaction
+  scenarios. (#1185)
+
+- **Audit — per-tool-call agent-invocation row + policy-replay
+  sense (G11.4-T5 #1186).** Per-tool-call dispatcher audit rows
+  fired from inside an agent loop are now keyed by the run's id
+  on `audit_log.agent_session_id`, and carry the run's `model` /
+  `provider` / `cost` snapshot in the JSON payload
+  (`agent_model`, `agent_provider`, `agent_cost`). A consumer
+  reading one row can attribute it without joining `agent_run`.
+  Adds a second audit-replay sense (`replay_policy`) that re-runs
+  the recorded `RedactionPolicy` against the row's captured
+  `raw_payload` and verifies it reproduces the stored manifest —
+  the policy-regression signal the C1-d round-trip CI gate
+  (#1185) consumes. Reconstruct-sense replay (`replay_session`,
+  G8.2-T3 #1011) is unchanged and verified against agent rows by
+  a regression test. (#1186)
+
+- **`approval.expired` broadcast event published from
+  `expire_stale_requests` (G11.2-T4 follow-up #1121).**
+  `expire_stale_requests` now lifts the decision row's `audit_id`
+  onto each returned `ApprovalRequest` as a transient `_audit_id`
+  attr, mirroring the pattern create / approve / reject already
+  use. The caller publishes one fail-open `approval.expired`
+  broadcast event per expired row **after commit** — same
+  publish-after-commit invariant the other three lifecycle steps
+  follow (#1069). The event's `audit_id` is the real
+  `audit_log.id` of the expiry decision row (FK invariant);
+  tenant scoping is preserved (event carries the request's
+  `tenant_id`, not a sweeper-wide `principal_sub`). Operators
+  watching the broadcast feed now see all four lifecycle
+  transitions — **pending / approved / rejected / expired** —
+  without polling the audit log. `docs/codebase/approvals.md`
+  updated: removed this from "Known gaps", added
+  `approval.expired` to the broadcast events table. (#1121)
+
+- **Keycloak CIMD onramp documented as the no-pre-registration
+  alternative for CIMD-capable MCP clients (G11.2-T6c #1187).**
+  Documents enabling Keycloak CIMD (Client ID Metadata Documents)
+  as the alternative to the #791 pre-registration path for
+  CIMD-capable MCP clients (Claude Code on MCP `2025-11-25+`).
+  With CIMD enabled, the `client_id` is the HTTPS URL of the
+  client's own metadata document — Keycloak fetches it on the
+  fly, so the client needs **no pre-registered client and no
+  DCR**, dissolving Wall #6 for those clients.
+  `deploy/values-examples/README.md` gains a § CIMD onramp
+  section (5 steps: feature flag, three Optional `mcp:tools` /
+  `mcp:prompts` / `mcp:resources` scopes with Audience mappers,
+  `cimd-profile` + `client-id-metadata-document` executor,
+  `cimd-policy` + `client-id-uri` condition, verification recipe).
+  Framed as the alternative to #791's pre-registration, **not**
+  a replacement — Keycloak < 26.6.0 and non-CIMD MCP clients
+  still need the pre-registration path. Stability label
+  (experimental) is loud and explicit; the docs link
+  [keycloak#45284](https://github.com/keycloak/keycloak/issues/45284)
+  so deployers can track GA. Closes #911. (#1187)
+
+- **KB UI read surface — `/ui/kb` search + server-rendered
+  Markdown + hover preview (G10.2-T1 + G10.2-T3 #1122).** Ships
+  the Knowledge Base UI read surface at `/ui/kb`: search box +
+  paginated entry list + ranked search result cards (fused / BM25
+  / cosine score pills) + entry detail with server-side Markdown
+  render + HTMX hover preview. Server-side Markdown rendering
+  via `markdown-it-py` (GFM tables + strikethrough, `html=False`
+  to strip raw HTML from kb bodies) + `pygments` syntax
+  highlight — no client-side JS highlighter. Pygments CSS
+  injected inline in the detail page. Retires the
+  `/ui/knowledge` stub; updates `base.html` sidebar, dashboard
+  tile, and chassis smoke test to reference `/ui/kb`. Adds
+  `markdown-it-py >= 3.0`, `pygments >= 2.18`,
+  `python-multipart >= 0.0.12` dependencies. (#1122)
+
+- **KB UI editor modal — CodeMirror 6 + mobile-readable reflow
+  (G10.2-T3 #1138).** Adds `POST /ui/kb/editor-preview` HTMX
+  live-preview partial (any authenticated operator; renders
+  Markdown server-side via `render_markdown`; returns
+  `kb/_editor_preview.html` fragment). Adds `POST /ui/kb/new`
+  editor save route with `tenant_admin` RBAC gate
+  (`_require_tenant_admin`: `load_session` →
+  `verify_jwt_for_audience` → `TenantRole.TENANT_ADMIN` check);
+  returns 204 + `HX-Redirect` on success, 422 + inline error
+  modal on failure. New `kb/_editor_modal.html`: DaisyUI
+  `<dialog>` with slug/tags inputs, split CodeMirror 6 pane +
+  live-preview column, HTMX-wired hidden textarea. Vendors
+  `codemirror-bundle.min.js` (SHA256 `a411a47c…`, 606 KB) as a
+  vendored artifact built once offline with esbuild from
+  `codemirror@6.0.1` + `@codemirror/lang-markdown@6.3.2`;
+  VENDOR.md updated with pinned hash and reproduction recipe.
+  Mobile-reflow CSS on `.kb-body` in `detail.html`
+  (`overflow-wrap: break-word`, table `display: block;
+  overflow-x: auto`, image `max-width: 100%`). (#1138)
+
+- **Memory UI — scope-aware list + detail/edit + delete + tag
+  filter (G10.4-T1 #1161).** Replaces the `/ui/memory` chassis
+  stub (#866) with the real read + edit + delete + tag-filter
+  surface across the five memory scopes (user / user-tenant /
+  user-target / tenant / target). Server-side Markdown rendering
+  of memory bodies via `markdown-it-py` (commonmark with
+  `html=False` for XSS defence) + pygments syntax highlighting
+  on code blocks; mirrors the KB UI render precedent (#1122).
+  Edit-in-place is gated on `MemoryRbacResolver.can_write`:
+  operator edits own user-scoped; tenant-scoped requires
+  `tenant_admin`. Cross-user / cross-tenant isolation holds
+  (returns 404, never 403, matching the `/api/v1/memory`
+  info-leak avoidance). New `resolve_ui_operator` FastAPI
+  dependency lifts a full `Operator` with `tenant_role` from the
+  BFF session by re-verifying the stored access token through the
+  chassis JWT chain; read paths skip the round-trip via
+  `build_read_operator`. (#1161)
+
+- **Memory UI — create modal + scope-promotion flow (G10.4-T2
+  #1167).** Layers create + scope-promotion onto T1's
+  read+edit+delete surface from #1161. "+" on `/ui/memory` opens
+  an HTMX-loaded modal with an RBAC-filtered scope selector,
+  optional slug, Markdown body textarea with 300 ms-debounced
+  server-side preview, expiry picker, and comma-separated tags
+  input; submit calls `MemoryService.remember` and HTMX-redirects
+  back to the list. Detail page renders a Promote button for
+  non-terminal source scopes; the promote modal calls G5.2's
+  `MemoryService.promote` which is idempotent against same-scope
+  re-runs. Promote handler binds `operator_sub` + `tenant_id` +
+  `audit_op_id="memory.promote"` (+ scope/slug/promotion_target_scope)
+  so the chassis `AuditMiddleware` writes the canonical audit
+  row the AC requires. Module split into `create.py`,
+  `promote.py`, `_modal_shared.py` keeps each file under the
+  chassis-wide ~600-line cap. (#1167)
+
+- **Memory UI — expiry countdown + recently-expired + bulk
+  select/delete/extend (G10.4-T3 #1165).** Adds **server-rendered
+  countdown badges** ("expires in 3d 4h") on each memory card,
+  with an `hx-trigger="every 60s"` poll on the cards fragment so
+  the cue stays fresh without a client-side timer. The refresh
+  URL preserves the active scope + tag. Adds the **"Recently
+  expired (cleanup pending)" greyed section** below the active
+  cards — the bucket is naturally bounded by the G5.2 sweeper
+  window (#623), so the operator sees what just rotated out
+  before the next 24 h sweeper tick reaps it. Adds **bulk select
+  via checkboxes on writable rows** and `POST /ui/memory/bulk`
+  for bulk delete / bulk extend-expiry (pre-canned at 1d / 7d /
+  30d). HTML5 `form=` attribute associates the checkboxes with
+  the toolbar form regardless of DOM nesting. Tenant + RBAC
+  re-checked server-side per row; cross-tenant IDs silently fall
+  into the "not found" bucket. CSRF inherited from the chassis
+  double-submit cookie. Closes Initiative #341 (G10.4) and
+  ticks Goal #336 G10.4 line. (#1165)
+
+- **Targets UI — list + detail view + re-probe + recent-ops SSE
+  (G10.3-T1 #1172).** Replaces the chassis `/ui/connectors` stub
+  with the real read surface for G10.3-T1: sortable +
+  filterable targets list, per-target detail page with
+  fingerprint card + SSE-live recent-ops + grouped operations
+  matrix, and a tenant_admin-gated re-probe action that
+  delegates to the same `resolve_connector_or_label` helper the
+  REST `/api/v1/targets/<name>/probe` route uses. Recent-ops
+  streaming piggy-backs on the existing G10.1 broadcast SSE
+  bridge (`/ui/broadcast/stream?target=<name>`) — single-sourced
+  SSE plumbing, identical tenant gate. Operations matrix
+  consumes the same `(tenant_id IS NULL OR tenant_id = :tenant)`
+  scoping `list_operation_groups` uses for the agent surface,
+  so the UI's view of available verbs matches what the agent
+  sees. (#1172)
+
+- **Targets UI — create/edit forms (DaisyUI modal + HTMX +
+  Pydantic + tenant_admin RBAC + CSRF) (G10.3-T2 #1176).**
+  Two DaisyUI modals (HTMX-loaded) replace the YAML-edit
+  workflow for the common cases — `GET`/`POST
+  /ui/connectors/create` and `GET /ui/connectors/{name}/edit` +
+  `PATCH /ui/connectors/{name}`. Submit handlers build
+  `TargetCreate` / `TargetUpdate` from the form fields and
+  delegate to the REST `create_target` / `update_target`
+  handlers **in-process**, so the UI and REST surfaces share
+  one validation + product-registry-check + audit code path
+  (the posture T1's re-probe handler uses). Success → 204 +
+  `HX-Redirect: /ui/connectors`; a Pydantic `ValidationError`
+  (port outside 1–65535, empty name) re-renders the modal in
+  place (422) with per-field messages + echoed values.
+  `tenant_admin`-only, gated server-side via
+  `resolve_operator_or_403`. The product dropdown is sourced
+  from `registered_product_tokens()` — the same set
+  `create_target` validates against — so a selectable product
+  is always an acceptable product (no dropdown/validator
+  drift). (#1176)
+
+- **Targets UI — bulk `targets.yaml` import (paste/upload →
+  preview → in-process CRUD) (G10.3-T3 #1181).** Adds the bulk
+  `targets.yaml` import UI at `/ui/connectors/import` (work
+  item #5 of Initiative #340): paste OR upload a `targets.yaml`
+  → server-side `yaml.safe_load` parse → HTMX preview table
+  classifying each entry CREATE-vs-UPDATE → confirm → apply
+  the plan **in-process** via the existing target CRUD
+  (`create_target` for new names, `update_target` for
+  existing). **No `/api/v1/targets/import` endpoint** — mirrors
+  the client-orchestrated CRUD the `meho targets import` CLI
+  (#257) performs. Server-side port of `import.go`'s
+  `mapEntry` / `buildLivePlan` so web and CLI imports produce
+  byte-identical writes: known keys → columns, unknown →
+  `extras` JSONB (merged with an explicit `extras:` block),
+  `fingerprint` dropped with a warning, UPDATE emits a sparse
+  body (`name` / `product` stripped) so re-imports don't wipe
+  omitted columns. Preview→confirm is stateless: confirm
+  re-parses + re-classifies against the tenant's current
+  targets (a target created between preview and confirm is
+  PATCHed, not re-CREATEd into a 409). `tenant_admin`-only,
+  CSRF-gated, cross-tenant-isolated. Closes Initiative #340
+  (G10.3). (#1181)
+
+- **`next_step` hint on `state=registered` connectors
+  (G0.13-T3 #1153).** `GET /api/v1/connectors` now ships a
+  `next_step: NextStep | null` field on every row.
+  `state="registered"` rows carry a copy/pasteable
+  `meho connector ingest --catalog <product>/<version>` verb
+  (when the connector-spec catalog #743 has the entry) or a
+  manual-mode `meho connector ingest --product ... --version
+  ... --impl ... --spec <upstream-openapi-uri>` verb (when it
+  doesn't). `state="ingested"` rows set `next_step` to `null` —
+  the dispatcher already resolves them. Closes the v0.6.0 RDC
+  dogfood signal 11 framing: half-registered connectors fail
+  lookup with no in-product hint about what closes the workflow.
+  Surfaces the right verb as structured response data instead
+  of relying on tribal knowledge. Catalog lookup uses the
+  v2-registry's `(product, version)`, not the parser-derived
+  shortening, so SDDC (`registry="sddc-manager"` /
+  `parsed="sddc"`) resolves to `--catalog sddc-manager/9.0`
+  not `--catalog sddc/9.0`. (#1153)
+
+- **Catalog-driven REST ingest — `{catalog_entry}` resolved
+  server-side (G0.14-T9 #1182).** `POST /api/v1/connectors/ingest`
+  now accepts `{"catalog_entry": "vmware/9.0"}` as an alternative
+  to the resolved-quadruple shape. The route resolves the entry
+  against the packaged catalog server-side and dispatches through
+  the existing ingest path. REST-native agent runtimes (and the
+  CLI, refactored) hit one canonical resolution path; the
+  discoverability-vs-actionability asymmetry consumer feedback
+  flagged is closed. A `@model_validator(mode="after")` on
+  `IngestRequest` rejects mixed bodies (`catalog_entry_conflict`)
+  and empty bodies (`ingest_request_underspecified`); catalog-side
+  failures (`catalog_entry_malformed` / `_not_found` /
+  `_typed_connector` / `_templated_upstream`) ship structured 422
+  envelopes via `build_catalog_entry_*_detail` helpers in
+  `error_envelopes.py`, citing
+  `docs/codebase/error-message-shape.md` (T11). CLI refactor:
+  `meho connector ingest --catalog <p>/<v>` posts
+  `{"catalog_entry": "..."}` directly — no client-side catalog
+  fetch + resolve. Removed the now-dead `resolveCatalogEntry` /
+  `parseCatalogRef` / `upstreamSpecs` helpers + their tests.
+  Closes signal 14 from `claude-rdc-hetzner-dc#697`. (#1182)
+
+- **vmware composite L2 dependency pre-flight (G0.14-T10
+  #1183).** Adds a per-composite L2 sub-op pre-flight to
+  vmware-rest composites so the operator-visible failure when L2
+  isn't ingested is a structured `composite_l2_missing` error
+  (per `docs/codebase/error-message-shape.md`) rather than a
+  generic `connector_error` wrapping a mid-flight `unknown_op`.
+  The new error carries `missing_op_ids[]` +
+  `catalog_command="meho connector ingest --catalog vmware/9.0"`
+  so an operator (or agent) can act without paging the
+  maintainer. Picks Option B (lazy pre-resolve on first call)
+  from the three options the issue listed; the rationale is
+  documented in `_preflight.py`'s module docstring and
+  `docs/codebase/connectors-vmware-rest.md`. Closes signal 20
+  (`vmware-composite-ops-depend-on-l2-primitives-not-ingested-by-default`).
+  (#1183)
+
+- **`DELETE /api/v1/targets/{name}` + `product` allowed in
+  `TargetUpdate` (G0.14-T4 #1164).** Closes the
+  "misregistered target cannot be recovered" gap from signal 6 of
+  `claude-rdc-hetzner-dc#697`: a single typo at target creation
+  previously created a permanent broken row because there was no
+  DELETE route and `TargetUpdate` excluded `product`. Adds
+  `DELETE /api/v1/targets/{name}` (tenant_admin) — soft-delete by
+  stamping `deleted_at`; every read path filters `deleted_at IS
+  NULL`; cascade-check on `graph_node.target_id` references
+  defaults to 409 + a `?force=true` hint when the target is wired
+  into the topology graph. Allows `product` in `TargetUpdate` —
+  operator can correct `product='kubernetes'` → `'k8s'`
+  in-place; an unknown product yields a structured 422 mirroring
+  the `/probe` 501 shape. (#1164)
+
+- **`TargetCreate.product` enum at boot + discoverable 422
+  (G0.14-T3 #1166).** Closes the "single typo at target creation
+  silently creates a permanent broken row" hole from signal 5 of
+  `claude-rdc-hetzner-dc#697`. Ships **both** gold-standard
+  layers from the issue body: **Option A** (discoverability) — a
+  JSON Schema enum on `TargetCreate.product` populated from the
+  live connector registry, injected by a `build_openapi_schema`
+  override on `main.app.openapi`. Swagger UI / OpenAPI-driven
+  generator tooling surfaces the valid set before the request
+  leaves the editor. **Option C** (recovery) — a structured 422
+  with `kind`, `product`, `valid_products`, and a `message`
+  naming the remediation step + the convention doc. Shape
+  complies with the T11 #1141
+  `docs/codebase/error-message-shape.md` convention. Both layers
+  read from the same `registered_product_tokens()` helper in
+  `connectors/registry.py` so they cannot drift. The OpenAPI
+  override calls `_eager_import_connectors()` defensively so the
+  snapshot script under `cli/api/snapshot-openapi.py` (which
+  doesn't run the FastAPI lifespan) renders the correct enum —
+  the committed `cli/api/openapi.json` snapshot is updated
+  accordingly. (#1166)
+
+- **Release-body path-freshness CI gate + v0.6.0 amendments
+  (G0.13-T6 #1159).** Adds a **release-time CI-style gate**
+  (`scripts/release/check_release_body_paths.py`) that asserts
+  every `/api/v*` path cited in a release body resolves in the
+  published OpenAPI snapshot. Sister to the PR-time
+  `cli-api-snapshot-freshness` job (#928). Three consecutive
+  releases shipped with broken path citations (v0.5.0 missing
+  notes; v0.5.1 catalog-vs-dispatch; v0.6.0 audit/replay +
+  tenant_conventions + topology/history) — a recurring class of
+  defect that deserves a CI gate, not a per-cycle spot-check.
+  Amends the v0.6.0 GitHub release body + CHANGELOG `[0.6.0]` to
+  cite the shipped paths: `audit/sessions/{session_id}/replay`
+  (not `audit/replay`), 3 routes under `/api/v1/conventions` (not
+  6 under `tenant_conventions`), `topology/history/{name}` (not
+  `topology/history`). Adds two honesty callouts to the v0.6.0
+  release body per the 2026-05-26 scope extension: (signal 13)
+  topology populators land in v0.7 — substrate ships at v0.6.0
+  but no shipped connector overrides `Connector.discover_topology`,
+  so `topology/refresh/{target_name}` returns zero-row deltas;
+  (signal 15) MCP server silently upgrades
+  `initialize.protocolVersion` to `2025-06-18` regardless of
+  client request. (#1159)
+
+- **`add_to_memory` `content` alias shim + v0.6.0
+  breaking-change callout (G0.13-T4 #1160).** **One-cycle
+  deprecation shim** for the `add_to_memory` MCP tool's body
+  field. v0.6.x → v0.7.x now accepts both `body` (canonical) and
+  `content` (deprecated alias from v0.3.x); `body` wins when both
+  are supplied; `content` fires a structured
+  `add_to_memory_field_deprecated` warning log line with
+  `replacement="body"`, `removal_version="0.7"`, and
+  `body_supplied=<bool>` so an operator can distinguish pure
+  pinned clients from mid-migration clients. Closes the
+  silent-breaking-rename gap RDC reported (consumer signal
+  `add-to-memory-content-to-body-silent-rename`; pinned v0.3.x
+  clients hit 422 with no migration breadcrumb at v0.6.0). The
+  v0.6.0 CHANGELOG opening was retroactively amended to read
+  "Breaking changes: 1" with a new `### Changed (breaking)`
+  entry naming the rename + the shim grace period + the v0.7
+  removal plan; the v0.6.0 GitHub release body amended live via
+  `gh release edit v0.6.0`. **v0.7 follow-up note**: the shim
+  removal originally scheduled for v0.7 is deferred to v0.8 —
+  v0.7.x continues to accept `content`; the removal recipe in
+  `docs/RELEASING.md` remains valid for v0.8. (#1160)
+
+- **Error-message-shape convention codified (G0.14-T11
+  #1154).** Codifies MEHO's operator-facing error response
+  convention at `docs/codebase/error-message-shape.md` — the
+  three-clause message shape (code + actionable message naming
+  diagnostic values, remediation, and doc reference; optional
+  structured `data` payload), the info-leak boundary precedent
+  from G0.9.1-T12 #797 (codes in body, values in structlog),
+  and the intentionally-bare exception list. Includes a v0.6.0
+  audit table tabulating the consumer-cited gold-standard
+  surfaces (`/ui/auth/login`, `/probe`, `connectors/ingest`
+  `spec_label_mismatch`, `AmbiguousConnectorResolution`) and the
+  non-compliant ones (signal 8 dispatcher bare 500, signal 10
+  feed bare 500, signal 16 `keycloak_admin_not_configured`)
+  with the Task # tracking each per-surface fix. Lands first in
+  Initiative #1139 per the user-confirmed ordering — sibling
+  Tasks T1 #1142, T5 #1146, T7 #1148 cite the merged doc in
+  their respective acceptance criteria. (#1154)
+
+- **Conventions freshness section in consumer `ONBOARDING.md`
+  (G7.1 AC8 #1109).** Closes the last remaining gap in #229
+  G7.1 DoD: AC8 (freshness behaviour documented in
+  consumer-facing `ONBOARDING.md`). Mirrors what
+  `docs/codebase/tenant_conventions.md` already documents from
+  the backend's perspective — static-at-connect baseline,
+  reconnect-to-refresh, conditional `notifications/resources/updated`
+  gated on `capabilities.resources.subscribe`. Operator-focused
+  framing: starts with "what this means in practice" so a
+  `tenant_admin` editing a convention understands why their
+  change doesn't reach running sessions until reconnect.
+  (#1109)
+
+- **Test infrastructure — auto-coverage guard for new
+  `tenant.id` FKs in TRUNCATE lists (G11.2 follow-up #1120).**
+  New SQLite-only unit test `backend/tests/test_truncate_list_drift.py`
+  walks `meho_backplane.db.models.Base.metadata.tables` for
+  every column whose `ForeignKey` targets `tenant.id` and asserts
+  the table name appears in both `tests/integration/conftest.py`
+  and `tests/acceptance/conftest.py` per-test TRUNCATE lists.
+  Closes the recurring drift the Initiative #803 run paid for
+  twice (T3 #1052 `agent_permission`, T5 #1069
+  `approval_request`) — the next FK-adding PR fails its own
+  test, not the next unrelated PR's PG fixture setup. The
+  integration conftest inlines the truncate list as a SQL string
+  literal, the acceptance one exposes a module-level
+  `_TRUNCATE_TABLES` tuple; the guard uses `ast`-based parsing
+  to read both shapes without importlib-executing the conftests
+  (which would transitively require canary-fixture sibling
+  modules + pinned env vars). A third sanity test floors the
+  FK-walk at one table so a future metadata-introspection
+  regression cannot silently turn the coverage assertions into
+  no-ops. (#1120)
+
+- **Test infrastructure — negative RBAC coverage for agent
+  grant + approval verbs (REST + MCP) (G11.2 follow-up #1124).**
+  Adds gate-layer regression coverage for the G11.2 RBAC
+  surfaces wired by #1066 (agent grants) and #1069 (approvals).
+  The existing service-layer tests bypass the gate; this PR
+  exercises every gated route/tool through the FastAPI
+  `TestClient` + MCP dispatch path so a refactor that drops
+  `Depends(require_role(...))` from a router or strips
+  `required_role=...` from a `ToolDefinition` would fail CI.
+  Four new test files, one per surface (REST × MCP × grants /
+  approvals), each pinning the tool/route inventory inline so a
+  rename or new addition surfaces as a test break. Extends
+  `mcp_test_fixtures.isolated_registry` to reload the two new
+  MCP tool modules so they register cleanly across the
+  fixture-driven test suite. (#1124)
 
 ### Changed
 
@@ -163,6 +785,8 @@ connector-related release-notes line.
   edge" `target-shape-inconsistency-across-tools` signal from the
   RDC v0.6.0 closed-loop dogfood (`claude-rdc-hetzner-dc#697`).
   Non-breaking: agents pinned to the dict shape are not affected.
+  (#1155)
+
 - Generalise the `tenant_conventions` seed migration: the previously
   shipped `rdc-internal` tenant + 8 consumer-specific operational
   conventions (extracted from one consumer's `CLAUDE.md`) are
@@ -180,7 +804,49 @@ connector-related release-notes line.
   consumer dogfood: previously, every adopting customer's MCP
   `initialize.instructions` flowed the original consumer's
   operational discipline + repo references into their agent session
-  start. (#1137)
+  start. (#1137 / #1162)
+
+- **`agents/service.py` polish — identity_ref docstring honesty +
+  structured log + validator extracted (G11.2-T9 #1123).** Three
+  polish items deferred from G11.2-T7/T8 (#1099 / PR #1108) bundled
+  as one post-merge cleanup so `service.py` stays inside its size
+  budget before the next G11.2 feature push: (A) drops the incorrect
+  "REPEATABLE READ" claim from the validator's docstring, `create()`'s
+  inline comment, and `docs/codebase/agent-definition.md` — the
+  chassis runs PostgreSQL's default READ COMMITTED, so a revoke that
+  lands between the validator's SELECT and the write IS visible to
+  the write; the TOCTOU window is small but real, and the
+  authoritative gate is G11.3's `run_scheduled` enforcing
+  `identity_ref == agent_client_id` under `client_credentials`. (B)
+  emits `identity_ref_invalid` structlog `warning` carrying
+  `identity_ref`, `reason`, `tenant_id` before each
+  `AgentIdentityRefInvalidError` raise — mirroring the
+  `agent_definition_create` / `..._update` info events on the happy
+  path so operators can grep structured fields for stale-principal
+  events. (C) `_validate_identity_ref` moves to
+  `agents/identity_ref.py` (re-exported from `service.py` so callers
+  don't change); Pydantic-to-ORM mappers (`build_definition_row`,
+  `apply_changes`) move to `agents/mapping.py`. `service.py` drops
+  from **446 → 367 lines**; `code-quality.py --diff` warnings on
+  `service.py` go to **0**. (#1123)
+
+- **Broadcast — shared `xrange + filter` helper between MCP recent
+  + UI history (G6.4-T4 #1106).** Collapses the duplicate `xrange`
+  + filter + redact-aware parse body that previously lived in both
+  the MCP `broadcast.recent` tool and the UI `/ui/broadcast/history`
+  route into a single shared module at
+  `backend/src/meho_backplane/broadcast/history.py`. T1 (#1091) had
+  deferred this unification because the two callers' failure shapes
+  differ; this Task lands the helper with that contract divergence
+  handled explicitly via two named wrappers. The MCP tool keeps its
+  fail-loud contract (`list_recent_events_strict` re-raises
+  `RedisError`; the dispatcher maps to `-32603`); the UI route keeps
+  its fail-soft contract (`list_recent_events_fail_soft` returns
+  `{"events": [], "next_cursor": None}` on `RedisError`; the pane
+  renders its empty state, not a 500). T1's full test suite (89
+  passed, 10 docker-gated skipped) still passes verbatim; 15 UI
+  replay tests pass (one new fail-soft case added); 10 new unit
+  tests pin the helper-level contract. (#1106)
 
 ### Fixed
 
@@ -195,7 +861,8 @@ connector-related release-notes line.
   dispatcher so the two surfaces always agree on whether a
   target's connector resolves; ambiguous probes return 409 with
   the resolver's message. Closes G0.14-T1 signals 7, 8, 19 from
-  `claude-rdc-hetzner-dc#697`. (#1142)
+  `claude-rdc-hetzner-dc#697`. (#1142 / #1157)
+
 - `/api/v1/feed` no longer drops to a bare HTTP 500 when the
   broadcast subsystem is unreachable. The SSE generator now catches
   `redis.exceptions.RedisError` (covers `ConnectionError`,
@@ -208,7 +875,8 @@ connector-related release-notes line.
   deploy, no events published yet) was already handled — redis-py
   returns `None` for an absent stream key, which falls through to
   the existing heartbeat path. Closes G0.14-T5 signal 10 from
-  `claude-rdc-hetzner-dc#697`. (#1146)
+  `claude-rdc-hetzner-dc#697`. (#1146 / #1163)
+
 - **G0.13-T1 auth-invalid-token classifier extended to authlib
   `DecodeError`.** Promotes the decode-stage failure for a non-JWT
   bearer (e.g. `Bearer not-a-real-jwt`) at `/api/v1/health` from the
@@ -222,6 +890,7 @@ connector-related release-notes line.
   `{detail: invalid_token}` for non-JWT bearers now see
   `{detail: malformed_jws}`
   ([#1131](https://github.com/evoila/meho/issues/1131) / #1152).
+
 - **G0.14-T6 audit-replay session-id capture decoupled from
   `MCP_REQUIRE_SESSION_ID`.** `_bind_mcp_session_id` in
   `mcp/server.py` now captures any `Mcp-Session-Id` header the
@@ -238,7 +907,75 @@ connector-related release-notes line.
   (`"always"` / `"enforced"`) so operators can confirm the deploy's
   capture mode at a glance; `docs/RELEASING.md` documents the
   post-deploy auto-enablement story. Closes G0.14-T6 signal 11 from
-  `claude-rdc-hetzner-dc#697`. (#1147)
+  `claude-rdc-hetzner-dc#697`. (#1147 / #1174)
+
+- **Resolver — versioned candidates beat wildcard registrations
+  (G0.14-T2 #1156).** The K8s connector self-registers under
+  **both** `("k8s", "", "")` (v1 wildcard, written by
+  `register_connector` so `get_connector("k8s")` keeps working for
+  the `/probe` route) and `("k8s", "1.x", "k8s")` (v2 versioned,
+  written by `register_connector_v2` so `connector_id="k8s-1.x"`
+  resolves). An unfingerprinted K8s target left both entries in
+  play, both scored `(_SPECIFICITY_UNBOUNDED, 0.0)` on the
+  specificity ladder because `KubernetesConnector` doesn't
+  advertise a `supported_version_range`, priorities tied, and the
+  resolver bailed with `AmbiguousConnectorResolution` — a bare 500
+  to the operator (T1 #1142 surfaces the diagnostic cleanly going
+  forward). Adds a new step 1 `versioned_over_wildcard` to the
+  resolver's tie-break ladder: when ≥1 candidate carries a
+  non-empty `(version, impl_id)` slot, demote candidates with empty
+  slots before the rest of the ladder runs. Conditional — wildcards
+  that are the *only* candidate (e.g. `vault` registered v1-only)
+  still win. Closes signal 9 from `claude-rdc-hetzner-dc#697`. (#1156)
+
+- **`/api/v1/connectors/{id}/review` two-pass tenant lookup
+  (G0.13-T5 #1158).** `GET /api/v1/connectors/{id}/review` now
+  applies the same "operator's-tenant + built-ins" scope as
+  `GET /api/v1/connectors` — global (`tenant_id IS NULL`)
+  connectors stop returning 404 on the daily-driver path (RDC
+  v0.6.0 closed-loop validate signal
+  `connector-review-tenant-scope-404`). The fix is service-layer
+  only: `ReviewService.get_review_payload` falls back to
+  `tenant_id IS NULL` when the operator's own-tenant probe misses.
+  The route handler stays untouched per the task scope; the PATCH
+  edit routes also stay single-pass (the "do tenant_admins edit
+  built-ins?" policy decision is intentionally distinct from this
+  read-visibility bug). Cross-tenant probes still 404 — the
+  fallback only triggers when the caller passes the operator's
+  *own* `tenant_id`. The MCP explicit-built-in path
+  (`tenant_id=None` argument) keeps its admin-only gate. (#1158)
+
+- **`/api/v1/agents/grants` route reachable — include_router
+  order swap (G11.2 follow-up #1169, closes #1168).** Fixes a
+  FastAPI route-shadow regression where `GET /api/v1/agents/grants`
+  was dispatched to `show_agent(name="grants")` instead of
+  `list_grants()` because the agent-definitions router (with
+  `GET /{name}`) was registered before the grants router.
+  Solution: swap the `app.include_router(...)` order so
+  `api_v1_agent_grants_router` runs first — FastAPI route
+  precedence is registration order. Restores correct per-role
+  behaviour on the list route: `read_only` and `operator` JWTs now
+  both surface 403 `insufficient_role` from the grants-list
+  `_require_admin` gate (the load-bearing assertion), and
+  `tenant_admin` can actually reach `list_grants()`. Folds the
+  carve-out `test_read_only_list_route_returns_403` back into the
+  parametrised `_GRANT_ENDPOINTS` matrix and removes the
+  matrix-level routing-shadow docstring — the workaround
+  documented in #1124 is now obsolete. (#1169)
+
+- **Redaction resolver — wildcard register-as-global-override
+  semantics restored (G11.4-T6 #1190).** Adds `(None, None, None)`
+  as the sixth and final override-lookup step in the redaction
+  resolver ladder, restoring the wildcard register-as-global-
+  override contract documented in both `register_policy()`'s
+  docstring and `docs/codebase/redaction.md`. A wildcard
+  `register_policy(policy)` call (no scope kwargs) now shadows
+  the packaged default for every `resolve_policy(...)` call.
+  More-specific overrides still win per the existing specificity
+  hierarchy — adding the sixth step changes no other override
+  path. Pre-existing from #1071 (the original wiring); flagged
+  as adjacent findings during the PR #1180 and #1185 reviews and
+  deferred to this single-Task follow-up. (#1190)
 
 ## [0.6.0] - 2026-05-26
 

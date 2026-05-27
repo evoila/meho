@@ -490,13 +490,15 @@ def test_query_audit_tree_without_agent_session_id_returns_invalid_params(
 def test_query_audit_tree_without_session_header_returns_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """No ``Mcp-Session-Id`` header → the bound id is a random uuid4 the
-    client can't match → -32602.
+    """No ``Mcp-Session-Id`` header → no contextvar → -32602.
 
-    With no header, the transport binds a fresh per-call uuid4 as the
-    session id, so any ``agent_session_id`` the client supplies cannot
-    equal it. The tree path stays self-session-only even when the caller
-    didn't establish an explicit session.
+    With no header the transport does not bind the ``mcp_session_id``
+    contextvar at all (G0.14-T6 #1147 decoupled capture from
+    enforcement — no header, no synthetic id), so the self-session
+    check at :func:`_resolve_self_session_id` reads ``None`` and
+    rejects any ``agent_session_id`` the client supplies. The tree
+    path stays self-session-only even when the caller didn't establish
+    an explicit session.
     """
     client, _op = client_with_operator
     mock_replay = AsyncMock(return_value=_two_level_tree())

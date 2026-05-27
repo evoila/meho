@@ -592,6 +592,266 @@ async def test_dispatch_ingested_returns_no_connector_when_resolver_misses(
     assert result.error is not None
     assert result.error.startswith("no_connector:")
     assert result.extras["error_code"] == "no_connector"
+    # G0.14-T1 (#1142): the resolver's exception message rides under
+    # extras.exception_message so operators see the diagnostic
+    # without re-fetching the pod log.
+    assert "exception_message" in result.extras
+    assert "ghost" in result.extras["exception_message"]
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T1 (#1142): typed/composite resolver miss must surface
+# no_connector (matching the ingested branch), and the resolver's
+# AmbiguousConnectorResolution must surface ambiguous_connector on
+# both branches with the diagnostic message preserved verbatim.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_typed_returns_no_connector_when_resolver_misses(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Typed branch mirrors the ingested branch's resolver-miss label.
+
+    Pre-G0.14-T1 (#1142) the typed/composite branch silently returned
+    ``(None, None)`` on :exc:`NoMatchingConnector`, letting an unbound
+    bound-method handler proceed to dispatch and re-surface as the
+    misleading ``connector_error: RuntimeError: typed handler ...
+    reached dispatch still unbound`` from :mod:`_branches`. After
+    #1142 the typed branch returns the explicit ``no_connector``
+    label (with the resolver's exception message in
+    ``extras["exception_message"]``) so operators see the upstream
+    diagnosis, matching ``signals 7`` and ``8`` of
+    ``claude-rdc-hetzner-dc#697``.
+    """
+    # Register a typed op for a product, but DON'T register a
+    # connector class for it — the resolver must miss.
+    await register_typed_operation(
+        product="phantom",
+        version="1.x",
+        impl_id="phantom",
+        op_id="phantom.ping",
+        handler=_module_handler_returning_dict,
+        summary="Phantom op.",
+        description="Phantom op for resolver-miss coverage.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+    target = _FakeTarget(product="phantom")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="phantom-1.x",
+        op_id="phantom.ping",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("no_connector:")
+    assert result.extras["error_code"] == "no_connector"
+    # Resolver-message passthrough: the operator can read the resolver's
+    # exception text right off the OperationResult.
+    assert "exception_message" in result.extras
+    assert "phantom" in result.extras["exception_message"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Typed branch surfaces ``ambiguous_connector`` with the resolver's diagnostic message.
+
+    Mirrors the live ``rdc-rke2-infra-k8s`` shape from
+    ``claude-rdc-hetzner-dc#697`` signal 8: the Kubernetes connector
+    self-registers under ``('k8s', '', '')`` (v1) AND ``('k8s',
+    '1.x', 'k8s')`` (v2), the tie-break ladder treats both as
+    equally specific (both have ``supported_version_range=None``),
+    and :exc:`AmbiguousConnectorResolution` propagates. Pre-#1142
+    that exception bubbled past the dispatcher as a bare 500; after
+    #1142 it lands as a structured ``ambiguous_connector`` error
+    with the message verbatim in ``extras["exception_message"]``.
+    """
+
+    class _ConflictA(Connector):
+        product = "kclash"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> OperationResult:
+            raise NotImplementedError
+
+    class _ConflictB(Connector):
+        product = "kclash"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> OperationResult:
+            raise NotImplementedError
+
+    # Two connectors for the same product, both with no version range
+    # and equal priority (default 0) — the tie-break ladder ends
+    # ambiguous after every step.
+    from meho_backplane.connectors.registry import register_connector_v2 as _reg
+
+    _reg(product="kclash", version="", impl_id="a", cls=_ConflictA)
+    _reg(product="kclash", version="", impl_id="b", cls=_ConflictB)
+
+    # Register a typed op against this product so the dispatcher
+    # reaches the connector-resolution step on the typed branch.
+    await register_typed_operation(
+        product="kclash",
+        version="1.x",
+        impl_id="kclash",
+        op_id="kclash.ping",
+        handler=_module_handler_returning_dict,
+        summary="Ping.",
+        description="Ping.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+    target = _FakeTarget(product="kclash")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="kclash-1.x",
+        op_id="kclash.ping",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("ambiguous_connector:")
+    assert result.extras["error_code"] == "ambiguous_connector"
+    # The resolver's exception text — naming the candidates and the
+    # remediation step — rides verbatim. Operators see the same
+    # diagnostic on the wire that the pod log emits.
+    msg = result.extras["exception_message"]
+    assert "preferred_impl_id" in msg
+    assert "kclash" in msg
+
+
+@pytest.mark.asyncio
+async def test_dispatch_ingested_returns_ambiguous_when_resolver_cant_tiebreak(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Ingested branch catches ``AmbiguousConnectorResolution`` the same way.
+
+    Both source-kind branches must mirror each other on the
+    resolver's two diagnostic exception shapes — pre-#1142 the
+    ingested branch caught ``NoMatchingConnector`` only, and any
+    ambiguity from the resolver propagated past the dispatcher into
+    FastAPI as a bare 500.
+    """
+
+    class _AmbA(Connector):
+        product = "ghost"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> OperationResult:
+            raise NotImplementedError
+
+    class _AmbB(Connector):
+        product = "ghost"
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> OperationResult:
+            raise NotImplementedError
+
+    from meho_backplane.connectors.registry import register_connector_v2 as _reg
+
+    _reg(product="ghost", version="", impl_id="a", cls=_AmbA)
+    _reg(product="ghost", version="", impl_id="b", cls=_AmbB)
+
+    # Build an ingested descriptor that points at the ambiguous
+    # product. Bypasses ``register_typed_operation`` because that
+    # helper only writes typed/composite rows.
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    descriptor = EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="ghost",
+        version="1.0",
+        impl_id="ghost",
+        op_id="GET:/api/probe",
+        source_kind="ingested",
+        method="GET",
+        path="/api/probe",
+        handler_ref=None,
+        summary="Ghost probe.",
+        description="Ghost probe.",
+        tags=[],
+        parameter_schema={},
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="safe",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=stub_embedding_service.encode_one.return_value,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session.add(descriptor)
+    await session.commit()
+
+    operator = _make_operator()
+    target = _FakeTarget(product="ghost")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="ghost-1.0",
+        op_id="GET:/api/probe",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("ambiguous_connector:")
+    assert result.extras["error_code"] == "ambiguous_connector"
+    msg = result.extras["exception_message"]
+    assert "preferred_impl_id" in msg
+    assert "ghost" in msg
 
 
 # ---------------------------------------------------------------------------

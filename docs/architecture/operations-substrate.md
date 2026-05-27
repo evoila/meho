@@ -196,8 +196,9 @@ flowchart TD
     D -->|invalid| Z2[result_invalid_params]
     D -->|valid| E[4. policy_gate]
     E -->|denied| Z3["result_denied&#10;+ audit_and_broadcast_safe"]
-    E -->|allowed| F[5. resolve_connector]
+    E -->|allowed| F["5. resolve_connector_or_label"]
     F -->|no match| Z4[result_no_connector]
+    F -->|ambiguous| Z4a[result_ambiguous_connector]
     F -->|cls| G["6. branch on source_kind&#10;ingested / typed / composite"]
     G --> H["7. reduce&#10;(JSONFlux)"]
     H -->|reducer raises| Z5["connector_error&#10;+ audit_and_broadcast_safe"]
@@ -213,7 +214,7 @@ The eight phases (steps 2–9) map directly to function calls in the dispatcher 
 2. **Look up `EndpointDescriptor`** by the natural key `(tenant_id, product, version, impl_id, op_id)` with the tenant union (`tenant_id IS NULL OR tenant_id == operator.tenant_id`). Miss → structured `unknown_op` error with `known_op_count` in `extras` so the agent's "did you mean" path has a signal.
 3. **Validate `params`** against `descriptor.parameter_schema` via `jsonschema.Draft202012Validator`. Invalid → structured `invalid_params` error carrying every validator path that failed.
 4. **Policy gate.** v0.2 default-allow; `requires_approval=True` → `denied`. The gate writes an audit row before returning (so denials are visible in `audit_log` even though the op never executed).
-5. **Resolve the connector class** via `resolve_connector(target)` and instantiate it (cached at module level via [`_handler_resolve.get_or_create_connector_instance`](../../backend/src/meho_backplane/operations/_handler_resolve.py)). Resolver miss → structured `no_connector` error.
+5. **Resolve the connector class** via [`resolve_connector_or_label(target)`](../../backend/src/meho_backplane/connectors/resolver.py) — the shared wrapper around `resolve_connector(target)` — and instantiate it (cached at module level via [`_handler_resolve.get_or_create_connector_instance`](../../backend/src/meho_backplane/operations/_handler_resolve.py)). The helper translates resolver exceptions to labels: `NoMatchingConnector` → `no_connector` (structured error, message in `extras.exception_message`); `AmbiguousConnectorResolution` → `ambiguous_connector` (G0.14-T1 #1142 — message naming the candidates + the remediation step rides in `extras.exception_message`). Both source-kind branches (ingested AND typed/composite-with-target) share this helper; the `/api/v1/targets/{name}/probe` route consults the same helper so dispatch and probe agree on yes/no/ambiguous (consumer feedback signal 19, `claude-rdc-hetzner-dc#697`).
 6. **Branch on `descriptor.source_kind`** — see [`operations/_branches.py`](../../backend/src/meho_backplane/operations/_branches.py).
 7. **JSONFlux-wrap the response via the `Reducer`.** The default is [`JsonFluxReducer`](jsonflux.md) (G0.6.1, #750), which materializes large set-shaped responses as a `ResultHandle` and passes small ones through; the call is **wrapped in `try/except`** so reducer exceptions land as `connector_error` (with the audit row + broadcast event still firing).
 8. **Write the audit row + publish a broadcast event** via [`_audit.audit_and_broadcast_safe`](../../backend/src/meho_backplane/operations/_audit.py). Audit failure → logged at error level; broadcast skipped (the event would reference a phantom row). Broadcast failure → logged, fail-open per `publish_event`'s contract.
@@ -223,14 +224,16 @@ The eight phases (steps 2–9) map directly to function calls in the dispatcher 
 
 The dispatcher never raises; it always returns an `OperationResult`. Every error-shaped exit carries a structured `error` string of the form `"<code>: <human-readable>"` so callers can both string-match (`error.startswith("unknown_op:")`) and parse the suffix for display. Detail payloads land in `extras`. Codes:
 
-| Code                  | When                                                                                  |
-|-----------------------|---------------------------------------------------------------------------------------|
-| `unknown_op`          | Natural key didn't resolve a descriptor.                                              |
-| `invalid_params`      | `params` failed JSON Schema validation.                                               |
-| `no_connector`        | Resolver couldn't pick a connector for the target.                                    |
-| `handler_unreachable` | `importlib` couldn't resolve `handler_ref`, or the resolved symbol is not callable.   |
-| `denied`              | Policy gate denied the call.                                                          |
-| `connector_error`     | Connector / handler / reducer raised. Exception class + (length-capped) message in `extras`. |
+| Code                    | When                                                                                  |
+|-------------------------|---------------------------------------------------------------------------------------|
+| `unknown_op`            | Natural key didn't resolve a descriptor.                                              |
+| `invalid_params`        | `params` failed JSON Schema validation.                                               |
+| `no_connector`          | Resolver couldn't pick a connector for the target. `extras.exception_message` carries the resolver's diagnostic text (G0.14-T1 #1142). |
+| `ambiguous_connector`   | Resolver matched two or more connectors and the tie-break ladder couldn't pick. `extras.exception_message` carries the candidate list + remediation step ("set `target.preferred_impl_id` to one of them"). G0.14-T1 (#1142). |
+| `handler_unreachable`   | `importlib` couldn't resolve `handler_ref`, or the resolved symbol is not callable.   |
+| `denied`                | Policy gate denied the call.                                                          |
+| `awaiting_approval`     | Policy gate issued a `needs_approval` verdict; a durable `ApprovalRequest` row was created. `extras.approval_request_id` carries the UUID. |
+| `connector_error`       | Connector / handler / reducer raised. Exception class + (length-capped) message in `extras`. |
 
 Why always-return: two distinct surfaces consume `dispatch()`. HTTP routes via FastAPI — a raised exception turns into a 500 via the chassis handler, useful for genuine programming bugs (deleted module) but not for user-input errors. MCP tool handlers + CLI verbs + recursive composite calls — the caller wants a structured result it can render; a raised exception across the MCP JSON-RPC boundary turns into a generic 500 with no diagnostic surface. Returning a structured `OperationResult` for every operator-visible failure mode keeps the contract uniform across the three call sites.
 

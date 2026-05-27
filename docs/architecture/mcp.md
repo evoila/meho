@@ -160,32 +160,41 @@ Fail-closed: audit write failure → MCP call fails with JSON-RPC `INTERNAL_ERRO
 
 ## Target-reference shape convention
 
-The agent surface today has three distinct shapes for "name a target/node by name". This is deliberate but easy to mistake for inconsistency — and it surfaced as Signal #8 of the 2026-05-21 RDC second-cycle dogfood (#780). The shapes are internally coherent per tool; the divergence is *across* tools.
+The agent surface has shapes for "name a target/node by name" that
+diverge slightly across tools. The divergence is internally coherent
+per tool's role; cross-tool, an agent carrying a target name across
+the read and the write surfaces no longer needs to reshape it.
+
+G0.13-T2 (#1132) is the additive convergence step: `call_operation`
+now accepts a bare-string `target` alongside the existing dict shape,
+matching `query_topology` / `query_audit`. The dict shape stays
+supported -- agents pinned to it are unchanged -- and is the form
+that opens the `fqdn` vhost-override door.
 
 | Shape | Tool(s) | Why |
 |---|---|---|
-| `target: {"name": "<name>"}` (object with `name` key) | [`call_operation`](../../backend/src/meho_backplane/mcp/tools/operations.py) | The dispatcher reserves room for additional future selector fields on the target descriptor (e.g. an `alias_precedence` pin or a tenant-scoped `kind` disambiguator) without a breaking schema change. The `{name}` envelope is the partial form; only `name` is honoured today. |
-| `target: "<name>"` (bare string) | [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`dependents`/`dependencies`), [`query_audit`](../../backend/src/meho_backplane/mcp/tools/audit.py) | Read tools only need the name. The bare-string shape keeps the argument cheap and the schema legible; no selector fields are anticipated. |
-| `from_name`/`to_name`: `"<name>"` (paired strings) | [`meho.topology.annotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`meho.topology.unannotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`path`) | These tools name **two** nodes (a directed edge pair). The two flat fields mirror Python's `(from_, to)` keyword convention (with `from_name` because `from` is a reserved word) and let the JSON Schema layer require both atomically. A nested `{from: {name}, to: {name}}` object would be ceremony for no benefit. |
+| `target: "<name>"` (bare string, **preferred forward**) | [`call_operation`](../../backend/src/meho_backplane/mcp/tools/operations.py) (since G0.13-T2 #1132), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`dependents`/`dependencies`), [`query_audit`](../../backend/src/meho_backplane/mcp/tools/audit.py) | Either-shape acceptance reduces agent retries (the consumer's most-cited daily-driver sharp edge at v0.6.0). The handler normalises the bare string to `{name: <string>}` before dispatch, so downstream code sees one canonical form. |
+| `target: {"name": "<name>"}` (object with `name` key) | [`call_operation`](../../backend/src/meho_backplane/mcp/tools/operations.py) | Original shape; still accepted unchanged. Opens the optional `fqdn` field for per-call vhost-override (`vcfa-rest-9.0`-style routing); the bare-string form does not, so callers needing the override stay on the dict. The dispatcher also reserves room here for future selector fields without a breaking schema change. |
+| `from_name`/`to_name`: `"<name>"` (paired strings) | [`meho.topology.annotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`meho.topology.unannotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`path`) | These tools name **two** nodes (a directed edge pair). The two flat fields mirror Python's `(from_, to)` keyword convention (with `from_name` because `from` is a reserved word) and let the JSON Schema layer require both atomically. A nested `{from: {name}, to: {name}}` object would be ceremony for no benefit. The future-`target`-unification work does *not* roll edge tools into a single `target` field; the directed-edge intent is signalled by the field names. |
 
-[`list_targets`](../../backend/src/meho_backplane/mcp/tools/topology.py) returns rows that carry a bare `name`; that is the value the caller passes to `call_operation` (wrapped as `{name: ...}`) or to `query_topology` (as a bare string).
+[`list_targets`](../../backend/src/meho_backplane/mcp/tools/topology.py) returns rows that carry a bare `name`; that is the value the caller passes to `call_operation` (either as a bare string or wrapped as `{name: ...}`) or to `query_topology` (as a bare string).
 
 ### Forward convention for new tools
 
 When a new tool needs to reference a target/node by name, pick the shape that matches the tool's *role*:
 
-1. **Write/dispatch tools that act on one target** (anything like `call_operation`) — **use the `{name: ...}` object form.** The forward-compat headroom matters; the cost of an envelope is one extra brace pair.
+1. **Write/dispatch tools that act on one target** (anything like `call_operation`) — **accept the bare-string `target` as the primary shape and document the dict alias.** Either shape is fine; bare-string is preferred for cross-tool consistency. Reserve the dict for the case where forward-compat selector room (e.g. `fqdn`, future `alias_precedence`) is needed.
 2. **Read tools that filter by one target name** (anything like `query_audit`, single-anchor closure queries) — **use the bare-string `target`.** No selector room is needed; keep the schema flat.
 3. **Tools that operate on an edge (two endpoints)** — **use the `from_name`/`to_name` pair.** Match the existing `meho.topology.annotate` schema verbatim so an agent carrying a node-pair through the topology surface can hand the same arguments to the next tool without renaming.
 
-A future v0.4+ unification (a shared `TargetRef` / `TargetSelector` model with strict-schema breakage) is on the roadmap (Initiative #772 out-of-scope; v0.3.2 is docs-first); that decision will cite this section. Until then: **do not introduce a fourth shape**. If you find yourself reaching for one, file an Initiative-level discussion rather than landing it.
+A future breaking unification (a shared `TargetRef` / `TargetSelector` model that collapses the dict variant entirely) remains a v0.7+ window decision; that decision will cite this section. Until then: **do not introduce a fourth shape**. If you find yourself reaching for one, file an Initiative-level discussion rather than landing it.
 
 ## Adding an MCP tool
 
 For a new vendor connector op:
 
 1. **Implement the op** in your connector's `_op_map` (per [`connectors.md`](connectors.md)).
-2. **Pick the target-reference shape** per the "Target-reference shape convention" section above — bare-string `target` for read tools, `{name: ...}` object for write/dispatch tools, `from_name`/`to_name` pair for edge tools. The example below is a single-target read.
+2. **Pick the target-reference shape** per the "Target-reference shape convention" section above — bare-string `target` for read tools (and as the preferred forward shape for write/dispatch tools too; the dict shape stays accepted on `call_operation` for forward-compat selector room), `from_name`/`to_name` pair for edge tools. The example below is a single-target read.
 3. **Register an MCP tool** in `backend/src/meho_backplane/mcp/tools/<product>.py`:
    ```python
    register_mcp_tool(

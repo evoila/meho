@@ -1223,3 +1223,237 @@ async def test_list_budget_status_kind_filter_does_not_narrow_budget(
     bs = body["budget_status"]
     assert bs["over_budget"] is True
     assert "op-c" in bs["dropped_slugs"]
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T8 #1149 -- preamble_status on POST/PATCH responses (signal 18)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_post_operational_returns_preamble_status_included(
+    client: TestClient,
+) -> None:
+    """POST an operational convention that fits → ``preamble_status.included=True``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-included")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post_convention(
+            client,
+            token,
+            slug="fits-easily",
+            body="Short body that fits.",
+            kind="operational",
+            priority=10,
+        )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert "preamble_status" in body, "POST operational must surface inclusion"
+    ps = body["preamble_status"]
+    assert ps["included"] is True
+    assert ps["position"] == 1  # only convention in the tenant; takes first slot
+    assert ps["token_count"] > 0
+    assert ps["would_drop_slugs"] == []
+
+
+def _sized_body(char_count: int) -> str:
+    """Build an ASCII body of exactly *char_count* characters.
+
+    Pairs with the ``ceil(len / 3.3)`` heuristic so callers can
+    target a precise estimated-token cost without leaning on
+    :func:`_near_budget_body`'s ``max(target*4, 1400)`` floor (which
+    over-shoots for small targets).
+    """
+    return "x" * char_count
+
+
+@pytest.mark.asyncio
+async def test_post_operational_dropped_when_over_budget(
+    client: TestClient,
+) -> None:
+    """POST a convention that doesn't fit → ``included=False`` + slug in ``would_drop_slugs``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-dropped")
+    token = _token(key)
+    # ~250-token bodies (825 chars → ceil(825/3.3)=250). Two fit
+    # comfortably under the 600-token budget; a third pushes the
+    # cumulative pack over and the lowest-priority row drops.
+    body_mid = _sized_body(825)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # Two priority-10 mid-sized rows fill most of the budget...
+        _post_convention(client, token, slug="winner-a", body=body_mid, priority=10)
+        _post_convention(client, token, slug="winner-b", body=body_mid, priority=10)
+        # ...the third lands at priority 1 -- packer drops it on overflow.
+        resp = _post_convention(
+            client,
+            token,
+            slug="loser-c",
+            body=body_mid,
+            priority=1,
+        )
+    assert resp.status_code == 201, resp.text
+    ps = resp.json()["preamble_status"]
+    assert ps["included"] is False
+    assert ps["position"] is None
+    assert ps["token_count"] > 0
+    # The just-written slug appears in would_drop_slugs (it was the
+    # one the packer dropped); the other two priority-10 rows fit
+    # and must not appear.
+    assert "loser-c" in ps["would_drop_slugs"]
+    assert "winner-a" not in ps["would_drop_slugs"]
+    assert "winner-b" not in ps["would_drop_slugs"]
+
+
+@pytest.mark.asyncio
+async def test_post_operational_high_priority_displaces_existing_slugs(
+    client: TestClient,
+) -> None:
+    """A high-prio POST that pushes a lower-prio neighbour out lists it in ``would_drop_slugs``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-displace")
+    token = _token(key)
+    # Two ~250-token rows fit; a third pushes overflow. The new top-
+    # priority row goes in at position 1 and the lowest-priority
+    # existing row drops.
+    body_mid = _sized_body(825)  # ~250 tokens
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        _post_convention(client, token, slug="existing-mid", body=body_mid, priority=5)
+        _post_convention(client, token, slug="existing-low", body=body_mid, priority=1)
+        # New row at priority 100 -- highest -- takes position 1; the
+        # cumulative pack now overflows and the lowest-priority
+        # neighbour drops.
+        resp = _post_convention(
+            client,
+            token,
+            slug="new-top",
+            body=body_mid,
+            priority=100,
+        )
+    assert resp.status_code == 201, resp.text
+    ps = resp.json()["preamble_status"]
+    assert ps["included"] is True
+    assert ps["position"] == 1  # priority=100 wins the top slot
+    # ``existing-low`` had priority 1 -- the lowest -- so it's the
+    # natural drop on overflow. ``new-top`` itself is NOT in the
+    # drop list (it's the included one).
+    assert "existing-low" in ps["would_drop_slugs"]
+    assert "new-top" not in ps["would_drop_slugs"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["workflow", "reference"])
+async def test_post_workflow_reference_omits_preamble_status(
+    client: TestClient,
+    kind: str,
+) -> None:
+    """Non-operational kinds don't enter the preamble → ``preamble_status`` is ``None``."""
+    await _seed_tenants()
+    key = make_rsa_keypair(f"kid-preamble-{kind}")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post_convention(
+            client,
+            token,
+            slug=f"non-op-{kind}",
+            body="Workflow / reference text.",
+            kind=kind,
+        )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    # The field is present on the schema (``Convention.preamble_status``)
+    # but null for preamble-unbound kinds. JSON consumers branching
+    # on ``preamble_status is None`` get the right "this write does
+    # not affect the preamble" signal.
+    assert body["preamble_status"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_operational_returns_preamble_status(client: TestClient) -> None:
+    """PATCH an operational convention's body → response carries fresh ``preamble_status``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-patch")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        _post_convention(
+            client,
+            token,
+            slug="patch-target",
+            body="Original short.",
+            priority=5,
+        )
+        resp = client.patch(
+            "/api/v1/conventions/patch-target",
+            json={"body": "Updated body text."},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    ps = resp.json()["preamble_status"]
+    assert ps is not None
+    assert ps["included"] is True
+    assert ps["position"] == 1
+    assert ps["would_drop_slugs"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_priority_only_returns_preamble_status(client: TestClient) -> None:
+    """Priority-only PATCH that re-ranks the convention still surfaces ``preamble_status``."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-patch-prio")
+    token = _token(key)
+    body_near = _near_budget_body(target_tokens=400)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # Three rows; only two fit. Start the to-be-patched row at
+        # priority 1 (definitely dropped) and bump it to 100 via
+        # PATCH (should now be included at position 1).
+        _post_convention(client, token, slug="patch-prio", body=body_near, priority=1)
+        _post_convention(client, token, slug="other-a", body=body_near, priority=5)
+        _post_convention(client, token, slug="other-b", body=body_near, priority=5)
+        # Pre-PATCH state: patch-prio is dropped.
+        resp_pre = client.get(
+            "/api/v1/conventions/patch-prio",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_pre.status_code == 200
+        # GET-single does NOT carry preamble_status (the aggregate
+        # signal lives on the list response's budget_status); the
+        # write-time feedback is the only post-mutation signal.
+        assert resp_pre.json().get("preamble_status") is None
+        # Bump priority to 100 -- now patch-prio takes the top slot.
+        resp = client.patch(
+            "/api/v1/conventions/patch-prio",
+            json={"priority": 100},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    ps = resp.json()["preamble_status"]
+    assert ps is not None
+    assert ps["included"] is True
+    assert ps["position"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_single_does_not_carry_preamble_status(client: TestClient) -> None:
+    """``GET /{slug}`` returns ``preamble_status=None`` -- inclusion signal is write-time only."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-preamble-get")
+    token = _token(key)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        _post_convention(client, token, slug="get-only")
+        resp = client.get(
+            "/api/v1/conventions/get-only",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    # GET-single is the natural read shape; ``budget_status`` on the
+    # list response is the aggregate-budget signal, so the per-row
+    # GET deliberately omits preamble_status (returns None) to keep
+    # the read paths' responsibilities clean.
+    assert resp.json()["preamble_status"] is None

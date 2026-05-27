@@ -644,3 +644,41 @@ async def test_list_targets_keyset_pagination(
     )
     assert [t["name"] for t in page2["targets"]] == ["t-c"]
     assert page2["next_cursor"] is None
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_list_targets_excludes_soft_deleted(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """Soft-deleted targets (G0.14-T4 #1145) are excluded from the MCP listing.
+
+    Mirrors the REST list endpoint's ``deleted_at IS NULL`` filter so
+    MCP and REST never disagree about which targets are visible to a
+    tenant — the consumer's session-pinned target cache should not
+    surface tombstoned rows.
+    """
+    from datetime import UTC, datetime
+
+    client, _op = client_with_operator
+    await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
+    await _seed_target(OPERATOR_TENANT_ID, "live", "vmware", "live.example")
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(
+            TargetORM(
+                tenant_id=OPERATOR_TENANT_ID,
+                name="retired",
+                aliases=[],
+                product="vmware",
+                host="retired.example",
+                port=443,
+                secret_ref="targets/topology-x",
+                auth_model="shared_service_account",
+                deleted_at=datetime.now(UTC),
+            )
+        )
+
+    response = _list_targets_call(client, 27, {})
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert [t["name"] for t in payload["targets"]] == ["live"]

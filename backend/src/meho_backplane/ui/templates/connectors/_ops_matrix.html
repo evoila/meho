@@ -1,0 +1,145 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Available-operations matrix (Task #873 work item #7).
+
+  Renders the resolved connector's enabled operation_groups as a
+  collapsed-by-default accordion. Each group's <details> carries:
+    * The group name + operation count (collapsed summary).
+    * The ``when_to_use`` agent-facing copy as a subtitle (the same
+      string the ``list_operation_groups`` meta-tool returns to the
+      agent; surfacing it here gives the operator the same context
+      the agent uses to pick a group).
+    * Per-op rows with op_id + summary + safety_level badge +
+      requires_approval flag.
+
+  Three branches on the resolver's verdict:
+    * ``resolved`` -- normal matrix render.
+    * ``no_connector`` -- explanatory panel naming the missing
+      ``(product, version)`` pair. The operator can re-probe to
+      refresh the fingerprint.
+    * ``ambiguous_connector`` -- explanatory panel naming the
+      candidate set + the remediation step (set
+      ``target.preferred_impl_id``).
+-#}
+<article
+  id="ops-matrix-card"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  aria-label="Available operations matrix"
+>
+  <div class="card-body space-y-2">
+    <header class="flex items-baseline justify-between">
+      <h2 class="card-title text-base">Available operations</h2>
+      {% if connector_id %}
+        <code class="badge badge-outline badge-sm">{{ connector_id }}</code>
+      {% endif %}
+    </header>
+
+    {% if connector_label == "resolved" %}
+      {% if ops_matrix %}
+        <div class="space-y-2">
+          {% for group in ops_matrix %}
+            <details
+              class="rounded-box border border-base-300 bg-base-50"
+              data-group-key="{{ group.group_key }}"
+            >
+              <summary class="cursor-pointer px-3 py-2 text-sm font-semibold">
+                {{ group.name }}
+                <span class="ml-2 text-xs opacity-60">
+                  ({{ group.operations | length }} ops)
+                </span>
+              </summary>
+              <div class="border-t border-base-300 px-3 py-2 text-xs">
+                {% if group.when_to_use %}
+                  <p class="opacity-70 italic mb-2">{{ group.when_to_use }}</p>
+                {% endif %}
+                {% if group.operations %}
+                  <ul class="divide-y divide-base-300" role="list">
+                    {% for op in group.operations %}
+                      <li class="flex items-start gap-2 py-1.5">
+                        <span class="font-mono shrink-0">{{ op.op_id }}</span>
+                        {% if op.summary %}
+                          <span class="opacity-70 truncate">{{ op.summary }}</span>
+                        {% endif %}
+                        <span class="ml-auto flex items-center gap-1 shrink-0">
+                          {#- ``safety_level`` is the closed enum the DB-layer
+                              CHECK constraint pins: ``safe`` / ``caution`` /
+                              ``dangerous`` (see ``EndpointDescriptor`` model
+                              docstring). The badge palette colours by level
+                              so an operator scanning the matrix sees the
+                              policy gate visually before reading the label.
+                          -#}
+                          {%- set safety = op.safety_level -%}
+                          {% if safety == "dangerous" %}
+                            <span
+                              class="badge badge-error badge-xs"
+                              title="Dangerous — irreversible or high-impact"
+                            >{{ safety }}</span>
+                          {% elif safety == "caution" %}
+                            <span
+                              class="badge badge-warning badge-xs"
+                              title="Caution — state-changing"
+                            >{{ safety }}</span>
+                          {% else %}
+                            <span
+                              class="badge badge-ghost badge-xs"
+                              title="Safe — read or non-impacting"
+                            >{{ safety }}</span>
+                          {% endif %}
+                          {% if op.requires_approval %}
+                            <span
+                              class="badge badge-outline badge-xs"
+                              title="Requires approval"
+                            >approval</span>
+                          {% endif %}
+                        </span>
+                      </li>
+                    {% endfor %}
+                  </ul>
+                {% else %}
+                  <p class="opacity-60 italic">No enabled operations in this group.</p>
+                {% endif %}
+              </div>
+            </details>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="text-sm opacity-60">
+          No enabled operation groups for connector
+          <code>{{ connector_id }}</code>.
+        </p>
+      {% endif %}
+    {% elif connector_label == "no_connector" %}
+      <div role="alert" class="alert alert-warning">
+        <div>
+          <h3 class="font-semibold text-sm">No matching connector</h3>
+          <p class="text-xs">
+            {{ connector_message or "no connector matches the target's (product, version)" }}
+          </p>
+          {% if is_tenant_admin %}
+            <p class="text-xs mt-1 opacity-80">
+              Re-probe the target to refresh its fingerprint, or register a
+              connector for this product/version.
+            </p>
+          {% endif %}
+        </div>
+      </div>
+    {% elif connector_label == "ambiguous_connector" %}
+      <div role="alert" class="alert alert-warning">
+        <div>
+          <h3 class="font-semibold text-sm">Ambiguous connector resolution</h3>
+          <p class="text-xs">
+            {{ connector_message or "multiple connector candidates remain" }}
+          </p>
+          {% if is_tenant_admin %}
+            <p class="text-xs mt-1 opacity-80">
+              Set the target's <code>preferred_impl_id</code> to one of the
+              candidate impls.
+            </p>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+  </div>
+</article>

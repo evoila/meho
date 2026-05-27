@@ -71,6 +71,7 @@ __all__ = [
     "IngestRequest",
     "IngestResponse",
     "IngestionResultModel",
+    "NextStep",
     "SpecSource",
 ]
 
@@ -232,6 +233,38 @@ class IngestResponse(BaseModel):
 ConnectorState = Literal["ingested", "registered"]
 
 
+class NextStep(BaseModel):
+    """Self-describing in-product hint pointing at the verb that closes the workflow.
+
+    Surfaced on :class:`ConnectorListItem` rows whose :attr:`~ConnectorListItem.state`
+    is ``"registered"`` (G0.13-T3 / #1133). An ``"ingested"`` row sets
+    :attr:`ConnectorListItem.next_step` to ``None`` because the dispatcher
+    already resolves operations against it -- there is nothing left for the
+    operator to do.
+
+    Two ``verb`` shapes ship:
+
+    * ``meho connector ingest --catalog <product>/<version>`` -- when the
+      connector-spec catalog (G0.7-T8 / #743) carries an entry for the
+      registry's ``(product, version)``. The operator copies the verb,
+      ``meho connector ingest`` looks up the upstream spec URL, and
+      dispatchability follows after operator review.
+    * ``meho connector ingest --product <p> --version <v> --impl <i> --spec <uri>``
+      -- when the catalog has no entry. The ``rationale`` makes the
+      missing-catalog branch explicit so the operator knows they need
+      to source the OpenAPI spec themselves.
+
+    Frozen for the same reason every wire shape in this module is frozen:
+    responses are read-only and any in-place mutation should surface as a
+    Pydantic error rather than a silently-modified payload.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    verb: str = Field(min_length=1, max_length=512)
+    rationale: str = Field(min_length=1, max_length=512)
+
+
 class ConnectorListItem(BaseModel):
     """One row in the ``GET /api/v1/connectors`` response.
 
@@ -262,6 +295,20 @@ class ConnectorListItem(BaseModel):
     not-yet-dispatchable when ``state == "registered"``. Defaults to
     ``"ingested"`` so existing call sites (tests, MCP fakes)
     construct rows without breakage.
+
+    ``next_step`` (G0.13-T3 / #1133) is the self-describing hint that
+    closes the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:
+    half-registered connectors fail lookup with no in-product hint
+    about what verb closes the workflow). It is a :class:`NextStep`
+    object on ``state="registered"`` rows and ``None`` on
+    ``state="ingested"`` rows (no operator action remains for an
+    ingested connector). The hint is computed against the curated
+    connector-spec catalog (#743): when the catalog carries an entry
+    for the registry's ``(product, version)`` the verb points at
+    ``meho connector ingest --catalog ...``; otherwise it points at
+    the manual-mode flags. Defaults to ``None`` so existing
+    construction call sites (tests, MCP fakes) continue to compile
+    without explicit assignment.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -277,6 +324,7 @@ class ConnectorListItem(BaseModel):
     disabled_group_count: int
     operation_count: int
     state: ConnectorState = "ingested"
+    next_step: NextStep | None = None
 
 
 class ConnectorListResponse(BaseModel):

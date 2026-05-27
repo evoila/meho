@@ -409,6 +409,46 @@ honours the over-budget warning AC. The
 sub-document (`max_tokens`, `estimated_tokens`, `over_budget`,
 `dropped_slugs`) computed by a call to
 `assemble_preamble(operator.tenant_id)` on every list call.
+
+**Per-write inclusion feedback (G0.14-T8 #1149).** A complementary
+post-write signal: `POST /api/v1/conventions` and
+`PATCH /api/v1/conventions/{slug}` attach a `preamble_status`
+sub-document to the response when the convention is
+`kind='operational'`. The shape:
+
+```json
+{
+  "preamble_status": {
+    "included": true,
+    "position": 4,
+    "token_count": 142,
+    "would_drop_slugs": []
+  }
+}
+```
+
+* `included` — `True` when the just-written slug landed in the
+  preamble after the priority-ranked pack against
+  `DEFAULT_MAX_PREAMBLE_TOKENS`; `False` when it was dropped.
+* `position` — 1-based index of the slug in the assembled
+  preamble's packed order (`priority DESC, created_at ASC`).
+  `None` when `included=False`.
+* `token_count` — the convention body's own estimated token cost.
+* `would_drop_slugs` — every slug dropped on this pack. When
+  `included=True` this names *other* slugs the write displaced;
+  when `included=False` the just-written slug appears here.
+
+`preamble_status` is `null` on `GET /{slug}` (the aggregate budget
+signal lives on the list response's `budget_status`) and `null` for
+writes against `workflow` / `reference` kinds (those don't enter
+the preamble). The route handler resolves inclusion via
+`assemble_preamble_detailed(tenant_id, session=session)` -- the
+same session the write committed through, so the pack reflects
+the post-write state without an extra commit round-trip. Signal 18
+in `claude-rdc-hetzner-dc#697` motivated the addition: an operator
+who writes a convention previously got a `201` with no indication
+the row would ever reach an agent session; with `preamble_status`
+the answer arrives in the same round-trip.
 When the tenant is over budget:
 
 - **Table mode** (default): the table still prints to stdout (the
@@ -448,7 +488,11 @@ Downstream consumers:
   (`docs/examples/consumer-onboarding/CLAUDE.md`). **Landed.**
 - **T7 (#1094)** -- `BudgetStatus` surfacing on
   `GET /api/v1/conventions` + `meho conventions list` exit-code-5
-  warning. **Landed** (this task).
+  warning. **Landed**.
+- **G0.14-T8 (#1149)** -- `preamble_status` per-write inclusion
+  feedback on `POST` / `PATCH /api/v1/conventions[/{slug}]`. Surfaces
+  whether the just-written operational convention landed in the
+  preamble (signal 18 from `claude-rdc-hetzner-dc#697`). **Landed**.
 
 ## Migration
 

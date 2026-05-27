@@ -112,9 +112,11 @@ async def _seed_tenant_and_definition(
     per-test setup needs both rows to avoid spurious
     :class:`IntegrityError` under PRAGMA foreign_keys=ON.
 
-    The slug must not be ``rdc-internal``: migration 0018 (G7.1-T5 #317)
-    seeds a real tenant with that slug into the migrated test DB, so
-    reusing it collides on the unique ``tenant.slug`` constraint.
+    The slug must not be ``default``: migration ``0028`` (G0.13-T7
+    #1137) seeds a real tenant with that slug into the migrated test
+    DB (replacing the ``rdc-internal`` seed migration ``0018`` had
+    previously shipped), so reusing either handle would collide on
+    the unique ``tenant.slug`` constraint.
     """
     tenant_id = uuid.uuid4()
     definition_id = uuid.uuid4()
@@ -517,24 +519,24 @@ def test_in_flight_policies_match_enum() -> None:
     }
 
 
-def _load_migration_0020() -> object:
-    """Load migration ``0020`` as a module via its file path.
+def _load_migration_by_name(name: str) -> object:
+    """Load an Alembic migration as a module via its file basename.
 
     Alembic version files are digit-prefixed (``0020_create_scheduled_trigger``)
     and so are not importable as normal dotted modules. Loading by file
     path with :mod:`importlib.util` is the robust way to reach the
     migration's recorded literal tuples for the drift guards below.
+
+    Migration 0020 originated the ``status`` CHECK vocabulary; 0021 widened
+    it with ``'fired'`` (T2's terminal one-off state). The drift guards
+    below compose the literals so the model enum is checked against the
+    *effective* migration history rather than a single snapshot.
     """
     import importlib.util
     from pathlib import Path
 
-    path = (
-        Path(__file__).resolve().parent.parent
-        / "alembic"
-        / "versions"
-        / "0020_create_scheduled_trigger.py"
-    )
-    spec = importlib.util.spec_from_file_location("_migration_0020", path)
+    path = Path(__file__).resolve().parent.parent / "alembic" / "versions" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_migration_{name}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -543,23 +545,29 @@ def _load_migration_0020() -> object:
 
 def test_migration_kind_literals_match_model_enum() -> None:
     """The migration's frozen kind tuple matches the model enum."""
-    migration = _load_migration_0020()
+    migration = _load_migration_by_name("0020_create_scheduled_trigger")
     assert set(migration._SCHEDULED_TRIGGER_KINDS) == {  # type: ignore[attr-defined]
         k.value for k in ScheduledTriggerKind
     }
 
 
 def test_migration_status_literals_match_model_enum() -> None:
-    """The migration's frozen status tuple matches the model enum."""
-    migration = _load_migration_0020()
-    assert set(migration._SCHEDULED_TRIGGER_STATUSES) == {  # type: ignore[attr-defined]
+    """0025's widened status tuple matches the model enum.
+
+    0020 originated the CHECK with three values; 0025 (T2) added
+    ``'fired'`` as a fourth terminal value for the one-off finalisation
+    path. The effective vocabulary is therefore 0025's ``_V2`` literal;
+    the model enum must agree.
+    """
+    m_0025 = _load_migration_by_name("0025_scheduled_trigger_dispatcher_columns")
+    assert set(m_0025._SCHEDULED_TRIGGER_STATUSES_V2) == {  # type: ignore[attr-defined]
         s.value for s in ScheduledTriggerStatus
     }
 
 
 def test_migration_in_flight_policy_literals_match_model_enum() -> None:
     """The migration's frozen in_flight_policy tuple matches the model enum."""
-    migration = _load_migration_0020()
+    migration = _load_migration_by_name("0020_create_scheduled_trigger")
     assert set(migration._SCHEDULED_TRIGGER_IN_FLIGHT_POLICIES) == {  # type: ignore[attr-defined]
         p.value for p in ScheduledTriggerInFlightPolicy
     }

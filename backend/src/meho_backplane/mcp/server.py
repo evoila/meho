@@ -108,6 +108,7 @@ from meho_backplane.settings import get_settings
 __all__ = [
     "RESOURCES_SUBSCRIBE_ENABLED",
     "McpInvalidParamsError",
+    "mcp_session_id_capture_mode",
     "register_method",
     "router",
 ]
@@ -518,6 +519,36 @@ def _validate_protocol_version_header(
     )
 
 
+def mcp_session_id_capture_mode() -> str:
+    """Report whether MCP session-id capture is ``"always"`` or ``"enforced"``.
+
+    Capture is **unconditional**: whenever a request carries a
+    parseable ``Mcp-Session-Id`` header the server binds it to the
+    structlog contextvar regardless of any env var, so the
+    ``audit_log.agent_session_id`` column populates automatically for
+    every client that sends one (G8.2 audit replay then has rows to
+    walk in the default deploy). The
+    :attr:`~meho_backplane.settings.Settings.mcp_require_session_id`
+    knob (``MCP_REQUIRE_SESSION_ID`` env) is **strictly about
+    enforcement** — whether a missing header is a 400 reject. It does
+    not gate capture.
+
+    Operators can introspect the current mode via
+    :func:`~meho_backplane.api.v1.health.authenticated_health` (Task
+    G0.14-T6 #1147) so the deploy-time observability story for the
+    audit-replay feature gate (G8.2) is a single GET away. Task
+    G0.14-T7 #1148's ``/ready`` features block reads this helper too
+    so both surfaces stay consistent.
+
+    Returns ``"enforced"`` when ``MCP_REQUIRE_SESSION_ID=true`` (every
+    MCP call must carry a header or the server rejects it before
+    dispatch); ``"always"`` otherwise (header is captured when sent,
+    otherwise ``agent_session_id`` lands as NULL — which is fine: the
+    G8.2 replay route filters NULLs out of session walks naturally).
+    """
+    return "enforced" if get_settings().mcp_require_session_id else "always"
+
+
 def _bind_mcp_session_id(
     request: Request,
     payload: dict[str, Any],
@@ -539,16 +570,28 @@ def _bind_mcp_session_id(
     write picks it up without threading the value through every handler
     signature.
 
-    Resolution rules (issue #1010):
+    **Capture is independent of enforcement (G0.14-T6 #1147).** Capture
+    fires whenever the client sent a parseable UUID header, regardless
+    of :attr:`~meho_backplane.settings.Settings.mcp_require_session_id`.
+    Enforcement — the missing-header reject — is the only behaviour
+    that env var gates. This split lets G8.2 audit-replay light up
+    automatically on any deploy whose MCP clients include the header
+    (Claude Code does, by default) without operators having to flip a
+    second env var.
+
+    Resolution rules:
 
     * Present and a parseable UUID → bind that id.
-    * Present but not a UUID → treated as absent. A non-UUID id can't
-      go in a ``uuid`` column, and a malformed *client* header must not
-      500 the call (the client is in the wrong, not the server).
-    * Absent / empty → generate a fresh :func:`uuid.uuid4` for the
-      single-call duration so the row still carries a stable, non-NULL
-      session id (the spec explicitly permits servers to not require
-      sessions; single-call sessions are valid).
+    * Present but not a UUID → don't bind. A non-UUID id can't go in
+      the ``uuid`` column, and a malformed *client* header must not
+      500 the call (the client is in the wrong, not the server). The
+      audit row's ``agent_session_id`` lands as NULL — same as a row
+      from a client that never sent the header. A warning is logged so
+      the malformation is observable in structlog.
+    * Absent / empty → don't bind. The row's ``agent_session_id``
+      lands as NULL. The G8.2 replay route's session walk treats NULLs
+      as "not part of any session", which is correct for a call from a
+      stateless client.
 
     When :attr:`~meho_backplane.settings.Settings.mcp_require_session_id`
     is ``True`` (``MCP_REQUIRE_SESSION_ID`` env), a missing/empty header
@@ -556,14 +599,16 @@ def _bind_mcp_session_id(
     dispatch, mirroring the early-return shape of
     :func:`_validate_protocol_version_header`. A present-but-malformed
     header is *not* a rejection in require-mode: the client did send a
-    session id, so the require-a-session contract is satisfied; the
-    malformed value just falls back to a fresh uuid4 the same way it
-    does in the default mode.
+    session id (just a malformed one), so the require-a-session
+    contract is satisfied at the transport layer; the audit row gets a
+    NULL ``agent_session_id`` the same way it does in the default
+    capture-only mode, and the structured warning lets the operator
+    see which client is misbehaving.
 
-    Returns ``None`` on the OK path (contextvar bound); a
-    :class:`JSONResponse` (HTTP 200 + JSON-RPC ``-32600`` envelope) on
-    the require-mode rejection so the caller can early-return it before
-    any audit row is written.
+    Returns ``None`` on the OK path (contextvar bound or deliberately
+    unbound); a :class:`JSONResponse` (HTTP 200 + JSON-RPC ``-32600``
+    envelope) on the require-mode rejection so the caller can
+    early-return it before any audit row is written.
     """
     session_header = request.headers.get("mcp-session-id")
     has_header = session_header is not None and session_header != ""
@@ -576,14 +621,14 @@ def _bind_mcp_session_id(
             "invalid request: Mcp-Session-Id header is required",
         )
 
-    session_id: uuid.UUID | None = None
-    if has_header:
-        try:
-            session_id = uuid.UUID(session_header)
-        except ValueError:
-            _log.warning("mcp_malformed_session_id", header=session_header)
-    if session_id is None:
-        session_id = uuid.uuid4()
+    if not has_header:
+        return None
+
+    try:
+        session_id = uuid.UUID(session_header)
+    except ValueError:
+        _log.warning("mcp_malformed_session_id", header=session_header)
+        return None
 
     structlog.contextvars.bind_contextvars(mcp_session_id=str(session_id))
     return None
@@ -749,11 +794,12 @@ async def mcp_dispatch(
     if protocol_error is not None:
         return protocol_error
 
-    # Capture the Mcp-Session-Id header (G8.2-T2 #1010) so the audit
-    # writer can correlate every row of this call to one agent session.
-    # Bound for both requests and notifications — notifications still
-    # write audit rows downstream. In MCP_REQUIRE_SESSION_ID mode a
-    # missing header short-circuits to -32600 before any dispatch.
+    # Capture the Mcp-Session-Id header (G8.2-T2 #1010 + G0.14-T6 #1147
+    # decouple) so the audit writer can correlate every row of this
+    # call to one agent session. Capture-if-present is unconditional;
+    # MCP_REQUIRE_SESSION_ID only gates the missing-header reject
+    # (-32600 before any dispatch). Bound for both requests and
+    # notifications — notifications still write audit rows downstream.
     session_error = _bind_mcp_session_id(request, payload)
     if session_error is not None:
         return session_error

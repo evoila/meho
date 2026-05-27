@@ -1,0 +1,59 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  HTMX-loaded create-target modal for the Connectors surface
+  (Initiative #340 Task #874 work item #3). Loaded into
+  ``#connectors-modal-container`` on the list page by the "Create
+  target" button's ``hx-get`` to ``/ui/connectors/create``. The
+  inserted ``<dialog>`` carries ``modal-open`` so it shows without an
+  extra click.
+
+  Submit contract: the form ``hx-post``s to ``/ui/connectors/create``
+  targeting itself (``hx-target="this"``, ``hx-swap="outerHTML"``).
+    * Success -> the handler returns 204 + ``HX-Redirect: /ui/connectors``
+      so HTMX reloads the list page with the new row.
+    * Validation failure -> the handler returns 422 + this same modal
+      re-rendered with ``errors`` populated and the operator's typed
+      values echoed back; HTMX swaps it in place so the operator fixes
+      the field without losing their input.
+
+  CSRF: the page-level ``hx-headers`` directive on ``list.html`` echoes
+  ``X-CSRF-Token``; HTMX inherits it through the inserted form. The
+  route also re-mints + re-sets the ``meho_csrf`` cookie on every modal
+  render so the double-submit pair lines up.
+-#}
+<dialog id="connectors-create-modal" class="modal modal-open">
+  <div class="modal-box max-w-2xl">
+    <h3 class="font-semibold text-lg" id="connectors-create-modal-title">Create target</h3>
+
+    <form
+      id="connectors-create-form"
+      hx-post="/ui/connectors/create"
+      hx-target="this"
+      hx-swap="outerHTML"
+      hx-disabled-elt="find button[type=submit]"
+      class="space-y-3 py-2"
+      aria-labelledby="connectors-create-modal-title"
+    >
+      {% include "connectors/_target_form_fields.html" %}
+
+      <div class="modal-action">
+        <button
+          type="button"
+          class="btn btn-sm btn-ghost"
+          data-action="cancel-create"
+          onclick="document.getElementById('connectors-create-modal').close()"
+        >
+          Cancel
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary" data-action="create-submit">
+          Create
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

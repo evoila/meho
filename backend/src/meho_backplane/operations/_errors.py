@@ -11,10 +11,10 @@ dispatcher's :func:`dispatch` body stay focused on control flow.
 Each builder owns one ``error_code`` from the contract documented in
 :mod:`meho_backplane.operations.dispatcher`'s module docstring:
 ``unknown_op`` / ``invalid_params`` / ``no_connector`` /
-``handler_unreachable`` / ``denied`` / ``awaiting_approval`` /
-``connector_error``. The ``status`` field maps to
-``OperationResult.status``; the ``error_code`` lives in ``extras`` so
-callers can both string-match the ``error`` field
+``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
+``awaiting_approval`` / ``connector_error``. The ``status`` field maps
+to ``OperationResult.status``; the ``error_code`` lives in ``extras``
+so callers can both string-match the ``error`` field
 (``error.startswith("unknown_op:")``) and parse the code for structured
 handling.
 """
@@ -27,6 +27,7 @@ from typing import Any
 from meho_backplane.connectors import OperationResult, ResultHandle
 
 __all__ = [
+    "result_ambiguous_connector",
     "result_awaiting_approval",
     "result_connector_error",
     "result_denied",
@@ -75,15 +76,85 @@ def result_invalid_params(
 
 
 def result_no_connector(
-    op_id: str, product: str, version: str, duration_ms: float
+    op_id: str,
+    product: str,
+    version: str,
+    duration_ms: float,
+    exception_message: str | None = None,
 ) -> OperationResult:
-    """Resolver miss -- no registered impl for *(product, version)*."""
+    """Resolver miss -- no registered impl for *(product, version)*.
+
+    ``exception_message`` (added by G0.14-T1 #1142) carries the
+    :exc:`~meho_backplane.connectors.NoMatchingConnector` exception text
+    so the operator-facing surface can show the diagnostic detail the
+    resolver computed (``target.product`` value, the absence of a
+    matching v1/v2 entry, etc.) rather than a bare summary. The field
+    lands under ``extras["exception_message"]`` matching the
+    ``connector_error`` shape so the structured-error consumer can read
+    a uniform key across the two diagnostic codes.
+
+    The argument is optional for backward compatibility with call sites
+    that pre-date the resolver-helper unification — they pass through
+    the bare ``(product, version)`` form and ``extras`` omits the field.
+    """
+    extras: dict[str, Any] = {
+        "error_code": "no_connector",
+        "product": product,
+        "version": version,
+    }
+    if exception_message is not None:
+        extras["exception_message"] = exception_message
     return OperationResult(
         status="error",
         op_id=op_id,
         error=f"no_connector: no implementation for product={product!r} version={version!r}",
         duration_ms=duration_ms,
-        extras={"error_code": "no_connector", "product": product, "version": version},
+        extras=extras,
+    )
+
+
+def result_ambiguous_connector(
+    op_id: str,
+    product: str,
+    version: str,
+    exception_message: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Resolver tie-break ladder couldn't pick a single connector.
+
+    G0.14-T1 (#1142). The resolver raises
+    :exc:`~meho_backplane.connectors.AmbiguousConnectorResolution` when
+    two or more connectors remain after every step of the tie-break
+    ladder (specificity → operator preference → priority). The exception
+    message *already* carries the diagnostic shape an operator needs:
+    the target's ``(product, version)``, the candidate list, and the
+    remediation step ("set ``target.preferred_impl_id`` to one of
+    them"). This builder preserves that message verbatim under
+    ``extras["exception_message"]`` so the structured-error envelope
+    on ``/operations/call`` (and any other dispatcher consumer) surfaces
+    it without a paraphrase.
+
+    Mirrors :func:`result_no_connector`'s shape — ``status="error"``,
+    ``error="<code>: <human-readable>"``, full diagnostic detail in
+    ``extras`` — so callers that already string-match
+    ``error.startswith("no_connector:")`` can extend the same pattern
+    to ``"ambiguous_connector:"`` without re-shaping their consumer.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"ambiguous_connector: resolution ambiguous for "
+            f"product={product!r} version={version!r}; "
+            f"set target.preferred_impl_id to one of the candidates"
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "ambiguous_connector",
+            "product": product,
+            "version": version,
+            "exception_message": exception_message,
+        },
     )
 
 

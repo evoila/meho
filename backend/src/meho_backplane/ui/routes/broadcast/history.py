@@ -24,16 +24,34 @@ cannot hang a worker the way an unguarded stream loop could.
 The 24h window
 ==============
 
-Valkey stream entry ids are ``<ms-timestamp>-<sequence>``. A bare
-millisecond timestamp as the ``XRANGE`` start auto-completes the
-sequence to ``0`` (Valkey ``XRANGE`` semantics), so
-``XRANGE key <now_ms - 24h> + COUNT <cap>`` returns every entry from the
-last 24 hours, oldest-first, capped. The window width is
-:attr:`Settings.broadcast_retention_hours` (default 24, the locked
-decision-3 contract -- the same retention the publisher's ``MAXLEN``
-trim targets). ``XRANGE`` returns ascending (oldest-first); the pane
-renders newest-first to match the live feed, so the parsed list is
-reversed before it reaches the template.
+The ``XRANGE`` lower bound is the bare millisecond timestamp ``now_ms -
+broadcast_retention_hours * 3_600_000``; the upper bound is ``"+"``
+(latest). The retention setting is :attr:`Settings.broadcast_retention_hours`
+(default 24, the locked decision-3 contract -- the same retention the
+publisher's ``MAXLEN`` trim targets). ``XRANGE`` returns ascending
+(oldest-first); the pane renders newest-first to match the live feed,
+so the parsed list is reversed before it reaches the template.
+
+Shared read helper (G6.4-T4 #1103)
+==================================
+
+The xrange + redact-aware parse loop lives in
+:func:`meho_backplane.broadcast.history.list_recent_events_fail_soft`
+(the fail-soft sibling of the MCP ``broadcast.recent`` tool's
+fail-loud caller). The wrapper catches :class:`redis.exceptions.RedisError`
+and returns the empty result so a Valkey blip degrades this pane to
+its empty state, not 500. That guarantee is what keeps the page
+useful when the broadcast subchart is unhealthy.
+
+The shared helper handles both :class:`BroadcastEvent` (audit-driven)
+and :class:`AgentAnnouncementEvent` (agent-authored). This pane today
+renders only :class:`BroadcastEvent` -- the row template binds to
+audit-event columns (``op_class`` / ``op_id`` / ``result_status`` /
+``payload``) that announcements don't carry. The post-helper filter
+in :func:`_fetch_history` drops announcement entries to keep the pane
+byte-compatible with the existing live SSE feed (which also drops
+announcements today). Adding announcement rendering is a follow-up
+that lives on the row template, not this route.
 
 Why reuse the live feed's row + drawer
 ======================================
@@ -65,15 +83,16 @@ tenant-B's history pane (and vice versa).
 from __future__ import annotations
 
 import json
-import time
-from typing import Final
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
-from pydantic import ValidationError
 
-from meho_backplane.broadcast import BroadcastEvent, get_broadcast_client
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.broadcast import list_recent_events_fail_soft
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.routes.broadcast.feed import (
@@ -86,117 +105,96 @@ __all__ = ["build_history_router"]
 
 _log = structlog.get_logger(__name__)
 
-#: Milliseconds per hour -- the 24h window start id is computed as
-#: ``now_ms - broadcast_retention_hours * _MS_PER_HOUR``.
-_MS_PER_HOUR: Final[int] = 3_600_000
 
-#: ``XRANGE`` end anchor -- ``"+"`` is Valkey's "latest available entry"
-#: sentinel, so the pull spans from the window start to the live tail.
-_XRANGE_END: Final[str] = "+"
+def _window_start_iso(*, retention_hours: int, now: datetime) -> str:
+    """Build the inclusive ISO-8601 ``since`` for the retention-window read.
 
+    Returns ``now - retention_hours``, ISO-8601 with a ``Z`` suffix --
+    the shape :func:`~meho_backplane.broadcast.history.parse_since`
+    accepts as an ISO-8601 ``since`` and converts to a bare-ms inclusive
+    lower bound. ``retention_hours`` is bounded by the
+    :attr:`Settings.broadcast_retention_hours` setting (default 24).
 
-def _stream_key(tenant_id: object) -> str:
-    """Build the per-tenant Valkey stream key.
-
-    Mirrors :func:`meho_backplane.ui.routes.broadcast.stream._stream_key`
-    and the publisher exactly so the history pane reads the same key the
-    publisher writes and the live stream tails.
+    Returns the epoch when the window would underflow (e.g. a
+    misconfigured absurdly-large retention window) so the helper never
+    sees a negative timestamp. The epoch maps to bare-ms ``0`` after
+    parsing, which Valkey treats as "start from the beginning of time".
     """
-    return f"meho:feed:{tenant_id}"
-
-
-def _window_start_id(*, retention_hours: int, now_ms: int) -> str:
-    """Build the ``XRANGE`` start id for the replay window.
-
-    The start id is a bare millisecond timestamp ``now_ms -
-    retention_hours * 3_600_000``. Valkey ``XRANGE`` auto-completes a
-    bare timestamp's sequence to ``0``, so the range is inclusive of
-    every entry from that millisecond onward. Clamped at ``0`` so a
-    misconfigured (absurdly large) retention window never produces a
-    negative start id that Valkey would reject.
-    """
-    start_ms = max(now_ms - retention_hours * _MS_PER_HOUR, 0)
-    return str(start_ms)
-
-
-def _parse_entries(
-    entries: list[tuple[str, dict[str, str]]],
-    *,
-    stream_key: str,
-) -> list[BroadcastEvent]:
-    """Parse ``XRANGE`` entries into :class:`BroadcastEvent` objects.
-
-    Mirrors the skip discipline in
-    :func:`meho_backplane.api.v1.feed._process_entries`: an entry with
-    no ``event`` field, or a malformed JSON ``event`` field, is logged
-    and skipped rather than failing the whole pane -- the same
-    belt-and-suspenders guard against a future foreign writer on the
-    shared stream key.
-    """
-    events: list[BroadcastEvent] = []
-    for entry_id, fields in entries:
-        raw_event_json = fields.get("event")
-        if not isinstance(raw_event_json, str):
-            _log.warning(
-                "broadcast_history_skipped_unknown_field_shape",
-                stream_key=stream_key,
-                entry_id=entry_id,
-                fields=list(fields.keys()),
-            )
-            continue
-        try:
-            events.append(BroadcastEvent.model_validate_json(raw_event_json))
-        except ValidationError:
-            _log.warning(
-                "broadcast_history_skipped_malformed_event",
-                stream_key=stream_key,
-                entry_id=entry_id,
-            )
-    return events
-
-
-async def _fetch_history(tenant_id: object) -> list[BroadcastEvent]:
-    """Pull the last-24h events for *tenant_id*, newest-first, capped.
-
-    A single finite ``XRANGE`` over ``meho:feed:{tenant_id}`` from the
-    window start to ``"+"`` (latest), bounded by ``COUNT`` =
-    :data:`IN_DOM_ROW_CAP` so the pane stays within the same in-DOM row
-    budget as the live feed. ``XRANGE`` returns oldest-first; the list
-    is reversed so the pane renders newest-first, matching the live
-    feed's reverse-chronological order.
-
-    Fail-soft: any Valkey error returns an empty list (the pane renders
-    its empty state) rather than 500-ing the fragment -- a transient
-    broadcast-subchart blip should degrade the replay pane, not the
-    page. The error is logged with the exception class only (redis-py
-    exceptions can embed the endpoint URL).
-    """
-    client = get_broadcast_client()
-    stream_key = _stream_key(tenant_id)
-    retention_hours = get_settings().broadcast_retention_hours
-    start_id = _window_start_id(
-        retention_hours=retention_hours,
-        now_ms=int(time.time() * 1000),
+    delta = timedelta(hours=retention_hours)
+    start = (
+        now - delta
+        if now - delta > datetime(1970, 1, 1, tzinfo=UTC)
+        else datetime(1970, 1, 1, tzinfo=UTC)
     )
-    try:
-        entries = await client.xrange(
-            stream_key,
-            min=start_id,
-            max=_XRANGE_END,
-            count=IN_DOM_ROW_CAP,
-        )
-    except Exception as exc:
-        _log.warning(
-            "broadcast_history_fetch_failed",
-            error_class=type(exc).__name__,
-            stream_key=stream_key,
-        )
-        return []
-    events = _parse_entries(entries, stream_key=stream_key)
+    return start.isoformat().replace("+00:00", "Z")
+
+
+def _is_audit_event(event: dict[str, Any]) -> bool:
+    """Return ``True`` iff *event* is a :class:`BroadcastEvent` (audit-driven).
+
+    The shared helper surfaces both :class:`BroadcastEvent` (audit-driven,
+    no ``event_kind`` field on the wire JSON) and
+    :class:`AgentAnnouncementEvent` (``event_kind == "agent_announcement"``).
+    This route today renders only audit events -- the existing row template
+    binds to audit columns (``op_class`` / ``op_id`` / ``result_status``
+    / ``payload``) that announcements don't carry. Surfacing
+    announcement-shape events through the existing template would render
+    blank cells. Adding announcement rendering is a follow-up that lives
+    on the row template, not this route.
+    """
+    return event.get("event_kind") != "agent_announcement"
+
+
+async def _fetch_history(
+    tenant_id: UUID,
+    operator_sub: str,
+) -> list[dict[str, Any]]:
+    """Pull the last-24h audit events for *tenant_id*, newest-first, capped.
+
+    Delegates to :func:`~meho_backplane.broadcast.list_recent_events_fail_soft`
+    -- a single finite ``XRANGE`` over ``meho:feed:{tenant_id}`` from the
+    retention-window start to ``"+"`` (latest), bounded by ``COUNT`` =
+    :data:`IN_DOM_ROW_CAP` so the pane stays within the same in-DOM row
+    budget as the live feed.
+
+    The helper returns ascending (oldest-first) dict-shaped events with
+    a stream-cursor ``id``; this route reverses to newest-first to match
+    the live feed's display order, then filters out
+    :class:`AgentAnnouncementEvent` entries to preserve the existing
+    row template's audit-event contract (see :func:`_is_audit_event`).
+
+    Fail-soft: a Valkey error returns an empty list (the pane renders
+    its empty state) rather than 500-ing the fragment. The helper logs
+    the structured warning; this route does not re-log or transform the
+    failure.
+
+    *operator_sub* is the session's principal subject; the helper takes
+    a synthesised :class:`Operator` because its API is operator-scoped
+    even though the UI doesn't validate operator role for the read
+    (the session middleware already gated the request). The role on the
+    synthesised operator is OPERATOR (sufficient for the helper's
+    structural tenant check).
+    """
+    operator = Operator(
+        sub=operator_sub,
+        raw_jwt="ui-session",
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+    )
+    since_iso = _window_start_iso(
+        retention_hours=get_settings().broadcast_retention_hours,
+        now=datetime.now(UTC),
+    )
+    result = await list_recent_events_fail_soft(
+        operator,
+        since=since_iso,
+        limit=IN_DOM_ROW_CAP,
+    )
     # XRANGE is ascending (oldest-first); the pane renders newest-first
     # to match the live feed's reverse-chronological order.
-    events.reverse()
-    return events
+    audit_events = [e for e in result["events"] if _is_audit_event(e)]
+    audit_events.reverse()
+    return audit_events
 
 
 #: Module-level :class:`fastapi.Depends` closure -- ruff B008 guard.
@@ -219,20 +217,24 @@ def build_history_router() -> APIRouter:
     ) -> HTMLResponse:
         """``GET /ui/broadcast/history`` -- the Last-24h replay fragment.
 
-        Pulls the session tenant's last-24h events via a finite
-        ``XRANGE``, passes them as a list the template serialises with
-        Jinja ``| tojson`` into a ``<script type="application/json">``
-        data island the shared ``broadcastFeed`` controller seeds from,
-        and returns the ``broadcast/_history.html`` fragment (no
-        ``base.html`` chrome -- the tab swaps it into the page's history
-        container). The tenant comes from the validated session, never a
-        query parameter.
+        Pulls the session tenant's last-24h events via the shared
+        fail-soft read helper, passes them as a list the template
+        serialises with Jinja ``| tojson`` into a
+        ``<script type="application/json">`` data island the shared
+        ``broadcastFeed`` controller seeds from, and returns the
+        ``broadcast/_history.html`` fragment (no ``base.html`` chrome --
+        the tab swaps it into the page's history container). The
+        tenant comes from the validated session, never a query
+        parameter.
         """
-        events = await _fetch_history(session_ctx.tenant_id)
+        events = await _fetch_history(
+            session_ctx.tenant_id,
+            session_ctx.operator_sub,
+        )
         context: dict[str, object] = {
             "in_dom_row_cap": IN_DOM_ROW_CAP,
             "op_class_badge_json": _badge_palette_json(),
-            "history_events": _events_payload(events),
+            "history_events": events,
             "history_count": len(events),
             "retention_hours": get_settings().broadcast_retention_hours,
         }
@@ -257,25 +259,3 @@ def _badge_palette_json() -> str:
     the history fragment renders it into.
     """
     return json.dumps(OP_CLASS_BADGE_CLASSES)
-
-
-def _events_payload(events: list[BroadcastEvent]) -> list[dict[str, object]]:
-    """Build the historical events as JSON-ready dicts for the controller.
-
-    Each event is dumped via ``model_dump(mode="json")`` -- the same
-    JSON-value shape :meth:`BroadcastEvent.model_dump_json` emits for a
-    live SSE frame's ``data:`` payload (UUIDs / datetimes rendered as
-    strings), so once the ``broadcastFeed`` controller ``JSON.parse``s
-    the seed it holds an event object byte-identical to a parsed live
-    frame and the rows render through the same ``_event_row.html``
-    partial.
-
-    The list is returned (not a pre-serialised string) so the template
-    can run it through Jinja's ``| tojson`` filter inside a
-    ``<script type="application/json">`` data island. ``tojson`` escapes
-    ``<`` / ``>`` / ``&`` / ``'`` and U+2028/U+2029 for that script-text
-    context, closing the stored-XSS / render-corruption hole that a
-    ``| safe`` interpolation into a double-quoted ``x-data`` attribute
-    opened on any quote- or markup-bearing event field (B1, PR #1044).
-    """
-    return [event.model_dump(mode="json") for event in events]

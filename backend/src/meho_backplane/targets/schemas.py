@@ -14,9 +14,11 @@ Four models cover the full CRUD + list contract:
   fields have documented defaults matching the ORM column defaults.
   Rejects unknown fields (``extra='forbid'``).
 * :class:`TargetUpdate` — PATCH body. Every field optional; only fields
-  that are not ``None`` are applied by the route handler. ``name`` and
-  ``product`` are intentionally absent — rename = delete + create.
-  Rejects unknown fields (``extra='forbid'``).
+  that are not ``None`` are applied by the route handler. ``name`` is
+  intentionally absent — rename = delete + create. ``product`` is
+  patchable as of G0.14-T4 (#1145) with route-handler validation
+  against the registered connector products; rejects unknown fields
+  (``extra='forbid'``).
 
 The G0.3-T1.5 (#477) amendment added two fields to :class:`Target`:
 
@@ -110,6 +112,15 @@ class Target(BaseModel):
     preferred_impl_id: str | None
     created_at: datetime
     updated_at: datetime
+    # Soft-delete timestamp (G0.14-T4 #1145). ``None`` for live
+    # targets; a non-``None`` value names the wall-clock time of
+    # the ``DELETE /api/v1/targets/{name}`` call that retired the
+    # row. Read paths (``resolve_target``, ``list_targets``)
+    # exclude rows where the column is non-``None``, so a caller
+    # holding a :class:`Target` instance with ``deleted_at`` set
+    # observed the target through an audit-history surface, not a
+    # live registry probe.
+    deleted_at: datetime | None = None
 
 
 class TargetCreate(BaseModel):
@@ -149,8 +160,22 @@ class TargetUpdate(BaseModel):
     All fields are optional. The route handler applies only the fields
     that are not ``None``; callers must send an explicit ``null`` JSON
     value to clear a nullable column (``fqdn``, ``secret_ref``,
-    ``notes``). ``name`` and ``product`` are absent — rename = delete
-    + create.
+    ``notes``). ``name`` is absent — rename = delete + create.
+
+    ``product`` is patchable as of G0.14-T4 (#1145). The original
+    G0.3 contract treated ``product`` as immutable after creation
+    on the theory that the operator should delete + re-create on a
+    typo, but the v0.6.0 dogfood pass (signal 6) showed the
+    combination of "no DELETE route" + "no PATCH on product" left a
+    misregistered target permanently broken — name and alias slots
+    occupied, ``secret_ref`` pointing at a stranded Vault path. T4
+    closes the gap by adding DELETE *and* allowing PATCH on
+    ``product``. The route handler validates the new value against
+    the set of registered connector products and rejects unknown
+    values with a structured 422 mirroring the ``/probe`` 501
+    shape — so a typo at PATCH time produces the same actionable
+    diagnostic as the typo would at probe time, instead of
+    silently breaking the working target.
 
     ``fingerprint`` is **not** accepted via PATCH — it is server-managed
     and rewritten by every successful probe. Sending ``fingerprint``
@@ -161,6 +186,7 @@ class TargetUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     aliases: list[str] | None = None
+    product: str | None = Field(default=None, min_length=1, max_length=100)
     host: str | None = Field(default=None, max_length=512)
     port: int | None = Field(default=None, ge=1, le=65535)
     fqdn: str | None = None

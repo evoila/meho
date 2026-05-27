@@ -1,0 +1,23 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Bulk-import result summary (Initiative #340 Task #875 work item #5).
+  Swapped into ``#connectors-import-result`` by the confirm form's
+  ``hx-post`` to ``/ui/connectors/import/confirm`` after the plan is
+  applied in-process.
+
+  Context contract (set by
+  :func:`~meho_backplane.ui.routes.connectors.import_view.submit_confirm`):
+    * ``created`` -- count of targets created (``create_target``).
+    * ``updated`` -- count of targets updated (``update_target``).
+-#}
+<div class="alert alert-success" role="status" data-import-result>
+  <span>
+    Import applied: <span class="font-semibold" data-created>{{ created }}</span> created,
+    <span class="font-semibold" data-updated>{{ updated }}</span> updated.
+  </span>
+  <a href="/ui/connectors" class="btn btn-sm" aria-label="View targets list">
+    View targets
+  </a>
+</div>

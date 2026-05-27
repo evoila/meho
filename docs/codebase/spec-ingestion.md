@@ -445,6 +445,51 @@ Regression test:
 asserts the contract over a seeded DB that includes a stale-rename
 row and a class-side-only opless connector.
 
+#### `next_step` workflow-completion hint (G0.13-T3 / #1133)
+
+`state="registered"` rows carry a `next_step: NextStep` object that
+points at the verb that closes the workflow gap surfaced by the
+v0.6.0 RDC dogfood (signal 11: half-registered connectors fail
+lookup with no in-product hint about what verb closes the workflow).
+`state="ingested"` rows set `next_step` to `null` because the
+dispatcher already resolves operations against them — there is no
+operator action remaining.
+
+The hint comes from `_next_step_for_registered` in `list_connectors.py`.
+It consults the connector-spec catalog (`ingest/catalog.py`, #743) and
+emits one of two verb shapes:
+
+* **Catalog hit** — verb points at `meho connector ingest --catalog
+  <product>/<version>`. Rationale says the spec is available in the
+  catalog. The CLI's `meho connector ingest --catalog ...` form
+  (G0.7-T5 / #405) drives the rest of the workflow.
+* **Catalog miss** — verb points at `meho connector ingest --product
+  <p> --version <v> --impl <i> --spec <upstream-openapi-uri>`.
+  Rationale calls out the missing catalog entry so the operator
+  knows they need to source the OpenAPI spec themselves.
+
+The catalog lookup uses the **registry's** `(product, version)`, not
+the parser-derived shortening. The SDDC case is canonical: the
+catalog stores `product="sddc-manager"`, the listing emits
+`product="sddc"`, but the hint says `--catalog sddc-manager/9.0`
+because that is what `meho connector ingest --catalog ...` resolves
+against. Looking up the parsed product would always miss for SDDC.
+
+If `load_catalog()` raises `CatalogError` at listing time (only
+possible mid-test-monkeypatch or mid-reload — startup parse failures
+crash the lifespan), the helper degrades to the manual-mode
+rationale rather than 500ing the route. A `next_step_catalog_load_failed`
+log line is emitted so the observability trail flags the degraded
+path.
+
+Regression tests:
+`tests/test_api_v1_connectors_ingest.py::test_list_registered_row_carries_catalog_next_step_hint`
+(catalog-hit branch incl. SDDC's registry-vs-parsed asymmetry),
+`::test_list_registered_row_without_catalog_entry_points_at_manual_mode`
+(catalog-miss branch), and
+`::test_list_ingested_row_omits_next_step_hint`
+(ingested-row contract: field present, value `null`).
+
 ### API request / response models (`ingest/api_schemas.py`)
 
 The shared Pydantic-v2 surface T5 (CLI), T6 (REST), and T7 (MCP) all
@@ -461,6 +506,15 @@ consume so the wire contract is defined once:
   for DB-backed rows the dispatcher can resolve and `"registered"`
   for class-side-only rows the dispatcher cannot resolve yet — see
   the listing-integrity contract section above.
+  `ConnectorListItem.next_step` (G0.13-T3 / #1133) is the workflow-
+  completion hint: a `NextStep` object (verb + rationale) on
+  `state="registered"` rows, `null` on `state="ingested"` rows — see
+  the next-step hint section above.
+* `NextStep` (G0.13-T3 / #1133) — `{verb, rationale}` pair surfaced
+  on `state="registered"` rows. `verb` is a copy/pasteable
+  `meho connector ingest ...` invocation; `rationale` is one
+  sentence explaining why that verb is the right next step
+  (catalog-hit vs catalog-miss).
 * `EditGroupBody` / `EditOpBody` — PATCH bodies for the per-group
   and per-op edit verbs. Pydantic enforces the bounded enum for
   `safety_level` and the empty-body rejection lands as a service-
@@ -477,9 +531,29 @@ to the operator-facing HTTP surface. RBAC: read paths (GET /, GET
 (`POST /ingest`, `PATCH /groups`, `PATCH /operations`, `POST
 /enable`, `POST /disable`) require `tenant_admin`. Tenant scoping
 derives from the JWT — there is no body / query parameter that can
-override the operator's tenant. Cross-tenant probes surface as 404
-`ConnectorNotFoundError`, not 403 — same conflation `ReviewService`
-uses to keep the operator-facing failure surface uniform.
+override the operator's tenant.
+
+Both read paths apply the same "operator's-tenant rows + built-ins
+(`tenant_id IS NULL`)" scope: the listing query does it via a
+single `WHERE tenant_id IS NULL OR tenant_id = X` clause, and
+`ReviewService.get_review_payload` mirrors it through a two-pass
+lookup (own-tenant probe first, then built-in fallback when the
+caller's tenant_id matches `operator.tenant_id`). G0.13-T5 (#1135)
+landed the review-route fallback after the v0.6.0 RDC dogfood
+flagged that every global connector in the catalog returned 404
+on review even though the listing surfaced them. Cross-tenant
+probes (`tenant_id` ≠ operator's own) still surface as 404
+`ConnectorNotFoundError` — same conflation `ReviewService` uses
+to keep the operator-facing failure surface uniform and stop
+status-code differential from enumerating other tenants.
+
+The PATCH editing routes (`/groups`, `/operations`) deliberately
+keep their single-pass lookup against the operator's `tenant_id`:
+"do tenant_admins get to edit built-ins?" is a policy choice
+distinct from the read-visibility bug, and the route gate is
+`tenant_admin`-only — built-in writes already have an explicit
+MCP / CLI affordance (`ReviewService` accepts `tenant_id=None`
+under the `TENANT_ADMIN` role).
 
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)

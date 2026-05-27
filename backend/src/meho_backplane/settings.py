@@ -550,18 +550,44 @@ class Settings(BaseModel):
         the surface holds an HTTP connection open for a short interactive
         run before degrading to the pollable shape. Set via
         ``AGENT_SYNC_TIMEOUT_SECONDS``.
+    agent_approval_wait_timeout_seconds:
+        Overall wall-clock cap on the agent runtime's wait for a
+        ``requires_approval`` operation's decision broadcast event
+        (G11.1-T9 #1117). When an in-loop ``call_operation`` returns
+        ``awaiting_approval``, the wrapped tool subscribes to
+        ``approval.{approved,rejected}`` on the per-tenant Valkey stream
+        and blocks until the decision arrives, this cap elapses, or the
+        run is cancelled. Default 1800s = 30 minutes: long enough for
+        human review across timezone-distant teams without tying up an
+        agent loop indefinitely on a forgotten request. Set via
+        ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
-        ``Mcp-Session-Id`` header (G8.2-T2 #1010). Default ``False``:
-        the MCP 2025-06-18 Streamable HTTP transport explicitly permits
-        servers to not require sessions, and MEHO only needs the id for
-        audit correlation, so a missing header falls back to a fresh
-        single-call ``uuid4()``. Flip ``MCP_REQUIRE_SESSION_ID=true``
-        in deployments that mandate every agent call carry a stable
-        session id (compliance environments that forbid synthetic
-        single-call ids); a missing/empty header then returns a
-        JSON-RPC ``-32600`` Invalid Request before dispatch, so no
-        audit row is written for the rejected call.
+        ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
+        **Strictly gates enforcement, not capture.** Capture is
+        unconditional: any request that includes a parseable
+        ``Mcp-Session-Id`` header has the value bound to the structlog
+        contextvar and lands on
+        ``audit_log.agent_session_id`` regardless of this knob (so
+        G8.2 audit-replay lights up automatically on default deploys
+        for any client that sends the header — Claude Code does, by
+        default). Default ``False``: a missing or malformed header is
+        accepted, the audit row's ``agent_session_id`` lands as NULL,
+        and the call proceeds. Flip ``MCP_REQUIRE_SESSION_ID=true`` in
+        deployments that mandate every agent call carry a session id
+        (compliance environments); a missing/empty header then returns
+        a JSON-RPC ``-32600`` Invalid Request before dispatch, so no
+        audit row is written for the rejected call. A
+        present-but-malformed header is **not** a rejection — the
+        client did send a session id (just an unparseable one), so the
+        require contract is satisfied at the transport layer; the row
+        gets a NULL ``agent_session_id`` and structlog logs the
+        malformation as a warning so the misbehaving client is
+        observable. The current value is reported as
+        ``"enforced"`` / ``"always"`` on ``GET /api/v1/health`` via
+        :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
+        so operators can confirm the deploy's audit-replay capture
+        state without diffing env vars.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -640,6 +666,22 @@ class Settings(BaseModel):
     # elevation windows are typically hours, not days.
     grant_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
     grant_expiry_enabled: bool = True
+    # G11.3-T4 #825 -- agent_run reaper knobs. Same opt-out shape as
+    # GRANT_EXPIRY_ENABLED / MEMORY_EXPIRY_ENABLED so an operator
+    # running an external lease-reclaim mechanism (DBOS Transact, a
+    # workflow engine, etc.) can disable the in-tree reaper without
+    # patching code.
+    #
+    # The default tick (30s) + the default lease TTL (60s) give a
+    # worker two heartbeat windows of slack before reclaim -- a
+    # transient ~20s GC pause / network blip does not cost a run. The
+    # MAX_PER_TICK bound (50) keeps a post-outage backlog from
+    # monopolising one Postgres backend; a 500-row backlog drains
+    # across ~10 ticks.
+    agent_run_reaper_enabled: bool = True
+    agent_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    agent_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
+    agent_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -677,6 +719,58 @@ class Settings(BaseModel):
     # polls). Bounds how long the surface holds an HTTP connection open
     # for a short interactive run before degrading to the pollable shape.
     agent_sync_timeout_seconds: float = Field(default=30.0, gt=0)
+    # G11.1-T9 #1117 — overall wall-clock cap on the agent runtime's wait
+    # for a ``requires_approval`` operation's decision broadcast event.
+    # When an in-loop ``call_operation`` returns ``awaiting_approval``, the
+    # wrapped tool subscribes to ``approval.{approved,rejected}`` on the
+    # per-tenant Valkey stream and blocks until the decision arrives, this
+    # cap elapses, or the run is cancelled. Default 1800s = 30 minutes:
+    # long enough for human review across timezone-distant teams without
+    # tying up an agent loop indefinitely on a forgotten request. Set via
+    # ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
+    agent_approval_wait_timeout_seconds: float = Field(default=1800.0, gt=0)
+    # G11.3-T2 #823 — cron + one-off trigger scheduler. ``tick_interval``
+    # bounds how often the loop scans for due triggers; the default
+    # (30 s) is the consumer-doc-accepted granularity for cron triggers
+    # (one minute is the finest cron-expression boundary, so a 30 s
+    # tick guarantees the trigger fires inside its minute window). The
+    # ``enabled`` flag mirrors the MEMORY_EXPIRY / TOPOLOGY_HISTORY_PRUNE
+    # shape so operators using an external scheduler can opt out.
+    scheduler_tick_interval_seconds: int = Field(default=30, ge=1, le=3600)
+    scheduler_enabled: bool = True
+    # G11.3-T2 #823 — autonomous-agent credential sourcing for the
+    # scheduler. ``run_scheduled`` (G11.2-T2 #1096) wants
+    # ``(client_id, client_secret)``; the scheduler resolves
+    # ``client_id`` from the trigger's :class:`AgentDefinition.identity_ref`
+    # and reads the matching secret from an environment variable whose
+    # name is derived from this pattern. ``{client_id}`` is substituted
+    # at fire time and the result is uppercased + non-alphanumeric chars
+    # replaced with underscores so an ``identity_ref`` like ``agent:reporter``
+    # resolves to ``MEHO_AGENT_SECRET_AGENT_REPORTER``.
+    #
+    # Why env-var sourcing rather than Vault: ``vault_client_for_operator``
+    # is JWT/OIDC-bound and the scheduler is operator-less. Until a
+    # scheduler-service-token Vault auth path lands (G11.2 follow-up),
+    # operators wire agent secrets into the backplane pod's env (Helm
+    # secret / external-secrets / sealed-secret) the same way
+    # ``ANTHROPIC_API_KEY`` is wired today. The
+    # ``scheduler_agent_vault_path_pattern`` setting below is reserved
+    # for the future Vault path; it ships configured but unused so the
+    # transition is a code swap, not an env-var rename.
+    scheduler_agent_secret_env_pattern: str = Field(default="MEHO_AGENT_SECRET_{client_id}")
+    # Forward-compat: the Vault KVv2 path the scheduler will read once
+    # service-token auth lands. Configured but unused in v0.2.
+    scheduler_agent_vault_path_pattern: str = Field(
+        default="secret/data/agents/{client_id}/credentials"
+    )
+    # G11.3-T3 #824 — event-outbox drain loop cadence. 10 s default
+    # mirrors the consumer doc's accepted-latency target (the
+    # LISTEN/NOTIFY wake hint drops the typical latency to sub-second;
+    # this is the polled fall-back when no listener is connected).
+    # ``enabled`` mirrors SCHEDULER_ENABLED so operators using an
+    # external orchestrator (or running tests without the drain) opt out.
+    event_drain_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    event_drain_enabled: bool = True
     mcp_require_session_id: bool = False
 
     @field_validator("broadcast_redis_url")
@@ -721,6 +815,47 @@ class Settings(BaseModel):
                 f"DATABASE_URL must use an async driver scheme; "
                 f"supported: {supported}. Got: {value!r}",
             )
+        return value
+
+    @field_validator("scheduler_agent_secret_env_pattern")
+    @classmethod
+    def _scheduler_secret_pattern_must_substitute_client_id(cls, value: str) -> str:
+        """Reject env-var patterns that don't substitute ``{client_id}``.
+
+        Pulled up to :class:`Settings` construction so three otherwise-
+        silent failure shapes surface at pod startup rather than at
+        first scheduled fire:
+
+        * **Pattern lacks ``{client_id}``** (typo / copy-paste error):
+          ``str.format`` returns the literal pattern, every agent
+          resolves to the same env-var key, all scheduled runs share
+          one secret. Cross-tenant principal-credential bleed.
+        * **Pattern uses positional ``{0}`` instead of named
+          ``{client_id}``**: ``str.format(client_id=...)`` raises
+          :class:`KeyError` on first fire. The precondition gate logs
+          ``scheduler_credentials_unresolved`` and skips forever.
+        * **Pattern has unbalanced braces**: ``str.format`` raises
+          :class:`ValueError` on first fire. Same skip-forever path.
+
+        Same fail-closed-at-startup discipline as
+        :meth:`_broadcast_url_must_use_supported_scheme` and
+        :meth:`_database_url_must_be_async` -- a misconfigured env var
+        should fail the import chain immediately with an actionable
+        message, not days later under load.
+        """
+        if "{client_id}" not in value:
+            raise ValueError(
+                f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must include "
+                f"'{{client_id}}' so each agent resolves to its own env var; "
+                f"got: {value!r}"
+            )
+        try:
+            value.format(client_id="TEST_CLIENT_ID")
+        except (IndexError, KeyError, ValueError) as exc:
+            raise ValueError(
+                f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must be a valid "
+                f"str.format pattern; got: {value!r}"
+            ) from exc
         return value
 
 
@@ -836,6 +971,18 @@ def get_settings() -> Settings:
         grant_expiry_enabled=parse_bool_env(
             os.environ.get("GRANT_EXPIRY_ENABLED", "true"),
         ),
+        agent_run_reaper_enabled=parse_bool_env(
+            os.environ.get("AGENT_RUN_REAPER_ENABLED", "true"),
+        ),
+        agent_run_reaper_tick_interval_seconds=int(
+            os.environ.get("AGENT_RUN_REAPER_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        agent_run_reaper_max_per_tick=int(
+            os.environ.get("AGENT_RUN_REAPER_MAX_PER_TICK", "50"),
+        ),
+        agent_run_lease_ttl_seconds=int(
+            os.environ.get("AGENT_RUN_LEASE_TTL_SECONDS", "60"),
+        ),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),
@@ -861,6 +1008,29 @@ def get_settings() -> Settings:
         ),
         agent_sync_timeout_seconds=float(
             os.environ.get("AGENT_SYNC_TIMEOUT_SECONDS", "30.0"),
+        ),
+        agent_approval_wait_timeout_seconds=float(
+            os.environ.get("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "1800.0"),
+        ),
+        scheduler_tick_interval_seconds=int(
+            os.environ.get("SCHEDULER_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        scheduler_enabled=parse_bool_env(
+            os.environ.get("SCHEDULER_ENABLED", "true"),
+        ),
+        scheduler_agent_secret_env_pattern=os.environ.get(
+            "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
+            "MEHO_AGENT_SECRET_{client_id}",
+        ),
+        scheduler_agent_vault_path_pattern=os.environ.get(
+            "SCHEDULER_AGENT_VAULT_PATH_PATTERN",
+            "secret/data/agents/{client_id}/credentials",
+        ),
+        event_drain_tick_interval_seconds=int(
+            os.environ.get("EVENT_DRAIN_TICK_INTERVAL_SECONDS", "10"),
+        ),
+        event_drain_enabled=parse_bool_env(
+            os.environ.get("EVENT_DRAIN_ENABLED", "true"),
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),

@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Example Tier-1 redaction policy -- Initiative #805 (G11.4 Safety, C1),
+# Task #1070 (T1). Ships as package data alongside the loader so the
+# packaged backend wheel can resolve it via importlib.resources without
+# a bind-mount; tests round-trip raw YAML strings through parse_policy
+# directly, so this file is reference + an integration-shape proof, not
+# the canonical authority on which rules production runs.
+#
+# Sibling task #1071 (C1-b) wires policies into the middleware; the
+# operator-facing policy authoring path (per-tenant, per-op) is part
+# of that ticket, not this one.
+
+id: default-tier1
+version: 1
+description: |
+  Tier-1 default policy for the connector-boundary redactor. Hot-path
+  regex over named patterns -- targets credentials, tokens, network
+  identifiers, and kubeconfig blobs. Free-text NER (descriptions,
+  error strings) is handled by the Tier-2 Presidio adapter (#1072).
+
+rules:
+  - name: strip-authorization-header
+    pattern: authorization_header
+    action: redact
+    reason: "RFC 7235 secret on the header line"
+
+  - name: strip-bearer-token
+    pattern: bearer_token
+    action: redact
+    reason: "bare bearer token outside an Authorization header"
+
+  - name: strip-jwt
+    pattern: jwt
+    action: redact
+    reason: "JWT in payload body"
+
+  - name: strip-api-key
+    pattern: api_key
+    action: redact
+    reason: "labelled credential pair (api_key/token/secret/password)"
+
+  - name: strip-kubeconfig
+    pattern: kubeconfig
+    action: redact
+    reason: "kubeconfig blob in payload"
+
+  - name: mask-uuids
+    pattern: uuid
+    action: mask
+    reason: "UUIDs are tenant-stable correlators; mask preserves shape"
+
+  - name: hash-fqdn
+    pattern: fqdn
+    action: hash
+    reason: "FQDN reveals tenant infra topology; hashed correlator suffices"
+
+  - name: redact-ipv4
+    pattern: ipv4
+    action: redact
+    reason: "IPv4 reveals tenant infra topology"
+
+  - name: redact-ipv6
+    pattern: ipv6
+    action: redact
+    reason: "IPv6 reveals tenant infra topology"

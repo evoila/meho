@@ -47,9 +47,14 @@ from typing import Final
 
 import structlog
 from fastapi import FastAPI, Response
+from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
+from meho_backplane.agent.reaper import (
+    start_agent_run_reaper,
+    stop_agent_run_reaper,
+)
 from meho_backplane.agents import (
     start_grant_expiry_sweeper,
     stop_grant_expiry_sweeper,
@@ -79,6 +84,7 @@ from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
 from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
+from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -93,9 +99,10 @@ from meho_backplane.broadcast import (
     dispose_broadcast_client,
     get_broadcast_client,
 )
-from meho_backplane.connectors.registry import _eager_import_connectors
+from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
+from meho_backplane.events import start_event_drain, stop_event_drain
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -112,6 +119,7 @@ from meho_backplane.operations import run_typed_op_registrars, set_default_reduc
 from meho_backplane.operations.ingest import load_catalog
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
     start_topology_history_retention_sweeper,
@@ -302,6 +310,9 @@ class _BackgroundTasks:
     memory_expiry: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
+    scheduler: asyncio.Task[None] | None
+    agent_run_reaper: asyncio.Task[None] | None
+    event_drain: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -335,11 +346,33 @@ def _start_background_tasks() -> _BackgroundTasks:
     grant_expiry: asyncio.Task[None] | None = None
     if settings.grant_expiry_enabled:
         grant_expiry = start_grant_expiry_sweeper()
+    # G11.3-T2 #823 — cron + one-off agent-trigger scheduler. Gated on
+    # SCHEDULER_ENABLED so operators using an external orchestrator
+    # (or running the test path without a scheduler) can opt out.
+    scheduler: asyncio.Task[None] | None = None
+    if settings.scheduler_enabled:
+        scheduler = start_scheduler()
+    # G11.3-T4 #825 — gated on AGENT_RUN_REAPER_ENABLED so operators
+    # running an external lease-reclaim mechanism (DBOS Transact, a
+    # workflow engine) can disable the in-tree reaper without
+    # patching code.
+    agent_run_reaper: asyncio.Task[None] | None = None
+    if settings.agent_run_reaper_enabled:
+        agent_run_reaper = start_agent_run_reaper()
+    # G11.3-T3 #824 — event-outbox drain loop. Gated on
+    # EVENT_DRAIN_ENABLED so operators using an external orchestrator
+    # (or running the test path without the drain) can opt out.
+    event_drain: asyncio.Task[None] | None = None
+    if settings.event_drain_enabled:
+        event_drain = start_event_drain()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
         topology_history=topology_history,
         grant_expiry=grant_expiry,
+        scheduler=scheduler,
+        agent_run_reaper=agent_run_reaper,
+        event_drain=event_drain,
     )
 
 
@@ -351,6 +384,12 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.event_drain is not None:
+        await stop_event_drain(tasks.event_drain)
+    if tasks.agent_run_reaper is not None:
+        await stop_agent_run_reaper(tasks.agent_run_reaper)
+    if tasks.scheduler is not None:
+        await stop_scheduler(tasks.scheduler)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.topology_history is not None:
@@ -571,6 +610,20 @@ app.include_router(api_v1_audit_router)
 # boundaries. Every mutation writes an audit row and broadcasts
 # under op_class=write.
 app.include_router(api_v1_broadcast_overrides_router)
+# G11.2-T6 (#819) -- agent permission grant management (grant / revoke /
+# list / elevate). All verbs gated to tenant_admin. Tenant-scoped via
+# the JWT; cross-tenant probes return 404. Every mutation writes an
+# audit row and broadcasts under op_class=write.
+#
+# Registered BEFORE ``api_v1_agents_router`` (G11.2 follow-up #1168):
+# FastAPI dispatches routes in include order, so the agents-router's
+# ``GET /{name}`` would otherwise shadow ``GET /api/v1/agents/grants``
+# (matching ``name="grants"``). Specific prefix first → grants-list
+# route resolves correctly; ``GET /api/v1/agents/incident-triage``
+# (and every other non-``grants`` name) still falls through to
+# ``show_agent`` because the grants router only matches paths under
+# its own ``/api/v1/agents/grants`` prefix.
+app.include_router(api_v1_agent_grants_router)
 # G11.1-T2 (#809) -- agent-definition CRUD verbs (list / show / create
 # / edit / delete) over the AgentDefinition ORM model. Reads gated to
 # operator-level, writes to tenant_admin. Tenant-scoped via the JWT's
@@ -578,11 +631,6 @@ app.include_router(api_v1_broadcast_overrides_router)
 # existence is not leaked across tenant boundaries. Every mutation
 # writes an audit row and broadcasts under op_class=write.
 app.include_router(api_v1_agents_router)
-# G11.2-T6 (#819) -- agent permission grant management (grant / revoke /
-# list / elevate). All verbs gated to tenant_admin. Tenant-scoped via
-# the JWT; cross-tenant probes return 404. Every mutation writes an
-# audit row and broadcasts under op_class=write.
-app.include_router(api_v1_agent_grants_router)
 # G11.2-T1 (#815) -- agent-principal lifecycle (register / list / revoke).
 # register creates a Keycloak client tagged kind=agent + inserts a DB row.
 # revoke disables the Keycloak client (kill switch) + marks the row revoked.
@@ -596,6 +644,13 @@ app.include_router(api_v1_agent_principals_router)
 # / final events). Operator-level; tenant-scoped via the JWT; runs only an
 # enabled definition in the operator's tenant.
 app.include_router(api_v1_agent_runs_router)
+# G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
+# (list, paginated, operator-level), POST /scheduler/triggers (create,
+# tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).
+# Tenant-scoped via the JWT; tenant_admin may pass tenant_filter / a
+# body tenant_id to act cross-tenant for admin operations. Every
+# mutation writes an audit row and broadcasts under op_class=write.
+app.include_router(api_v1_scheduler_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``
@@ -686,6 +741,97 @@ if parse_bool_env(os.environ.get("MEHO_ENABLE_RBAC_TEST_ROUTE")):
     )
 
     app.include_router(api_v1_rbac_test_router)
+
+
+def _inject_target_product_enum(schema: dict[str, object]) -> None:
+    """Mutate ``TargetCreate.product`` in ``schema`` with the live product enum.
+
+    G0.14-T3 (#1144). Reads :func:`registered_product_tokens` and sets
+    the ``enum`` + ``description`` on the ``TargetCreate.product``
+    JSON Schema property in place. Defensive ``isinstance`` walks let
+    the override survive future schema-shape rearrangements without
+    raising on a missing key (the worst case becomes "the enum is not
+    injected" rather than "the OpenAPI doc fails to serve").
+    """
+    valid_products = sorted(registered_product_tokens())
+    if not valid_products:
+        return
+    components = schema.get("components")
+    if not isinstance(components, dict):
+        return
+    schemas = components.get("schemas")
+    if not isinstance(schemas, dict):
+        return
+    target_create = schemas.get("TargetCreate")
+    if not isinstance(target_create, dict):
+        return
+    properties = target_create.get("properties")
+    if not isinstance(properties, dict):
+        return
+    product_field = properties.get("product")
+    if not isinstance(product_field, dict):
+        return
+    product_field["enum"] = list(valid_products)
+    product_field["description"] = (
+        "Connector product slug. Must match the ``product`` "
+        "field of a registered connector class; see "
+        "``GET /api/v1/connectors`` for the live list and "
+        "``docs/codebase/error-message-shape.md`` for the "
+        "422 shape returned on miss."
+    )
+
+
+def build_openapi_schema() -> dict[str, object]:
+    """Generate the OpenAPI schema with the ``TargetCreate.product`` enum injected.
+
+    G0.14-T3 (#1144). Overrides the default :meth:`FastAPI.openapi` so
+    the ``product`` property on the ``TargetCreate`` request schema
+    renders as a JSON Schema enum populated from the live connector
+    registry. Without this hook the schema would surface ``product`` as
+    a free-form string — the dogfood signal 5 UX miss in
+    ``claude-rdc-hetzner-dc#697`` (operator typed ``'kubernetes'``,
+    resolver matched on ``'k8s'``, no early signal). Paired with the
+    runtime 422 in :func:`~meho_backplane.api.v1.targets.create_target`
+    (Options A + C from the task body, sharing one source-of-truth
+    helper so they cannot drift).
+
+    Calls :func:`_eager_import_connectors` when the registry is empty
+    so the schema is correct even when the override fires before the
+    FastAPI lifespan (the OpenAPI snapshot script under
+    ``cli/api/snapshot-openapi.py`` calls :meth:`app.openapi` directly
+    without running the lifespan). Idempotent — modules already in
+    ``sys.modules`` are a no-op on the second call.
+
+    Caches the result on ``app.openapi_schema`` to match FastAPI's
+    own caching behaviour.
+    """
+    if app.openapi_schema is not None:
+        return app.openapi_schema
+
+    if not registered_product_tokens():
+        _eager_import_connectors()
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        openapi_version=app.openapi_version,
+        summary=app.summary,
+        description=app.description,
+        routes=app.routes,
+        webhooks=app.webhooks.routes,
+        tags=app.openapi_tags,
+        servers=app.servers,
+        terms_of_service=app.terms_of_service,
+        contact=app.contact,
+        license_info=app.license_info,
+        separate_input_output_schemas=app.separate_input_output_schemas,
+    )
+    _inject_target_product_enum(schema)
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = build_openapi_schema  # type: ignore[method-assign]
 
 
 @app.get("/")

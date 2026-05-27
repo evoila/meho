@@ -169,12 +169,21 @@ _EXPECTED_INDEXES: frozenset[str] = frozenset(
 def test_upgrade_creates_scheduled_trigger_table_columns_indexes(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``upgrade head`` lands ``scheduled_trigger`` with all columns + indexes."""
+    """``upgrade 0020`` lands ``scheduled_trigger`` with the 0020 columns.
+
+    The upgrade target is the explicit revision ``"0020"`` rather than
+    ``"head"`` so the column expectations stay pinned to the *0020
+    snapshot*. Once T2's migration 0025 adds ``identity_sub`` /
+    ``inputs`` / ``timezone`` (and the ``fired`` status), running
+    ``upgrade head`` here would also land those columns and the
+    ``_EXPECTED_COLUMNS`` assertion would drift. The 0025 columns are
+    exercised by :mod:`tests.test_migration_0025_scheduled_trigger`.
+    """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0020")
 
     assert "scheduled_trigger" in _table_names(sync_url), (
-        "migration 0020 must create the scheduled_trigger table on upgrade head"
+        "migration 0020 must create the scheduled_trigger table on upgrade 0020"
     )
 
     columns = _table_columns(sync_url, "scheduled_trigger")
@@ -189,9 +198,16 @@ def test_upgrade_creates_scheduled_trigger_table_columns_indexes(
 
 
 def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
-    """NOT NULL columns reject NULL; nullable columns permit it."""
+    """NOT NULL columns reject NULL; nullable columns permit it.
+
+    Same revision-pinning rationale as
+    :func:`test_upgrade_creates_scheduled_trigger_table_columns_indexes`
+    -- target ``"0020"`` so the nullability matrix stays the 0020
+    snapshot. 0025's columns get their own nullability test in
+    :mod:`tests.test_migration_0025_scheduled_trigger`.
+    """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0020")
 
     not_null = (
         "tenant_id",
@@ -222,17 +238,18 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``downgrade "0019"`` drops the table; ``upgrade head`` restores it.
+    """``downgrade "0019"`` drops the table; ``upgrade 0020`` restores it.
 
     The reversibility contract migration 0020 inherits from 0007 / 0012
-    / 0013 / 0017. The downgrade target is the explicit revision
-    ``"0019"`` (0020's ``down_revision``) rather than head-relative
-    ``"-1"``, so the moment a later migration (0021+) lands it would
-    not silently stop exercising 0020's reverse -- anchoring to
-    ``"0019"`` keeps this test pinned to 0020.
+    / 0013 / 0017. Both upgrade targets are the explicit revision
+    ``"0020"`` so the post-round-trip column comparison stays the 0020
+    snapshot regardless of how many later migrations have landed.
+    Downgrading to ``"0019"`` (0020's ``down_revision``) keeps the
+    test pinned to 0020's reverse rather than silently degrading to
+    "drop whatever's at head".
     """
     cfg, sync_url = alembic_cfg
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0020")
 
     # Sanity -- the upgrade landed the table before we reverse it.
     assert "scheduled_trigger" in _table_names(sync_url)
@@ -243,7 +260,7 @@ def test_downgrade_then_upgrade_round_trips(
     )
 
     # Re-upgrade -- the table comes back, proving the round-trip.
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0020")
     assert "scheduled_trigger" in _table_names(sync_url)
     assert _table_columns(sync_url, "scheduled_trigger") == _EXPECTED_COLUMNS
 

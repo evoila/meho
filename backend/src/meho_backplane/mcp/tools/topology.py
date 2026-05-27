@@ -1122,10 +1122,17 @@ async def _list_targets_handler(
     :func:`~meho_backplane.operations._lookup.parse_connector_id` and
     only its product component drives a ``TargetORM.product`` exact-match
     filter (targets carry a product slug, not a connector id).
+
+    Soft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)
+    are excluded — same filter the REST list route applies so MCP and
+    REST never disagree about which targets are visible to a tenant.
     """
     scope_tenant_id = await _resolve_tenant_scope(operator, arguments.get("tenant"))
 
-    stmt = select(TargetORM).where(TargetORM.tenant_id == scope_tenant_id)
+    stmt = select(TargetORM).where(
+        TargetORM.tenant_id == scope_tenant_id,
+        TargetORM.deleted_at.is_(None),
+    )
 
     connector_id = arguments.get("connector_id")
     if connector_id is not None:

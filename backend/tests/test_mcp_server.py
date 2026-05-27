@@ -619,3 +619,51 @@ def test_handler_returning_non_dict_scalar_becomes_internal_error(
     assert body["id"] == 12
     assert body["error"]["code"] == INTERNAL_ERROR
     assert "result" in body["error"]["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T6 (#1147) — mcp_session_id_capture_mode helper
+# ---------------------------------------------------------------------------
+
+
+def _pin_chassis_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the chassis-required env vars so ``get_settings()`` constructs.
+
+    Mirrors :func:`tests.test_settings._base_env`. These unit tests
+    exercise the capture-mode helper directly (no FastAPI dependency
+    fixture), so the env needs pinning in-test.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
+
+def test_mcp_session_id_capture_mode_default_is_always(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default env (no ``MCP_REQUIRE_SESSION_ID``) → ``"always"``."""
+    from meho_backplane.mcp.server import mcp_session_id_capture_mode
+
+    _pin_chassis_env(monkeypatch)
+    monkeypatch.delenv("MCP_REQUIRE_SESSION_ID", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert mcp_session_id_capture_mode() == "always"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_mcp_session_id_capture_mode_enforced_when_env_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``MCP_REQUIRE_SESSION_ID=true`` → ``"enforced"``."""
+    from meho_backplane.mcp.server import mcp_session_id_capture_mode
+
+    _pin_chassis_env(monkeypatch)
+    monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", "true")
+    get_settings.cache_clear()
+    try:
+        assert mcp_session_id_capture_mode() == "enforced"
+    finally:
+        get_settings.cache_clear()

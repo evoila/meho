@@ -216,6 +216,94 @@ All four are keyword-only. The defaults match v0.1-spec §4 (50 rows /
 4 KB). Empty collections never materialize — a 0-row handle carries no
 information a pass-through doesn't.
 
+### `fetch_more` envelope (G0.15-T8, #1219)
+
+Every `ResultHandle` the adapter mints carries a `fetch_more` envelope
+so an agent reading the response can answer *"how do I get the next
+slice"* from the response itself — without a discovery dance across
+MCP tools / resource URIs / REST routes / CLI verbs. The shape is
+documentation-as-data, matching the established precedents:
+`ConnectorRegistration.next_step` (G0.13-T3 #1153),
+`/ready.features` (G0.14-T7 #1186),
+`/retrieve/usage.counted_surfaces` — every reduced response teaches
+the agent how to act on it next.
+
+`FetchMore` (defined in
+[`connectors/schemas.py`](../../backend/src/meho_backplane/connectors/schemas.py))
+has two independent branches; both are always present so consumers
+parse one shape regardless of source.
+
+**`drill_in: FetchMoreDrillIn`** — *"can the agent fetch more rows
+from the handle directly?"* In v0.7.x `available` is **always
+`False`** — the substrate exposes no drill-in surface (no MCP tool,
+resource URI, REST route, or CLI verb for round-tripping a handle
+back to the reducer's in-memory DuckDB table). The deferred
+`available=True` branch is reserved for the v0.8 / v0.9 fetch-back
+Task that ships the addressable spill backing store + the
+`result_query` / `result_aggregate` / `result_export` /
+`result_describe` meta-tools; landing the field today means that
+Task flips a bool and populates the (already-defined) `mcp_resource_uri`
+/ `mcp_tool` / `example_call` / `expires_at` fields without breaking
+any consumer that already parses the envelope. `rationale` carries
+the operator/agent-facing prose explaining the current state —
+today, the workaround pointer ("re-call with native pagination /
+narrower params"); tomorrow, the surfaced resource URI.
+
+**`native_pagination: FetchMoreNativePagination`** — *"what params
+let the underlying op return the next slice?"* When the op
+registered a `PaginationHint` (next paragraph), `available=True`
+and `params` / `example_next_call` are populated verbatim from the
+hint. When no hint exists, `available=False` with the rationale
+*"the underlying op did not register a `pagination_hint` in its
+`llm_instructions`"* and a curated pointer to the registration
+slot — useful for connector authors reading the response during
+development.
+
+The `pagination_hint` slot under `llm_instructions`. Connector
+authors that ship pagination-aware ops attach a `PaginationHint`
+to the op's registration `llm_instructions` payload under the
+`pagination_hint` key:
+
+```python
+register_typed_operation(
+    op_id="vault.kv.list.bulk",
+    ...,
+    llm_instructions={
+        "pagination_hint": {
+            "params": {"path": "directory prefix to list"},
+            "example_next_call": {
+                "op_id": "vault.kv.list.bulk",
+                "params": {"path": "/secret/team-a/"},
+            },
+        },
+        # ...other llm_instructions slots...
+    },
+)
+```
+
+Reading from `llm_instructions` (rather than adding a new
+`endpoint_descriptor` column) keeps the contract additive — no DB
+migration, no `EndpointDescriptor` schema change.
+
+`dispatcher._pagination_hint_from_descriptor(descriptor)` extracts
+the raw dict from `descriptor.llm_instructions["pagination_hint"]`
+and threads it through `reducer_context["pagination_hint"]` (see
+`dispatcher._reduce_or_error`). The reducer's
+`_resolve_pagination_hint` coerces the context value to a
+`PaginationHint` instance (accepting both already-validated
+`PaginationHint` instances and plain dicts the dispatcher reads
+from JSON-deserialised descriptors); a `ValidationError` on a
+malformed dict is **caught**, a warning is logged, and the reducer
+falls back to `native_pagination.available=False` with the same
+"no hint" rationale — so a connector author shipping a broken
+hint doesn't break the operator's read at runtime. Returning a
+plain dict from the dispatcher helper keeps the dispatcher layer
+free of a Pydantic-import dependency on the connectors schema;
+the reducer owns the validation boundary.
+
+For the wire shape of `fetch_more` on a serialized `ResultHandle`,
+see [`operations-substrate.md` § `ResultHandle` shape](operations-substrate.md#resulthandle-shape-future-facing).
+
 For how the dispatcher invokes the reducer (the `try/except` wrap that
 turns a reducer exception into `connector_error` with audit + broadcast
 still firing, and the `ResultHandle` shape), see

@@ -48,11 +48,42 @@ import uuid
 from typing import Any
 
 import msgspec
+import structlog
+from pydantic import ValidationError
 
-from meho_backplane.connectors.schemas import ResultHandle
+from meho_backplane.connectors.schemas import (
+    FetchMore,
+    FetchMoreDrillIn,
+    FetchMoreNativePagination,
+    PaginationHint,
+    ResultHandle,
+)
 from meho_backplane.jsonflux.query.engine import QueryEngine
 
 __all__ = ["JsonFluxReducer"]
+
+_log = structlog.get_logger(__name__)
+
+#: Rationale strings the reducer surfaces verbatim on the
+#: :attr:`FetchMore.drill_in` and :attr:`FetchMore.native_pagination`
+#: branches. Module-level constants so the wording stays consistent
+#: across every reducing dispatch (the agent / consumer sees the same
+#: prose every time) and so the tests can assert against a stable
+#: anchor.
+_DRILL_IN_UNAVAILABLE_RATIONALE: str = (
+    "No JsonFlux drill-in path is exposed in this meho version. To act "
+    "on more than the sample, re-call the operation with narrower "
+    "params (see ``native_pagination`` below) or wait for a future "
+    "release that surfaces the handle via an MCP tool / resource URI / "
+    "REST route."
+)
+_NATIVE_PAGINATION_UNAVAILABLE_RATIONALE: str = (
+    "The underlying op did not register a ``pagination_hint`` in its "
+    "metadata; native pagination params for this op are not documented "
+    "here. The connector author may register one via the typed-op "
+    "registration ``llm_instructions.pagination_hint`` slot to surface "
+    "specific param names + an example next call."
+)
 
 #: In-memory DuckDB table name the reducer registers each payload under.
 #: One :class:`QueryEngine` is created per :meth:`JsonFluxReducer.reduce`
@@ -146,11 +177,15 @@ class JsonFluxReducer:
         """Return ``(payload, None)`` or ``(summary, ResultHandle)``.
 
         See the class docstring for the threshold + collection-detection
-        contract. ``schema`` and ``context`` are accepted to satisfy the
-        Protocol; the reducer infers the materialized schema from the
-        DuckDB-registered table rather than the descriptor schema.
+        contract. ``schema`` is accepted to satisfy the Protocol; the
+        reducer infers the materialized schema from the DuckDB-registered
+        table rather than the descriptor schema. ``context`` carries the
+        op's :class:`~meho_backplane.connectors.schemas.PaginationHint`
+        (under the ``pagination_hint`` key) when the op registered one
+        via its ``llm_instructions``; the reducer copies the hint
+        verbatim into :attr:`ResultHandle.fetch_more.native_pagination`.
         """
-        del schema, context  # schema is inferred from the registered table
+        del schema  # schema is inferred from the registered table
 
         envelope_key, rows = _detect_collection(payload)
         if rows is None:
@@ -161,7 +196,7 @@ class JsonFluxReducer:
         if not self._over_threshold(rows, payload):
             return payload, None
 
-        return self._materialize(payload, envelope_key, rows)
+        return self._materialize(payload, envelope_key, rows, context)
 
     def _over_threshold(self, rows: list[Any], payload: Any) -> bool:
         """True when *rows* exceeds the row OR byte threshold.
@@ -181,12 +216,21 @@ class JsonFluxReducer:
         payload: Any,
         envelope_key: str | None,
         rows: list[Any],
+        context: dict[str, Any] | None,
     ) -> tuple[dict[str, Any], ResultHandle]:
         """Register *rows* in DuckDB and mint a handle + inline summary.
 
         A fresh :class:`QueryEngine` is created per call (in-memory,
         per-payload isolation) and closed before returning so no DuckDB
         connection leaks across dispatches.
+
+        ``context`` carries the dispatcher's per-call extras --
+        ``op_id``, ``operator_sub``, ``source_kind``, ``target_id``,
+        ``pagination_hint`` (when the op registered one). The reducer
+        reads ``pagination_hint`` to build
+        :attr:`FetchMore.native_pagination`; the rest of the context is
+        currently informational (future routing decisions can read it
+        without breaking the contract).
         """
         table_rows = _normalize_rows(rows)
         engine = QueryEngine()
@@ -199,13 +243,17 @@ class JsonFluxReducer:
         finally:
             engine.close()
 
+        fetch_more = _build_fetch_more(context)
+        handle_id = uuid.uuid4()
+        sample_rows_tuple = tuple(sample_rows) if sample_rows else None
         handle = ResultHandle(
-            handle_id=uuid.uuid4(),
+            handle_id=handle_id,
             summary_md=f"{total_rows} rows materialized as a JSONFlux handle.\n\n{summary_md}",
             schema_=schema_,
             total_rows=total_rows,
-            sample_rows=tuple(sample_rows) if sample_rows else None,
+            sample_rows=sample_rows_tuple,
             ttl_seconds=self._ttl_seconds,
+            fetch_more=fetch_more,
         )
         summary = {
             "row_count": total_rows,
@@ -306,3 +354,112 @@ def _serialize(payload: Any) -> bytes:
         return msgspec.json.encode(payload)
     except (TypeError, msgspec.EncodeError):
         return str(payload).encode("utf-8", "replace")
+
+
+def _build_fetch_more(context: dict[str, Any] | None) -> FetchMore:
+    """Build the :class:`FetchMore` envelope from the reducer's *context*.
+
+    G0.15-T8 (#1219). The contract is **always shipped** on a
+    reducing-response handle so the agent never has to guess whether
+    the envelope teaches it how to fetch more rows. Two branches:
+
+    * ``drill_in.available`` is always ``False`` in this meho version --
+      no MCP tool / resource URI / REST route / CLI verb addresses the
+      handle. The rationale string surfaces the workaround verbatim
+      (re-call with narrower params via ``native_pagination``). When
+      a future Task ships the drill-in surface, it flips
+      ``available=True`` and populates ``mcp_resource_uri`` /
+      ``mcp_tool`` / ``example_call`` / ``expires_at`` in the same
+      envelope -- no consumer needs to re-parse.
+    * ``native_pagination`` is populated from the op's
+      :class:`PaginationHint` (registered under
+      ``llm_instructions.pagination_hint`` and threaded through the
+      dispatcher as ``context["pagination_hint"]``). When no hint
+      exists -- or the hint cannot be validated -- the envelope still
+      ships, with ``available=False`` and a curated rationale; the
+      response shape is uniform regardless of source.
+
+    Invalid pagination hints (a connector authored a malformed dict)
+    do **not** raise here: the reducer logs a structured warning and
+    falls back to the unavailable branch. A reduce-time exception
+    would otherwise convert into a ``connector_error``
+    :class:`~meho_backplane.connectors.OperationResult` via the
+    dispatcher's :func:`~meho_backplane.operations.dispatcher._reduce_or_error`
+    guard -- failing a real read because an operator-facing metadata
+    field had a typo is the wrong fail mode. The validation surfaces
+    instead at op-registration time (the connector author writes the
+    hint as a :class:`PaginationHint` literal there, not as a free
+    dict).
+    """
+    drill_in = FetchMoreDrillIn(
+        available=False,
+        rationale=_DRILL_IN_UNAVAILABLE_RATIONALE,
+    )
+    native = _native_pagination_from_context(context)
+    return FetchMore(drill_in=drill_in, native_pagination=native)
+
+
+def _native_pagination_from_context(
+    context: dict[str, Any] | None,
+) -> FetchMoreNativePagination:
+    """Return the :class:`FetchMoreNativePagination` branch for *context*.
+
+    Pull order:
+
+    1. ``context["pagination_hint"]`` already-validated
+       :class:`PaginationHint` instance -- the reducer copies its
+       ``params`` + ``example_next_call`` verbatim.
+    2. ``context["pagination_hint"]`` plain dict (the dispatcher reads
+       the descriptor's ``llm_instructions`` JSON, which lives as
+       primitive Python types) -- validated through
+       :class:`PaginationHint` here; the dispatcher does not import
+       Pydantic for this codepath.
+    3. Absent / invalid -- ``available=False`` with the curated
+       rationale.
+    """
+    hint = _resolve_pagination_hint(context)
+    if hint is None:
+        return FetchMoreNativePagination(
+            available=False,
+            rationale=_NATIVE_PAGINATION_UNAVAILABLE_RATIONALE,
+        )
+    return FetchMoreNativePagination(
+        available=True,
+        params=hint.params,
+        example_next_call=hint.example_next_call,
+    )
+
+
+def _resolve_pagination_hint(context: dict[str, Any] | None) -> PaginationHint | None:
+    """Coerce ``context['pagination_hint']`` into a :class:`PaginationHint` or ``None``.
+
+    Tolerates three shapes per :func:`_native_pagination_from_context`'s
+    pull order. A validation failure on the dict branch is logged at
+    warning level and converted to ``None`` -- the reduce path stays
+    on the happy path; the connector author sees the warning in
+    structured logs and fixes the metadata. The op_id (when carried
+    in *context*) names the offender so the warning is actionable.
+    """
+    if not context:
+        return None
+    raw = context.get("pagination_hint")
+    if raw is None:
+        return None
+    if isinstance(raw, PaginationHint):
+        return raw
+    if not isinstance(raw, dict):
+        _log.warning(
+            "jsonflux_pagination_hint_invalid_shape",
+            op_id=context.get("op_id"),
+            received_type=type(raw).__name__,
+        )
+        return None
+    try:
+        return PaginationHint.model_validate(raw)
+    except ValidationError as exc:
+        _log.warning(
+            "jsonflux_pagination_hint_validation_failed",
+            op_id=context.get("op_id"),
+            errors=exc.errors(),
+        )
+        return None

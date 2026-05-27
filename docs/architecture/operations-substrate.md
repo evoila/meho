@@ -359,11 +359,14 @@ class ResultHandle(BaseModel):
     total_rows: int | None = None
     sample_rows: tuple[Mapping[str, Any], ...] | None = None  # frozen
     ttl_seconds: int
+    fetch_more: FetchMore | None = None                       # G0.15-T8 (#1219)
 ```
 
 Frozen Pydantic model with `MappingProxyType`-wrapped nested mappings (via `@model_validator(mode="after")` calling `object.__setattr__` to bypass `frozen=True`'s field guard). Pydantic v2's `frozen=True` is "faux immutability" — it blocks field reassignment but not nested-dict mutation; the wrapping closes that hole so callers can't tamper with a handle post-construction. Matches the sibling `FingerprintResult.extras` / `OperationResult.extras` pattern.
 
 `schema_` carries a trailing underscore to avoid collision with Pydantic's deprecated `BaseModel.schema()` API; it serialises as `schema_` on the wire.
+
+`fetch_more` is the G0.15-T8 (#1219) self-documenting drill-in / pagination envelope. Every handle the production reducer mints carries it (the two branches `drill_in` and `native_pagination` are always populated) so an agent reading the response can answer *"how do I get more rows"* from the envelope itself — no MCP-tool / resource-URI / REST-route discovery dance. The shape, the deferred drill-in branch (`available=False` in v0.7.x, flipped by the v0.8/0.9 fetch-back Task), and the `llm_instructions.pagination_hint` registration slot the reducer reads to build `native_pagination` are documented in [`jsonflux.md` § fetch_more envelope](jsonflux.md#fetch_more-envelope-g015-t8-1219). `None` only on legacy code paths that build a `ResultHandle` directly without going through the reducer (test fixtures, future spill backends that have already enriched the envelope); production reduce paths always populate it.
 
 `JsonFluxReducer` now populates `handle` for large set-shaped responses (G0.6.1, #750). The `result_query` / `result_aggregate` / `result_export` / `result_describe` meta-tools that read handles back from the backing store are still a follow-on Initiative.
 

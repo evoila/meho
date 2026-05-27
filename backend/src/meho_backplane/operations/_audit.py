@@ -191,6 +191,7 @@ def _build_audit_payload(
     result_status: str,
     *,
     redaction_policy_id: str | None = None,
+    handle_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compose the ``audit_log.payload`` dict for the dispatcher row.
 
@@ -221,6 +222,15 @@ def _build_audit_payload(
     (migration ``0030``), but mirroring the policy id into the
     JSON payload keeps the broadcast-event surface (which serialises
     ``payload``, not the dedicated columns) attribution-complete.
+
+    *handle_metadata* is the JsonFlux reducer's per-dispatch handle
+    summary (G0.15-T8 #1219) -- ``handle_id`` + ``total_rows`` +
+    ``sample_rows_returned``. Present on the success path of any
+    reducing dispatch; ``None`` on pass-through reduces (small
+    payloads) and on every error-path audit write. The keys land
+    verbatim under the audit payload so a consumer reading one row
+    attributes *"the agent saw N of M rows materialized as handle
+    <uuid>"* without joining the reducer's in-memory state.
     """
     payload: dict[str, Any] = {
         "op_id": descriptor.op_id,
@@ -236,6 +246,11 @@ def _build_audit_payload(
         payload["parent_audit_id"] = str(parent_audit_id)
     if redaction_policy_id is not None:
         payload["redaction_policy_id"] = redaction_policy_id
+    if handle_metadata is not None:
+        # The reducer ships pre-coerced primitives (``handle_id`` already
+        # a UUID-as-str, ``total_rows`` an int, ``sample_rows_returned``
+        # an int) so the dict merges into the JSON payload verbatim.
+        payload.update(handle_metadata)
     # G11.4-T5 #1074 -- agent-run attribution. The session id mirror in
     # the JSON payload is for the broadcast-event surface (consumers
     # parse ``payload``); the canonical lineage key lives in the real
@@ -291,6 +306,7 @@ async def write_audit_row(
     raw_payload: Any | None = None,
     redaction_manifest: list[dict[str, Any]] | None = None,
     redaction_policy_id: str | None = None,
+    handle_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Insert one ``audit_log`` row for this dispatch.
 
@@ -315,6 +331,7 @@ async def write_audit_row(
         params_hash,
         result_status,
         redaction_policy_id=redaction_policy_id,
+        handle_metadata=handle_metadata,
     )
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
@@ -394,6 +411,7 @@ async def audit_and_broadcast_safe(
     raw_payload: Any | None = None,
     redaction_manifest: list[dict[str, Any]] | None = None,
     redaction_policy_id: str | None = None,
+    handle_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Write the audit row + publish broadcast; swallow internal failures.
 
@@ -434,6 +452,7 @@ async def audit_and_broadcast_safe(
             raw_payload=raw_payload,
             redaction_manifest=redaction_manifest,
             redaction_policy_id=redaction_policy_id,
+            handle_metadata=handle_metadata,
         )
     except Exception:
         _log.exception(

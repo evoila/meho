@@ -33,6 +33,7 @@ the test routes in production — the documented contract is that
 import os
 from functools import lru_cache
 from typing import Final
+from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
@@ -996,6 +997,40 @@ class Settings(BaseModel):
                 f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must be a valid "
                 f"str.format pattern; got: {value!r}"
             ) from exc
+        return value
+
+    @field_validator("agent_runs_disabled_tenants")
+    @classmethod
+    def _agent_runs_disabled_tenants_must_be_uuid_csv(cls, value: str) -> str:
+        """Reject ``AGENT_RUNS_DISABLED_TENANTS`` entries that aren't UUIDs.
+
+        Pulled up to :class:`Settings` construction so a typo'd env var
+        fails the pod start rather than silently matching nothing at
+        gate-evaluation time (the kill switch is supposed to fire, and a
+        deploy that thinks it's kill-switched but isn't is the worst-
+        case outcome). Same fail-closed-at-startup discipline as
+        :meth:`_broadcast_url_must_use_supported_scheme` and
+        :meth:`_scheduler_secret_pattern_must_substitute_client_id`:
+        misconfigured env vars surface at import time with an
+        actionable message that names the offending entry.
+
+        Empty values (the documented default, "no tenants disabled")
+        and blank-separator artefacts (trailing comma, double comma)
+        are tolerated -- the gate parser at
+        :func:`~meho_backplane.operations.budget_enforcement.evaluate_pre_run_budget`
+        skips empty chunks already, and this validator mirrors that
+        leniency so the validator's accept-set is exactly the
+        gate's accept-set.
+        """
+        for chunk in (part.strip() for part in value.split(",")):
+            if not chunk:
+                continue
+            try:
+                UUID(chunk)
+            except ValueError as exc:
+                raise ValueError(
+                    f"AGENT_RUNS_DISABLED_TENANTS entries must be UUIDs; got {chunk!r}"
+                ) from exc
         return value
 
 

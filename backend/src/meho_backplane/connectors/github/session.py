@@ -316,7 +316,16 @@ def mint_github_app_jwt(
     The error message names the App ID (operator-known) but not the key
     material (per the T11 info-leak rule).
     """
-    iat = int(now if now is not None else time.time())
+    # Backdate ``iat`` by 60s per GitHub's documented JWT recipe:
+    # https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app
+    # GitHub recommends ``iat = now - 60`` to absorb forward clock
+    # skew between the caller and GitHub's clock. ``JWT_TTL_SECONDS``
+    # already trims ``exp - iat`` below the 10-minute cap to absorb
+    # backward skew on the other end, but that only protects the
+    # expiry side. Without this backdate, a clock running fast on
+    # this host would produce a JWT GitHub rejects as
+    # "issued-at in the future".
+    iat = int(now if now is not None else time.time()) - 60
     exp = iat + ttl_seconds
     payload: dict[str, object] = {"iat": iat, "exp": exp, "iss": app_id}
     try:

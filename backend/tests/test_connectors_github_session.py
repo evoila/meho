@@ -65,7 +65,10 @@ def test_mint_github_app_jwt_returns_decodable_rs256_token() -> None:
     # Decode without signature verification — we only assert claim shape.
     decoded = jwt.decode(token, options={"verify_signature": False})
     assert decoded["iss"] == "123456"
-    assert decoded["iat"] == int(now)
+    # ``iat`` is backdated by 60s per GitHub's documented JWT recipe
+    # to absorb forward clock skew. See docs URL on
+    # mint_github_app_jwt.
+    assert decoded["iat"] == int(now) - 60
     # exp - iat must equal the documented TTL; GitHub enforces ≤10 min.
     assert decoded["exp"] - decoded["iat"] == JWT_TTL_SECONDS
     # Header advertises RS256 (the GitHub-mandated algorithm).

@@ -10,23 +10,21 @@ contract; this test only asserts the parser scales to the real
 GitHub OpenAPI spec corpus per the Initiative's acceptance criterion
 ("~700 endpoint_descriptor rows landed").
 
-**KNOWN BLOCKER — parser limitation.** As shipped today (verified
-2026-05-27), the G0.7 OpenAPI parser at
-``src/meho_backplane/operations/ingest/refs.py`` only inlines
-``#/components/schemas/*`` and ``#/components/parameters/*`` ``$ref``
-shapes; the GitHub REST spec uses
-``#/components/responses/*`` refs (e.g.
-``#/components/responses/accepted``) extensively and the parser
-raises ``UnsupportedSpecError`` on the first one. The test is
-:func:`pytest.xfail`-marked with ``strict=False`` so it documents
-the gap without going red — the gap is **out of scope for this
-Task** (T3 ships the catalog YAML + acceptance scaffolding). A
-sibling Task on Initiative G3.11 #1220 (or a Goal #214 parser-scope
-follow-up) lifts the parser ref-bucket coverage; once shipped, the
-``xfail`` flips to ``xpass`` and this docstring + the
-``pytest.xfail`` mark get cleaned up. **The catalog entry itself is
-unblocked** — it ships verbatim, ready to ingest once the parser
-supports the ref shape.
+G3.11-T7 #1241 lifted the parser ref-bucket gap: the parser now
+inlines ``#/components/responses/*`` and
+``#/components/requestBodies/*`` refs alongside the existing schemas
+and parameters paths. This test was previously ``xfail(strict=True)``
+gated on that limitation; once the parser fix landed, the xfail was
+removed and the test runs cleanly under the env-var gate.
+
+**Note on downstream dispatch (out of scope here).** The T1↔T3
+version-string drift (catalog ``version: v3`` vs registry
+``version: "3"``) means that a full
+``meho connector ingest --catalog gh/v3 --dry-run`` end-to-end run
+will succeed at parsing but currently misses the connector-class
+lookup. That's tracked under G3.11-T8 (#1242). This integration
+test verifies the parsing layer only — row count + spot-checks on
+the parsed descriptors — so it is independent of that drift.
 
 **How to run locally.** The GitHub OpenAPI spec is public and direct-
 resolvable (no auth required for the spec itself):
@@ -87,17 +85,6 @@ def _resolve_gh_spec() -> str | None:
         "(G3.11-T3 #1223 AC line 3). Unit tests cover the parser "
         "contract; this only verifies the parser scales to the live "
         "~10 MB GitHub REST spec corpus."
-    ),
-)
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "G0.7 parser only inlines #/components/schemas/* and "
-        "#/components/parameters/* refs; the GitHub spec uses "
-        "#/components/responses/* refs and the parser raises "
-        "UnsupportedSpecError. Out of scope for T3 (catalog YAML); "
-        "lifted by a sibling parser-scope follow-up. xfail flips "
-        "to xpass once the ref-bucket coverage lands."
     ),
 )
 def test_parse_github_rest_spec_lands_700_plus_rows() -> None:

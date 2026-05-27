@@ -668,6 +668,16 @@ JSON-Schema validator to validate the immediate parameter shape;
 deeper schema dereferencing (chasing nested `$ref`s) is the
 dispatcher's concern (G0.6-T5 + T2's tracking of `components.schemas`).
 
+The four supported component buckets are: `#/components/schemas/*`,
+`#/components/parameters/*` (vi-json.yaml's shared `moId`),
+`#/components/responses/*` (the GitHub REST spec's 1.9k shared
+response envelopes — `accepted`, `not_found`, `validation_failed`
+etc), and `#/components/requestBodies/*` (parity bucket for future
+vendor specs; not yet used in the v0.x catalogue). Each opts in via
+a separate kwarg on `resolve_shallow_ref`; `parse_openapi` threads
+all four dicts uniformly so the full pipeline never trips the
+opt-out branch.
+
 ### T2 control flow
 
 ```text
@@ -781,13 +791,19 @@ operations go live.
   never use this combination. T2 will log a warning if it spots a
   collision after upsert.
 * **Other-bucket `$ref` rejected.** `$ref:
-  "#/components/requestBodies/X"`, `$ref:
-  "#/components/responses/X"`, `$ref: "#/components/headers/X"`
-  raise `UnsupportedSpecError`. Not used by any currently-targeted
-  vendor spec (vcenter.yaml, vi-json.yaml, NSX, SDDC Manager);
-  defer until a real spec needs them. (T11 / #501 landed the
-  `#/components/parameters/*` resolver — see the T8 paragraph
-  above and `docs/architecture/spec-ingestion.md` §T1.)
+  "#/components/headers/X"`, `$ref: "#/components/securitySchemes/X"`,
+  `$ref: "#/components/links/X"`, `$ref:
+  "#/components/callbacks/X"`, and `$ref: "#/components/examples/X"`
+  raise `UnsupportedSpecError` when they appear in a parser-traversed
+  slot. None of these buckets are used by a currently-targeted vendor
+  spec in a parser-traversed position (most appear inside
+  `responses.<code>.headers.<name>` or `content.<media>.examples`,
+  which the parser doesn't walk); defer until a real spec needs them.
+  G3.11-T7 #1241 landed the `#/components/responses/*` and
+  `#/components/requestBodies/*` resolvers (unblocked the GitHub REST
+  spec's live ingest); T11 #501 landed the
+  `#/components/parameters/*` resolver — see the T8 paragraph above
+  and `docs/architecture/spec-ingestion.md` §T1.
 * **Cross-document `$ref` rejected.** External files
   (`other.yaml#/...`) raise `UnsupportedSpecError`. Same v0.2.next
   note.

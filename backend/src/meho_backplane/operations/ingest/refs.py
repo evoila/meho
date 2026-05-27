@@ -69,10 +69,12 @@ def resolve_shallow_ref(
     obj: Any,
     component_schemas: dict[str, Any],
     component_parameters: dict[str, Any] | None = None,
+    component_responses: dict[str, Any] | None = None,
+    component_request_bodies: dict[str, Any] | None = None,
 ) -> Any:
     """Inline one level of ``$ref``; preserve any nested refs unchanged.
 
-    Supports refs to two OpenAPI 3.x component buckets:
+    Supports refs to four OpenAPI 3.x component buckets:
 
     * ``$ref: "#/components/schemas/X"`` — JSON Schema components.
       The resolved schema is returned verbatim (a copy is NOT taken —
@@ -81,14 +83,26 @@ def resolve_shallow_ref(
       components (OpenAPI 3.0 §4.7.12 / 3.1 §4.8.7). Same return
       semantics. ``vi-json.yaml`` uses this on every operation via the
       shared ``moId`` path parameter.
+    * ``$ref: "#/components/responses/X"`` — Response Object
+      components (OpenAPI 3.0 §4.7.7 / 3.1 §4.8.16). The GitHub REST
+      API spec uses this for every shared response shape
+      (``accepted``, ``not_found``, ``validation_failed`` etc) —
+      1929 ref hits across the spec as of 2026-05-27.
+    * ``$ref: "#/components/requestBodies/X"`` — Request Body Object
+      components (OpenAPI 3.0 §4.7.10 / 3.1 §4.8.13). Not used by
+      GitHub's spec, but in scope for parser parity since it's a
+      first-class component bucket per the OpenAPI 3.x spec and
+      future-onboarded vendors may use it.
 
-    ``component_parameters`` defaults to ``None`` so existing callers
-    that only need schema-ref resolution don't have to thread the
-    extra arg. Passing ``None`` keeps the legacy behaviour
-    (parameter refs raise :exc:`UnsupportedSpecError`); passing a
-    dict — even an empty one — opts in to the parameter-bucket branch.
+    Each opt-in kwarg defaults to ``None`` so existing callers that
+    only need schema-ref resolution don't have to thread the extra
+    arg. Passing ``None`` keeps the legacy behaviour for that bucket
+    (refs raise :exc:`UnsupportedSpecError`); passing a dict — even
+    an empty one — opts in to the bucket branch. ``parse_openapi``
+    always threads the full set (even empty dicts) so the full
+    pipeline never trips the opt-out branch.
 
-    Component-path drill-down refs into either bucket
+    Component-path drill-down refs into any bucket
     (``"#/components/schemas/X/properties/Y"`` or
     ``"#/components/parameters/X/schema"``) raise
     :exc:`InvalidSchemaError` — the OpenAPI spec only declares fragment
@@ -123,15 +137,38 @@ def resolve_shallow_ref(
             bucket=component_parameters,
             prefix="#/components/parameters/",
         )
-    # Anything else — external file refs, response refs, requestBody
-    # refs, or fragment-walk refs into other component buckets — is
-    # out of scope for v0.2. The dispatcher will not validate against
+    if ref.startswith("#/components/responses/"):
+        if component_responses is None:
+            raise UnsupportedSpecError(
+                f"$ref to #/components/responses/* requires the caller to pass "
+                f"component_responses (got {ref!r})"
+            )
+        return _resolve_named_component(
+            ref=ref,
+            bucket=component_responses,
+            prefix="#/components/responses/",
+        )
+    if ref.startswith("#/components/requestBodies/"):
+        if component_request_bodies is None:
+            raise UnsupportedSpecError(
+                f"$ref to #/components/requestBodies/* requires the caller to pass "
+                f"component_request_bodies (got {ref!r})"
+            )
+        return _resolve_named_component(
+            ref=ref,
+            bucket=component_request_bodies,
+            prefix="#/components/requestBodies/",
+        )
+    # Anything else — external file refs, refs into other component
+    # buckets (headers, securitySchemes, links, callbacks, examples)
+    # — is out of scope. The dispatcher will not validate against
     # them.
     if not ref.startswith("#/"):
         raise UnsupportedSpecError(f"cross-document $ref is not supported (got {ref!r})")
     raise UnsupportedSpecError(
-        f"$ref to non-schema/non-parameter component is not supported (got {ref!r}); "
-        f"v0.2 only inlines #/components/schemas/* and #/components/parameters/* refs"
+        f"$ref to unsupported component bucket (got {ref!r}); "
+        f"parser inlines #/components/schemas/*, #/components/parameters/*, "
+        f"#/components/responses/*, and #/components/requestBodies/* only"
     )
 
 

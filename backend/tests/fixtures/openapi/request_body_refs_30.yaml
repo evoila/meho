@@ -1,0 +1,64 @@
+openapi: 3.0.3
+info:
+  title: RequestBody-ref fixture
+  version: 1.0.0
+# Symmetric to response_refs_30: shared request body envelopes
+# referenced via ``$ref: '#/components/requestBodies/<name>'``.
+# Less common than response refs in real-world specs (GitHub's REST
+# spec uses zero requestBodies refs as of 2026-05-27) but a
+# first-class OpenAPI 3.x component bucket, so the parser supports
+# it for spec-coverage parity.
+paths:
+  /widgets:
+    post:
+      summary: Create a widget
+      requestBody:
+        $ref: "#/components/requestBodies/WidgetCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Widget"
+  /widgets/{id}:
+    put:
+      summary: Replace a widget
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        $ref: "#/components/requestBodies/WidgetCreate"
+      responses:
+        "200":
+          description: Replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Widget"
+components:
+  requestBodies:
+    WidgetCreate:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/WidgetCreate"
+  schemas:
+    Widget:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+    WidgetCreate:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string

@@ -7,36 +7,36 @@ Gated on ``MEHO_GH_INGEST_LIVE=1`` (same env var as
 ``tests/integration/test_operations_ingest_github.py`` from G3.11-T3
 #1228). When the env var is unset the test is skipped; when it is set,
 the test is currently :func:`pytest.xfail`-marked with ``strict=True``
-because of an upstream parser limitation documented below.
+because the composite-dispatch body itself is not yet wired against a
+live backplane.
 
-**KNOWN PARSER-LIMITATION DEPENDENCY.**
+**STATUS.**
 
-The G0.7 OpenAPI parser at
-``backend/src/meho_backplane/operations/ingest/refs.py`` only inlines
-``#/components/schemas/*`` and ``#/components/parameters/*`` ``$ref``
-shapes. The GitHub REST spec uses ``#/components/responses/*`` refs
-extensively (e.g. ``#/components/responses/accepted``), and the parser
-raises ``UnsupportedSpecError`` on the first one. This blocks T4's
-acceptance criterion #1 ("``gh.composite.pr_status_summary`` registered
-+ dispatchable") from running end-to-end against the live spec until a
-sibling parser-scope follow-up Task lifts the ref-bucket coverage.
+* G3.11-T7 #1241 lifted the upstream parser limitation — the parser
+  now inlines ``#/components/responses/*`` and
+  ``#/components/requestBodies/*`` refs, so catalog ingest against
+  the live GitHub spec succeeds end-to-end.
+* What is still xfailed here is T4's own composite-dispatch body:
+  the round-trip from ``gh.composite.pr_status_summary`` through
+  L2 child ops against a real running backplane + a real GitHub PR
+  requires a backplane process up, a GitHub App credential
+  provisioned in Vault, and the catalog ingested, none of which the
+  unit-test sandbox has. The body raises ``NotImplementedError`` to
+  keep ``strict=True`` honest until the dispatch sketch is filled in.
 
-The composite *registration* itself is not blocked -- the unit tests in
+The composite *registration* itself is unblocked -- the unit tests in
 ``tests/test_connectors_github_composites_register.py`` exercise the
 register path without ingest, and the unit tests in
 ``tests/test_connectors_github_composites_read.py`` cover the handler's
-dispatch logic with mocked ``dispatch_child``. What is xfailed here is
-the *L1-on-top-of-L2 dispatch* round-trip against a real running
-backplane + a real GitHub PR.
+dispatch logic with mocked ``dispatch_child``.
 
-Once the parser-scope follow-up lands and the catalog ingests cleanly,
-this test's ``xfail(strict=True)`` flips to ``xpass`` and CI fails
-loudly -- prompting the maintainer to remove the xfail mark and re-
-qualify the docstring. That's the desired hand-off shape: the test
-self-advertises when its blocker has lifted.
+Once the dispatch body is wired (separate follow-up Task on Initiative
+G3.11 #1220), this test's ``xfail(strict=True)`` flips to ``xpass`` and
+CI fails loudly -- prompting the maintainer to remove the xfail mark
+and re-qualify the docstring.
 
-**How to run locally.** Once the parser fix lands, with a backplane up,
-a GitHub App credential provisioned in Vault, and the catalog ingested::
+**How to run locally.** With a backplane up, a GitHub App credential
+provisioned in Vault, and the catalog ingested::
 
     MEHO_GH_INGEST_LIVE=1 \\
       uv run --package meho-backplane pytest -q \\
@@ -72,19 +72,18 @@ def _live_ingest_opted_in() -> bool:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "G0.7 parser only inlines #/components/schemas/* and "
-        "#/components/parameters/* refs; the GitHub spec uses "
-        "#/components/responses/* refs and the parser raises "
-        "UnsupportedSpecError on ingest. Out of scope for T4 (composite "
-        "implementation); a sibling parser-scope follow-up lifts the "
-        "ref-bucket coverage. xfail flips to xpass once that lands -- "
-        "remove the mark + this rationale block then."
+        "Composite-dispatch body not yet wired against a live backplane "
+        "(needs backplane up + GitHub App credential in Vault + catalog "
+        "ingested). The upstream parser ref-bucket gap that previously "
+        "blocked this test was lifted by G3.11-T7 #1241; what remains "
+        "is T4's own dispatch sketch. xfail flips to xpass once the "
+        "body is filled in -- remove the mark + this rationale then."
     ),
 )
 def test_pr_status_summary_dispatches_against_live_pr() -> None:
     """Composite end-to-end dispatch against a real GitHub PR.
 
-    The intended shape, once the parser fix lands:
+    The intended shape, once the dispatch body is wired:
 
     1. Ingest the catalog entry ``gh/v3`` (registers ~700 L2 ops).
     2. Dispatch ``gh.composite.pr_status_summary`` with ``owner=evoila,
@@ -96,17 +95,16 @@ def test_pr_status_summary_dispatches_against_live_pr() -> None:
     4. Assert ``checks_status`` is one of the enum values from the
        response schema (not "unknown" -- the live PR has CI configured).
 
-    Until the parser limitation is lifted, this body short-circuits via
+    Until the dispatch body is filled in, this body short-circuits via
     the ``xfail(strict=True)`` mark above so the test documents the
     dependency without claiming to pass.
     """
-    # When the parser fix lands and the catalog ingests cleanly, this
-    # body fills in with the dispatch + assertions sketched above. For
-    # now, the xfail mark short-circuits the test; we still raise here
-    # to make strict=True meaningful (the body fails until the parser
-    # is fixed).
+    # When the dispatch body lands, this body fills in with the
+    # dispatch + assertions sketched above. For now, the xfail mark
+    # short-circuits the test; we still raise here to make
+    # strict=True meaningful.
     raise NotImplementedError(
-        "gh.composite.pr_status_summary live dispatch is xfailed pending "
-        "G0.7 parser support for #/components/responses/* refs; see the "
-        "module docstring for the dependency + run instructions."
+        "gh.composite.pr_status_summary live dispatch body is not yet "
+        "wired; see the module docstring for the dependency + run "
+        "instructions."
     )

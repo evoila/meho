@@ -35,6 +35,8 @@ PETSTORE_30 = FIXTURES / "petstore_30.yaml"
 PETSTORE_31_YAML = FIXTURES / "petstore_31.yaml"
 PETSTORE_31_JSON = FIXTURES / "petstore_31.json"
 PARAMETER_REFS_30 = FIXTURES / "parameter_refs_30.yaml"
+RESPONSE_REFS_30 = FIXTURES / "response_refs_30.yaml"
+REQUEST_BODY_REFS_30 = FIXTURES / "request_body_refs_30.yaml"
 
 
 def _by_op_id(rows: list[EndpointDescriptorProto]) -> dict[str, EndpointDescriptorProto]:
@@ -379,31 +381,39 @@ components:
         parse_openapi(str(spec))
 
 
-def test_non_parameter_local_ref_raises(tmp_path: Path) -> None:
-    """Refs to component buckets we don't support (e.g. ``requestBodies``) stay rejected."""
-    spec = tmp_path / "request_body_ref.yaml"
+def test_unsupported_component_bucket_ref_raises(tmp_path: Path) -> None:
+    """Refs to component buckets the parser doesn't inline stay rejected.
+
+    Headers refs are the canonical example: OpenAPI 3.x defines them
+    as a component bucket, but the parser pipeline doesn't traverse
+    ``responses.<code>.headers.<Name>`` slots (the slot's payload is
+    metadata about the response envelope, not the operation's
+    schema). A spec that puts a headers ref in a position the parser
+    *does* traverse — e.g. inside the response slot itself, which is
+    a malformed shape per OpenAPI 3.0 §4.7.16 (the response slot
+    accepts only Response Object or a ref to one) — surfaces the
+    residual ``UnsupportedSpecError`` envelope. The envelope shape is
+    asserted here so future bucket gaps stay diagnosable.
+    """
+    spec = tmp_path / "headers_ref.yaml"
     spec.write_text(
         """
 openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
-    post:
-      requestBody:
-        $ref: '#/components/requestBodies/SharedBody'
+    get:
       responses:
         "200":
-          description: ok
+          $ref: '#/components/headers/X-Rate-Limit'
 components:
-  requestBodies:
-    SharedBody:
-      content:
-        application/json:
-          schema:
-            type: object
+  headers:
+    X-Rate-Limit:
+      schema:
+        type: integer
         """.lstrip()
     )
-    with pytest.raises(UnsupportedSpecError, match="non-schema/non-parameter component"):
+    with pytest.raises(UnsupportedSpecError, match="unsupported component bucket"):
         parse_openapi(str(spec))
 
 
@@ -458,6 +468,204 @@ def test_parse_parameter_refs_30_fixture() -> None:
     assert isinstance(properties, dict)
     assert "timeout" in properties
     assert properties["timeout"]["x-meho-param-loc"] == "query"
+
+
+def test_resolve_shallow_ref_response_ref_opt_in() -> None:
+    """Direct-call contract: response refs require ``component_responses`` to opt in.
+
+    Mirrors :func:`test_resolve_shallow_ref_parameter_ref_opt_in` for
+    the response bucket. ``parse_openapi`` always threads the dict
+    (even when empty), so the full pipeline never trips the opt-out
+    branch — but the function is exported and the contract must be
+    explicit for direct callers.
+    """
+    from meho_backplane.operations.ingest.refs import resolve_shallow_ref
+
+    ref = {"$ref": "#/components/responses/Accepted"}
+    responses = {
+        "Accepted": {
+            "description": "Accepted",
+            "content": {"application/json": {"schema": {"type": "object"}}},
+        }
+    }
+
+    resolved = resolve_shallow_ref(ref, {}, component_responses=responses)
+    assert resolved == responses["Accepted"]
+
+    with pytest.raises(UnsupportedSpecError, match="component_responses"):
+        resolve_shallow_ref(ref, {})
+
+
+def test_resolve_shallow_ref_request_body_ref_opt_in() -> None:
+    """Direct-call contract: requestBody refs require ``component_request_bodies``."""
+    from meho_backplane.operations.ingest.refs import resolve_shallow_ref
+
+    ref = {"$ref": "#/components/requestBodies/CreateBody"}
+    request_bodies = {
+        "CreateBody": {
+            "required": True,
+            "content": {"application/json": {"schema": {"type": "object"}}},
+        }
+    }
+
+    resolved = resolve_shallow_ref(ref, {}, component_request_bodies=request_bodies)
+    assert resolved == request_bodies["CreateBody"]
+
+    with pytest.raises(UnsupportedSpecError, match="component_request_bodies"):
+        resolve_shallow_ref(ref, {})
+
+
+def test_parse_response_refs_30_fixture() -> None:
+    """End-to-end: GitHub-shaped response refs splice through cleanly.
+
+    Models the GitHub REST spec's shape: shared response envelopes
+    under ``components.responses`` referenced from operations via
+    ``$ref: '#/components/responses/<name>'``. The success response's
+    schema must end up extracted on each row — the splice happens
+    transparently, the rest of the parser sees the resolved
+    Response Object.
+    """
+    rows = parse_openapi(str(RESPONSE_REFS_30))
+    by_op = _by_op_id(rows)
+    assert set(by_op) == {"GET:/widgets", "GET:/widgets/{id}"}
+
+    # List op: response ref resolves to an array of Widget; the
+    # inner ``items`` $ref stays unresolved (shallow) — the
+    # dispatcher walks nested refs lazily.
+    list_op = by_op["GET:/widgets"]
+    list_schema = list_op.response_schema
+    assert isinstance(list_schema, dict)
+    assert list_schema["type"] == "array"
+    assert list_schema["items"] == {"$ref": "#/components/schemas/Widget"}
+
+    # Single op: response ref resolves through to the Widget schema
+    # via two-hop ($ref → content schema $ref). The parser inlines one
+    # ref level per slot; the resolved response's
+    # content.<media>.schema field itself carries a ref, which the
+    # media-type extractor's existing schema-ref resolution handles.
+    one_op = by_op["GET:/widgets/{id}"]
+    one_schema = one_op.response_schema
+    assert isinstance(one_schema, dict)
+    assert one_schema["type"] == "object"
+    assert "id" in one_schema["properties"]
+    assert "name" in one_schema["properties"]
+
+
+def test_parse_request_body_refs_30_fixture() -> None:
+    """End-to-end: requestBody refs splice through cleanly.
+
+    First-class component bucket per OpenAPI 3.x §4.7.10. Resolved
+    request body's ``content.<media>.schema`` becomes the operation's
+    ``body`` property with ``x-meho-param-loc='body'`` and
+    ``required=True`` because the resolved Request Body Object's
+    ``required`` field is ``True``.
+    """
+    rows = parse_openapi(str(REQUEST_BODY_REFS_30))
+    by_op = _by_op_id(rows)
+    assert set(by_op) == {"POST:/widgets", "PUT:/widgets/{id}"}
+
+    for op_id in ("POST:/widgets", "PUT:/widgets/{id}"):
+        op = by_op[op_id]
+        properties = op.parameter_schema["properties"]
+        assert isinstance(properties, dict), f"{op_id}: properties must be dict"
+        assert "body" in properties, f"{op_id}: body missing after requestBody ref resolution"
+        body = properties["body"]
+        assert body["x-meho-param-loc"] == "body"
+        # Resolved body schema is the WidgetCreate envelope (name only).
+        assert body["type"] == "object"
+        assert "name" in body["properties"]
+        required = op.parameter_schema["required"]
+        assert "body" in required, f"{op_id}: body must be required (requestBody.required=True)"
+
+
+def test_parse_github_shaped_response_ref_with_inline_schema(tmp_path: Path) -> None:
+    """Tightest reproduction of the GitHub spec's `responses/accepted` shape.
+
+    GitHub's spec defines ``components.responses.accepted`` with a
+    bare ``schema: {type: object}`` inside ``content.application/json``
+    — no nested ``$ref``. Locks the simplest case so future
+    refactors don't lose it.
+    """
+    spec = tmp_path / "gh_accepted.yaml"
+    spec.write_text(
+        """
+openapi: '3.0.3'
+info: {title: x, version: '1'}
+paths:
+  /op:
+    post:
+      summary: trigger an async op
+      responses:
+        "202":
+          $ref: '#/components/responses/accepted'
+components:
+  responses:
+    accepted:
+      description: Accepted
+      content:
+        application/json:
+          schema:
+            type: object
+        """.lstrip()
+    )
+    rows = parse_openapi(str(spec))
+    assert len(rows) == 1
+    assert rows[0].response_schema == {"type": "object"}
+
+
+def test_missing_response_ref_raises(tmp_path: Path) -> None:
+    """A ref to an unknown response component raises ``InvalidSchemaError``."""
+    spec = tmp_path / "dangling_response.yaml"
+    spec.write_text(
+        """
+openapi: '3.0.3'
+info: {title: x, version: '1'}
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          $ref: '#/components/responses/Missing'
+components:
+  responses:
+    Present:
+      description: Present
+      content:
+        application/json:
+          schema:
+            type: string
+        """.lstrip()
+    )
+    with pytest.raises(InvalidSchemaError, match="missing component"):
+        parse_openapi(str(spec))
+
+
+def test_missing_request_body_ref_raises(tmp_path: Path) -> None:
+    """A ref to an unknown requestBody component raises ``InvalidSchemaError``."""
+    spec = tmp_path / "dangling_requestbody.yaml"
+    spec.write_text(
+        """
+openapi: '3.0.3'
+info: {title: x, version: '1'}
+paths:
+  /x:
+    post:
+      requestBody:
+        $ref: '#/components/requestBodies/Missing'
+      responses:
+        "201":
+          description: ok
+components:
+  requestBodies:
+    Present:
+      content:
+        application/json:
+          schema:
+            type: string
+        """.lstrip()
+    )
+    with pytest.raises(InvalidSchemaError, match="missing component"):
+        parse_openapi(str(spec))
 
 
 def test_missing_schema_ref_raises(tmp_path: Path) -> None:

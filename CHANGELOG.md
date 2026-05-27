@@ -125,6 +125,22 @@ connector-related release-notes line.
   policy persistence + the `AgentModelTier` ↔ `AgentTier` enum
   unification remain the M1 follow-up — the `TODO(G11.5-T2)`
   marker stays. (#1078)
+- **`gh/v3` catalog entry — GitHub REST API on-ramp for L2 ingest
+  (G3.11-T3 #1223).** Adds `gh/v3` to the curated connector-spec
+  catalog with `impl_id: gh-rest` and `requires_connector_class:
+  GitHubRestConnector` (registered by G3.11-T1 #1221). Upstream pins
+  the `github/rest-api-description` repo's `main` branch
+  (`raw.githubusercontent.com/.../api.github.com.json`, OpenAPI 3.0.3,
+  ~700 paths / ~40 tags) — the public release cadence lags by years
+  so `main` is the daily-regenerated pin; `spec_info_version: 1.1.4`
+  observed against the upstream tip on 2026-05-27. `meho connector
+  ingest --catalog gh/v3` (once T1's connector class is registered)
+  lands ~700 `endpoint_descriptor` rows; operators flip groups
+  (`pulls`, `issues`, `actions`, `repos`) from `staged` to `enabled`
+  via `meho operation review`. Live integration test guarded by
+  `MEHO_GH_INGEST_LIVE=1` per AC; the operator runbook in
+  `docs/cross-repo/github-connector.md` (G3.11-T6) carries the
+  end-to-end recipe.
 - **`KubernetesConnector.discover_topology` populator — closes v0.6.0
   signal-13 amendment promise (G0.14-T12 #1201).** First shipped
   override of `Connector.discover_topology` against the K8s connector

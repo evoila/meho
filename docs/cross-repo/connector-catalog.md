@@ -69,14 +69,20 @@ Each entry is validated by `ConnectorSpecEntry`:
 | `sddc-manager` 9.0 | generic | SDDC Manager API (appliance-served; Broadcom Developer Portal) |
 | `harbor` 2.x | generic | `goharbor` `api/v2.0/swagger.yaml` — **Swagger 2.0**, needs conversion to OpenAPI 3.x before ingest |
 | `nsx` 4.2 | generic | `/api/v1/spec/openapi/nsx_api.yaml` (appliance-served; Broadcom Developer Portal mirror) |
+| `gh` v3 | generic | `rest-api-description/main/descriptions/api.github.com/api.github.com.json` — OpenAPI 3.0.3, direct-resolvable, `info.version` 1.1.4, ~700 paths / ~40 tags. Auth: GitHub App installation tokens (or fine-grained PAT). |
 | `vault` 1.x | typed | none (hand-coded connector) |
 | `k8s` 1.x | typed | none (typed; per-minor OpenAPI ingest is a future Goal #214 investigation) |
 | `bind9` 9.x | typed | none (SSH-only; no REST surface) |
 
-`spec_info_version` and `sha256` are `null` across the board in this first
-catalog: they are populated only after a connector's spec has been
-ingest-verified through MEHO, not from desk research. Fill them in as part
-of each connector's first verified `--catalog` ingest.
+`spec_info_version` and `sha256` are populated only after a connector's
+spec has been ingest-verified through MEHO, not from desk research. The
+`gh/v3` entry carries `spec_info_version: 1.1.4` observed against the
+upstream main branch tip on 2026-05-27 — the value comes from a smoke
+parse of the live spec, not the GitHub release tag (the public
+`rest-api-description` release cadence lags by years; the spec is
+regenerated daily on `main` from production, so `main` is the pin).
+Refresh as part of each operator-cadenced re-ingest. The other entries
+still ship `null`.
 
 ## Operator workflow
 

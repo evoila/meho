@@ -893,6 +893,11 @@ async def test_cron_scheduler_invoke_refused_on_budget_advances_and_does_not_ref
     assert len(refused) == 1, buf.getvalue()
     assert refused[0]["trigger_id"] == str(trigger.id)
     assert refused[0]["agent_name"] == "reporter"
+    # ``budget_reason`` mirrors ``BudgetExceededError.reason`` (G11.5-T6
+    # #1080 CR iter-3 B2): on-call needs the gate-fired tag (kill-switch
+    # / per-tenant / per-identity-window) to triage from one log line
+    # without grepping for the exception's text.
+    assert "global kill switch" in refused[0]["budget_reason"], refused[0]
 
     # ``next_fire_at`` must have advanced past the overdue instant --
     # the advance commit happens *before* the dispatch (Step 2 of

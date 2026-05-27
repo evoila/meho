@@ -534,13 +534,20 @@ async def _dispatch_invocation(
         # (G11.5-T6 #1080) is the per-identity / per-tenant / global
         # pre-execution budget refusal; treated the same way -- the
         # scheduler must not blast through a kill switch on every
-        # tick, the cap is the contract.
-        _log.warning(
-            "scheduler_invoke_refused",
-            trigger_id=str(row.id),
-            agent_name=prepared.name,
-            reason=type(exc).__name__,
-        )
+        # tick, the cap is the contract. When the refusal is a budget
+        # gate, also surface ``exc.reason`` (machine-readable refusal
+        # tag: ``per_identity_*``, ``per_tenant_kill_switch``,
+        # ``global_kill_switch``) so on-call can tell from a single
+        # log line which gate fired, without grepping for the
+        # exception's text.
+        log_kwargs = {
+            "trigger_id": str(row.id),
+            "agent_name": prepared.name,
+            "reason": type(exc).__name__,
+        }
+        if isinstance(exc, BudgetExceededError):
+            log_kwargs["budget_reason"] = exc.reason
+        _log.warning("scheduler_invoke_refused", **log_kwargs)
         return False
     except AgentTokenError as exc:
         # Network / Keycloak failure on the client_credentials grant.

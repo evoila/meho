@@ -59,6 +59,7 @@ from meho_backplane.operations.ingest.exceptions import (
     InvalidSchemaError,
     InvalidSpecError,
     UnsupportedSpecError,
+    UpstreamNotSpecError,
 )
 from meho_backplane.operations.ingest.refs import (
     normalize_boolean_schema as _normalize_boolean_schema,
@@ -78,6 +79,7 @@ __all__ = [
     "InvalidSchemaError",
     "InvalidSpecError",
     "UnsupportedSpecError",
+    "UpstreamNotSpecError",
     "detect_spec_format",
     "parse_openapi",
     "read_spec_info_version",
@@ -116,6 +118,25 @@ _DANGEROUS_VERBS = frozenset({"DELETE"})
 # and rarely take more than a couple of seconds; a 30 s ceiling keeps
 # pathological cases from hanging an ingest.
 _HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+
+# Content-Type prefixes the upstream-fetch path accepts as spec-shaped.
+# OpenAPI specs are served as ``application/json`` (the modern default),
+# ``application/x-yaml`` / ``application/yaml`` / ``text/yaml`` /
+# ``text/x-yaml`` (YAML's wandering history of registered + provisional
+# media types), or ``text/plain`` (the GitHub-raw fallback most CI specs
+# end up on). Anything else -- ``text/html`` from a developer-portal
+# landing page, ``application/octet-stream`` from a misconfigured host
+# -- is rejected with :exc:`UpstreamNotSpecError` so the operator gets
+# a structured 422 instead of an opaque YAML parse error at line 33.
+_ACCEPTED_SPEC_CONTENT_TYPES: tuple[str, ...] = (
+    "application/json",
+    "application/yaml",
+    "application/x-yaml",
+    "text/yaml",
+    "text/x-yaml",
+    "text/plain",  # raw.githubusercontent.com serves YAML as text/plain
+)
 
 
 def detect_spec_format(content: bytes) -> str:
@@ -171,6 +192,12 @@ def parse_openapi(
             are a transport concern.
         UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x, or the
             document references a cross-document ``$ref``.
+        UpstreamNotSpecError: HTTP fetch succeeded (2xx) but the
+            response's ``Content-Type`` declared a non-spec media type
+            (e.g. ``text/html`` from a developer-portal landing page).
+            Raised before any decoding so callers see a precise
+            "upstream isn't a spec" diagnostic instead of an opaque
+            YAML / JSON parse error.
         InvalidSchemaError: A local ``$ref`` points at a missing
             component, or a structurally unsupported shape is used.
         yaml.YAMLError: Malformed YAML — bubbles up from the loader.
@@ -244,6 +271,10 @@ def read_spec_info_version(spec_path_or_uri: str) -> str | None:
         UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x — the
             same gate the parser enforces; surfaced here so callers
             can fail fast before touching ``info.version``.
+        UpstreamNotSpecError: HTTP fetch succeeded but the response
+            declared a non-spec media type. Same shape
+            :func:`parse_openapi` raises; see that function's
+            docstring for context.
         yaml.YAMLError: Malformed YAML — bubbles up from the loader.
         json.JSONDecodeError: Malformed JSON — bubbles up.
         httpx.HTTPError: HTTP fetch failure for URL inputs.
@@ -272,11 +303,26 @@ def _load_spec_bytes(spec_path_or_uri: str) -> bytes:
     :exc:`httpx.HTTPStatusError` (an :exc:`httpx.HTTPError` subclass)
     unwrapped — fetch failures are a transport concern, not a spec
     concern.
+
+    After a 2xx HTTP fetch we additionally inspect ``Content-Type``: a
+    non-spec media type (HTML developer portal, generic
+    ``application/octet-stream``, etc.) raises
+    :exc:`UpstreamNotSpecError` instead of falling through to YAML
+    decoding. Local files are not gated on content-type — the operator
+    chose the path and a stray ``.html`` next to ``.yaml`` is on them
+    to notice; the YAML / JSON decoder still produces a usable error
+    in that case. The HTTP gate exists because catalog-driven ingest
+    against the Broadcom Developer Portal (vmware/9.0, sddc-manager/9.0)
+    returned HTML and surfaced as a useless YAML parse error at line 33.
     """
     parsed = urlparse(spec_path_or_uri)
     if parsed.scheme in {"http", "https"}:
         response = httpx.get(spec_path_or_uri, timeout=_HTTP_TIMEOUT, follow_redirects=True)
         response.raise_for_status()
+        _reject_non_spec_content_type(
+            upstream_url=spec_path_or_uri,
+            content_type=response.headers.get("content-type"),
+        )
         return response.content
     # Treat everything else as a local file path. ``Path`` handles
     # both relative and absolute paths cleanly; ``file://`` URIs go
@@ -291,6 +337,34 @@ def _load_spec_bytes(spec_path_or_uri: str) -> bytes:
         return path.read_bytes()
     except (FileNotFoundError, IsADirectoryError, PermissionError, OSError) as exc:
         raise InvalidSpecError(f"could not read spec from {spec_path_or_uri!r}: {exc}") from exc
+
+
+def _reject_non_spec_content_type(
+    *,
+    upstream_url: str,
+    content_type: str | None,
+) -> None:
+    """Raise :exc:`UpstreamNotSpecError` when ``content_type`` is not spec-shaped.
+
+    The check is intentionally a prefix match against
+    :data:`_ACCEPTED_SPEC_CONTENT_TYPES` -- servers tack
+    ``; charset=utf-8`` (or stricter media-type parameters) onto the
+    base type, and the parameters are irrelevant to "is this YAML/JSON".
+
+    A missing header (``content_type is None``) is treated as non-spec
+    -- every legitimate spec host (raw.githubusercontent.com, vendor
+    appliances) sets the header, and the alternative is silently
+    accepting the HTML developer-portal pages that motivated this
+    check.
+    """
+    if content_type is None:
+        raise UpstreamNotSpecError(upstream_url=upstream_url, content_type=None)
+    # Lowercase before prefix check so ``Content-Type: TEXT/HTML`` is
+    # caught the same as ``text/html``; HTTP media types are
+    # case-insensitive per RFC 9110 §8.3.1.
+    normalized = content_type.lower().split(";", 1)[0].strip()
+    if not any(normalized == accepted for accepted in _ACCEPTED_SPEC_CONTENT_TYPES):
+        raise UpstreamNotSpecError(upstream_url=upstream_url, content_type=content_type)
 
 
 def _decode_spec(content: bytes) -> dict[str, Any]:

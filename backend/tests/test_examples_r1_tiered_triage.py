@@ -307,16 +307,36 @@ def test_scheduler_payload_parses_against_live_schema() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_permissions_json_is_well_formed_and_carries_escalate_grant() -> None:
-    """:file:`permissions.json` is parseable + names both principals + has the escalate edge.
+def test_permissions_json_is_well_formed_and_carries_no_invoke_agent_grant() -> None:
+    """:file:`permissions.json` is parseable + every row has UUID-or-``*`` ``target_scope``.
 
     The permission-grants surface (G11.2-T6 #819) accepts a
     ``{"permissions": [...]}`` body. We validate the structural
     shape here without round-tripping through the surface (which
-    needs the API stack); the load-bearing claim is that the file
-    carries the **escalate grant** (cheap principal -> deep agent
-    via ``meho.invoke_agent``) -- the missing-escalate failure mode
-    is the cheap tier silently never escalating in production.
+    needs the API stack).
+
+    Two contracts pinned, both load-bearing for the example's
+    v0.2 accuracy:
+
+    1. **``target_scope`` is UUID or ``*``** -- the API validator at
+       ``backend/src/meho_backplane/api/v1/agent_grants.py``
+       (``create_grant`` parses ``target_scope`` as a UUID and 422s
+       anything else, except the literal ``*`` sentinel). A
+       freeform ``"agent:<name>"`` string is rejected; documenting
+       one in the example would land an operator on a copy-paste
+       422 the first time they apply Step 3.
+
+    2. **No ``meho.invoke_agent`` grant row.** v0.2 does NOT gate
+       agent-to-agent dispatch on the grants table -- the
+       ``invoke_agent`` meta-tool body at
+       ``backend/src/meho_backplane/agent/invoke.py`` only checks
+       the depth cap + name resolution via the harness's
+       ``child_agent_resolver``. Shipping an ``invoke_agent`` row
+       would either 422 (with the rejected
+       ``target_scope="agent:..."`` shape) or mislead operators into
+       thinking the row is what enables the escalate edge. The
+       harness's ``_name_resolver`` in ``workflow.py`` is the real
+       composition surface.
     """
     raw = json.loads((EXAMPLE_DIR / "permissions.json").read_text(encoding="utf-8"))
     assert "permissions" in raw, "permissions.json must wrap rows in a top-level 'permissions' key"
@@ -324,32 +344,43 @@ def test_permissions_json_is_well_formed_and_carries_escalate_grant() -> None:
     assert isinstance(rows, list)
     assert rows, "permissions.json must declare at least one grant"
 
-    # Validate the row shape; each row must have these five keys
-    # at minimum (the agent-grants API accepts more, but the
-    # example's contract is the five core fields).
+    # Validate the row shape; each row must have these four keys at
+    # minimum (the agent-grants API accepts more, but the example's
+    # contract is the four core fields).
     required_keys = {"principal_sub", "op_pattern", "target_scope", "verdict"}
     for row in rows:
         missing = required_keys - row.keys()
         assert not missing, f"permission row missing required keys: {missing}; row={row}"
 
-    # The load-bearing claim: there's an escalate grant that pins
-    # the cheap principal's invoke_agent verb to the deep agent's
-    # name. The example's prompt-side story does not work without
-    # this row.
-    escalate_grants = [
-        row
-        for row in rows
-        if row["op_pattern"] == "meho.invoke_agent"
-        and row["target_scope"] == "agent:r1-deep-tier-investigator"
-    ]
-    assert escalate_grants, (
-        "permissions.json must carry a meho.invoke_agent grant pinning the "
-        "cheap principal to the deep agent's name; without it the cheap tier "
-        "cannot escalate."
-    )
-    assert all(g["verdict"] == "auto-execute" for g in escalate_grants), (
-        "the escalate grant must auto-execute -- needs-approval here would "
-        "pause every firing waiting for an operator and break the 24/7 shape."
+    # Contract 1: target_scope is UUID or "*". The principal_sub
+    # placeholders carry their own non-UUID sentinels we substitute
+    # at apply time -- target_scope is the field the API actually
+    # parses as a UUID.
+    for row in rows:
+        scope = row["target_scope"]
+        if scope == "*":
+            continue
+        try:
+            uuid.UUID(scope)
+        except ValueError as exc:
+            raise AssertionError(
+                f"target_scope must be a UUID or '*'; got {scope!r} on row {row} -- "
+                "the agent-grants API 422s a freeform string. "
+                "See backend/src/meho_backplane/api/v1/agent_grants.py."
+            ) from exc
+
+    # Contract 2: no meho.invoke_agent grant. v0.2's runtime does
+    # not consult the grants table for agent-to-agent dispatch
+    # (see backend/src/meho_backplane/agent/invoke.py); the
+    # escalate edge is enabled by the harness's child_agent_resolver,
+    # not by a grant row. Documenting one in the example would be
+    # fiction.
+    invoke_grants = [row for row in rows if row["op_pattern"] == "meho.invoke_agent"]
+    assert not invoke_grants, (
+        "permissions.json must NOT carry a meho.invoke_agent grant -- v0.2 "
+        "does not gate agent-to-agent dispatch on grant rows; the escalate "
+        "edge is enabled by the harness's child_agent_resolver in workflow.py. "
+        f"Found unexpected row(s): {invoke_grants}"
     )
 
 

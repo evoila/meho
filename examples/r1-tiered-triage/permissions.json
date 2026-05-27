@@ -1,6 +1,6 @@
 {
   "_comment": "AgentPermission grants for the R1 tiered-triage pattern. Apply each row as one INSERT into backend/src/meho_backplane/db/models.py:AgentPermission. The /api/v1/agent-grants surface (G11.2-T6 #819) is the operator path; the `_purpose` fields are doc-only metadata stripped before the POST. Substitute <cheap-principal-sub> and <deep-principal-sub> with the Keycloak sub claims for each agent's principal registry row (see GUIDE.md Step 3).",
-  "_note_on_escalate_grant": "The cheap tier MUST hold an `invoke_agent` grant against the deep tier's name. Without it the dispatch path raises a permission denial at child-resolver time and the cheap-tier loop surfaces a ModelRetry it cannot recover from. The grant is target_scope='agent:r1-deep-tier-investigator' (the child's name), narrow on purpose -- the cheap tier cannot escalate to any other agent in the tenant.",
+  "_note_on_agent_to_agent_dispatch": "v0.2 does NOT gate agent-to-agent invocation on grant rows. The `meho.invoke_agent` meta-tool is permitted by reaching the child agent's identity via the in-process harness's child_agent_resolver (see backend/src/meho_backplane/agent/invoke.py:307-477; the only runtime checks are name-resolution scoped to the parent operator's tenant + a depth cap). No grant row makes the escalate edge work; no grant row blocks it. The agent-grants table gates `call_operation` dispatch only. The cheap → deep escalate edge in this example is therefore controlled by the harness composition in workflow.py (`_name_resolver`), not by RBAC.",
   "_note_on_no_write_grants": "Neither agent carries write grants on managed targets. The cheap tier is read-only on the broadcast / memory connectors (loaded by the harness, not the loop); the deep tier is read-only across the discovery connector surface. Action recommendations from the deep tier route through the operator-approval gate (see R2) -- the agent identifies the action; the operator authorises it.",
   "permissions": [
     {
@@ -9,13 +9,6 @@
       "target_scope": "*",
       "verdict": "auto-execute",
       "_purpose": "Cheap tier reads recent broadcast events as the source of triage signal. Read-only op; auto-executes."
-    },
-    {
-      "principal_sub": "<cheap-principal-sub>",
-      "op_pattern": "meho.invoke_agent",
-      "target_scope": "agent:r1-deep-tier-investigator",
-      "verdict": "auto-execute",
-      "_purpose": "The escalate grant. Narrow target_scope pins escalation to the deep tier only; the cheap tier cannot invoke any other agent in the tenant. The deep tier carries its own broader grants, so this single edge is the entire composition surface."
     },
     {
       "principal_sub": "<deep-principal-sub>",

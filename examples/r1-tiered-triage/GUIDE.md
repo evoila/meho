@@ -58,15 +58,22 @@ You have, in this order:
    # Pull the access_token, base64-decode the payload, then read the claims.
    JWT_PAYLOAD="$(jq -r .access_token ~/.config/meho/credentials.json \
        | cut -d. -f2 | base64 -d 2>/dev/null)"
-   echo "$JWT_PAYLOAD" | jq '{tenant_id, sub, realm_access: .realm_access.roles}'
-   # expect realm_access.roles to contain "tenant_admin"
+   echo "$JWT_PAYLOAD" | jq '{tenant_id, sub, tenant_role}'
+   # expect tenant_role == "tenant_admin"
    TENANT_ID="$(echo "$JWT_PAYLOAD" | jq -r .tenant_id)"
    ```
    `meho status` (and its `--json` form) renders the operator's
    sub/email/name and backplane health but does not surface the
-   tenant id or the realm roles — the JWT is the source of truth for
-   both (per
-   [`backend/src/meho_backplane/auth/jwt.py:585`](../../backend/src/meho_backplane/auth/jwt.py)).
+   tenant id or the tenant role — the JWT is the source of truth for
+   both. The backplane reads `tenant_id` via
+   [`_extract_tenant_id`](../../backend/src/meho_backplane/auth/jwt.py)
+   (`auth/jwt.py:585`) and the role via
+   [`_extract_tenant_role`](../../backend/src/meho_backplane/auth/jwt.py)
+   (`auth/jwt.py:617`); both pull from top-level claim names whose
+   defaults (`tenant_id`, `tenant_role`) are configured in
+   [`settings.py:722-723`](../../backend/src/meho_backplane/settings.py)
+   and emitted by the Keycloak protocol mappers documented in
+   [`deploy/values-examples/README.md` § Auth onramp recipe](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp).
 4. **Two agent principals registered**, one per tier
    ([G11.2-T1 #815](https://github.com/evoila/meho/issues/815)):
    ```bash
@@ -177,9 +184,14 @@ file via `@<path>`, or extract inline via process substitution:
 Verify:
 
 ```bash
-meho scheduler list --json | jq '.[] | select(.identity_sub=="agent:r1-cheap-tier-classifier")'
+meho scheduler list --json | jq '.triggers[] | select(.identity_sub=="agent:r1-cheap-tier-classifier")'
 # expect: kind=cron cron_expr=*/15 * * * * identity_sub=agent:r1-cheap-tier-classifier in_flight_policy=fail_into_audit
 ```
+
+> The `--json` response is the envelope `{"triggers": [...]}` per
+> [`cli/internal/cmd/scheduler/scheduler.go:175-177`](../../cli/internal/cmd/scheduler/scheduler.go),
+> mirroring the backend's `ScheduledTriggerListResponse` Pydantic
+> shape. Iterate `.triggers[]`, not `.[]`.
 
 > The cron `*/15 * * * *` is deliberate. A per-minute schedule
 > against a noisy broadcast feed runs up against the per-identity
@@ -194,13 +206,30 @@ meho scheduler list --json | jq '.[] | select(.identity_sub=="agent:r1-cheap-tie
 
 ## Step 3 — Apply the permission grants
 
-The [`permissions.json`](./permissions.json) file documents five
-`AgentPermission` rows that wire the RBAC posture:
+The [`permissions.json`](./permissions.json) file documents four
+`AgentPermission` rows that wire the RBAC posture for
+`call_operation` dispatch:
 
-- Cheap tier: read `meho.broadcast.recent`; escalate to `r1-deep-tier-investigator`.
+- Cheap tier: read `meho.broadcast.recent` (the triage signal source).
 - Deep tier: read across `*.read` / `*.list` op patterns;
   `*.write` patterns route through the operator-approval gate
   (the R2 approval-gate pattern in [PR #1243](https://github.com/evoila/meho/pull/1243) covers that flow in detail).
+
+> **v0.2 note: agent-to-agent dispatch is not yet gated by RBAC.**
+> The `meho.invoke_agent` meta-tool the cheap tier uses to escalate
+> to the deep tier is **not** checked against the agent-grants table.
+> The runtime path (see
+> [`backend/src/meho_backplane/agent/invoke.py:307-477`](../../backend/src/meho_backplane/agent/invoke.py))
+> permits the call when (a) the depth cap is not exceeded and
+> (b) the `child_agent_resolver` returns a definition for the
+> requested name. The in-process harness in
+> [`workflow.py`](./workflow.py) (`_name_resolver`) installs a
+> single-edge resolver that returns the deep tier's definition for
+> `r1-deep-tier-investigator` and `None` for everything else — so
+> the composition surface is exactly that one edge, by construction.
+> No `meho.invoke_agent` grant row makes it work; no grant row
+> blocks it. Grant rows in `permissions.json` only govern
+> `call_operation` dispatch.
 
 The grants surface in v0.2 is `meho agent grant` (see
 [`cli/internal/cmd/agent/grant.go`](../../cli/internal/cmd/agent/grant.go)) —
@@ -237,9 +266,15 @@ Each `meho agent grant create` call posts to
 `POST /api/v1/agents/grants` (see
 [`cli/internal/cmd/agent/grant.go:265`](../../cli/internal/cmd/agent/grant.go))
 with `--principal`, `--op` (the op-pattern), `--target` (the
-target-scope, `*` for "any target"), and `--verdict` (one of
+target-scope; must be a UUID or `*` per the validator
+[`_validate_target_scope`](../../backend/src/meho_backplane/agents/grants.py)
+at `backend/src/meho_backplane/agents/grants.py:110-124` — the
+route at
+[`backend/src/meho_backplane/api/v1/agent_grants.py:142-167`](../../backend/src/meho_backplane/api/v1/agent_grants.py)
+catches the validation error and returns HTTP 422), and `--verdict`
+(one of
 `auto-execute | needs-approval | deny`). Omit `--expires` for
-a permanent grant — the five rows above are baseline RBAC posture,
+a permanent grant — the four rows above are baseline RBAC posture,
 not a time-bounded elevation.
 
 Verify the grants landed by listing them for the cheap tier:
@@ -247,19 +282,13 @@ Verify the grants landed by listing them for the cheap tier:
 ```bash
 meho agent grant list --principal "$CHEAP_SUB" --json | \
   jq '.grants[] | {op_pattern, target_scope, verdict}'
-# expect:
+# expect (one row):
 #   {op_pattern: "meho.broadcast.recent", target_scope: "*", verdict: "auto-execute"}
-#   {op_pattern: "meho.invoke_agent",     target_scope: "agent:r1-deep-tier-investigator",
-#    verdict: "auto-execute"}
 ```
 
-The escalate edge (`meho.invoke_agent` to
-`agent:r1-deep-tier-investigator`) is what makes the composition
-work — without it the cheap tier's `invoke_agent` tool call lands
-as a permission denial at child-resolver time and the loop
-surfaces a `ModelRetry` it cannot recover from. The same
-verification for the deep tier should show the three `*.read`,
-`*.list`, and `*.write` rows.
+The cheap tier holds no `meho.invoke_agent` grant by design — see
+the v0.2 note above. The same verification for the deep tier
+should show the three `*.read`, `*.list`, and `*.write` rows.
 
 ## Step 4 — Seed the per-identity daily budgets
 
@@ -373,29 +402,46 @@ Driving `meho agent run` with the same shape exercises the loop
 without an in-process harness.
 
 Watch the audit lineage. `meho audit query` (see
-[`cli/internal/cmd/audit/query.go:87`](../../cli/internal/cmd/audit/query.go))
-filters on principal/op-id/parent-audit-id and lacks an
-`--include-children` shortcut — walk it as two steps:
+[`cli/internal/cmd/audit/query.go`](../../cli/internal/cmd/audit/query.go))
+exposes the documented filter set; v0.2 rejects
+`--parent-audit-id` with `HTTP 400 UnsupportedFilterError` (the
+column lands with G0.6-T7 [#398](https://github.com/evoila/meho/issues/398) —
+see
+[`audit_query/query.py:135-138`](../../backend/src/meho_backplane/audit_query/query.py)).
+The supported lineage key today is `agent_session_id`. Pull the
+cheap tier's latest row, lift its session id, and walk the cascade
+with `meho audit replay <session-id>`:
 
 ```bash
-# 1. Find the latest audit row written under the cheap tier's principal.
-PARENT_ID="$(meho audit query \
+# 1. Find the latest audit row written under the cheap tier's
+#    principal. The JSON response carries `id` (not `audit_id`) and
+#    `agent_session_id` — see Entry struct at
+#    cli/internal/cmd/audit/audit.go:86-106.
+LATEST="$(meho audit query \
   --principal "$CHEAP_SUB" \
   --limit 1 \
-  --json | jq -r '.rows[0].audit_id')"
+  --json)"
+SESSION_ID="$(echo "$LATEST" | jq -r '.rows[0].agent_session_id')"
 
-# 2. Walk the children of that audit row (the deep-tier dispatch).
-meho audit query --parent-audit-id "$PARENT_ID" --json | \
-  jq '.rows[] | {audit_id, op_id, principal_sub, result_status}'
+# 2. Walk the cheap → deep cascade for that session as an ASCII tree
+#    (or pass --json for the AuditReplayResult envelope). See
+#    cli/internal/cmd/audit/replay.go.
+meho audit replay "$SESSION_ID"
+
+# 3. Or page the flat rows — same session-scoped scope, paginated.
+meho audit query --session-id "$SESSION_ID" --json | \
+  jq '.rows[] | {id, op_id, principal_sub, result_status}'
 ```
 
 You should see:
 
 - A parent audit row written under `$CHEAP_SUB` for the cheap
   tier's last op (e.g. an `invoke_agent` dispatch).
-- One or more child rows under `--parent-audit-id` covering the
-  deep tier's investigation tool calls — the `parent_audit_id`
-  column is what threads the cascade together (G0.6-T7).
+- One or more child rows in the same session covering the deep
+  tier's investigation tool calls — the `agent_session_id` column
+  is what threads the cascade together, and the replay route
+  reconstructs the parent/child tree server-side via the
+  `parent_audit_id` recursive CTE (G0.6-T7).
 - A `r1-policy-<alert-class>` memory entry persisted by the
   harness (verified in Step 6).
 
@@ -447,11 +493,15 @@ BRIEF
 )"
 ```
 
-Walk the audit again (Step 5's two-step query):
+Walk the audit again (same `agent_session_id` pattern as Step 5):
 
 ```bash
-PARENT_ID="$(meho audit query --principal "$CHEAP_SUB" --limit 1 --json | jq -r '.rows[0].audit_id')"
-meho audit query --parent-audit-id "$PARENT_ID" --json | jq '.rows | length'
+SESSION_ID="$(meho audit query --principal "$CHEAP_SUB" --limit 1 --json | jq -r '.rows[0].agent_session_id')"
+# Count the deep-tier dispatches in this session — the cheap tier
+# itself contributes its own audit rows, so filter by the deep
+# principal's sub.
+meho audit query --session-id "$SESSION_ID" --json | \
+  jq --arg ds "$DEEP_SUB" '[.rows[] | select(.principal_sub == $ds)] | length'
 # expect: 0 (no deep-tier dispatch — the cheap tier saw the policy and skipped)
 ```
 
@@ -492,8 +542,13 @@ Likely causes:
 
 - The broadcast feed has no events that meet the interestingness
   rules. Stage one manually (Step 5).
-- The cheap tier doesn't carry the `meho.invoke_agent` grant for
-  the deep tier's name. Re-check Step 3's resolve verification.
+- The harness's `child_agent_resolver` returns `None` for the
+  deep tier's name (a typo, the deep tier's `AgentDefinition` failed
+  to load, or a consumer-side override). The runtime surfaces this
+  as a `ModelRetry` (`"no agent definition named ..."`); check the
+  cheap-tier audit row for that text. The resolver is the only
+  gate on agent-to-agent dispatch in v0.2 — see the v0.2 note in
+  Step 3.
 - The cheap tier's structured input doesn't match the prompt's
   expected section headings (`## Known policy` / `## Recent events`).
   The harness builds these correctly; a custom consumer-side

@@ -828,8 +828,22 @@ async def test_run_scheduled_allows_matching_agent_definition(
             )
         ),
     )
-    # Pass the guard, then stop the flow at run-row creation.
-    monkeypatch.setattr(invoker, "_to_agent_definition", lambda entry: object())
+    # Pass the guard, then stop the flow at run-row creation. The
+    # stubbed definition needs the real ``AgentDefinition`` shape now
+    # that the G11.5-T6 #1080 pre-execution budget gate reads
+    # ``definition.tier``; the budget gate itself returns ALLOW
+    # unchanged (no budget configured for this principal).
+    from meho_backplane.agent.run import AgentDefinition
+
+    monkeypatch.setattr(
+        invoker,
+        "_to_agent_definition",
+        lambda entry: AgentDefinition(
+            name="a-bot",
+            system_prompt="stub",
+            request_limit=1,
+        ),
+    )
     boom = RuntimeError("stop-after-guard")
     create_spy = AsyncMock(side_effect=boom)
     monkeypatch.setattr(invoker, "_create_run_row", create_spy)

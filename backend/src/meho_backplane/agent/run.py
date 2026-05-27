@@ -124,6 +124,7 @@ __all__ = [
     "AgentRunHandle",
     "AgentRunResult",
     "AgentRunStatus",
+    "BudgetExceededError",
     "ModelFactory",
     "PydanticAgentRun",
     "default_model_factory",
@@ -151,6 +152,45 @@ class AgentRunError(RuntimeError):
     :class:`AgentRunHandle` as a :attr:`AgentRunStatus.FAILED` status with
     the error message attached — they do not propagate as this exception.
     """
+
+
+class BudgetExceededError(AgentRunError):
+    """The pre-execution budget gate refused this run.
+
+    Raised by the
+    :class:`~meho_backplane.agent.invocation.AgentInvoker` when the
+    G11.5-T6 (#1080) enforcement gate
+    (:func:`~meho_backplane.operations.budget_enforcement.evaluate_pre_run_budget`)
+    returns
+    :attr:`~meho_backplane.operations.budget_enforcement.BudgetDecisionKind.REFUSE`.
+    Subclass of :class:`AgentRunError` so a caller that only catches the
+    parent type still handles the budget-refused path uniformly with
+    every other seam-level failure (turn budget exhausted, resolver
+    mismatch, etc.); a caller that wants to distinguish "I refused
+    because of cost / kill switch" from "the loop tripped" catches
+    this subclass specifically.
+
+    The exception's message carries the short human-readable reason
+    from
+    :attr:`~meho_backplane.operations.budget_enforcement.BudgetDecision.reason`
+    (e.g. ``"daily cost_consumed (3.50) >= cost_limit (3.50)"``,
+    ``"global kill switch enabled"``); the full per-window snapshot
+    rides on :attr:`reason` separately so REST / MCP boundaries can
+    structure the response without re-parsing the message.
+
+    The boundary contract is intentionally a *pre*-creation refusal —
+    no ``agent_run`` row is written when this is raised, so an
+    operator polling the runs table sees the refused attempt only via
+    the audit log (the structured ``agent_run_refused_*`` warning
+    emitted by the enforcement service) and the surface's HTTP /
+    MCP-elicitation response. The "no row" choice keeps a kill-switched
+    deploy from filling the runs table with ``failed`` rows the moment
+    a stuck scheduler retries.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
 
 
 class AgentRunStatus(StrEnum):

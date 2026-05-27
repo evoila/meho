@@ -205,14 +205,26 @@ def _highlight_query_terms(snippet: str, query: str) -> str:
 
     if not query.strip():
         return Markup(escape(snippet))
-    terms = [t for t in query.split() if t]
     escaped_snippet = str(escape(snippet))
+    # Match against the *escaped* snippet, so the alternation branches
+    # must also be built from escaped terms — otherwise a term containing
+    # ``<``/``&``/``>`` (e.g. ``<b>``) never matches because the snippet
+    # now holds ``&lt;b&gt;``. Dedupe + sort by descending length so the
+    # alternation prefers the longest match (``python`` wins over ``py``;
+    # leftmost-alternation would otherwise mark only the shorter prefix).
+    escaped_terms = sorted(
+        {str(escape(t)) for t in query.split() if t},
+        key=len,
+        reverse=True,
+    )
     pattern = re.compile(
-        "|".join(re.escape(t) for t in terms),
+        "|".join(re.escape(t) for t in escaped_terms),
         re.IGNORECASE,
     )
+    # ``m.group(0)`` is already-escaped text (a slice of escaped_snippet),
+    # so it is inserted verbatim — re-escaping here would double-encode.
     result = pattern.sub(
-        lambda m: f'<mark class="kb-term">{escape(m.group(0))}</mark>',
+        lambda m: f'<mark class="kb-term">{m.group(0)}</mark>',
         escaped_snippet,
     )
     return Markup(result)

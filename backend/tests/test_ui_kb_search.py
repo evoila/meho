@@ -745,3 +745,64 @@ def test_highlight_query_terms_no_double_mark() -> None:
     assert "<mark" in result_str
     # Opening and closing tag counts must be equal (no nesting).
     assert result_str.count("<mark") == result_str.count("</mark>")
+
+
+# ---------------------------------------------------------------------------
+# Blocker — render.py: raw HTML in the entry body is escaped, not rendered
+# ---------------------------------------------------------------------------
+
+
+def test_render_markdown_escapes_raw_html_body() -> None:
+    """``render_markdown`` must escape raw HTML in the kb body (html=False).
+
+    The ``commonmark`` preset enables ``html`` (CommonMark permits raw HTML
+    passthrough); ``_build_md`` overrides it to ``html=False``. A body
+    carrying ``<script>`` / ``<img onerror>`` must render as inert escaped
+    text, never as live tags — otherwise a stored kb entry is a stored-XSS
+    vector on the operator console.
+    """
+    from meho_backplane.ui.routes.kb.render import render_markdown
+
+    rendered = str(
+        render_markdown(
+            "Intro\n\n<script>alert(document.cookie)</script>\n\n"
+            '<img src=x onerror="alert(1)"> and <a href="javascript:alert(1)">x</a>'
+        )
+    )
+    assert "<script>" not in rendered
+    assert "<img" not in rendered
+    assert "onerror" not in rendered or "&lt;img" in rendered
+    # The payload survives as escaped text so the content is still visible.
+    assert "&lt;script&gt;" in rendered
+    # Legitimate Markdown still renders (sanity: the escape didn't nuke output).
+    assert "<p>" in rendered
+
+
+def test_highlight_query_terms_prefers_longest_term() -> None:
+    """Overlapping terms: the longest alternative wins (``python`` over ``py``).
+
+    Leftmost-alternation would mark only ``py`` inside ``python``; terms are
+    deduped + sorted by descending length so the full word is highlighted.
+    """
+    from meho_backplane.ui.routes.kb.routes import _highlight_query_terms
+
+    result = str(_highlight_query_terms("learn python and py basics", "py python"))
+    assert '<mark class="kb-term">python</mark>' in result
+    # The standalone ``py`` token is also marked, but ``python`` is not
+    # left as a bare ``py``+``thon`` fragment.
+    assert "py</mark>thon" not in result
+
+
+def test_highlight_query_terms_marks_special_char_term() -> None:
+    """A query term containing HTML metacharacters still highlights.
+
+    The snippet is escaped before matching, so the alternation branches are
+    built from escaped terms — a term like ``<b>`` matches ``&lt;b&gt;`` in
+    the escaped snippet and is wrapped without double-encoding.
+    """
+    from meho_backplane.ui.routes.kb.routes import _highlight_query_terms
+
+    result = str(_highlight_query_terms("the <b> tag is bold", "<b>"))
+    assert '<mark class="kb-term">&lt;b&gt;</mark>' in result
+    # No double-encoding of the ampersand entity.
+    assert "&amp;lt;" not in result

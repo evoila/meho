@@ -3,8 +3,8 @@
 
 """Add a GIN index on ``documents.metadata`` for JSONB containment.
 
-Revision ID: 0032
-Revises: 0031
+Revision ID: 0033
+Revises: 0032
 Create Date: 2026-05-27
 
 Substrate-side migration for Task #1177 (G4.4-T1) under Initiative
@@ -93,8 +93,8 @@ from collections.abc import Sequence
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0032"
-down_revision: str | None = "0031"
+revision: str = "0033"
+down_revision: str | None = "0032"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -137,7 +137,7 @@ reaches the substrate as `kind="kb-entry"` plus
   with `plainto_tsquery`. GIN expression index `documents_body_fts_idx`
   (migration `0003`).
 - **JSONB containment** — `documents.metadata @>` (containment
-  operator); GIN index `documents_metadata_gin_idx` (migration `0032`,
+  operator); GIN index `documents_metadata_gin_idx` (migration `0033`,
   default `jsonb_ops` opclass) backs the lookup.
 - **fastembed** — the `EmbeddingService` wraps a `BAAI/bge-small-en-v1.5`
   ONNX model (384-dim).

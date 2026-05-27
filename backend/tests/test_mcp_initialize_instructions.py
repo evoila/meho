@@ -24,6 +24,7 @@ rows whose preamble we expect to surface on ``initialize``.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -336,3 +337,160 @@ async def test_initialize_against_default_tenant_carries_no_consumer_tokens(
             "default tenant -- the seed must contain no references to a specific "
             "consumer's operational discipline or repo identifiers"
         )
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T13 #1202 — initialize protocolVersion mismatch observability
+# ---------------------------------------------------------------------------
+
+
+def _initialize_envelope_with_version(version: str) -> dict[str, object]:
+    """Build a valid ``initialize`` request pinning a specific protocol version.
+
+    Mirrors :func:`_initialize_envelope` but lets the caller force the
+    client-side ``protocolVersion`` to an older (or arbitrary) revision
+    so the mismatch path is exercised end-to-end through the MCP wire
+    surface.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": version,
+            "capabilities": {},
+            "clientInfo": {"name": "test-harness", "version": "0.0.0"},
+        },
+    }
+
+
+def _parse_structlog_events(
+    captured_stdout: str,
+    *,
+    event_name: str,
+) -> list[dict[str, object]]:
+    """Filter structlog JSON-lines stdout for events matching ``event_name``.
+
+    The chassis configures structlog with :class:`PrintLoggerFactory`
+    rendering each event as a single JSON object on stdout. The test
+    surface for those events is ``capfd``'s OS-fd-level stdout
+    capture; this helper turns that raw text into a list of decoded
+    event dicts so the assertions can read attributes directly.
+    Lines that aren't valid JSON (rare interleaved warnings from
+    non-structlog sources) are silently skipped — they cannot match
+    by event name anyway, and including them would only widen the
+    parser's failure modes.
+    """
+    matches: list[dict[str, object]] = []
+    for line in captured_stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("event") == event_name:
+            matches.append(event)
+    return matches
+
+
+@pytest.mark.asyncio
+async def test_initialize_logs_warning_on_protocol_version_mismatch(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Older client ``protocolVersion`` emits the mismatch WARNING + unchanged response.
+
+    Acceptance criterion (G0.14-T13 #1202): an MCP ``initialize`` call
+    with ``protocolVersion: "2025-03-26"`` (any non-``PROTOCOL_VERSION``
+    value) emits a single ``mcp_initialize_protocol_version_mismatch``
+    WARNING log line carrying ``client_protocol_version`` +
+    ``server_protocol_version``, and the response still returns
+    HTTP 200 with ``InitializeResponse.protocolVersion == PROTOCOL_VERSION``
+    (behaviour unchanged).
+
+    Capture surface: the chassis configures structlog with
+    :class:`PrintLoggerFactory`, so structured events are written to
+    stdout at the OS-fd level rather than through Python's ``logging``
+    module. ``capfd`` is the matching capture surface — same pattern
+    the existing ``test_initialize_logs_warning_on_dropped_slugs``
+    test uses on this file for the ``mcp_preamble_over_budget``
+    event. ``capture_logs()`` from ``structlog.testing`` only
+    intercepts when the project's logger factory is the testing
+    factory, which MEHO doesn't install (PrintLogger keeps
+    production parity for the test suite's wire-format assertions).
+    """
+    client, op = client_with_operator
+    older_revision = "2025-03-26"
+    assert older_revision != PROTOCOL_VERSION, (
+        "test premise broken: pinned client revision matches server"
+    )
+
+    response = post_mcp(
+        client,
+        _initialize_envelope_with_version(older_revision),
+    )
+
+    # Behaviour unchanged: HTTP 200, response echoes the server version.
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" not in body
+    assert body["result"]["protocolVersion"] == PROTOCOL_VERSION
+
+    # Observability: parse PrintLogger's JSON-lines stdout for the
+    # mismatch event. Each structlog event is a single JSON document
+    # per line — scan for the expected event name + assert payload
+    # shape.
+    captured = capfd.readouterr().out
+    mismatch_events = _parse_structlog_events(
+        captured,
+        event_name="mcp_initialize_protocol_version_mismatch",
+    )
+    assert len(mismatch_events) == 1, (
+        "expected exactly one mcp_initialize_protocol_version_mismatch event; "
+        f"got captured stdout={captured!r}"
+    )
+    event = mismatch_events[0]
+    assert event["level"] == "warning"
+    assert event["client_protocol_version"] == older_revision
+    assert event["server_protocol_version"] == PROTOCOL_VERSION
+    assert event["operator_sub"] == op.sub
+
+
+@pytest.mark.asyncio
+async def test_initialize_does_not_log_mismatch_when_versions_match(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Matching client ``protocolVersion`` → no mismatch warning.
+
+    Negative complement of the mismatch test: the WARNING fires only
+    on mismatch, so clients sending the server's pinned version (the
+    typical case) leave the log stream clean. Important for log-volume
+    discipline: a noisy "every initialize logs a warning" surface
+    would train operators to ignore the event.
+    """
+    client, _op = client_with_operator
+
+    response = post_mcp(
+        client,
+        _initialize_envelope_with_version(PROTOCOL_VERSION),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" not in body
+    assert body["result"]["protocolVersion"] == PROTOCOL_VERSION
+
+    captured = capfd.readouterr().out
+    mismatch_events = _parse_structlog_events(
+        captured,
+        event_name="mcp_initialize_protocol_version_mismatch",
+    )
+    assert mismatch_events == [], (
+        "matching client protocolVersion must not emit the mismatch warning; "
+        f"got events={mismatch_events!r}"
+    )

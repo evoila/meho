@@ -211,6 +211,7 @@ def test_ready_with_empty_registry_returns_503(client: TestClient) -> None:
         "ui_surface",
         "audit_replay",
         "approval_queue",
+        "mcp",
     }
 
 
@@ -236,6 +237,7 @@ def test_ready_with_all_passing_probes_returns_200(client: TestClient) -> None:
         "ui_surface",
         "audit_replay",
         "approval_queue",
+        "mcp",
     }
 
 
@@ -318,3 +320,28 @@ def test_ready_features_block_reflects_wired_keycloak_admin(
     approval_queue = body["features"]["approval_queue"]
     assert approval_queue["configured"] is True
     assert approval_queue["depends_on"] == "agent_runtime"
+
+
+def test_ready_features_block_carries_mcp_protocol_version(
+    client: TestClient,
+) -> None:
+    """/ready surfaces the server-pinned MCP protocol revision.
+
+    Acceptance criterion (G0.14-T13 #1202): the ``features.mcp`` block
+    on ``/ready`` carries ``protocol_version`` matching the build-time
+    :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION` constant.
+    Operators get a single unauthenticated GET that answers "which MCP
+    revision will this server pin in handshake responses?". The
+    matching :class:`~meho_backplane.api.v1.health.HealthResponse`
+    field (``mcp_protocol_version``) carries the same value on the
+    authenticated surface so both views stay consistent.
+    """
+    from meho_backplane.mcp.schemas import PROTOCOL_VERSION
+
+    response = client.get("/ready")
+
+    body = response.json()
+    mcp = body["features"]["mcp"]
+    assert mcp["configured"] is True
+    assert mcp["protocol_version"] == PROTOCOL_VERSION
+    assert mcp["missing_env"] == []

@@ -50,6 +50,7 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.migrations import db_migration_probe
+from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.mcp.server import mcp_session_id_capture_mode
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import dispatch
@@ -139,6 +140,16 @@ class HealthResponse(BaseModel):
     the same
     :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
     helper so both surfaces stay consistent).
+
+    ``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's
+    pinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.
+    Mirrors the ``mcp_session_id_capture`` precedent: single-field
+    operator visibility into the MCP layer's runtime state. The
+    matching ``mcp.protocol_version`` entry on ``/ready``'s features
+    block (see :func:`meho_backplane.features.build_features_block`)
+    surfaces the same value on the unauthenticated readiness probe so
+    a deploy operator can answer "which MCP revision will this server
+    negotiate with my clients?" without an authenticated GET.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -147,6 +158,7 @@ class HealthResponse(BaseModel):
     vault: VaultStatus
     db: DbStatus
     mcp_session_id_capture: str
+    mcp_protocol_version: str = PROTOCOL_VERSION
 
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
@@ -282,6 +294,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         vault=vault_status,
         db=DbStatus(migrated=db_probe_result.ok),
         mcp_session_id_capture=mcp_session_id_capture_mode(),
+        mcp_protocol_version=PROTOCOL_VERSION,
     )
 
 

@@ -75,6 +75,42 @@ from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
 __all__ = ["MemoryService"]
 
 
+def _metadata_filters_for_scope(scope: MemoryScope, operator: Operator) -> dict[str, Any] | None:
+    """Build the ``metadata_filters`` dict for a single-scope recall.
+
+    G4.4-T2 (#1179). The substrate's metadata-filter primitive
+    (G4.4-T1) accepts a flat ``{key: scalar}`` dict and translates it
+    to ``documents.doc_metadata @> :jsonb`` containment. The memory
+    RBAC predicate for user-flavoured scopes is exactly
+    ``doc_metadata.user_sub == operator.sub`` -- a one-key
+    containment, which is the substrate's sweet spot.
+
+    Returns:
+        * ``{"user_sub": operator.sub}`` when *scope* is in
+          :data:`USER_SCOPED`. The substrate filters rows whose stored
+          ``user_sub`` doesn't match the operator before the
+          50-candidate-per-signal budget is allocated.
+        * ``None`` for tenant- / target-flavoured scopes. Within-tenant
+          RBAC for those scopes is "any operator" so there is no
+          per-row predicate to push down; the substrate's ``tenant_id``
+          predicate already enforces the tenant boundary upstream.
+
+    The helper deliberately does **not** try to push ``expires_at``
+    or ``target_name`` down:
+
+    * ``expires_at`` is a range predicate (``> now()``) not a
+      containment one; the T1 substrate cannot express it (see the
+      docstring on :meth:`MemoryService._hit_to_search_result`).
+    * ``target_name`` is not currently part of ``search_memories``'s
+      signature -- the caller picks a scope, not a target. If the
+      MCP / route layer adds a target-name kwarg in a future task,
+      the helper extends naturally with another key in the dict.
+    """
+    if scope in USER_SCOPED:
+        return {"user_sub": operator.sub}
+    return None
+
+
 class MemoryService:
     """Tenant-scoped memory service over the ``documents`` table.
 
@@ -686,25 +722,57 @@ class MemoryService:
     ) -> list[MemoryEntrySearchHit]:
         """Hybrid BM25 + cosine search over the operator's visible memories.
 
-        Wraps :func:`~meho_backplane.retrieval.retriever.retrieve`
-        with ``source='memory'`` and (optional) ``kind=<scope>``;
-        post-filters the ranked hits through the RBAC matrix on
-        ``user_sub`` so an operator's search never surfaces another
-        operator's user-scoped row even when retrieval ranked it
-        highly. Expired entries are filtered out (same contract as
-        :meth:`list_memories` with ``include_expired=False``).
+        Pushes the RBAC ``user_sub`` predicate down into the substrate's
+        ``metadata_filters`` (G4.4-T1 / #1177) so the SQL layer
+        eliminates rows the operator cannot read *before* the
+        50-candidate-per-signal budget is allocated. A tenant with many
+        archived (RBAC-invisible) memories now ranks against only the
+        rows the operator can see; pre-migration the budget was burned
+        on invisible rows and a legitimate match deeper in the corpus
+        could fall off the end.
+
+        Push-down strategy:
+
+        * **Scope-given, user-flavoured** (``USER`` / ``USER_TENANT`` /
+          ``USER_TARGET``): one :func:`retrieve` call with
+          ``metadata_filters={"user_sub": operator.sub}``. RBAC fully
+          pushed down.
+        * **Scope-given, tenant/target-flavoured** (``TENANT`` /
+          ``TARGET``): one :func:`retrieve` call with no metadata
+          filter. The within-tenant RBAC for these scopes is "any
+          operator allowed" and the substrate's ``tenant_id`` predicate
+          already enforces the tenant boundary.
+        * **Scope-omitted (cross-scope)**: fan out one
+          :func:`retrieve` call per visible kind, each with its
+          kind-appropriate ``metadata_filters`` dict. Per-kind
+          candidate sets are merged by ``fused_score`` desc and
+          truncated to ``limit``. Cross-scope determinism is
+          preserved because each per-kind retrieve fuses its own
+          BM25 + cosine candidates with RRF first; the cross-kind
+          merge then operates on the same per-call scalar score.
+
+        Expiry (``expires_at > now()``) is a range predicate, not a
+        containment one -- the substrate's ``@>`` cannot express it,
+        so expired rows remain a post-retrieval filter here. The
+        substrate-minimalism postulate forbids expanding T1's
+        scalar-containment shape to support range predicates for one
+        consumer (see G4.4 Initiative #1178 out-of-scope).
         """
         if limit < 1:
             return []
-        kind_filter = kind_for_scope(scope) if scope is not None else None
         retrieval_limit = max(limit * 4, 50)
-        hits = await retrieve(
-            tenant_id=operator.tenant_id,
-            query=query,
-            source=MEMORY_SOURCE,
-            kind=kind_filter,
-            limit=retrieval_limit,
-        )
+        if scope is not None:
+            hits = await retrieve(
+                tenant_id=operator.tenant_id,
+                query=query,
+                source=MEMORY_SOURCE,
+                kind=kind_for_scope(scope),
+                limit=retrieval_limit,
+                metadata_filters=_metadata_filters_for_scope(scope, operator),
+            )
+        else:
+            hits = await self._retrieve_cross_scope(operator, query, retrieval_limit)
+
         results: list[MemoryEntrySearchHit] = []
         for hit in hits:
             converted = self._hit_to_search_result(operator, hit)
@@ -714,6 +782,68 @@ class MemoryService:
             if len(results) >= limit:
                 break
         return results
+
+    async def _retrieve_cross_scope(
+        self,
+        operator: Operator,
+        query: str,
+        retrieval_limit: int,
+    ) -> list[RetrievalHit]:
+        """Fan out :func:`retrieve` per visible kind and merge by fused_score.
+
+        Cross-scope search (``scope=None``) cannot express RBAC as a
+        single ``metadata_filters`` dict because the predicate is
+        conditional on ``kind`` -- user-flavoured rows gate on
+        ``user_sub`` while tenant/target-flavoured rows don't. One
+        per-kind call lets each kind carry its own metadata filter and
+        keeps the substrate's containment contract honest (no
+        OR-with-NULL gymnastics in SQL).
+
+        The per-kind candidate sets are merged on ``fused_score``
+        descending and truncated to ``retrieval_limit``. RRF is
+        rank-based, so per-call scores live in roughly the same
+        ``[0, 2/(RRF_K+1)]`` envelope regardless of which kind they
+        came from; the cross-kind sort is therefore total-order on a
+        comparable scalar without renormalisation. Determinism holds:
+        the operator-shaped query plus the same corpus yields the
+        same ranked list across runs because each per-kind retrieve
+        is deterministic and the merge sort is stable.
+
+        Cost: 2 SQL round-trips per kind (BM25 + cosine) plus one
+        hydrate per kind. For the all-kinds case this is 5 retrieves
+        instead of 1 -- the trade is correctness (no
+        candidate-budget burn on RBAC-invisible rows) for a fixed
+        constant-factor query-volume increase that's bounded by the
+        five-scope shape.
+        """
+        # Schedule the per-kind retrieves serially rather than via
+        # ``asyncio.gather``. They share the underlying engine /
+        # connection pool, and the substrate already issues two SQL
+        # round-trips per call; fanning out concurrently would risk
+        # pool exhaustion on tenants under load for a workload that's
+        # already off the hot path (search_memories is invoked by
+        # MCP tools, not the request hot path).
+        all_hits: list[RetrievalHit] = []
+        for scope_value in MemoryScope:
+            kind = kind_for_scope(scope_value)
+            metadata_filters = _metadata_filters_for_scope(scope_value, operator)
+            hits = await retrieve(
+                tenant_id=operator.tenant_id,
+                query=query,
+                source=MEMORY_SOURCE,
+                kind=kind,
+                limit=retrieval_limit,
+                metadata_filters=metadata_filters,
+            )
+            all_hits.extend(hits)
+        # Stable sort on ``fused_score`` desc; per-kind RRF scores
+        # share the same RRF_K envelope (rank-based, scale-invariant)
+        # so cross-kind comparison is well-defined without
+        # renormalisation. Truncate to ``retrieval_limit`` so the
+        # downstream expiry post-filter has the same candidate pool
+        # shape as the single-call path.
+        all_hits.sort(key=lambda hit: hit.fused_score, reverse=True)
+        return all_hits[:retrieval_limit]
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -835,8 +965,26 @@ class MemoryService:
         * the hit's ``kind`` is not a recognised memory kind (defensive
           drop with a structured warn log -- the substrate's kind
           filter should have prevented this),
-        * the RBAC matrix denies the operator the read,
         * the stored ``expires_at`` is in the past.
+
+        RBAC is **not** rechecked here -- :meth:`search_memories`
+        pushes the ``user_sub`` predicate into the substrate via
+        :func:`retrieve`'s ``metadata_filters``, so the rows that
+        arrive are already RBAC-scoped at the SQL boundary (G4.4-T2 /
+        #1179). The in-process :func:`metadata_str` /
+        :func:`metadata_datetime` calls below are field-extraction
+        only -- they project the hit into the typed
+        :class:`MemoryEntry` shape, they do not gate the result.
+
+        ``expires_at`` stays as a post-retrieval filter because the
+        T1 substrate's metadata-filter primitive expresses scalar
+        containment (``doc_metadata @> :jsonb``) and cannot express
+        a range predicate (``expires_at > now()``). The
+        substrate-minimalism postulate forbids broadening T1's shape
+        for one consumer; if a future Initiative measures the
+        expired-row budget burn as a real problem, the fix would
+        be a substrate-side range-predicate primitive, not a memory-
+        specific escape hatch.
 
         Otherwise returns the ranked search hit with the retrieval
         substrate's per-signal scores attached. ``created_at`` /
@@ -855,15 +1003,10 @@ class MemoryService:
                 kind=hit.kind,
             )
             return None
+        # Field extraction for the typed entry projection -- not a
+        # filter. RBAC is handled at the substrate boundary above.
         user_sub = metadata_str(hit.doc_metadata, "user_sub")
         target_name = metadata_str(hit.doc_metadata, "target_name")
-        if not self._rbac.can_read(
-            operator,
-            hit_scope,
-            user_sub=user_sub,
-            target_name=target_name,
-        ):
-            return None
         expires_at = metadata_datetime(hit.doc_metadata, "expires_at")
         if expires_at is not None and is_expired(expires_at):
             return None

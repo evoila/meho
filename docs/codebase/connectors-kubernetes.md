@@ -245,6 +245,86 @@ conditional on a versioned entry being present.
    ones pass through — writes the audit row, fires the broadcast event,
    and wraps the result in `OperationResult.status="ok"`.
 
+### Topology discovery (`discover_topology`)
+
+G0.14-T12 (#1201) lands the first
+[`Connector.discover_topology`](../../backend/src/meho_backplane/connectors/base.py)
+override against a shipped connector. The populator emits the minimum
+the v0.6.0 release-body amendment promised: cluster + namespaces +
+nodes, with `belongs-to` edges from each namespace and each cluster
+node to the target. The
+[refresh service](../../backend/src/meho_backplane/topology/refresh.py)
+calls the override on demand
+(`POST /api/v1/topology/refresh/{target_name}`) and on the per-tenant
+scheduled cadence, diffs the snapshot against `graph_node` +
+`graph_edge` rows for `(tenant_id, target_id)`, and applies inserts /
+updates / soft-deletes in one transaction.
+
+**What lands on the graph (v0.7-shape)**
+
+| `NodeHint.kind` | Count             | Properties carried                              |
+| --------------- | ----------------- | ----------------------------------------------- |
+| `target`        | exactly 1         | `git_version` / `major` / `minor` / `platform` from `VersionApi.get_code()` (same payload `k8s.about` returns) |
+| `namespace`     | N (≥ 4 on k3s)    | Mirrors [`namespace_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `age_seconds` / `labels` |
+| `node`          | M (≥ 1)           | Mirrors [`node_row`](../../backend/src/meho_backplane/connectors/kubernetes/ops_core.py): `status` / `roles` / `version` (kubelet) / `kernel` / `os` / `internal_ip` / `taints` / `age_seconds` / `labels` |
+
+`EdgeHint` rows: one `belongs-to` from every namespace to the target,
+one `belongs-to` from every cluster node to the target. `cluster` is
+**not** in the v0.2 [`NodeKind` enum](../../backend/src/meho_backplane/connectors/schemas.py)
+(the enum is closed per the module docstring); the cluster manifests
+as a `target`-kinded node so the refresh service's natural-key
+contract holds without enum changes (which are a G9.2 concern).
+
+**Explicit out-of-scope (sibling Tasks)**
+
+- **Pods** — `CoreV1Api.list_pod_for_all_namespaces()` or N
+  `list_namespaced_pod(namespace)` calls. A 100-namespace cluster
+  would mean 100 list calls per refresh tick; the v0.7.x deploy
+  hasn't surfaced refresh-cost data yet.
+- **Services** — same scaling concern as pods.
+- **Ingresses** — same.
+- **Deployments** — same.
+- **Volumes** (`PersistentVolume` cluster-scope + `PersistentVolumeClaim`
+  namespaced) — same.
+
+When the cost picture and operator demand justify them, file sibling
+Tasks against [Initiative #1139](https://github.com/evoila/meho/issues/1139)
+or a future G9.4 Initiative.
+
+**Operator threading**
+
+The [`Connector.discover_topology(self, target)`](../../backend/src/meho_backplane/connectors/base.py)
+ABC signature stays unchanged at v0.7 (out of scope for T12). The K8s
+override extends the signature with a keyword-only `operator: Operator
+| None = None` parameter; the refresh service introspects the bound
+method via [`inspect.signature`](https://docs.python.org/3/library/inspect.html#inspect.signature)
+and forwards the per-tenant system operator the scheduler synthesises
+([`_system_operator`](../../backend/src/meho_backplane/topology/scheduler.py))
+when the keyword is declared. Connectors whose override doesn't
+declare `operator` (the inherited no-op default, plus any future
+override that doesn't need credentials) are invoked verbatim. The
+forwarded operator flows through
+[`_get_api_client(target, operator)`](../../backend/src/meho_backplane/connectors/kubernetes/connector.py)
+so the operator-context Vault → kubeconfig chain reads under the
+synthesised identity (the same chain `k8s.about` and every other
+operator-aware op already use).
+
+**Where the helpers live**
+
+[`backend/src/meho_backplane/connectors/kubernetes/_topology.py`](../../backend/src/meho_backplane/connectors/kubernetes/_topology.py)
+exposes pure functions (`build_target_node_hint`,
+`namespace_node_hint`, `node_node_hint`,
+`namespace_to_target_edge`, `node_to_target_edge`,
+`build_topology_hints`) that re-use `namespace_row` / `node_row` so
+the populator and the inventory ops share their wire shape. The
+unit suite at
+[`backend/tests/test_connectors_k8s_topology.py`](../../backend/tests/test_connectors_k8s_topology.py)
+drives synthetic `V1Namespace` / `V1Node` / `VersionInfo` fixtures;
+the k3s testcontainer slice in
+[`backend/tests/integration/test_connectors_k8s_k3d.py`](../../backend/tests/integration/test_connectors_k8s_k3d.py)
+covers the live API round-trip plus the
+`(kind, name)` idempotency property the refresh service depends on.
+
 ### `k8s.ls` three-way dispatch
 
 The `k8s.ls` handler is a thin path parser:
@@ -322,6 +402,10 @@ just `len(rows)` because nothing reduces.
 
 ## References
 
+- Topology populator: [#1201 G0.14-T12](https://github.com/evoila/meho/issues/1201)
+  -- `KubernetesConnector.discover_topology` (cluster + namespaces +
+  nodes); closes the v0.6.0 release-body amendment promise on
+  `claude-rdc-hetzner-dc#697` signal 13.
 - Parent Initiative: [#320 G3.2](https://github.com/evoila/meho/issues/320)
   -- `k8s-1.x` typed connector (library: `kubernetes_asyncio`).
 - Predecessor Tasks:

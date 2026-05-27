@@ -644,3 +644,86 @@ async def test_event_list_against_k3s_field_selector_filters(
     assert isinstance(result["rows"], list)
     for row in result["rows"]:
         assert row["type"] == "Warning"
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T12 (#1201) discover_topology populator -- live k3s exercise.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discover_topology_against_k3s_returns_cluster_namespaces_and_nodes(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``discover_topology`` over live k3s emits target + namespace + node hints.
+
+    The populator scope is deliberately minimal: 1 ``target`` NodeHint
+    for the cluster (with the server version on properties), N
+    ``namespace`` NodeHints, M ``node`` NodeHints, and ``belongs-to``
+    edges from every namespace and every cluster node to the target.
+    Pods / services / ingresses / deployments / volumes are out of
+    scope at v0.7 — sibling Tasks under Initiative #1139 land them
+    when refresh-cost data justifies the spend.
+    """
+    from meho_backplane.connectors.schemas import TopologyHints
+
+    connector, target = k3s_connector
+    hints = await connector.discover_topology(target, operator=_make_k3d_operator())
+
+    assert isinstance(hints, TopologyHints)
+
+    target_hints = [n for n in hints.nodes if n.kind == "target"]
+    namespace_hints = [n for n in hints.nodes if n.kind == "namespace"]
+    node_hints = [n for n in hints.nodes if n.kind == "node"]
+
+    # Exactly one cluster anchor.
+    assert len(target_hints) == 1
+    assert target_hints[0].name == target.name
+    # Server version surfaces verbatim on the target node's properties
+    # so an operator inspecting the graph can identify the cluster.
+    assert target_hints[0].properties["git_version"].startswith("v")
+
+    # k3s ships ``default`` / ``kube-system`` / ``kube-public`` /
+    # ``kube-node-lease`` from boot.
+    namespace_names = {n.name for n in namespace_hints}
+    assert "default" in namespace_names
+    assert "kube-system" in namespace_names
+    assert len(namespace_hints) >= 4
+
+    # Single-node default k3s cluster.
+    assert len(node_hints) >= 1
+
+    # Every namespace and every cluster node carries a belongs-to edge
+    # to the target.
+    namespace_edges = [
+        e for e in hints.edges if e.from_kind == "namespace" and e.to_kind == "target"
+    ]
+    node_edges = [e for e in hints.edges if e.from_kind == "node" and e.to_kind == "target"]
+    assert {e.from_name for e in namespace_edges} == namespace_names
+    assert {e.from_name for e in node_edges} == {n.name for n in node_hints}
+    assert all(e.kind == "belongs-to" for e in hints.edges)
+    assert all(e.to_name == target.name for e in hints.edges)
+
+
+@pytest.mark.asyncio
+async def test_discover_topology_against_k3s_is_idempotent_when_recalled(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """Two back-to-back populator calls return the same node/edge keys.
+
+    The refresh service's diff/apply sweep depends on stable
+    ``(kind, name)`` natural keys across snapshots; this test pins
+    that against the live API server (creation_timestamp-derived
+    ``age_seconds`` properties drift but the key tuples don't).
+    """
+    connector, target = k3s_connector
+    snap1 = await connector.discover_topology(target, operator=_make_k3d_operator())
+    snap2 = await connector.discover_topology(target, operator=_make_k3d_operator())
+
+    keys1 = {(n.kind, n.name) for n in snap1.nodes}
+    keys2 = {(n.kind, n.name) for n in snap2.nodes}
+    assert keys1 == keys2
+
+    edge_keys1 = {(e.from_kind, e.from_name, e.to_kind, e.to_name, e.kind) for e in snap1.edges}
+    edge_keys2 = {(e.from_kind, e.from_name, e.to_kind, e.to_name, e.kind) for e in snap2.edges}
+    assert edge_keys1 == edge_keys2

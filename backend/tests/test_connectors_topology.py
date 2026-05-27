@@ -215,11 +215,17 @@ def test_overridden_list_candidates_dispatches_via_abc() -> None:
 
 
 def test_shipped_v1_subclasses_inherit_topology_defaults() -> None:
-    # Backward-compat guard: VaultConnector (#244) and KubernetesConnector
-    # skeleton (#321) only set ``product`` and override fingerprint/probe/
-    # execute. They must remain importable AND inherit the new
-    # ``discover_topology`` + ``list_candidates`` defaults without code
-    # change.
+    # Backward-compat guard: VaultConnector (#244) inherits the no-op
+    # default for both ``discover_topology`` and ``list_candidates``;
+    # ``KubernetesConnector`` (#321) inherits the ``list_candidates``
+    # default. The K8s ``discover_topology`` override landed in
+    # G0.14-T12 (#1201), so the "no override yet" invariant moved from
+    # tested-fact to deleted line — see the populator at
+    # :meth:`meho_backplane.connectors.kubernetes.connector.KubernetesConnector.discover_topology`
+    # and the live coverage in ``test_connectors_k8s_topology.py``
+    # (unit, synthetic V1Namespace/V1Node fixtures) +
+    # ``tests/integration/test_connectors_k8s_k3d.py`` (k3s
+    # testcontainer round-trip).
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.vault.connector import VaultConnector
 
@@ -228,7 +234,6 @@ def test_shipped_v1_subclasses_inherit_topology_defaults() -> None:
     # touch settings + Vault).
     assert VaultConnector.discover_topology is Connector.discover_topology
     assert VaultConnector.list_candidates is Connector.list_candidates
-    assert KubernetesConnector.discover_topology is Connector.discover_topology
     assert KubernetesConnector.list_candidates is Connector.list_candidates
 
 

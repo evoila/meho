@@ -84,12 +84,19 @@ __all__ = [
     "CapabilityMismatchError",
     "EgressViolationError",
     "ModelResolver",
+    "OpenAICompatVendor",
     "ResolverError",
     "TenantModelPolicy",
     "TierMapping",
     "anthropic_backend_builder",
     "anthropic_capabilities",
     "build_resolver",
+    "default_openai_backend_builder",
+    "ollama_chat_profile",
+    "openai_chat_profile",
+    "openai_compat_backend_builder",
+    "openai_compat_capabilities",
+    "vllm_chat_profile",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -535,3 +542,316 @@ def default_anthropic_policy() -> TenantModelPolicy:
 # call-site triple of :func:`build_resolver`. Keeping it underscore-
 # prefixed signals "stable but advanced".
 _ = _BackendRegistration  # silence "unused" linters; documented surface.
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible backend (G11.5-T3 #1077)
+# ---------------------------------------------------------------------------
+#
+# The OpenAI-compatible surface covers three deployment shapes the
+# Initiative #806 §C4 calls out: **OpenAI SaaS** (``api.openai.com``),
+# **vLLM** on-prem (a Python inference server exposing the OpenAI
+# Chat Completions wire format under ``/v1``), and **Ollama** local
+# (the same wire format with quirks documented at
+# https://docs.vllm.ai/en/latest/features/tool_calling/ and
+# https://github.com/ollama/ollama/blob/main/docs/openai.md).
+# All three share the *transport* (OpenAI Chat Completions) but
+# differ on which sub-features the underlying engine actually
+# implements; pydantic_ai exposes those quirks as
+# :class:`~pydantic_ai.profiles.openai.OpenAIModelProfile` fields.
+#
+# The shape mirrors :func:`anthropic_backend_builder` — a zero-arg
+# closure the resolver registers — but with an explicit constructor
+# (:func:`openai_compat_backend_builder`) since a multi-tenant deploy
+# typically registers *several* OpenAI-compat backends (one per
+# on-prem endpoint, one for OpenAI SaaS), each with its own
+# ``base_url`` / ``api_key`` / ``model_id``. The settings-driven
+# default (:func:`default_openai_backend_builder`) reproduces the
+# single-tenant convenience the Anthropic builder offers.
+
+
+class OpenAICompatVendor(StrEnum):
+    """The OpenAI-compatible deployment shapes the builder distinguishes.
+
+    Each enum member picks a pre-baked :class:`OpenAIModelProfile` whose
+    flags reflect the vendor's documented quirks (see module docstring
+    above). Adding a vendor is two lines: a new enum member and a
+    matching ``_vendor_profile_for(...)`` branch. The set is deliberately
+    closed (StrEnum) so a tenant policy listing an unknown vendor fails
+    at config-load time rather than mid-loop.
+
+    * :attr:`OPENAI` — OpenAI SaaS (``api.openai.com``). Full feature
+      surface, including strict tool definitions and multiple system
+      messages.
+    * :attr:`VLLM` — vLLM on-prem. Tool calling supported (see vLLM
+      docs §"Tool calling"), but the engine does *not* honour OpenAI's
+      ``strict: true`` tool-definition contract — the inference server
+      treats the schema as advisory. Surfaced via
+      ``openai_supports_strict_tool_definition=False`` so the loop
+      will not send the strict flag (which vLLM would silently ignore,
+      letting the model emit a non-conforming call).
+    * :attr:`OLLAMA` — Ollama local. Same wire format, plus two extra
+      restrictions: no strict tool defs (per Ollama's OpenAI-compat
+      docs), and the OpenAI ``messages[]`` shape with *multiple*
+      ``role=system`` entries is collapsed to a single one (the
+      framework prepends them with newlines instead of sending them
+      as distinct turns), which surfaces here as
+      ``openai_chat_supports_multiple_system_messages=False``.
+    """
+
+    OPENAI = "openai"
+    VLLM = "vllm"
+    OLLAMA = "ollama"
+
+
+def openai_chat_profile() -> OpenAIModelProfile:
+    """Return the capability profile for OpenAI SaaS Chat Completions.
+
+    Bit-equivalent to pydantic_ai's bundled defaults at the OpenAI
+    Chat Completions surface, returned explicitly so the three vendor
+    profiles read at the same level of abstraction and a future API
+    change at the framework level (a default flip on a flag) surfaces
+    as a diff in this file rather than a silent behaviour change at
+    runtime. Constructing the profile inside a function (vs. a module
+    constant) keeps the lazy-import discipline: the import only fires
+    when an OpenAI-compat backend is actually registered.
+    """
+    from pydantic_ai.profiles.openai import OpenAIModelProfile
+
+    return OpenAIModelProfile(
+        openai_supports_strict_tool_definition=True,
+        openai_chat_supports_multiple_system_messages=True,
+        json_schema_transformer=None,
+    )
+
+
+def vllm_chat_profile() -> OpenAIModelProfile:
+    """Return the capability profile for vLLM behind the OpenAI shim.
+
+    Flips ``openai_supports_strict_tool_definition`` to ``False``: vLLM
+    accepts the ``strict: true`` flag on its REST surface but the engine
+    does not enforce the schema (see vLLM tool-calling docs); leaving
+    the framework to send the flag would let the model emit a non-
+    conforming tool call that the loop then rejects on a structural
+    mismatch. Multiple system messages and the default JSON-schema
+    pipeline are honoured.
+    """
+    from pydantic_ai.profiles.openai import OpenAIModelProfile
+
+    return OpenAIModelProfile(
+        openai_supports_strict_tool_definition=False,
+        openai_chat_supports_multiple_system_messages=True,
+        json_schema_transformer=None,
+    )
+
+
+def ollama_chat_profile() -> OpenAIModelProfile:
+    """Return the capability profile for Ollama behind the OpenAI shim.
+
+    Two restrictions versus OpenAI SaaS:
+
+    * ``openai_supports_strict_tool_definition=False`` — Ollama's
+      ``openai`` compat layer ignores the strict flag (same posture as
+      vLLM).
+    * ``openai_chat_supports_multiple_system_messages=False`` —
+      Ollama's chat template collapses multiple ``role=system`` turns
+      into one, so the framework merges them before sending. Without
+      this flag the loop would forward each system part as a separate
+      message and Ollama would render the conversation history in an
+      order the prompt template did not expect.
+    """
+    from pydantic_ai.profiles.openai import OpenAIModelProfile
+
+    return OpenAIModelProfile(
+        openai_supports_strict_tool_definition=False,
+        openai_chat_supports_multiple_system_messages=False,
+        json_schema_transformer=None,
+    )
+
+
+def _vendor_profile_for(vendor: OpenAICompatVendor) -> OpenAIModelProfile:
+    """Map a :class:`OpenAICompatVendor` to its bundled profile.
+
+    Internal — the public surface is the three named profile factories
+    above (``openai_chat_profile`` / ``vllm_chat_profile`` /
+    ``ollama_chat_profile``), so a caller wanting one of the three
+    constructs it directly. This helper exists so
+    :func:`openai_compat_backend_builder` can dispatch from a vendor
+    enum without forcing every call site to remember which profile
+    corresponds to which vendor.
+    """
+    if vendor is OpenAICompatVendor.OPENAI:
+        return openai_chat_profile()
+    if vendor is OpenAICompatVendor.VLLM:
+        return vllm_chat_profile()
+    if vendor is OpenAICompatVendor.OLLAMA:
+        return ollama_chat_profile()
+    # Closed enum — a new member added without a branch above would
+    # land in mypy's exhaustiveness check; this raise is the runtime
+    # belt for the same misuse.
+    raise ValueError(f"unsupported OpenAI-compat vendor: {vendor!r}")
+
+
+# ----- Capability flags --------------------------------------------------
+#
+# The resolver consults :class:`BackendCapabilities` to decide whether a
+# backend can honour a tier; OpenAI-compat backends share the same broad
+# shape (tools yes, streaming yes, prompt-cache no) regardless of vendor.
+# Prompt caching is OFF because none of the three OpenAI-compat surfaces
+# implement the Anthropic-style ``cache_control`` knob today (OpenAI's
+# automatic input caching is opaque to the client and does not require
+# explicit declaration; vLLM/Ollama don't expose any equivalent). The
+# cost-attribution layer (#1079) reads this flag to decide whether to
+# model a per-message cache discount, so flipping this to ``True`` later
+# is a real billing change — keep it ``False`` until a vendor exposes
+# the knob explicitly.
+
+
+#: Capability flags for an OpenAI-compatible backend
+#: (``pydantic_ai.models.openai.OpenAIChatModel`` over OpenAI / vLLM /
+#: Ollama). Tools and streaming are honoured by every supported vendor;
+#: prompt caching is off because none of the three exposes the
+#: Anthropic-style ``cache_control`` knob. ``tool_format`` is
+#: ``"openai"`` — the wire format every OpenAI-compat surface speaks.
+openai_compat_capabilities: Final[BackendCapabilities] = BackendCapabilities(
+    supports_tools=True,
+    supports_streaming=True,
+    supports_prompt_cache=False,
+    tool_format="openai",
+)
+
+
+# ----- Backend builders --------------------------------------------------
+
+
+def openai_compat_backend_builder(
+    *,
+    vendor: OpenAICompatVendor,
+    model_id: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> BackendBuilder:
+    """Build a zero-arg :class:`BackendBuilder` for one OpenAI-compat backend.
+
+    Returns a closure the resolver registers; the closure constructs a
+    fresh :class:`~pydantic_ai.models.openai.OpenAIChatModel` on each
+    call, the same lazy-build posture the Anthropic builder uses (so
+    settings reloads pick up at the next resolve without a resolver
+    rebuild). The vendor-specific quirks ride on the
+    :class:`OpenAIModelProfile` picked from ``vendor``.
+
+    Args:
+        vendor: Which OpenAI-compat deployment shape to target — picks
+            the bundled :class:`OpenAIModelProfile`.
+        model_id: The framework's model id. Accepts the raw model name
+            (``gpt-4o-mini``, ``meta-llama/Llama-3.1-8B-Instruct``,
+            ``llama3.1:8b``) or the ``openai:<name>`` prefix; the
+            framework strips the prefix internally so both shapes work.
+        base_url: The OpenAI Chat Completions base URL. ``None`` (the
+            default) routes to OpenAI SaaS. An on-prem deploy passes
+            the engine's URL (e.g. ``http://vllm.internal:8000/v1`` /
+            ``http://ollama.internal:11434/v1`` / the VCF PAIF
+            ``…/api/v1/compatibility/openai/v1/``).
+        api_key: The bearer token sent on every request. ``None``
+            tells the provider to fall back to ``OPENAI_API_KEY``;
+            most on-prem endpoints accept any non-empty string but
+            still require *some* value (the OpenAI SDK refuses to
+            send a request without an API key argument). The value
+            never leaks into structured logs — :class:`OpenAIProvider`
+            stores it as a private attribute on the client.
+
+    Returns:
+        A :class:`BackendBuilder` suitable for the ``backends=`` argument
+        of :func:`build_resolver`. The builder is **lazy**: pydantic_ai
+        and the OpenAI SDK only import when the resolver calls it, so
+        a deploy that registers an OpenAI-compat backend but never
+        resolves to it never loads the ``openai`` wheel into memory.
+    """
+    profile = _vendor_profile_for(vendor)
+
+    def _build() -> Model:
+        # Lazy import — the ``pydantic-ai-slim[openai]`` extra pulls in
+        # the ``openai`` SDK and ``tiktoken``; deploys that route every
+        # tier to Anthropic should not pay those imports. The closure
+        # captures only Python primitives so it stays cheap to register.
+        from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.providers.openai import OpenAIProvider
+
+        provider = OpenAIProvider(base_url=base_url, api_key=api_key)
+        return OpenAIChatModel(model_id, provider=provider, profile=profile)
+
+    return _build
+
+
+def default_openai_backend_builder() -> Model:
+    """Build the settings-driven default OpenAI-compatible Model.
+
+    Reads ``openai_api_key`` / ``openai_base_url`` / ``openai_default_model``
+    from :class:`~meho_backplane.settings.Settings` and picks a vendor
+    profile from the base URL host hint: a URL containing ``ollama``
+    picks the Ollama profile, ``vllm`` picks vLLM, everything else
+    (including the empty string for OpenAI SaaS) picks the OpenAI
+    profile. The host-hint heuristic is deliberately weak — operators
+    routing to an endpoint the hint misses register their own backend
+    via :func:`openai_compat_backend_builder` with the vendor passed
+    explicitly.
+
+    Fail-closed: empty ``openai_api_key`` raises
+    :class:`~meho_backplane.agent.run.AgentRunError`, mirroring
+    :func:`anthropic_backend_builder`'s posture so a deploy that
+    registered an OpenAI-compat backend but never wired credentials
+    surfaces at first agent invocation rather than mid-loop.
+    """
+    # Imported lazily so this function only pays the cost when the
+    # resolver actually resolves to OpenAI-compat (the
+    # :class:`AgentRunError` import would otherwise tie this module's
+    # import time to ``agent.run`` and its dependencies).
+    from meho_backplane.agent.run import AgentRunError
+    from meho_backplane.settings import get_settings
+
+    settings = get_settings()
+    api_key = settings.openai_api_key
+    if not api_key:
+        raise AgentRunError(
+            "no OPENAI_API_KEY configured for the agent runtime; "
+            "set it to route a tier to OpenAI / vLLM / Ollama via the "
+            "default OpenAI-compat backend, or register a per-backend "
+            "builder via openai_compat_backend_builder(...) — see G11.5.",
+        )
+    base_url = settings.openai_base_url or None
+    vendor = _vendor_from_base_url_hint(base_url)
+    builder = openai_compat_backend_builder(
+        vendor=vendor,
+        model_id=settings.openai_default_model,
+        base_url=base_url,
+        api_key=api_key,
+    )
+    return builder()
+
+
+def _vendor_from_base_url_hint(base_url: str | None) -> OpenAICompatVendor:
+    """Pick an :class:`OpenAICompatVendor` from a base URL host hint.
+
+    Cheap heuristic for the settings-driven default builder. A real
+    multi-endpoint deploy registers each backend explicitly via
+    :func:`openai_compat_backend_builder` rather than relying on this
+    function; it exists only so the single-knob single-tenant default
+    picks the right profile out of the three common shapes.
+    """
+    if base_url is None:
+        return OpenAICompatVendor.OPENAI
+    lowered = base_url.lower()
+    if "ollama" in lowered:
+        return OpenAICompatVendor.OLLAMA
+    if "vllm" in lowered:
+        return OpenAICompatVendor.VLLM
+    return OpenAICompatVendor.OPENAI
+
+
+if TYPE_CHECKING:
+    # The vendor profile factories return concrete
+    # :class:`OpenAIModelProfile` instances. Importing the class
+    # under :data:`TYPE_CHECKING` keeps the strict-mypy contract
+    # while preserving the runtime lazy-import posture (the actual
+    # class is imported inside each factory at call time).
+    from pydantic_ai.profiles.openai import OpenAIModelProfile

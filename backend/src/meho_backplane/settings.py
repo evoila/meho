@@ -561,6 +561,42 @@ class Settings(BaseModel):
         human review across timezone-distant teams without tying up an
         agent loop indefinitely on a forgotten request. Set via
         ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
+    openai_api_key:
+        Bearer token the OpenAI-compatible backend builder
+        (G11.5-T3 #1077) authenticates with. Empty (the default) is
+        fail-closed: a deploy whose policy never routes any tier to an
+        OpenAI-compat backend never reads the value, so the default
+        single-tenant Anthropic shape keeps working with no extra env
+        var. Set via ``OPENAI_API_KEY`` for OpenAI SaaS, the on-prem
+        proxy's bearer token for VCF PAIF, or any non-empty value for
+        local vLLM/Ollama (most expect *some* string but don't enforce
+        it). The builder reads this **once** at construction time per
+        invocation, so rotating the key requires a resolver rebuild.
+    openai_base_url:
+        Endpoint base URL the OpenAI-compatible backend builder targets.
+        Empty (the default) routes to the OpenAI SaaS endpoint
+        (``api.openai.com``). A non-empty value points at an on-prem
+        endpoint: vLLM exposes ``http://<host>:8000/v1``, Ollama
+        ``http://<host>:11434/v1``, VCF Private AI Foundation a
+        deploy-specific path under
+        ``/api/v1/compatibility/openai/v1/``. The value is passed
+        verbatim to :class:`pydantic_ai.providers.openai.OpenAIProvider`,
+        which then constructs an underlying ``AsyncOpenAI`` client. Set
+        via ``OPENAI_BASE_URL``. The setting is per-deploy: tenants
+        that route to *different* on-prem endpoints construct their
+        backend builders explicitly via
+        :func:`~meho_backplane.agent.models.openai_compat_backend_builder`
+        rather than the settings-driven default.
+    openai_default_model:
+        Pinned model id the OpenAI-compatible backend uses when an
+        ``AgentDefinition`` does not override it. Full provider-qualified
+        id (``openai:gpt-4o-mini`` for OpenAI SaaS;
+        ``openai:meta-llama/Llama-3.1-8B-Instruct`` for a vLLM-hosted
+        Llama, etc. — pydantic_ai's :class:`OpenAIChatModel` accepts the
+        bare model name and the ``openai:`` prefix is stripped when
+        present). Same posture as ``agent_default_model``: a full id,
+        never a moving alias, so model swaps are deliberate config
+        pushes. Set via ``OPENAI_DEFAULT_MODEL``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010 + G0.14-T6 #1147).
@@ -729,6 +765,17 @@ class Settings(BaseModel):
     # tying up an agent loop indefinitely on a forgotten request. Set via
     # ``AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS``.
     agent_approval_wait_timeout_seconds: float = Field(default=1800.0, gt=0)
+    # G11.5-T3 #1077 — OpenAI-compatible backend configuration for the
+    # agent runtime's multi-provider resolver. Sources the credentials
+    # the settings-driven default OpenAI backend builder consumes; tenants
+    # that need a different base_url / api_key per backend construct
+    # their builders via ``openai_compat_backend_builder(...)`` explicitly
+    # and never touch these settings. Empty defaults are fail-closed: a
+    # deploy whose policy never registers an OpenAI-compat backend reads
+    # none of these knobs (the bare ``Anthropic``-only path is unchanged).
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+    openai_default_model: str = Field(default="openai:gpt-4o-mini", min_length=1)
     # G11.3-T2 #823 — cron + one-off trigger scheduler. ``tick_interval``
     # bounds how often the loop scans for due triggers; the default
     # (30 s) is the consumer-doc-accepted granularity for cron triggers
@@ -1011,6 +1058,12 @@ def get_settings() -> Settings:
         ),
         agent_approval_wait_timeout_seconds=float(
             os.environ.get("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "1800.0"),
+        ),
+        openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
+        openai_base_url=os.environ.get("OPENAI_BASE_URL", "").strip(),
+        openai_default_model=os.environ.get(
+            "OPENAI_DEFAULT_MODEL",
+            "openai:gpt-4o-mini",
         ),
         scheduler_tick_interval_seconds=int(
             os.environ.get("SCHEDULER_TICK_INTERVAL_SECONDS", "30"),

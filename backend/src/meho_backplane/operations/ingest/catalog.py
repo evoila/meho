@@ -30,16 +30,34 @@ connector-catalog.md`` is the operator-facing pointer.
   YAML crash startup (and therefore CI's app-boot smoke). It does not
   touch the connector registry, so it is safe to run inside the lifespan
   regardless of import-cache state.
-* :func:`validate_catalog_registry_coverage` cross-checks every entry's
-  ``requires_connector_class`` against
-  :func:`~meho_backplane.connectors.registry.all_connectors_v2`. That is
-  the #743 criterion-(b) guard; it runs as a CI regression test (where
-  the full connector set is registered) rather than at startup, where the
-  registry's populated-ness is import-order-dependent under pytest-xdist.
+* :func:`validate_catalog_registry_coverage` cross-checks every entry
+  against :func:`~meho_backplane.connectors.registry.all_connectors_v2`
+  on two axes:
+
+  - **Class presence** (#743 criterion (b)) — the
+    ``requires_connector_class`` resolves to a registered connector class.
+  - **Triple registration** (G3.11-T10 #1253) — the ``(product, version,
+    impl_id)`` triple itself has an entry in the v2 registry table.
+    T8 #1242 surfaced this gap: T1 #1221 registered ``("gh", "3",
+    "gh-rest")`` while T3 #1223 wrote the catalog row as ``version: v3``;
+    the class-presence check passed because ``GitHubRestConnector`` was
+    registered (under a different version key), and the drift only
+    surfaced at first dispatch. The triple check catches the class of
+    bug at boot / CI time.
+
+  Failure raises :class:`CatalogError` with a ``catalog_registry_triple
+  _mismatch:`` (or ``unregistered connector class``) code prefix per
+  the G0.14-T11 #1141 error-message-shape convention. At chassis
+  startup the lifespan calls this after :func:`_eager_import_connectors`
+  has populated the registry, so any mismatch fails the boot rather
+  than the first ``POST /api/v1/operations/call``. The same call from
+  the test suite exercises the synthetic-drift unit test and the
+  shipped-catalog self-test.
 """
 
 from __future__ import annotations
 
+import difflib
 import functools
 import re
 from importlib import resources
@@ -197,27 +215,158 @@ def load_catalog() -> ConnectorSpecCatalog:
     return parse_catalog(raw)
 
 
-def validate_catalog_registry_coverage(catalog: ConnectorSpecCatalog | None = None) -> None:
-    """Assert every ``requires_connector_class`` is registered (#743 crit. b).
+def _format_triple(product: str, version: str, impl_id: str) -> str:
+    """Render a ``(product, version, impl_id)`` triple for error messages.
 
-    Cross-checks against
-    :func:`~meho_backplane.connectors.registry.all_connectors_v2`. Raises
-    :class:`CatalogError` listing the offenders. Imported lazily so this
-    module stays import-light for the startup parse path.
+    A standalone helper so the unit test, the failure message, and the
+    closest-match hint all render the same shape — drift between the
+    three is itself a class of bug we're guarding against here.
+    """
+    return f"(product={product!r}, version={version!r}, impl_id={impl_id!r})"
+
+
+def _closest_registered_triple(
+    target_product: str,
+    target_version: str,
+    target_impl_id: str,
+    registered_triples: list[tuple[str, str, str]],
+) -> tuple[str, str, str] | None:
+    """Return the closest registered triple to ``target`` (or ``None``).
+
+    Used to populate the closest-match hint in the
+    ``catalog_registry_triple_mismatch`` envelope so the operator can
+    see *which field drifted*. The matching strategy is two-pass:
+
+    1. **Prefer same product.** When the registry has at least one
+       triple sharing the catalog row's ``product`` slug, return the
+       closest among them (matched on the concatenated
+       ``version|impl_id`` string). This is the T8 #1242 motivating
+       case: catalog says ``("gh", "v3", "gh-rest")`` and registry has
+       ``("gh", "3", "gh-rest")`` — same product, the version drifted.
+
+    2. **Fall back to global closest.** No same-product match (e.g.
+       the operator typo'd the product slug itself) → match against
+       every registered triple's joined ``product|version|impl_id``
+       string. Returns ``None`` only when the registry is empty.
+
+    Why a hint rather than a fuzzy-resolution: detection only. The
+    operator fixes the source of truth (catalog YAML or the
+    ``register_connector_v2`` call); the validator never auto-patches.
+    """
+    if not registered_triples:
+        return None
+
+    same_product = [t for t in registered_triples if t[0] == target_product]
+    if same_product:
+        # Match on version|impl_id when the product agrees — this is the
+        # T8 #1242 shape (version-string drift on the same product).
+        target_tail = f"{target_version}|{target_impl_id}"
+        candidates = {f"{v}|{i}": (p, v, i) for (p, v, i) in same_product}
+        match = difflib.get_close_matches(target_tail, list(candidates), n=1, cutoff=0.0)
+        if match:
+            return candidates[match[0]]
+        # `get_close_matches` returned nothing (very rare with cutoff=0.0;
+        # only when `candidates` is empty, which `same_product` truthiness
+        # already excluded). Fall through to global match.
+
+    # No same-product entry, or no candidate beat the cutoff — match on
+    # the full triple string against every registered entry.
+    target_joined = f"{target_product}|{target_version}|{target_impl_id}"
+    joined_to_triple = {f"{p}|{v}|{i}": (p, v, i) for (p, v, i) in registered_triples}
+    match = difflib.get_close_matches(target_joined, list(joined_to_triple), n=1, cutoff=0.0)
+    if match:
+        return joined_to_triple[match[0]]
+    return None
+
+
+def validate_catalog_registry_coverage(catalog: ConnectorSpecCatalog | None = None) -> None:
+    """Assert every catalog entry resolves cleanly against the v2 registry.
+
+    Two axes are checked per the G3.11-T10 #1253 extension:
+
+    * **Class presence** (#743 criterion (b)) —
+      ``requires_connector_class`` resolves to a class in
+      :func:`~meho_backplane.connectors.registry.all_connectors_v2`.
+    * **Triple registration** (T10 #1253) — the row's ``(product,
+      version, impl_id)`` triple is itself a key in
+      :func:`all_connectors_v2`. This catches the T8 #1242 class of
+      bug: a catalog/registry version-string drift that the
+      class-only check missed (the class was registered, just under a
+      different version key).
+
+    Failure raises :class:`CatalogError`. For the triple-mismatch
+    branch, the message carries a ``catalog_registry_triple_mismatch:``
+    code prefix and names the catalog triple plus the closest
+    registered triple for the same product so the operator can see
+    which field drifted, per the
+    ``docs/codebase/error-message-shape.md`` convention.
+
+    Imported lazily so this module stays import-light for the startup
+    parse path.
     """
     from meho_backplane.connectors.registry import all_connectors_v2
 
     cat = catalog if catalog is not None else load_catalog()
-    registered = {cls.__name__ for cls in all_connectors_v2().values()}
-    missing = sorted(
+    registry_v2 = all_connectors_v2()
+    registered_class_names = {cls.__name__ for cls in registry_v2.values()}
+
+    # Axis 1: class presence (existing #743 criterion (b) check).
+    missing_classes = sorted(
         {
             e.requires_connector_class
             for e in cat.entries
-            if e.requires_connector_class not in registered
+            if e.requires_connector_class not in registered_class_names
         }
     )
-    if missing:
+    if missing_classes:
         raise CatalogError(
             "connector-spec catalog references unregistered connector class(es): "
-            f"{missing}; registered classes: {sorted(registered)}"
+            f"{missing_classes}; registered classes: {sorted(registered_class_names)}"
+        )
+
+    # Axis 2: triple registration (T10 #1253). Walk catalog rows; flag
+    # any whose (product, version, impl_id) triple isn't in the v2
+    # registry table. The two checks are layered (class first, then
+    # triple) so a totally-missing class surfaces its specific code
+    # rather than a triple miss that points at the wrong thing.
+    registered_triples = sorted(registry_v2.keys())
+    triple_mismatches: list[tuple[ConnectorSpecEntry, tuple[str, str, str] | None]] = []
+    for entry in cat.entries:
+        triple = (entry.product, entry.version, entry.impl_id)
+        if triple not in registry_v2:
+            hint = _closest_registered_triple(
+                entry.product, entry.version, entry.impl_id, registered_triples
+            )
+            triple_mismatches.append((entry, hint))
+
+    if triple_mismatches:
+        # Build the message in three clauses per the T11 convention:
+        # (a) the offending values, (b) the closest-registered hint,
+        # (c) the doc reference + remediation imperative.
+        catalog_path = "backend/src/meho_backplane/operations/ingest/catalog.yaml"
+        register_path = "connectors/<product>/__init__.py"
+        details: list[str] = []
+        for entry, hint in triple_mismatches:
+            catalog_triple = _format_triple(entry.product, entry.version, entry.impl_id)
+            if hint is not None:
+                hint_str = _format_triple(*hint)
+                details.append(
+                    f"catalog row {catalog_triple}; closest registered triple: {hint_str}"
+                )
+            else:
+                # Registry empty (rare; mostly test scaffolding) or no
+                # close match found — still surface the catalog triple
+                # and the full registered list so the operator has the
+                # raw data to debug from.
+                details.append(
+                    f"catalog row {catalog_triple}; no close registered triple "
+                    f"(registered triples: {registered_triples})"
+                )
+        joined = "; ".join(details)
+        raise CatalogError(
+            "catalog_registry_triple_mismatch: connector-spec catalog row(s) name a "
+            f"(product, version, impl_id) triple not present in the v2 connector registry: "
+            f"{joined}. Reconcile {catalog_path} with the matching "
+            f"register_connector_v2(...) call in {register_path}. See "
+            f"docs/codebase/error-message-shape.md for the envelope convention."
         )

@@ -596,6 +596,39 @@ def _force_import_mcp_modules() -> None:
     eager_import_mcp_modules()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _force_import_connector_modules() -> None:
+    """Import every ``connectors/<product>/`` subpackage ONCE per worker.
+
+    Same hazard as :func:`_force_import_mcp_modules` above, but for the
+    connector registry: ``register_connector`` / ``register_connector_v2``
+    fire as module-import side effects, so the first
+    :func:`_eager_import_connectors` call populates the v1+v2 tables;
+    every subsequent call is a cached no-op (Python caches imports).
+    The per-test :func:`_isolate_global_registries` snapshot/restore then
+    pins the registry to whatever was registered *before* the snapshot
+    was first taken — empty if no prior test triggered a lifespan,
+    populated otherwise. That coupling bit G3.11-T10 #1253 when the
+    chassis lifespan started calling
+    :func:`validate_catalog_registry_coverage` post-:func:`load_catalog`:
+    a test exercising the lifespan after a registry-clearing test (or
+    in isolation, before any other test had triggered an import) saw an
+    empty registry and the validator raised
+    ``catalog_registry_triple_mismatch``.
+
+    Forcing the imports once at session start makes the registrations
+    land before any test runs; the snapshot then captures the populated
+    baseline; every subsequent lifespan ``_eager_import_connectors``
+    call (any worker, any order) is a cached no-op against an
+    already-populated registry. The triple-check validator finds every
+    catalog row's triple in the v2 table and lifespan startup tests
+    boot cleanly.
+    """
+    from meho_backplane.connectors.registry import _eager_import_connectors
+
+    _eager_import_connectors()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_global_registries() -> Iterator[None]:
     """Snapshot/restore every process-global registry around each test.

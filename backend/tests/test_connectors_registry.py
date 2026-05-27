@@ -354,6 +354,12 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             # ``patch.multiple`` to stay under CPython's "too many
             # statically nested blocks" limit (20) the parenthesised
             # ``with`` form imposes.
+            # G3.11-T10 #1253 added validate_catalog_registry_coverage
+            # to the lifespan after load_catalog. With _eager_import_connectors
+            # mocked out the registry is empty by construction, so patch
+            # load_catalog + the validator into the same patch.multiple
+            # block (avoids tripping CPython's 20-statically-nested-block
+            # limit the parenthesised ``with`` form imposes).
             patch.multiple(
                 "meho_backplane.main",
                 start_scheduler=MagicMock(),
@@ -362,6 +368,8 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),
                 stop_event_drain=AsyncMock(),
+                load_catalog=MagicMock(),
+                validate_catalog_registry_coverage=MagicMock(),
             ),
         ):
             # Manually step through the lifespan async generator.
@@ -436,6 +444,10 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             # ``patch.multiple`` to stay under CPython's "too many
             # statically nested blocks" limit (20) the parenthesised
             # ``with`` form imposes.
+            # Same G3.11-T10 #1253 shape as the sibling lifespan test —
+            # registry is empty under the mocks, so skip the catalog
+            # coverage validator. Folded into patch.multiple to fit
+            # under CPython's 20-statically-nested-block limit.
             patch.multiple(
                 "meho_backplane.main",
                 start_scheduler=MagicMock(),
@@ -444,6 +456,8 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),
                 stop_event_drain=AsyncMock(),
+                load_catalog=MagicMock(),
+                validate_catalog_registry_coverage=MagicMock(),
             ),
         ):
             gen = lifespan(None)  # type: ignore[arg-type]

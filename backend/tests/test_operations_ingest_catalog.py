@@ -196,6 +196,93 @@ def test_validate_catalog_registry_coverage_raises_on_unknown_class() -> None:
 
 
 # ---------------------------------------------------------------------------
+# (b') Triple registration — G3.11-T10 #1253 extension
+#
+# The class-presence check above catches the case where the connector
+# class isn't registered at all. The triple-registration check below
+# catches the T8 #1242 class of bug: the class IS registered, but under
+# a different (product, version, impl_id) key than the catalog row
+# names. The shipped catalog is exercised by
+# test_validate_catalog_registry_coverage_passes_for_shipped_catalog
+# (same fixture covers both axes); the dedicated tests below focus on
+# the synthetic-drift envelope shape per the G0.14-T11 #1141 convention.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_catalog_registry_coverage_raises_on_triple_drift(
+    _registered_connectors: set[str],
+) -> None:
+    """The exact T8 #1242 shape: catalog ``v3`` vs registry ``3``.
+
+    ``GitHubRestConnector`` is registered (by ``_registered_connectors``)
+    under the triple ``("gh", "3", "gh-rest")`` — the class-presence
+    check passes — but the synthetic catalog row names the pre-T8
+    drifted ``("gh", "v3", "gh-rest")`` triple, which is NOT in the
+    registry. The validator must raise ``CatalogError`` with the
+    ``catalog_registry_triple_mismatch:`` code prefix and the
+    closest-same-product hint.
+    """
+    drifted = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="gh",
+                version="v3",  # drifted from registry's "3"
+                impl_id="gh-rest",
+                requires_connector_class="GitHubRestConnector",
+            ),
+        ),
+    )
+    with pytest.raises(CatalogError) as exc_info:
+        validate_catalog_registry_coverage(drifted)
+    msg = str(exc_info.value)
+    assert msg.startswith("catalog_registry_triple_mismatch:"), msg
+    # (a) The catalog triple is named verbatim.
+    assert "product='gh'" in msg and "version='v3'" in msg and "impl_id='gh-rest'" in msg
+    # (b) The closest registered triple for the same product is the
+    # canonical post-T8 form — `version='3'` (no leading 'v').
+    assert "closest registered triple" in msg
+    assert "version='3'" in msg
+    # (c) The remediation imperative names both source-of-truth files
+    # and points at the error-message-shape doc.
+    assert "catalog.yaml" in msg
+    assert "register_connector_v2" in msg
+    assert "error-message-shape.md" in msg
+
+
+def test_validate_catalog_registry_coverage_drift_hint_falls_back_to_global(
+    _registered_connectors: set[str],
+) -> None:
+    """Product slug typo'd → hint falls back to the closest GLOBAL triple.
+
+    When the catalog row's ``product`` doesn't match ANY registered
+    triple, the same-product hint logic has nothing to compare against;
+    the validator should still produce a useful hint by matching the
+    full ``product|version|impl_id`` string against every registered
+    triple. The shipped catalog has ``("k8s", "1.x", "k8s")`` registered,
+    so a row claiming ``("k8z", "1.x", "k8s")`` (one-character product
+    typo) should surface ``k8s`` as the closest hint.
+    """
+    typo = ConnectorSpecCatalog(
+        entries=(
+            _entry(
+                product="k8z",
+                version="1.x",
+                impl_id="k8s",
+                requires_connector_class="KubernetesConnector",
+            ),
+        ),
+    )
+    with pytest.raises(CatalogError) as exc_info:
+        validate_catalog_registry_coverage(typo)
+    msg = str(exc_info.value)
+    assert "catalog_registry_triple_mismatch:" in msg
+    assert "product='k8z'" in msg
+    # Hint resolves to the closest globally — k8s with version 1.x.
+    assert "product='k8s'" in msg
+    assert "version='1.x'" in msg
+
+
+# ---------------------------------------------------------------------------
 # (c) spec_info_version is PEP 440
 # ---------------------------------------------------------------------------
 

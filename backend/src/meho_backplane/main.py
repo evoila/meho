@@ -116,7 +116,7 @@ from meho_backplane.memory import (
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
-from meho_backplane.operations.ingest import load_catalog
+from meho_backplane.operations.ingest import load_catalog, validate_catalog_registry_coverage
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
@@ -255,11 +255,20 @@ async def _run_lifespan_startup() -> None:
     # field, non-PEP-440 spec_info_version, duplicate (product, version))
     # raises here and crashes the lifespan, so CI's app-boot smoke fails
     # instead of the bad catalog surfacing as a 500 on first
-    # GET /api/v1/connectors/catalog. Registry-coverage of each entry's
-    # requires_connector_class is a CI regression test, not a startup
-    # guard (the registry's populated-ness is import-order-dependent
-    # under pytest-xdist; see catalog.py).
+    # GET /api/v1/connectors/catalog.
     load_catalog()
+    # Catalog ↔ registry triple coverage (G3.11-T10 #1253). At chassis
+    # boot the registry is fully populated (_eager_import_connectors
+    # above ran every connectors/<product>/__init__.py registration),
+    # so the validator can assert both the class-presence check
+    # (#743 crit. b) and the (product, version, impl_id) triple-
+    # registration check (T10) without the pytest-xdist import-order
+    # hazard the test suite hits. A mismatch fails-fast here rather
+    # than surfacing as ``no_connector`` on the first dispatch — the
+    # T8 #1242 class of bug (catalog ``version: v3`` vs registry
+    # ``version: "3"``) would have crashed the lifespan instead of
+    # shipping silently.
+    validate_catalog_registry_coverage()
     # Typed-op registration (G0.6-T-Refactor-Vault #390). See the
     # docstring for the contract; runs registrars connectors appended
     # to during the import pass above so descriptor rows are populated

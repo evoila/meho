@@ -1,0 +1,197 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  KB entry detail page: server-rendered Markdown + sidebar metadata.
+
+  Initiative #339 (G10.2 Knowledge base UI). Tasks #870 (T1) + #872 (T3).
+
+  Layout:
+    * Two-column on medium+ screens: main Markdown body (left, wider)
+      + metadata sidebar (right, narrower).
+    * Single column on small screens.
+    * The Markdown body is already rendered to HTML by the route handler
+      via ``render_markdown(entry.body)``; the ``rendered_body`` variable
+      holds ``Markup`` (autoescape-safe). The ``{{ rendered_body }}``
+      substitution is safe because:
+        - markdown-it-py with html=False (default) strips raw HTML from
+          the source body, so the rendered output contains only
+          markdown-generated tags.
+        - pygments emits span-only output inside pre/code blocks.
+    * Pygments CSS is injected inline in the ``<head>``-equivalent block;
+      this keeps the entry-detail page self-contained (no separate
+      stylesheet request). The ``code_css`` variable holds the raw CSS
+      string from ``pygments_css()`` and is injected as a ``<style>``
+      block via the ``scripts`` block (reusing the deferred-content
+      block base.html reserves for per-surface JS / CSS).
+
+  Sidebar fields:
+    * slug (identifier)
+    * kind (from documents.kind — "kb-entry" for normal entries)
+    * source_path (from entry.metadata["path"] if present)
+    * indexed_at (entry.updated_at — the last time the entry was indexed)
+    * body_hash (from entry.metadata["body_hash"] if present — for change
+      detection)
+
+  Accessibility:
+    * ``<article>`` wraps the Markdown body so screen readers can
+      landmark it as the primary content.
+    * ``<aside>`` wraps the metadata sidebar.
+    * Heading hierarchy: the page ``<h1>`` is the slug; the article
+      inherits its own heading hierarchy from the Markdown source.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ entry.slug }} &middot; Knowledge &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+  {# Back link #}
+  <nav aria-label="Breadcrumb">
+    <a href="/ui/kb" class="btn btn-ghost btn-sm gap-1">
+      <span aria-hidden="true">&larr;</span>
+      Knowledge
+    </a>
+  </nav>
+
+  <div class="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_16rem]">
+    {# ---------- Main content: rendered Markdown ---------- #}
+    <article
+      class="card bg-base-100 border-base-300 border shadow-sm min-w-0"
+      aria-label="Knowledge entry {{ entry.slug }}"
+    >
+      <div class="card-body">
+        <h1 class="text-xl font-mono font-semibold mb-4">{{ entry.slug }}</h1>
+        {#-
+          ``rendered_body`` is ``markupsafe.Markup`` — autoescape passes it
+          through unchanged. The route handler renders server-side via
+          ``render_markdown(entry.body)``; markdown-it-py with ``html=False``
+          strips raw HTML from the source before rendering.
+        -#}
+        <div class="prose prose-sm max-w-none kb-body">
+          {{ rendered_body }}
+        </div>
+      </div>
+    </article>
+
+    {# ---------- Sidebar: entry metadata ---------- #}
+    <aside
+      class="card bg-base-100 border-base-300 border shadow-sm self-start"
+      aria-label="Entry metadata"
+    >
+      <div class="card-body">
+        <h2 class="card-title text-sm font-semibold uppercase opacity-60 tracking-wider">
+          Metadata
+        </h2>
+        <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm mt-2">
+          <dt class="opacity-60 whitespace-nowrap">Slug</dt>
+          <dd class="font-mono break-all">{{ entry.slug }}</dd>
+
+          <dt class="opacity-60 whitespace-nowrap">Kind</dt>
+          <dd>{{ entry.metadata.get("kind", "kb-entry") }}</dd>
+
+          {% if source_path %}
+            <dt class="opacity-60 whitespace-nowrap">Source</dt>
+            <dd class="font-mono text-xs break-all">{{ source_path }}</dd>
+          {% endif %}
+
+          <dt class="opacity-60 whitespace-nowrap">Indexed&nbsp;at</dt>
+          <dd class="text-xs">{{ entry.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>
+
+          {% if body_hash %}
+            <dt class="opacity-60 whitespace-nowrap">Body&nbsp;hash</dt>
+            <dd class="font-mono text-xs break-all opacity-70" title="{{ body_hash }}">
+              {{ body_hash[:12] }}&hellip;
+            </dd>
+          {% endif %}
+        </dl>
+
+        <div class="divider my-2"></div>
+
+        <a
+          href="/ui/kb"
+          class="btn btn-ghost btn-sm w-full"
+          aria-label="Back to Knowledge Base"
+        >
+          &larr; All entries
+        </a>
+      </div>
+    </aside>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#-
+  Pygments CSS injected inline so the entry-detail page is self-contained.
+  The ``code_css`` variable is the raw CSS string from
+  :func:`~meho_backplane.ui.routes.kb.render.pygments_css`; it's wrapped in
+  a ``<style>`` block here and passed through ``| safe`` because the content
+  is generated programmatically by pygments (not from user input) and is
+  pure CSS.
+-#}
+<style>
+{{ code_css | safe }}
+
+/* Override highlight background to match DaisyUI base-200 */
+pre.kb-code {
+  background: var(--b2, #e5e7eb);
+  border-radius: 0.375rem;
+  padding: 1rem;
+  overflow-x: auto;
+  font-size: 0.875em;
+  line-height: 1.5;
+}
+
+/* Query-term highlight */
+mark.kb-term {
+  background-color: oklch(var(--wa) / 0.4);
+  padding: 0.1em 0.15em;
+  border-radius: 0.2em;
+}
+
+/*
+ * Mobile-readable Markdown reflow (G10.2-T3 / issue #872).
+ *
+ * Desktop-first per Goal #336, but the entry view must reflow
+ * usably at narrow widths (half-screen, tablet portrait, phone).
+ *
+ * Rules:
+ *   kb-body — the prose container wrapping the rendered Markdown.
+ *   1. Long lines wrap rather than causing horizontal scroll on the
+ *      page. ``overflow-wrap: break-word`` + ``word-break: break-word``
+ *      handle both pathological slugs and long URLs inside prose.
+ *   2. Code blocks (``pre.kb-code``) scroll horizontally inside their
+ *      own box. The parent prose container does NOT scroll; only the
+ *      pre element does (``overflow-x: auto`` already set above).
+ *      ``max-width: 100%`` keeps the block from escaping the card.
+ *   3. Tables: DaisyUI's ``table`` class handles overflow on small
+ *      screens when wrapped in ``overflow-x-auto``. The rendered
+ *      Markdown does not use that wrapper, so we add a max-width cap
+ *      and overflow on the table element itself.
+ *   4. Images: scale down to at most their container width.
+ *   5. ``min-width: 0`` on the ``<article>`` (already present via
+ *      Tailwind's ``min-w-0`` class in detail.html) allows the flex
+ *      child to shrink below its intrinsic size.
+ */
+.kb-body {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.kb-body pre.kb-code {
+  max-width: 100%;
+}
+
+.kb-body table {
+  max-width: 100%;
+  overflow-x: auto;
+  display: block;
+}
+
+.kb-body img {
+  max-width: 100%;
+  height: auto;
+}
+</style>
+{% endblock %}

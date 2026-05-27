@@ -44,7 +44,7 @@ Locked decisions:
 | ------ | ------- |
 | `meho_backplane.ui.paths` | Resolves `templates/`, `static/src/`, `static/dist/` directories at runtime. Source-tree dev and image deploy both work via `Path(__file__).resolve().parent`. |
 | `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.__version__`. |
-| `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), and the remaining surface stubs (`GET /ui/{knowledge,connectors,memory}`, `_stub.html` placeholders). Real routers are included **before** the stubs so their concrete paths win the first-match-wins lookup; the replaced surfaces are dropped from the stub enumeration. G10.2-G10.4 replace the remaining stubs the same way. |
+| `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), and the remaining surface stubs (`GET /ui/{connectors,memory}`, `_stub.html` placeholders). Real routers are included **before** the stubs so their concrete paths win the first-match-wins lookup. G10.3-G10.4 replace the remaining stubs the same way. |
 | `meho_backplane.ui.csrf` | T5 (#866) double-submit-cookie CSRF middleware on state-changing `/ui/*` requests (POST/PATCH/PUT/DELETE). Signed-double-submit per OWASP -- the token is `hmac_sha256(session_secret, session_id || random) + "." + random`; the cookie is JS-readable (`meho_csrf`) so HTMX can echo it in `X-CSRF-Token`. Mismatch / missing token / forged signature -> 403. Read-only methods + out-of-prefix paths pass through. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware. |
 | `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. |
@@ -266,10 +266,11 @@ HTMX partial responses don't extend `base.html`; they render the
 fragment template directly.
 
 The chassis template references the five surface URLs
-(`/ui/broadcast`, `/ui/knowledge`, `/ui/topology`,
-`/ui/connectors`, `/ui/memory`) — T5 (#866) ships stub routes at
-each so the chassis renders end-to-end before the surface
-Initiatives fill the routes in.
+(`/ui/broadcast`, `/ui/kb`, `/ui/topology`,
+`/ui/connectors`, `/ui/memory`) — T5 (#866) shipped stub routes at
+each; the KB stub was retired by G10.2-T1 (#870) which registered
+the real `/ui/kb` routes. The broadcast and topology stubs were
+retired by G10.1-T1 (#867) and G10.5-T1 (#880) respectively.
 
 ## Dependencies
 
@@ -346,11 +347,76 @@ Initiative #337 work-item #6:
 * A "readiness checks" panel listing every registered probe with a
   green/orange pill matching `/ready`'s shape.
 
-The five surface stubs render `_stub.html` with a "Coming soon"
-panel referencing the surface Initiative number (G10.1=#338,
-G10.2=#339, G10.3=#340, G10.4=#341, G10.5=#342). A surface
-Initiative landing its real view registers a router that overrides
-the stub route.
+The remaining surface stubs render `_stub.html` with a "Coming soon"
+panel referencing the surface Initiative number (G10.3=#340,
+G10.4=#341). Broadcast (#867), KB (#870), and topology (#880) have
+replaced their stubs with real surface routers.
+
+## KB read surface (G10.2-T1 #870)
+
+`meho_backplane.ui.routes.kb` ships the read surface at `/ui/kb`:
+
+- `GET /ui/kb` — entry list (empty query, paginated) or search results
+  (non-empty query, HTMX fragment when `HX-Request: true`).
+- `POST /ui/kb/search` — HTMX keyup-debounced search partial (returns
+  `kb/_results.html` fragment).
+- `GET /ui/kb/<slug>` — entry detail with server-side Markdown rendered
+  via `markdown-it-py` (tables + strikethrough enabled) and pygments
+  syntax highlight. 404 for missing or cross-tenant slugs.
+- `GET /ui/kb/<slug>/preview` — hover-preview HTMX partial with
+  query-term `<mark>` highlight markup.
+
+**Dependencies added:** `markdown-it-py >= 3.0`, `pygments >= 2.18`,
+`python-multipart >= 0.0.12`.
+
+The renderer singleton lives in `meho_backplane.ui.routes.kb.render`.
+A module-level `threading.Lock` guards the shared `MarkdownIt` instance
+(not thread-safe for concurrent `render()` calls). The pygments CSS is
+generated once at module load and injected as an inline `<style>` block
+in the entry-detail template.
+
+## KB editor modal + mobile reflow (G10.2-T3 #872)
+
+T3 extends `meho_backplane.ui.routes.kb` with two write routes and
+mobile-reflow CSS on the entry detail page:
+
+- `POST /ui/kb/editor-preview` — HTMX live-preview partial. Accepts a
+  `body` form field (max 65 536 bytes), renders it via `render_markdown`,
+  returns the `kb/_editor_preview.html` fragment. Any authenticated
+  operator can call this (read-only Markdown transform; no role gate).
+- `POST /ui/kb/new` — editor save. Requires `tenant_admin` role (enforced
+  by `_require_tenant_admin()`: loads the full `DecryptedSession` via
+  `load_session()`, verifies the access token via
+  `verify_jwt_for_audience()`, checks `operator.tenant_role ==
+  TenantRole.TENANT_ADMIN`). On success returns HTTP 204 +
+  `HX-Redirect: /ui/kb/<slug>`; on failure re-renders the
+  `kb/_editor_modal.html` fragment with a 422 and an inline error banner.
+
+**Editor modal** (`kb/_editor_modal.html`): DaisyUI `<dialog>` element
+with a slug input, a CodeMirror 6 editor pane (`#kb-editor-cm`), a live
+preview column (`#kb-editor-preview-content`), and a hidden textarea
+(`#kb-editor-body`) that HTMX reads for the preview POST. Variables use
+`| default('')` / `| default(none)` so the template is safe when
+`{% include %}`'d from `index.html` without the editor-specific context
+keys (Jinja2 StrictUndefined catches bare names; the `| default()`
+filter intercepts the Undefined object before the strict check fires).
+
+**CodeMirror 6** (`static/src/vendor/codemirror-bundle.min.js`): a
+single-file IIFE bundle (SHA256 `a411a47c…`, 606 KB) built offline with
+esbuild from `codemirror@6.0.1` + `@codemirror/lang-markdown@6.3.2`.
+Exposes the `CM` global with `EditorView`, `EditorState`, `basicSetup`,
+`markdown`, `keymap`, `defaultKeymap`, `historyKeymap`, `indentWithTab`.
+Mounted via a `MutationObserver` on the `<dialog>` `open` attribute — the
+editor is created on first modal open and reused across open/close cycles
+so the operator's draft persists without a hidden-textarea seed.
+
+**Mobile reflow** (`kb/detail.html` `{% block scripts %}`): CSS added to
+`.kb-body` prevents horizontal page overflow at narrow widths:
+`overflow-wrap: break-word`, `word-break: break-word`; code blocks cap at
+`max-width: 100%` and scroll inside their own box; tables use
+`display: block; overflow-x: auto`; images cap at `max-width: 100%`.
+
+Upload (T2) may add further routes to the same package.
 
 The chassis smoke test
 [`backend/tests/test_ui_chassis_smoke.py`](../../backend/tests/test_ui_chassis_smoke.py)

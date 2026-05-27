@@ -84,7 +84,7 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
     {
         "title": "Knowledge",
         "summary": "Search + browse the team's distilled knowledge base.",
-        "href": "/ui/knowledge",
+        "href": "/ui/kb",
         "icon": "\U0001f4da",  # books
     },
     {

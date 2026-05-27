@@ -103,22 +103,21 @@ _END_SESSION_ENDPOINT = f"{DEFAULT_ISSUER}/protocol/openid-connect/logout"
 #: work-item #5 enumerates these exact URLs; the chassis smoke test
 #: pins them so a future surface Initiative renaming the path triggers
 #: an explicit test break (not a silent sidebar-vs-route divergence).
-_SURFACE_ROUTES = ("/ui/broadcast", "/ui/knowledge", "/ui/topology", "/ui/connectors", "/ui/memory")
+_SURFACE_ROUTES = ("/ui/broadcast", "/ui/kb", "/ui/topology", "/ui/connectors", "/ui/memory")
 
 #: Subset of :data:`_SURFACE_ROUTES` that still render the chassis
 #: "Coming soon" stub. ``/ui/topology`` is omitted because Initiative
 #: #342 Task #880 (G10.5-T1) replaced the stub with the real table
 #: view; ``/ui/broadcast`` is omitted because Initiative #338 Task #867
 #: (G10.1-T1) replaced the stub with the real live-feed view;
-#: ``/ui/memory`` is omitted because Initiative #341 Task #877
-#: (G10.4-T1) replaced the stub with the real list / detail / edit
-#: surface; and ``/ui/connectors`` is omitted because Initiative #340
-#: Task #873 (G10.3-T1) replaced the stub with the real targets list
-#: + per-target detail + re-probe surface. G10.2 (kb) will trim this
-#: tuple further once its surface Initiative lands. The chassis smoke
-#: test still pins the sidebar links via :data:`_SURFACE_ROUTES` so a
-#: sidebar-vs-route divergence surfaces explicitly.
-_STUB_SURFACE_ROUTES = ("/ui/knowledge",)
+#: ``/ui/kb`` (G10.2-T1 #870), ``/ui/memory`` (G10.4-T1 #877), and
+#: ``/ui/connectors`` (G10.3-T1 #873) all replaced their stubs with
+#: real surfaces, joining ``/ui/topology`` (#880) and ``/ui/broadcast``
+#: (#867). No surface renders the "Coming soon" stub any more, so this
+#: tuple is empty. The chassis smoke test still pins the sidebar links
+#: via :data:`_SURFACE_ROUTES` so a sidebar-vs-route divergence surfaces
+#: explicitly.
+_STUB_SURFACE_ROUTES: tuple[str, ...] = ()
 
 
 @pytest.fixture(autouse=True)

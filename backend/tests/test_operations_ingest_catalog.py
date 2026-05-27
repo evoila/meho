@@ -52,12 +52,16 @@ from meho_backplane.operations.ingest.catalog import (
     validate_catalog_registry_coverage,
 )
 
-# The seven v0.3.0 connectors the catalog enumerates.
+# The eight catalog entries currently shipped. The seven v0.3.0
+# connectors plus ``gh/v3`` (G3.11-T3 #1223 -- the GitHub REST API
+# v3 entry that consumes the GitHubRestConnector class shipped by
+# G3.11-T1 #1221).
 _EXPECTED_PRODUCT_VERSION = {
     ("vmware", "9.0"),
     ("sddc-manager", "9.0"),
     ("harbor", "2.x"),
     ("nsx", "4.2"),
+    ("gh", "v3"),
     ("vault", "1.x"),
     ("k8s", "1.x"),
     ("bind9", "9.x"),
@@ -134,6 +138,8 @@ def _registered_connectors() -> set[str]:
     here — swallowing the duplicate-key ``RuntimeError`` — makes the
     coverage assertion order-independent under pytest-xdist.
     """
+    from meho_backplane.connectors.github import GitHubRestConnector
+
     from meho_backplane.connectors.bind9 import Bind9Connector
     from meho_backplane.connectors.harbor import HarborConnector
     from meho_backplane.connectors.kubernetes import KubernetesConnector
@@ -144,6 +150,7 @@ def _registered_connectors() -> set[str]:
 
     for cls in (
         Bind9Connector,
+        GitHubRestConnector,
         HarborConnector,
         KubernetesConnector,
         NsxConnector,

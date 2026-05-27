@@ -77,7 +77,7 @@ jobs:
         # Multiple identifier forms covered because pip-licenses falls back
         # from PEP 639 License-Expression to Classifier to raw License field.
         #
-        # --ignore-packages "py_rust_stemmers fastembed": two
+        # --ignore-packages "py_rust_stemmers fastembed tiktoken": three
         # holdouts even with pip-licenses 5.5.5's PEP 639 support.
         # py_rust_stemmers (fastembed's tokeniser) ships no license
         # metadata at all — the crate is MIT in its repo
@@ -92,6 +92,19 @@ jobs:
         # Other/Proprietary. Remove either entry when upstream
         # license metadata is corrected. ``--ignore-packages`` accepts
         # ``nargs=*`` (space-separated), NOT a semicolon-joined string.
+        #
+        # tiktoken (transitive of ``openai>=2.29.0`` pulled in by the
+        # ``[openai]`` extra in G11.5-T3 #1077) is MIT-licensed upstream
+        # (github.com/openai/tiktoken) but its PyPI 0.13.0 metadata ships
+        # the full MIT license *text* in the ``License`` field instead of
+        # a clean SPDX identifier — pip-licenses surfaces that multi-line
+        # blob, which fails the allow-only gate that keys on exact license
+        # identifiers. Adding the literal license-text blob to
+        # ``--allow-only`` would force the allowlist to absorb arbitrary
+        # multi-line payloads and weaken every other entry; the
+        # minimum-diff fix is the ignore-line, mirroring the
+        # py_rust_stemmers / fastembed pattern. Remove when tiktoken
+        # publishes an SPDX identifier in its packaging metadata.
         #
         # ``EPL-2.0 OR GPL-2.0-or-later``: asyncssh (G0.2-T4, an existing
         # accepted dependency) reports this PEP 639 dual-license expression
@@ -109,7 +122,7 @@ jobs:
         # the exact emitted expression keeps the gate specific rather than
         # broadening to either arm alone or to bare ``CNRI-Python``.
         run: >
-          pip-licenses --format=plain --ignore-packages py_rust_stemmers fastembed --allow-only="
+          pip-licenses --format=plain --ignore-packages py_rust_stemmers fastembed tiktoken --allow-only="
           Apache Software License;
           Apache-2.0;
           Apache 2.0;

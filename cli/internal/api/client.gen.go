@@ -1932,6 +1932,16 @@ type HTTPValidationError struct {
 // the same
 // :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
 // helper so both surfaces stay consistent).
+//
+// “mcp_protocol_version“ (G0.14-T13 #1202) reports the server's
+// pinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.
+// Mirrors the “mcp_session_id_capture“ precedent: single-field
+// operator visibility into the MCP layer's runtime state. The
+// matching “mcp.protocol_version“ entry on “/ready“'s features
+// block (see :func:`meho_backplane.features.build_features_block`)
+// surfaces the same value on the unauthenticated readiness probe so
+// a deploy operator can answer "which MCP revision will this server
+// negotiate with my clients?" without an authenticated GET.
 type HealthResponse struct {
 	// Db Database migration status.
 	//
@@ -1946,6 +1956,7 @@ type HealthResponse struct {
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
 	Db                  DbStatus `json:"db"`
+	McpProtocolVersion  *string  `json:"mcp_protocol_version,omitempty"`
 	McpSessionIdCapture string   `json:"mcp_session_id_capture"`
 
 	// Operator Operator identity surface exposed to the CLI.

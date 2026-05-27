@@ -90,6 +90,38 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **`KubernetesConnector.discover_topology` populator — closes v0.6.0
+  signal-13 amendment promise (G0.14-T12 #1201).** First shipped
+  override of `Connector.discover_topology` against the K8s connector
+  the typed-connector dispatch exercise proved live in v0.6.0. Emits
+  one `target`-kinded `NodeHint` for the cluster (properties: server
+  `git_version` / `major` / `minor` / `platform` — same payload
+  `k8s.about` returns, no extra round-trip), one `namespace` `NodeHint`
+  per namespace (properties from `namespace_row` — `status` /
+  `age_seconds` / `labels`), one `node` `NodeHint` per cluster node
+  (properties from `node_row` — `roles` / kubelet `version` / `kernel`
+  / …), plus `belongs-to` `EdgeHint`s from every namespace and every
+  cluster node to the target. Pods / services / ingresses /
+  deployments / volumes are **explicitly out of scope** at v0.7 — each
+  would multiply the per-refresh API-call cost in proportion to
+  namespace count, and the v0.7.x deploy hasn't surfaced refresh-cost
+  data yet; sibling Tasks land them when justified. The
+  [refresh service](backend/src/meho_backplane/topology/refresh.py)
+  forwards the per-tenant system operator the scheduler already
+  synthesises (`_system_operator` in `topology/scheduler.py`) via
+  `inspect.signature`-based detection on the bound `discover_topology`
+  method — `Connector` ABC stays unchanged, connectors whose override
+  doesn't declare `operator` run verbatim. The deleted regression at
+  `backend/tests/test_connectors_topology.py:231` (which asserted
+  `KubernetesConnector.discover_topology is Connector.discover_topology`)
+  is itself the test that this Task ran. Closes
+  `claude-rdc-hetzner-dc#697` signal 13
+  (`topology-refresh-no-populator-for-k8s`) and the v0.6.0 GitHub
+  release body's "topology populators land in v0.7" honesty callout.
+  (#1201)
+
 ## [0.7.0] - 2026-05-27
 
 **MVP6 — agent runtime floor (P1 + P2 + P3) + safety (C1 sanitization)

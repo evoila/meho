@@ -35,7 +35,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -610,3 +610,171 @@ async def test_refresh_does_not_soft_delete_other_targets_nodes() -> None:
         ).scalar_one()
     assert a_vm_a.target_id == target_a.id
     assert a_vm_a.last_seen is not None, "target B's refresh must not soft-delete target A's node"
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T12 (#1201) -- refresh service forwards the operator to
+# operator-aware ``discover_topology`` overrides (K8s populator).
+# ---------------------------------------------------------------------------
+
+
+class _OperatorAwareConnector(Connector):
+    """Connector whose ``discover_topology`` declares ``operator`` keyword.
+
+    Mirrors the
+    :meth:`~meho_backplane.connectors.kubernetes.connector.KubernetesConnector.discover_topology`
+    signature shape (``(self, target, *, operator: Operator | None = None)``)
+    so the refresh service's signature-introspection forwarder is
+    exercised against the same contract the K8s populator declares,
+    without booting a k3s testcontainer in the unit suite.
+    """
+
+    product = "k8s-test-populator"
+
+    captured_operators: ClassVar[list[Operator]] = []
+
+    async def fingerprint(self, target: Any) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    async def execute(
+        self, target: Any, op_id: str, params: dict[str, Any]
+    ) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    async def discover_topology(  # type: ignore[override]
+        self,
+        target: Any,
+        *,
+        operator: Operator | None = None,
+    ) -> TopologyHints:
+        if operator is not None:
+            type(self).captured_operators.append(operator)
+        return TopologyHints(
+            discovered_at=datetime.now(UTC),
+            nodes=(
+                NodeHint(kind="target", name=target.name, properties={"git_version": "v1.32.5"}),
+                NodeHint(kind="namespace", name="default"),
+                NodeHint(kind="node", name="ctrl-plane-1"),
+            ),
+            edges=(
+                EdgeHint(
+                    from_kind="namespace",
+                    from_name="default",
+                    to_kind="target",
+                    to_name=target.name,
+                    kind="belongs-to",
+                ),
+                EdgeHint(
+                    from_kind="node",
+                    from_name="ctrl-plane-1",
+                    to_kind="target",
+                    to_name=target.name,
+                    kind="belongs-to",
+                ),
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_refresh_forwards_operator_to_k8s_style_discover_topology() -> None:
+    """The refresh service introspects the override and forwards ``operator`` when accepted.
+
+    Pins the G0.14-T12 (#1201) decision: refresh service is the
+    authority on threading the per-tenant system operator into a
+    populator that needs it (e.g. K8s' kubeconfig-from-Vault chain
+    reads under the operator's identity). Connectors whose override
+    didn't declare ``operator`` keep their ``(self, target)`` signature
+    and run unchanged.
+    """
+    register_connector_v2(
+        product="k8s-test-populator",
+        version="",
+        impl_id="",
+        cls=_OperatorAwareConnector,
+    )
+    tenant_id, target = await _seed_tenant_and_target("rdc-internal")
+    target.product = "k8s-test-populator"
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(target)
+        await session.commit()
+
+    op = _operator(tenant_id)
+    _OperatorAwareConnector.captured_operators = []
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        result = await refresh_target_topology(target, op)
+
+    assert _OperatorAwareConnector.captured_operators == [op], (
+        "refresh service must forward the operator to a populator whose "
+        "``discover_topology`` override declares the keyword parameter"
+    )
+    # 1 target anchor + 1 namespace + 1 cluster node = 3 nodes; 2 belongs-to edges.
+    assert result.added_nodes == 3
+    assert result.added_edges == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_with_k8s_style_populator_is_idempotent_on_recall() -> None:
+    """Acceptance criterion: ``RefreshResult`` second-call counts must be all zero.
+
+    Mirrors the issue body's "first call ``added_nodes >= 2``;
+    immediate second call ``added_nodes == 0, updated_nodes == 0``"
+    contract under the refresh service's diff/apply sweep — the same
+    sweep that runs against the live rke2-infra cluster in the v0.7.x
+    deploy.
+    """
+    register_connector_v2(
+        product="k8s-test-populator",
+        version="",
+        impl_id="",
+        cls=_OperatorAwareConnector,
+    )
+    tenant_id, target = await _seed_tenant_and_target("rdc-internal")
+    target.product = "k8s-test-populator"
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(target)
+        await session.commit()
+
+    op = _operator(tenant_id)
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        first = await refresh_target_topology(target, op)
+        second = await refresh_target_topology(target, op)
+
+    assert first.added_nodes >= 2  # ≥2 per the issue body's acceptance criterion.
+    assert second.added_nodes == 0
+    assert second.added_edges == 0
+    assert second.updated_nodes == 0
+    assert second.updated_edges == 0
+    assert second.removed_nodes == 0
+    assert second.removed_edges == 0
+
+    # Acceptance criterion: graph_node rows are visible to subsequent
+    # queries scoped to this (tenant, target). Existing ``query_topology``
+    # and MCP tools (``topology/dependents/{name}`` /
+    # ``topology/path/{from}/{to}``) read against this same
+    # (tenant_id, kind, name) natural key, so visibility here implies
+    # visibility there without further wiring.
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(GraphNode).where(
+                        GraphNode.tenant_id == tenant_id,
+                        GraphNode.target_id == target.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert {(r.kind, r.name) for r in rows} == {
+        ("target", target.name),
+        ("namespace", "default"),
+        ("node", "ctrl-plane-1"),
+    }

@@ -79,6 +79,7 @@ from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
+    TopologyHints,
 )
 
 __all__ = ["KubernetesConnector", "product_from_git_version"]
@@ -397,6 +398,72 @@ class KubernetesConnector(Connector):
             "git_commit": version.git_commit,
             "git_tree_state": version.git_tree_state,
         }
+
+    async def discover_topology(
+        self,
+        target: KubernetesTargetLike,
+        *,
+        operator: Operator | None = None,
+    ) -> TopologyHints:
+        """Return cluster + namespaces + nodes as a :class:`TopologyHints`.
+
+        Op-side: this is the G0.14-T12 (#1201) populator the refresh
+        service (:func:`meho_backplane.topology.refresh.refresh_target_topology`)
+        calls on demand and on the per-tenant scheduled tick. The
+        returned snapshot is diffed against the existing ``graph_node`` +
+        ``graph_edge`` rows for ``(operator.tenant_id, target.id)`` and
+        applied as inserts / updates / soft-deletes.
+
+        Scope (deliberately minimal for v0.7):
+
+        * one ``target`` :class:`NodeHint` for the cluster — properties
+          carry the K8s server version, the same ``VersionApi.get_code()``
+          payload :meth:`about` already issues. ``cluster`` is not in the
+          v0.2 :data:`NodeKind` enum (the enum is closed per
+          ``connectors/schemas.py``) so the cluster manifests as
+          ``kind="target"``.
+        * one ``namespace`` :class:`NodeHint` per namespace — properties
+          from :func:`namespace_row` (``status`` / ``age_seconds`` /
+          ``labels``).
+        * one ``node`` :class:`NodeHint` per cluster node — properties
+          from :func:`node_row` (``roles`` / ``version`` /
+          ``kernel``…).
+        * one ``belongs-to`` :class:`EdgeHint` from each namespace and
+          each cluster node to the target node.
+
+        Pods / services / ingresses / deployments / volumes are
+        **explicitly out of scope** — each would multiply the
+        per-refresh API-call cost in proportion to the namespace count.
+        Sibling Tasks land them when refresh-cost data justifies the
+        spend.
+
+        ``operator`` is keyword-only with a ``None`` default to keep the
+        :class:`Connector` ABC signature unchanged while letting the
+        refresh service forward the per-tenant system operator the
+        scheduler synthesises
+        (:func:`~meho_backplane.topology.scheduler._system_operator`).
+        The forwarded operator flows through :meth:`_get_api_client` so
+        the operator-context Vault → kubeconfig chain reads under the
+        scheduler's synthetic tenant identity. The ``None`` fall-back
+        synthesises the system operator the fingerprint/probe paths
+        already use, so a direct caller (test, future on-demand surface
+        that doesn't yet thread the operator) still works closed-loop.
+        """
+        from meho_backplane.connectors.kubernetes._topology import build_topology_hints
+
+        eff_operator = operator if operator is not None else synthesise_system_operator()
+        api_client = await self._get_api_client(target, eff_operator)
+        version_api = client.VersionApi(api_client)
+        core_v1 = client.CoreV1Api(api_client)
+        version = await version_api.get_code()
+        namespaces_resp = await core_v1.list_namespace()
+        nodes_resp = await core_v1.list_node()
+        return build_topology_hints(
+            target_name=target.name,
+            version=version,
+            namespaces=list(namespaces_resp.items or []),
+            nodes=list(nodes_resp.items or []),
+        )
 
     async def k8s_namespace_list(
         self,

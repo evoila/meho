@@ -226,6 +226,7 @@ const (
 const (
 	Bind9         TargetCreateProduct = "bind9"
 	Gcloud        TargetCreateProduct = "gcloud"
+	Gh            TargetCreateProduct = "gh"
 	Harbor        TargetCreateProduct = "harbor"
 	HetznerRobot  TargetCreateProduct = "hetzner-robot"
 	Holodeck      TargetCreateProduct = "holodeck"

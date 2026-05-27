@@ -12326,6 +12326,7 @@
             "enum": [
               "bind9",
               "gcloud",
+              "gh",
               "harbor",
               "hetzner-robot",
               "holodeck",

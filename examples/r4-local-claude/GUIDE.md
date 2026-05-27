@@ -168,7 +168,10 @@ A successful triage run lands one or more rows with
 `op_id=add_to_memory` (the latter ONLY when the cheap-tier
 decided some event was interesting). A `result_status=denied` on
 `add_to_memory` is the most common first-time failure — the
-agent principal needs the grant set up in Step 4 below.
+agent principal's JWT is missing the `tenant_role=tenant_admin`
+claim that `MemoryRbacResolver.can_write` requires for
+`scope="tenant"` writes. Fix this with the Keycloak role-mapper
+in Step 4 below.
 
 ## Step 3 — Wire the local Claude Code's `.mcp.json`
 
@@ -264,63 +267,100 @@ Claude Code session spawns `npx mcp-remote ...` on stdio; the shim
 holds the token and translates JSON-RPC frames to Streamable HTTP.
 Token rotation is the same as Variant A.
 
-## Step 4 — Scope grants for the agent principal (tenant_admin)
+## Step 4 — Agent principal's `tenant_role` (tenant_admin via Keycloak)
 
 The cheap-tier agent's write target is **memory `scope="tenant"`**
-(per [`agent.alert-triage.json`](./agent.alert-triage.json)). Per
-the RBAC matrix in
-[`backend/src/meho_backplane/memory/rbac.py`](../../backend/src/meho_backplane/memory/rbac.py)
-`MemoryRbacResolver.can_write`, tenant-scope writes require
-**either** the principal to hold `tenant_admin`, **or** a per-
-principal grant for `add_to_memory` via the G11.2 grant table
-([G11.2-T6 #819](https://github.com/evoila/meho/issues/819)).
+(per [`agent.alert-triage.json`](./agent.alert-triage.json)). The
+authorisation gate for that write is **not** the per-(principal,
+op_class, target) grant table — the MCP `tools/call` dispatcher
+at
+[`backend/src/meho_backplane/mcp/handlers.py`](../../backend/src/meho_backplane/mcp/handlers.py)
+L272-285 only consults the tool's `required_role` (`OPERATOR`),
+then delegates to the per-tool handler. For `add_to_memory`, the
+handler at
+[`backend/src/meho_backplane/mcp/tools/memory.py`](../../backend/src/meho_backplane/mcp/tools/memory.py)
+calls `MemoryService.remember`, which calls
+`MemoryRbacResolver.can_write`. That resolver unconditionally
+requires `tenant_role=tenant_admin` on the operator for any
+`MemoryScope.TENANT` write
+([`backend/src/meho_backplane/memory/rbac.py`](../../backend/src/meho_backplane/memory/rbac.py)
+L137-139). The `agent_permission` grant table is consulted by the
+**typed-op** dispatcher (`operations/_validate.py:177`), not by
+the MCP path; no `meho agent grant create` row affects
+`add_to_memory` in v0.2.
 
-The deployer issues those grants on the agent principal at
-install time. The grant verb family is **`meho agent grant`**,
-not `meho agent-principal grant` — grants are properties of the
-(principal, op-pattern, target) triple, not the principal itself.
+So the deployer's job is to make sure the agent principal's
+**Keycloak JWT carries `tenant_role=tenant_admin`**. That claim
+flows from a realm role-mapper onto the agent principal's
+`client_credentials` token (mapper shape per
+[`backend/src/meho_backplane/auth/jwt.py`](../../backend/src/meho_backplane/auth/jwt.py)
+L617-642 — the same `tenant_role` claim a human operator's token
+carries).
+
+Two paths to mount that role on the principal:
+
+1. **Keycloak admin UI** — Clients → `r4-alert-triage` →
+   Service Account Roles → assign a realm role mapped to
+   `tenant_admin` via the realm's `tenant-role` protocol
+   mapper.
+2. **CLI bootstrap** — at install time, the same
+   [`meho admin keycloak bootstrap-clients`](../../cli/internal/cmd/admin/keycloak/keycloak.go)
+   verb that wires the human-operator clients can be re-pointed
+   at the agent client with `--tenant-role tenant_admin` (the
+   flag is documented in the verb's help).
+
+> **Why `tenant_admin` is the right level here:** the agent's
+> only privileged action is writing tenant-shared memory on
+> behalf of the triage loop. Tenant-shared memory is governed by
+> `tenant_admin` for the same reason the consumer-needs.md §G5
+> spec ships it that way — tenant-shared knowledge is privileged
+> by design, and the v0.2 RBAC matrix has no narrower lane for
+> "this principal can write tenant memory but not change tenant
+> conventions". The G11.2 grant table is forward-compat for
+> per-(op_class, target) narrowing on the **typed-op** surface
+> (connectors, ops dispatcher); the MCP memory route does not
+> yet read it, and `add_to_memory` writes are gated by
+> `MemoryRbacResolver.can_write` alone.
+
+### Alternative — narrower scope at the cost of cross-operator visibility
+
+If granting `tenant_admin` to the cheap-tier is too privileged
+for your tenant, change the agent's `scope` from `"tenant"` to
+`"user-tenant"` in the system prompt **and** mount the agent
+principal under the operator's own `sub` (set `--owner-sub` on
+`meho agent-principal register`). Memory rows at `user-tenant`
+scope only need the writer to be `>= operator`, so no role
+escalation is needed.
+
+The catch: a `user-tenant` row is **visible only to the
+operator whose `sub` matches `user_sub`** (per
+[`MemoryRbacResolver.can_read`](../../backend/src/meho_backplane/memory/rbac.py)
+L154-168, which gates user-scoped reads on `operator.sub ==
+user_sub`). Every other operator on the tenant trying to
+`search_memory` for the handoff sees nothing. The shared-team-
+inbox property of R4 is lost. For a single-operator tenant
+that's a fine tradeoff; for a team it isn't.
+
+Verify the principal's effective role:
 
 ```bash
-# Grant the cheap-tier the minimal scope it needs. The principal
-# sub follows the clientId convention `agent:<name>` set by
-# `meho agent-principal register`.
-PRINCIPAL="agent:r4-alert-triage"
+# Decode the client_credentials token the scheduler will use and
+# read the tenant_role claim out of the payload.
+TOKEN=$(curl -s -X POST \
+  "https://keycloak.example.com/realms/<realm>/protocol/openid-connect/token" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=agent:r4-alert-triage" \
+  -d "client_secret=$AGENT_CLIENT_SECRET" \
+  | jq -r .access_token)
 
-# Read: pull recent broadcasts.
-meho agent grant create \
-  --principal "$PRINCIPAL" \
-  --op meho.broadcast.recent \
-  --verdict auto-execute
-
-# Read: search memory (for re-triage / dedupe checks).
-meho agent grant create \
-  --principal "$PRINCIPAL" \
-  --op search_memory \
-  --verdict auto-execute
-
-# Write: add a tenant-scoped handoff entry. Without this grant,
-# add_to_memory at scope="tenant" returns 403 PermissionDenied;
-# the prompt's whole pattern stops working.
-meho agent grant create \
-  --principal "$PRINCIPAL" \
-  --op add_to_memory \
-  --verdict auto-execute
+# Pull the JWT payload (no signature check — for diagnostics only).
+echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null \
+  | jq '{tenant_role, tenant_id, sub}'
+# expect: tenant_role="tenant_admin"
 ```
 
-> **Why grant the agent, not widen the operator's role:** the
-> agent principal needs *exactly* the read-broadcast-feed +
-> write-handoff-memory grants to do its job — and nothing else.
-> The G11.2 grant table is where that minimal-scope is bound,
-> not the operator's `tenant_role`. The operator's role stays
-> coarse on purpose; the agent's grants are fine.
-
-Verify the grants landed:
-
-```bash
-meho agent grant list --principal "$PRINCIPAL"
-# expect three rows: meho.broadcast.recent / search_memory / add_to_memory
-# all with verdict=auto-execute, target_scope=*  (no target narrowing)
-```
+If `tenant_role` reads as `operator` or is absent, the role-
+mapper is missing on the agent client — fix the mapper, retry.
 
 ### Operator's own session role
 
@@ -332,15 +372,20 @@ the ones the local model decides to issue without asking:
 - `read_only` — read tools work (`meho.status`, `search_memory`,
   `search_knowledge`, `meho.broadcast.recent`); write tools 403.
 - `operator` — adds tool-call execution: `meho.agents.run`,
-  `meho.connector.*` reads, write tools the per-(agent_principal,
-  op_class, target) grant table allows.
+  `meho.connector.*` reads, user-scope memory writes
+  (`add_to_memory` at `scope="user"` / `"user-tenant"` /
+  `"user-target"`), and typed-op connector calls gated by the
+  per-(principal, op_class, target) `agent_permission` table
+  (`operations/_validate.py`). Note that grant table does **not**
+  gate MCP `tools/call` directly — MCP tools are gated by their
+  `required_role` plus the per-tool handler's own checks.
 - `tenant_admin` — adds the admin surface (agent definitions,
-  scheduler triggers, broadcast overrides). Note `add_to_memory`
-  at `scope="tenant"` is in this lane — the operator's local
-  session reading the handoff via `search_memory` does **not**
-  need `tenant_admin`, only the read path (tenant scope is
-  readable by every operator in the tenant per
-  [`MemoryRbacResolver.can_read`](../../backend/src/meho_backplane/memory/rbac.py)).
+  scheduler triggers, broadcast overrides) and tenant-scope
+  memory writes (`add_to_memory` at `scope="tenant"`). The
+  operator's local session **reading** a handoff via
+  `search_memory` does **not** need `tenant_admin` — tenant scope
+  is readable by every operator in the tenant per
+  [`MemoryRbacResolver.can_read`](../../backend/src/meho_backplane/memory/rbac.py).
 
 **Recommended posture for the operator's local session:**
 
@@ -370,10 +415,18 @@ The verification chain has four steps:
    `compute_effective_broadcast_detail`). After the cron tick, list
    the tenant-scope memory entries:
    ```bash
-   meho memory list --scope tenant | grep r4-handoff-
-   # expect: one entry per interesting event,
-   # slug like `r4-handoff-<event_id>`, tag `r4-triage-handoff`
+   meho list --scope tenant --tag r4-triage-handoff
+   # expect: one row per interesting event,
+   # slug like `r4-handoff-<event_id>`
    ```
+
+   > The memory verbs are registered as **top-level** cobra commands
+   > (`meho remember` / `meho recall` / `meho forget` / `meho list` /
+   > `meho promote`), not under a `memory` parent — see
+   > [`cli/internal/cmd/memory/memory.go`](../../cli/internal/cmd/memory/memory.go)'s
+   > package docstring. `--tag` filters on `metadata.tags` and
+   > `--slug-pattern r4-handoff-` is the closest substring fallback
+   > if the tag was ever dropped from the agent's write.
 3. **Local Claude reads the entry.** Open the operator's local
    repo in Claude Code; once `.mcp.json` is in place and the
    session restarts, ask the model:
@@ -404,9 +457,12 @@ If step 3 returns nothing, the failure is usually in:
 - The cheap-tier didn't see a sufficiently-interesting event in
   the window. Lower the bar in the system prompt's "interesting"
   list while you're testing, then revert.
-- The agent principal lacks the `add_to_memory` grant (Step 4).
+- The agent principal's JWT is missing
+  `tenant_role=tenant_admin`. The MCP `add_to_memory` route only
+  checks the role claim — no agent-grant row papers over that.
   Confirm with `meho audit query --principal agent:r4-alert-triage
-  --op-id add_to_memory --result-status denied`.
+  --op-id add_to_memory --result-status denied`, then re-check
+  the role-mapper in Step 4.
 
 ## Step 6 — Tuning + ops
 

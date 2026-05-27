@@ -168,7 +168,7 @@ async def resolve_ui_operator(
         :func:`require_ui_session` to read it off ``request.state``.
     """
     if session_ctx is None:
-        session_ctx = require_ui_session(request)
+        session_ctx = await require_ui_session(request)
     access_token = await _load_session_or_401(session_ctx)
     settings = get_settings()
     operator = await verify_jwt_for_audience(

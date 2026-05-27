@@ -347,6 +347,76 @@ Reverse dependencies:
   (admin tool + `shape="tree"`) through `replay_session`.
 * T3 #467 (CLI) follows.
 
+## BFF (operator UI) audit coverage (G0.15-T7 #1216)
+
+Every authenticated ``/ui/<surface>`` GET / HEAD writes one ``audit_log`` row
+attributed to the BFF session's operator. The binding lives in
+:func:`meho_backplane.ui.auth.middleware.require_ui_session` — the FastAPI
+dependency every UI route declares (directly or transitively via
+``require_ui_admin``). On entry the dependency calls
+:func:`meho_backplane.ui.audit.bind_ui_view_audit`, which binds four
+structlog contextvars the chassis :class:`AuditMiddleware` reads on the
+response side:
+
+| Contextvar | Value | Lands on `audit_log` as |
+|---|---|---|
+| ``operator_sub`` | Session's stable subject id | typed ``operator_sub`` column |
+| ``tenant_id`` | ``str(session.tenant_id)`` | typed ``tenant_id`` column |
+| ``audit_op_id`` | ``ui.view.<surface>`` (see table below) | ``payload.op_id`` |
+| ``audit_op_class`` | ``"ui_view"`` (constant ``UI_AUDIT_OP_CLASS``) | ``payload.op_class`` |
+
+Surface mapping (single source of truth in
+``backend/src/meho_backplane/ui/audit.py``):
+
+| URL prefix | Surface | op_id |
+|---|---|---|
+| ``/ui/`` | dashboard | ``ui.view.dashboard`` |
+| ``/ui/broadcast`` (+ subpaths) | broadcast | ``ui.view.broadcast`` |
+| ``/ui/connectors`` (+ subpaths) | connectors | ``ui.view.connectors`` |
+| ``/ui/kb`` (+ subpaths) | kb | ``ui.view.kb`` |
+| ``/ui/memory`` (+ subpaths) | memory | ``ui.view.memory`` |
+| ``/ui/topology`` (+ subpaths) | topology | ``ui.view.topology`` |
+
+The ``op_class="ui_view"`` is a new class (the consumer's
+``claude-rdc-hetzner-dc#753`` v0.7.0 closed-loop dogfood "Option B")
+distinct from the agent path's ``read`` / ``write``. Operators who want
+UI page views in their forensic timeline query
+``op_class=ui_view``; operators who want to prune them filter them
+out — and a retention policy can drop them independently of the
+governance-load-bearing agent dispatch trail.
+
+Target-scoped page views (e.g. ``/ui/connectors/<name>``) also populate
+the typed ``audit_log.target_id`` column. That binding is unchanged
+from G0.3-T4 — :func:`meho_backplane.targets.resolver.resolve_target`
+binds ``target_id`` into structlog at its single exit point, and the
+audit middleware reads it into the row. The JOIN against ``targets``
+in :func:`query_audit` then surfaces ``target_name`` on the returned
+``AuditEntry``.
+
+Skipped paths:
+
+* ``/ui/auth/*`` — login / callback / logout. Unauthenticated by design;
+  the session middleware bypasses the audit-thread binding and the
+  AuditMiddleware's general no-``operator_sub``-skip applies.
+* ``/ui/static/*`` — vendored JS + compiled CSS. Bypassed at the session
+  middleware so unauthenticated browsers render styled login pages.
+* POST / PATCH / DELETE on ``/ui/*`` — service-layer functions
+  (``create_target``, ``update_target``, ``forget_memory``, etc.) write
+  their own audit row under the canonical ``<surface>.<verb>`` op_id /
+  ``op_class=write`` discipline. Binding ``ui_view`` here would
+  double-attribute every state change. ``operator_sub`` / ``tenant_id``
+  are still bound on non-GET so a write-path route that happens to
+  bypass the service-layer writer still produces a row (under the
+  default ``http.<method>:<path>`` op_id) rather than disappearing.
+
+Pre-fix gap (closed by G0.15-T7): the chassis audit middleware skips
+requests with no ``operator_sub`` contextvar, and only
+``require_ui_admin`` — a dependency a small subset of write surfaces
+chain — bound it. Every read GET through ``require_ui_session`` left
+zero audit footprint, so an operator browsing 5 surfaces generated
+zero rows under their sub. The substrate now has full BFF coverage
+parity with the ``/api/v1/*`` chassis path and the MCP transport path.
+
 ## Known issues / v0.2 gaps
 
 * **`principal_name` never populates.** The HTTP audit middleware

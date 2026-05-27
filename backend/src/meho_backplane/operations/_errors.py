@@ -11,10 +11,10 @@ dispatcher's :func:`dispatch` body stay focused on control flow.
 Each builder owns one ``error_code`` from the contract documented in
 :mod:`meho_backplane.operations.dispatcher`'s module docstring:
 ``unknown_op`` / ``invalid_params`` / ``no_connector`` /
-``handler_unreachable`` / ``denied`` / ``awaiting_approval`` /
-``connector_error``. The ``status`` field maps to
-``OperationResult.status``; the ``error_code`` lives in ``extras`` so
-callers can both string-match the ``error`` field
+``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
+``awaiting_approval`` / ``connector_error``. The ``status`` field maps
+to ``OperationResult.status``; the ``error_code`` lives in ``extras``
+so callers can both string-match the ``error`` field
 (``error.startswith("unknown_op:")``) and parse the code for structured
 handling.
 """
@@ -27,7 +27,9 @@ from typing import Any
 from meho_backplane.connectors import OperationResult, ResultHandle
 
 __all__ = [
+    "result_ambiguous_connector",
     "result_awaiting_approval",
+    "result_composite_l2_missing",
     "result_connector_error",
     "result_denied",
     "result_handler_unreachable",
@@ -75,15 +77,85 @@ def result_invalid_params(
 
 
 def result_no_connector(
-    op_id: str, product: str, version: str, duration_ms: float
+    op_id: str,
+    product: str,
+    version: str,
+    duration_ms: float,
+    exception_message: str | None = None,
 ) -> OperationResult:
-    """Resolver miss -- no registered impl for *(product, version)*."""
+    """Resolver miss -- no registered impl for *(product, version)*.
+
+    ``exception_message`` (added by G0.14-T1 #1142) carries the
+    :exc:`~meho_backplane.connectors.NoMatchingConnector` exception text
+    so the operator-facing surface can show the diagnostic detail the
+    resolver computed (``target.product`` value, the absence of a
+    matching v1/v2 entry, etc.) rather than a bare summary. The field
+    lands under ``extras["exception_message"]`` matching the
+    ``connector_error`` shape so the structured-error consumer can read
+    a uniform key across the two diagnostic codes.
+
+    The argument is optional for backward compatibility with call sites
+    that pre-date the resolver-helper unification — they pass through
+    the bare ``(product, version)`` form and ``extras`` omits the field.
+    """
+    extras: dict[str, Any] = {
+        "error_code": "no_connector",
+        "product": product,
+        "version": version,
+    }
+    if exception_message is not None:
+        extras["exception_message"] = exception_message
     return OperationResult(
         status="error",
         op_id=op_id,
         error=f"no_connector: no implementation for product={product!r} version={version!r}",
         duration_ms=duration_ms,
-        extras={"error_code": "no_connector", "product": product, "version": version},
+        extras=extras,
+    )
+
+
+def result_ambiguous_connector(
+    op_id: str,
+    product: str,
+    version: str,
+    exception_message: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Resolver tie-break ladder couldn't pick a single connector.
+
+    G0.14-T1 (#1142). The resolver raises
+    :exc:`~meho_backplane.connectors.AmbiguousConnectorResolution` when
+    two or more connectors remain after every step of the tie-break
+    ladder (specificity → operator preference → priority). The exception
+    message *already* carries the diagnostic shape an operator needs:
+    the target's ``(product, version)``, the candidate list, and the
+    remediation step ("set ``target.preferred_impl_id`` to one of
+    them"). This builder preserves that message verbatim under
+    ``extras["exception_message"]`` so the structured-error envelope
+    on ``/operations/call`` (and any other dispatcher consumer) surfaces
+    it without a paraphrase.
+
+    Mirrors :func:`result_no_connector`'s shape — ``status="error"``,
+    ``error="<code>: <human-readable>"``, full diagnostic detail in
+    ``extras`` — so callers that already string-match
+    ``error.startswith("no_connector:")`` can extend the same pattern
+    to ``"ambiguous_connector:"`` without re-shaping their consumer.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"ambiguous_connector: resolution ambiguous for "
+            f"product={product!r} version={version!r}; "
+            f"set target.preferred_impl_id to one of the candidates"
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "ambiguous_connector",
+            "product": product,
+            "version": version,
+            "exception_message": exception_message,
+        },
     )
 
 
@@ -159,6 +231,51 @@ def result_awaiting_approval(
         extras={
             "error_code": "awaiting_approval",
             "approval_request_id": str(approval_request_id),
+        },
+    )
+
+
+def result_composite_l2_missing(
+    op_id: str,
+    missing_op_ids: tuple[str, ...],
+    catalog_command: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Composite handler pre-flight detected missing L2 sub-op descriptors.
+
+    G0.14-T10 (#1151). A composite (``vmware.composite.*``) declares the
+    raw-REST sub-ops it dispatches into via
+    :func:`~meho_backplane.connectors.vmware_rest.composites._preflight.preflight_l2_dependencies`.
+    When one or more are not registered in ``endpoint_descriptor`` -- the
+    operator hasn't run ``meho connector ingest --catalog
+    <product>/<version>`` yet -- the helper raises
+    :class:`~meho_backplane.operations.composite.CompositeL2DependencyMissing`
+    and the dispatcher converts it to this structured result.
+
+    The error shape complies with the
+    ``docs/codebase/error-message-shape.md`` convention (G0.14-T11
+    #1141): a stable ``composite_l2_missing`` code, a remediation-bearing
+    human message (names missing op-ids + the catalog command + the doc
+    reference), and a structured ``data`` payload (``missing_op_ids`` +
+    ``catalog_command``) so an agent can branch on the diagnostic without
+    re-parsing the human text.
+    """
+    missing_repr = ", ".join(missing_op_ids) if missing_op_ids else "(none)"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"composite_l2_missing: composite {op_id!r} depends on L2 sub-ops "
+            f"not registered in the catalog: [{missing_repr}]. Run "
+            f"{catalog_command!r} to ingest them, then retry. See "
+            f"docs/codebase/connectors-vmware-rest.md for the L1+L2 "
+            f"dispatch contract."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "composite_l2_missing",
+            "missing_op_ids": list(missing_op_ids),
+            "catalog_command": catalog_command,
         },
     )
 

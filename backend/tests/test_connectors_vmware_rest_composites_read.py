@@ -26,6 +26,7 @@ sub-ops, in what order, with what params.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
@@ -33,6 +34,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites import _preflight
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -40,6 +42,40 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
+
+
+@pytest.fixture(autouse=True)
+def _prime_preflight_cache() -> Iterator[None]:
+    """Prime the L2 pre-flight cache so handler-direct tests skip the DB walk.
+
+    The handler-direct tests in this module bypass the dispatcher and call
+    the composite handlers as plain async functions. The G0.14-T10 (#1151)
+    pre-flight check would otherwise issue a
+    :func:`~meho_backplane.operations._lookup.lookup_descriptor` query
+    against an unconfigured session at the top of every handler. Priming
+    the per-process cache with each composite's op_id before the test
+    fires (and clearing it after) keeps these tests handler-direct
+    without re-shaping every fixture to stand up a DB session.
+
+    Per-composite preflight behaviour (cache miss -> DB walk; cache miss
+    on missing L2 -> structured exception) is exercised in the dedicated
+    module ``test_connectors_vmware_rest_composites_l2_preflight.py``
+    where a stub ``lookup_descriptor`` exercises both the all-present
+    and the missing-L2 code paths.
+    """
+    _preflight.reset_preflight_cache()
+    _preflight._PREFLIGHT_CACHE.update(
+        {
+            "vmware.composite.cluster.drs_recommendations",
+            "vmware.composite.event.tail",
+            "vmware.composite.performance.summary",
+            "vmware.composite.datastore.usage",
+            "vmware.composite.network.portgroup.audit",
+        }
+    )
+    yield
+    _preflight.reset_preflight_cache()
+
 
 # ---------------------------------------------------------------------------
 # Helpers

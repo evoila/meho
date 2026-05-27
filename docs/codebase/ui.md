@@ -375,6 +375,47 @@ A module-level `threading.Lock` guards the shared `MarkdownIt` instance
 generated once at module load and injected as an inline `<style>` block
 in the entry-detail template.
 
+## KB editor modal + mobile reflow (G10.2-T3 #872)
+
+T3 extends `meho_backplane.ui.routes.kb` with two write routes and
+mobile-reflow CSS on the entry detail page:
+
+- `POST /ui/kb/editor-preview` — HTMX live-preview partial. Accepts a
+  `body` form field (max 65 536 bytes), renders it via `render_markdown`,
+  returns the `kb/_editor_preview.html` fragment. Any authenticated
+  operator can call this (read-only Markdown transform; no role gate).
+- `POST /ui/kb/new` — editor save. Requires `tenant_admin` role (enforced
+  by `_require_tenant_admin()`: loads the full `DecryptedSession` via
+  `load_session()`, verifies the access token via
+  `verify_jwt_for_audience()`, checks `operator.tenant_role ==
+  TenantRole.TENANT_ADMIN`). On success returns HTTP 204 +
+  `HX-Redirect: /ui/kb/<slug>`; on failure re-renders the
+  `kb/_editor_modal.html` fragment with a 422 and an inline error banner.
+
+**Editor modal** (`kb/_editor_modal.html`): DaisyUI `<dialog>` element
+with a slug input, a CodeMirror 6 editor pane (`#kb-editor-cm`), a live
+preview column (`#kb-editor-preview-content`), and a hidden textarea
+(`#kb-editor-body`) that HTMX reads for the preview POST. Variables use
+`| default('')` / `| default(none)` so the template is safe when
+`{% include %}`'d from `index.html` without the editor-specific context
+keys (Jinja2 StrictUndefined catches bare names; the `| default()`
+filter intercepts the Undefined object before the strict check fires).
+
+**CodeMirror 6** (`static/src/vendor/codemirror-bundle.min.js`): a
+single-file IIFE bundle (SHA256 `a411a47c…`, 606 KB) built offline with
+esbuild from `codemirror@6.0.1` + `@codemirror/lang-markdown@6.3.2`.
+Exposes the `CM` global with `EditorView`, `EditorState`, `basicSetup`,
+`markdown`, `keymap`, `defaultKeymap`, `historyKeymap`, `indentWithTab`.
+Mounted via a `MutationObserver` on the `<dialog>` `open` attribute — the
+editor is created on first modal open and reused across open/close cycles
+so the operator's draft persists without a hidden-textarea seed.
+
+**Mobile reflow** (`kb/detail.html` `{% block scripts %}`): CSS added to
+`.kb-body` prevents horizontal page overflow at narrow widths:
+`overflow-wrap: break-word`, `word-break: break-word`; code blocks cap at
+`max-width: 100%` and scroll inside their own box; tables use
+`display: block; overflow-x: auto`; images cap at `max-width: 100%`.
+
 ## KB upload surface (G10.2-T2 #871)
 
 Task [#871](https://github.com/evoila/meho/issues/871) extends
@@ -1188,3 +1229,597 @@ against the SQLite fixture.
 - Cytoscape `cy.pan` / `cy.zoom` — https://js.cytoscape.org/#cy.pan
 - Cytoscape selector classes — https://js.cytoscape.org/#selectors/class
 - FastAPI `StaticFiles` (consumed by T5) — https://fastapi.tiangolo.com/tutorial/static-files/
+- markdown-it-py — https://markdown-it-py.readthedocs.io/en/latest/
+- pygments `HtmlFormatter` — https://pygments.org/docs/formatters/
+
+## Memory surface (Task #877)
+
+Initiative [#341](https://github.com/evoila/meho/issues/341) (G10.4
+Memory UI), Task [#877](https://github.com/evoila/meho/issues/877)
+(G10.4-T1) replaces the chassis stub at `/ui/memory` with the real
+**scope-aware list** + **per-memory detail/edit view** + **delete with
+confirm modal** + **tag autocomplete**. Sibling Tasks T2
+([#878](https://github.com/evoila/meho/issues/878)) and T3
+([#879](https://github.com/evoila/meho/issues/879)) layer create+promote
+and expiry-viz+bulk on top of the same router.
+
+### Routes
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/ui/memory` | List page or HTMX card-list fragment. Accepts `?scope=` (one of the five `MemoryScope` values or `"all"`) and `?tag=` (equal-match against `metadata.tags`). HTMX fragment when `HX-Request: true`. |
+| `GET` | `/ui/memory/tags` | Tag-autocomplete datalist fragment. Returns `<option>` rows for the union of tags the operator can see, sorted, capped at 200. |
+| `GET` | `/ui/memory/<scope>/<slug>` | Detail page (server-rendered Markdown body) or HTMX body fragment. |
+| `GET` | `/ui/memory/<scope>/<slug>/edit` | HTMX edit-form fragment. 403 when RBAC denies the write. |
+| `PATCH` | `/ui/memory/<scope>/<slug>` | Save the edited body (HTMX form post). Returns the re-rendered body view. CSRF-enforced. |
+| `DELETE` | `/ui/memory/<scope>/<slug>` | Delete + re-render the card list with a flash banner. CSRF-enforced. |
+
+### Module layout
+
+* `backend/src/meho_backplane/ui/routes/memory/__init__.py` — exports
+  `build_memory_router`.
+* `backend/src/meho_backplane/ui/routes/memory/routes.py` — thin
+  FastAPI handlers that resolve session + operator deps and delegate
+  to the render helpers in `views`.
+* `backend/src/meho_backplane/ui/routes/memory/views.py` — render
+  functions + projection helpers (`render_index`, `render_detail`,
+  `render_edit_form`, `patch_entry`, `delete_entry`, `render_tags`).
+  Pulled out of `routes` so the render logic is unit-testable
+  without an HTTP fixture and so each module fits the chassis-wide
+  ~600-line cap.
+* `backend/src/meho_backplane/ui/routes/memory/render.py` — Markdown
+  → HTML renderer (`markdown-it-py` commonmark + `pygments`). Mirrors
+  the precedent the KB UI sets in `kb/render.py`
+  (G10.2-T1 #870); the two modules will dedupe once both PRs land on
+  `main`.
+* `backend/src/meho_backplane/ui/routes/memory/operator.py` —
+  `resolve_ui_operator` FastAPI dependency that lifts a full
+  `Operator` (carrying `tenant_role`) from the BFF session by
+  re-verifying the stored access token. Used by every write handler.
+  Read handlers use `build_read_operator` which synthesises an
+  `OPERATOR`-role operator without a JWT round-trip (the read RBAC
+  matrix only consults the per-row `user_sub`, never the role).
+* `backend/src/meho_backplane/ui/templates/memory/` — Jinja2
+  templates: `index.html` (full list page), `_cards.html` (HTMX list
+  fragment), `detail.html` (full detail page), `_body_view.html` /
+  `_body_edit.html` (HTMX swap targets on Edit / Save / Cancel),
+  `_tags_options.html` (autocomplete datalist).
+
+### Markdown rendering
+
+`render_markdown` constructs a process-wide `MarkdownIt("commonmark",
+{"html": False, "linkify": True, "highlight": _highlight_code})` and
+enables `table` + `strikethrough`. The `html=False` override is
+load-bearing — `markdown-it-py` 4.2.0's `commonmark` preset has
+`html` defaulted to `True`, which would render raw `<script>` /
+`<iframe>` in a memory body as live HTML. With `html=False`, raw HTML
+is rendered as escaped text and Markdown structure (headings, links,
+code blocks) still parses.
+
+Code blocks pass through `pygments`'s `HtmlFormatter(nowrap=True,
+cssclass="memory-code")` so each token is a bare `<span>` annotated
+with a class; the highlight callback wraps the spans in
+`<pre class="memory-code"><code class="language-{lang}">`. Unknown
+languages fall back to `TextLexer` (no decoration) rather than
+guessing.
+
+`MarkdownIt.render` mutates internal parser state, so the singleton
+is guarded by a `threading.Lock`. The lock-contention cost is
+negligible compared to the surrounding DB read at realistic UI QPS.
+
+### RBAC posture
+
+Read paths (list / detail / tags) build a synthesised `Operator` with
+`TenantRole.OPERATOR` and rely on `MemoryRbacResolver.can_read`'s
+per-row `user_sub` gate for cross-user isolation. Write paths
+(edit-form GET, PATCH, DELETE) re-verify the BFF session's access
+token through the chassis JWT chain (`verify_jwt_for_audience`) to
+produce a fully-validated `Operator` carrying the live `tenant_role`.
+The matrix is re-checked at the service layer
+(`MemoryService.remember` / `forget` call `can_write`); the
+route-side check is for the UX "show / hide Edit button" decision
+and a quick 403 on the edit-form GET so the operator doesn't load
+the textarea for an action the save would reject anyway. The
+edit-form GET surfaces RBAC denial as **403** (not 404, the read
+posture) — mirroring `/api/v1/memory`'s write-side posture and
+pinned by `test_edit_form_tenant_scoped_as_operator_returns_403`.
+
+The 404-vs-403 collapse on detail / edit-form / PATCH / DELETE for
+non-existent slugs is the info-leak avoidance the `/api/v1/memory`
+surface holds: a caller cannot distinguish "no such memory" from
+"you can't read it" by the response status. PATCH / DELETE on a
+tenant-scoped row by an `operator` role do surface as 403 (the
+matrix mismatch is honest feedback — the alternative would be a
+silent no-op that audits worse).
+
+### HTMX conventions
+
+* `hx-get` for scope tabs + tag filter (idempotent reads).
+* `hx-patch` for the edit-in-place save; the form's
+  `id="memory-body"` is the swap target so Save replaces the form
+  with the rendered body view in place.
+* `hx-delete` for the delete-with-confirm-modal; the modal's
+  Confirm button swaps the full `<body>` with the re-rendered list
+  page (`hx-target="body" hx-push-url="/ui/memory"`) so the
+  operator lands on the list with the deleted row absent.
+* The page-level `hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'`
+  directive on `detail.html` echoes the chassis double-submit token
+  on every HTMX request from that page; the index page sets the
+  same directive so future state-changing actions on the list (T3's
+  bulk delete) inherit the token without per-element wiring.
+
+### Tests
+
+The full suite lives in
+`backend/tests/test_ui_memory_list.py`. It pins:
+
+* the auth boundary (unauthenticated requests 302 to the BFF login),
+* the list view (empty inventory + populated cards with scope badge
+  + 200-char preview + tag chips + scope tab + tag filter +
+  `/ui/memory/tags` autocomplete),
+* the detail view (Markdown → HTML rendering, raw `<script>` stripped
+  to escaped text, 404 on missing slug, cross-user 404 on another
+  operator's user-scoped slug, cross-tenant 404 on another tenant's
+  tenant-scoped slug),
+* the edit-in-place flow (textarea fragment renders for own
+  user-scoped, 403 for tenant-scoped under `operator` role, textarea
+  for tenant-scoped under `tenant_admin`, PATCH save persists +
+  returns the rendered body view, empty body 422),
+* the delete flow (DELETE removes the row + re-renders the empty
+  list with a flash banner, 403 on tenant-scoped under `operator`,
+  404 on missing slug),
+* the stub-retirement (the chassis "Coming soon" stub no longer
+  renders for `/ui/memory`).
+
+The PATCH happy-path mocks `meho_backplane.retrieval.indexer.get_embedding_service`
+because `MemoryService.remember`'s re-index path calls `encode_one`
+on the new body. Read paths bypass embedding entirely.
+
+## Memory create modal + scope-promotion (Task #878)
+
+Initiative [#341](https://github.com/evoila/meho/issues/341) (G10.4
+Memory UI), Task [#878](https://github.com/evoila/meho/issues/878)
+(G10.4-T2) layers the **create modal** + the **scope-promotion flow**
+onto the T1 router. The "+" button on `/ui/memory` opens an
+HTMX-loaded `<dialog>` with an RBAC-filtered scope selector, slug
+input (optional, auto-generated when blank), Markdown body
+textarea + debounced server-side preview, expiry picker, and a
+comma-separated tags input. Submit calls `MemoryService.remember`
+and HTMX redirects back to the list. The detail-page Promote
+button (rendered only when the source scope has at least one legal
+ladder step) opens a second HTMX-loaded modal and submits through
+the same G5.2 `MemoryService.promote` the REST surface uses; the
+chassis `AuditMiddleware` writes one `memory.promote` audit row
+per request because the handler binds `operator_sub` + `tenant_id`
++ `audit_op_id` + `audit_op_class` + `audit_scope` + `audit_slug`
++ `audit_promotion_target_scope` to the structlog contextvars
+before calling the service.
+
+### Routes
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/ui/memory/create` | HTMX-loaded create modal fragment. Scope selector filtered to scopes the operator can write to via `MemoryRbacResolver.can_write`. |
+| `POST` | `/ui/memory/create` | Submit handler. Form-encoded body shape mirrors `/api/v1/memory`'s `RememberBody`. Returns 204 + `HX-Redirect: /ui/memory`. |
+| `POST` | `/ui/memory/preview` | Debounced server-side Markdown preview. Returns the `_body_preview.html` fragment; same `<article>` shape `_body_view.html` uses on the detail page so styling matches. |
+| `GET` | `/ui/memory/<scope>/<slug>/promote` | HTMX-loaded promote modal. Legal targets derived from `PROMOTE_TARGETS_BY_SOURCE`; terminal scopes (`tenant` / `target`) return 400. |
+| `POST` | `/ui/memory/<scope>/<slug>/promote` | Submit handler. Calls G5.2's `MemoryService.promote`. Returns 204 + `HX-Redirect: /ui/memory/<target-scope>/<slug>`. |
+
+### Module layout (additions to T1)
+
+* `backend/src/meho_backplane/ui/routes/memory/create.py` —
+  render + submit helpers for the create modal
+  (`render_create_modal`, `render_body_preview`, `create_entry`).
+  Split out of `views.py` so each module stays under the
+  chassis-wide ~600-line cap.
+* `backend/src/meho_backplane/ui/routes/memory/promote.py` —
+  render + submit helpers for the scope-promotion modal
+  (`render_promote_modal`, `promote_entry`, `_map_promote_error`).
+  Sibling of `create.py`; both call into G5.2's `MemoryService`.
+* `backend/src/meho_backplane/ui/routes/memory/_modal_shared.py` —
+  shared helpers + constants for both modals: scope-selector
+  vocabulary (`writable_scopes_for`, `scope_label`), the
+  double-submit CSRF cookie set (`set_csrf_cookie`,
+  `build_common_template_context`), the form-encoded tags parser
+  (`parse_tags`), and the form-field sizing constants
+  (`TAGS_MAX_LENGTH`, etc.).
+* `backend/src/meho_backplane/ui/routes/memory/routes.py` — adds
+  `_register_static_prefix_routes` which registers `/ui/memory/create`
+  + `/ui/memory/preview` (+ T1's `/ui/memory/tags`) ahead of the
+  parametrised `/ui/memory/{scope}/{slug}` routes. Registration
+  order is load-bearing: a request to `/ui/memory/create` would
+  otherwise be matched by `/ui/memory/{scope}/{slug}` with
+  `scope="create"`, producing a 422 from the `MemoryScope` enum.
+* `backend/src/meho_backplane/ui/templates/memory/_create_modal.html` —
+  the HTMX-loaded create modal with the RBAC-filtered scope selector,
+  Markdown textarea with debounced preview wiring, and a tiny inline
+  script that toggles the `target_name` row visibility based on the
+  selected scope. Empty-state renders an alert when
+  `writable_scopes_for(operator)` is empty (read-only role).
+* `backend/src/meho_backplane/ui/templates/memory/_promote_modal.html` —
+  the HTMX-loaded promote modal. Legal targets are rendered as a
+  `<select>`; the same inline-script pattern as the create modal
+  toggles `target_name` when the selected target is
+  target-flavoured.
+* `backend/src/meho_backplane/ui/templates/memory/_body_preview.html` —
+  Markdown-rendered preview fragment returned by `POST /ui/memory/preview`.
+* `backend/src/meho_backplane/ui/templates/memory/index.html` — adds
+  the "+" Create button (`hx-get="/ui/memory/create"`) and a stable
+  `#memory-modal-container` mount point that persists across HTMX
+  swaps.
+* `backend/src/meho_backplane/ui/templates/memory/detail.html` — adds
+  the Promote button (only rendered for non-terminal source scopes)
+  and a second `#memory-modal-container` mount point.
+
+### HTMX modal conventions
+
+* Modals are loaded into a stable `#memory-modal-container` mount
+  point via `hx-get` with `hx-target="#memory-modal-container"
+  hx-swap="innerHTML"`. The inserted `<dialog>` element carries the
+  `modal-open` class (DaisyUI v5) so it opens immediately without a
+  client-side `showModal()` call.
+* Submit forms inside the modals use `hx-post` with `hx-target="this"
+  hx-swap="none"` — the 204 + `HX-Redirect` response shape means
+  HTMX navigates the whole page rather than swapping the form into a
+  rendered fragment. Same convention T1's delete-confirm modal uses.
+* Form encoding is `application/x-www-form-urlencoded`. The chassis
+  `CSRFMiddleware` accepts the double-submit token from either the
+  `X-CSRF-Token` header (HTMX inherits it from the page-level
+  `hx-headers` directive) or the `csrf_token` form field.
+* `hx-trigger="keyup changed delay:300ms"` on the create modal's
+  body textarea drives the debounced server-side preview — see
+  https://htmx.org/attributes/hx-trigger/. `delay:300ms` matches
+  the convention T1's tag-filter input uses for the list page's
+  type-ahead.
+* The create + promote modals each carry a tiny inline `<script>`
+  that toggles the `target_name` field's visibility based on the
+  selected scope. Pulled inline (not into a separate `<script src>`)
+  because the modal is HTMX-injected and a fresh request for the
+  external JS file would race the `<dialog>` insertion. The script
+  reads the target-scoped scope values off a `data-target-scoped-values`
+  attribute on the form so the enum is not re-hardcoded on the
+  client.
+
+### Idempotency + audit trail
+
+`MemoryService.promote` is idempotent (G5.2 contract): a re-promotion
+to the same target returns the existing target row, no insert, no
+`promote_target_conflict` 409. The UI mirrors that contract — a
+double-click on Promote redirects to the same URL twice; the second
+audit row reflects a successful repeat (status 204) and the row
+count in the target scope stays at one.
+
+The promote handler explicitly binds `operator_sub` + `tenant_id`
++ `audit_op_id="memory.promote"` + `audit_op_class="write"` +
+`audit_scope` + `audit_slug` + `audit_promotion_target_scope` to the
+structlog contextvars before calling the service so the chassis
+`AuditMiddleware` writes the audit row with the canonical op id.
+Without this binding the UI session middleware leaves the contextvars
+unset and the chassis middleware skips the audit write — the T1 read
++ edit + delete handlers run without an audit row today for the same
+reason. T2's create handler also binds `audit_op_id="memory.remember"`
++ `audit_op_class="write"` for parity with the `/api/v1/memory` POST
+route, so any future audit-query consumer can correlate a UI-driven
+write with the same op-id literal a CLI / MCP-driven write produces.
+
+### Tests
+
+The full suite lives in
+`backend/tests/test_ui_memory_create_promote.py`. It pins:
+
+* the create-modal render (RBAC-filtered scope selector for
+  operator, tenant-admin sees TENANT, read-only sees the empty state),
+* the create submit (persists the row + HX-Redirects to the list,
+  blank slug auto-generates, tenant scope as operator 403s, empty
+  body 422s, target-scoped without `target_name` 422s, missing CSRF
+  cookie 403s),
+* the Markdown preview (renders Markdown to HTML, empty body returns
+  the placeholder, raw `<script>` escapes),
+* the promote-modal render (USER source lists USER_TENANT +
+  USER_TARGET; terminal TENANT source 400s; cross-user 404),
+* the promote submit (USER -> USER_TENANT persists the target +
+  HX-Redirects to the new detail page; the chassis audit row commits
+  with op id `memory.promote` and the right payload fields; re-promote
+  is idempotent at the row count; operator -> TENANT 403s with
+  `insufficient_promotion_authority`; tenant_admin USER_TENANT ->
+  TENANT succeeds; cross-ladder USER -> TENANT 400s; cross-user 404;
+  cross-tenant 404),
+* the UI integration (list page renders the Create button + modal
+  container; detail page renders the Promote button only for
+  non-terminal source scopes).
+
+The create + promote tests stub the embedding service for the same
+reason the T1 PATCH test does — `index_document` (called by both
+`MemoryService.remember` and `MemoryService.promote`) computes a
+new embedding for the inserted row.
+
+### Expiry visualisation + bulk actions (Task #879)
+
+Initiative [#341](https://github.com/evoila/meho/issues/341) (G10.4
+Memory UI), Task [#879](https://github.com/evoila/meho/issues/879)
+(G10.4-T3) layers two surfaces on top of T1's list:
+
+* **Server-rendered countdown badges** — every memory with
+  `expires_at` shows an `"expires in 3d 4h"` cue, formatted by
+  `bulk.format_countdown`. The cards block wrapper carries
+  `hx-trigger="every 60s"` (mirrors topology graph's poll at #882's
+  30-second cadence) so the badge re-renders without a client-side
+  timer. The refresh URL preserves the active scope + tag so a poll
+  mid-page-stay stays aligned with the operator's filter state.
+* **Recently expired section** — expired-but-unswept rows render in a
+  greyed `<ul>` below the active cards. The bucket is naturally
+  bounded by the G5.2 sweeper window
+  ([#623](https://github.com/evoila/meho/issues/623)) — between
+  expiry and the next sweeper tick (default 24 h via
+  `memory_expiry_tick_interval_seconds`), expired rows are still in
+  the documents table. `MemoryService.list_memories` is called with
+  `include_expired=True` and the partition runs in
+  `bulk.partition_expired`.
+* **Bulk select + actions** — writable cards carry a checkbox (form
+  association via the HTML5 `form="memory-bulk-form"` attribute so
+  the checkbox participates in the bulk form regardless of DOM
+  nesting); the toolbar posts the selected `Document.id` UUIDs to
+  `POST /ui/memory/bulk` via HTMX. Two actions: `delete` (calls
+  `MemoryService.forget` per row) and `extend` (calls
+  `MemoryService.remember` with the existing body + a fresh
+  `expires_at = now + duration`; durations are pre-canned at 1d /
+  7d / 30d to prevent "extend by 10 years" footguns).
+
+#### Bulk RBAC posture
+
+The route resolves IDs to entries via a tenant-scoped + `source='memory'`
+filter so an operator can't smuggle a knowledge-base or audit-row UUID
+through the form. Per row, `MemoryRbacResolver.can_write` is re-checked
+before dispatch; the service's own `can_write` re-check still runs
+inside `forget` / `remember`. The route-side check exists so the
+result counts (`succeeded` / `denied` / `missing`) are honest in the
+flash banner.
+
+The flash message follows the shape `"Bulk: N deleted, M denied
+(RBAC), K not found."` with the denied / not-found terms suppressed
+when their count is zero. Cross-tenant IDs fall silently into the
+`missing` bucket — the row is real in another tenant, but invisible
+to this operator.
+
+#### Routes (T3 additions)
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `POST` | `/ui/memory/bulk` | Bulk delete or bulk extend-expiry. Form fields: `action` (`delete` \| `extend`), `ids` (multi-value `Document.id`), `extend_duration` (one of `1d` / `7d` / `30d`, required when `action=extend`), `scope` + `tag` (echoed back so the post-bulk render preserves the operator's filter state). CSRF-enforced. Returns the re-rendered `_cards.html` partial with a flash banner. |
+
+#### Files
+
+* `backend/src/meho_backplane/ui/routes/memory/bulk.py` — countdown
+  formatter, partition helper, form parsers, and `apply_bulk_action`.
+  Pulled out of `views.py` so the T3 code lands in one cohesive
+  module without growing the T1 render file past its cap.
+* `backend/src/meho_backplane/ui/routes/memory/views.py` (extended) —
+  `render_index` partitions the entries and passes the active +
+  recently-expired buckets to the template; `render_bulk_action`
+  dispatches the bulk handler.
+* `backend/src/meho_backplane/ui/routes/memory/routes.py` (extended) —
+  registers `POST /ui/memory/bulk` ahead of the parameterised
+  PATCH/DELETE so the literal path segment is unambiguous.
+* `backend/src/meho_backplane/ui/templates/memory/_cards.html`
+  (extended) — countdown badge, checkbox column on writable rows,
+  bulk-action toolbar, recently-expired section, and the
+  `hx-trigger="every 60s"` poll attribute on the wrapper.
+* `backend/tests/test_ui_memory_expiry_bulk.py` — countdown
+  formatting, partition split, parser guards, badge + recently-
+  expired rendering, bulk delete + extend, RBAC denial path,
+  cross-tenant safety, CSRF gate.
+
+## Connectors surface (Task #873)
+
+Initiative #340 (G10.3 Connectors + Targets UI). Task #873 (T1)
+ships the **read** surface — the targets list + per-target detail
+page. T2 (#874) layers create / edit forms; T3 (#875) layers bulk
+import. The connectors stub registered in T5 #866 is retired by
+this task — the real router is included ahead of the chassis stubs
+the same way broadcast / topology / memory retired theirs.
+
+### Routes
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/ui/connectors` | Sortable + filterable targets list. URL: `?sort=name|product|host|last_probed_at|status&dir=asc|desc&product=<slug>`. Full-page render or `_table_rows.html` fragment (HX-Request branch). |
+| `GET` | `/ui/connectors/{name}` | Per-target detail. Renders properties + fingerprint card + recent-ops card (SSE-live) + available-operations matrix. Alias-aware target resolution via `resolve_target`. |
+| `POST` | `/ui/connectors/{name}/probe` | Re-probe action. Tenant_admin RBAC gated server-side (the template hides the button optimistically; the handler is the authority). Persists the new fingerprint and swaps the refreshed `_fingerprint_card.html` fragment. |
+| `GET` | `/ui/connectors/create` | (T2 #874) HTMX-loaded create-target modal. Tenant_admin gated. Product `<select>` server-rendered from `registered_product_tokens()`; auth_model `<select>` from the `AuthModel` enum. |
+| `POST` | `/ui/connectors/create` | (T2 #874) Create submit. Builds a `TargetCreate` and delegates to the REST `create_target` handler in-process. Success → 204 + `HX-Redirect: /ui/connectors`; validation failure → 422 + modal re-rendered with per-field errors. |
+| `GET` | `/ui/connectors/{name}/edit` | (T2 #874) HTMX-loaded edit-target modal, pre-populated server-side from the resolved target. Tenant_admin gated; alias-aware 404 on cross-tenant. |
+| `PATCH` | `/ui/connectors/{name}` | (T2 #874) Edit submit. Builds a `TargetUpdate` and delegates to the REST `update_target` handler in-process. Same success / failure shapes as create. |
+| `GET` | `/ui/connectors/import` | (T3 #875) Full bulk-import page: paste box + file upload. Tenant_admin gated. |
+| `POST` | `/ui/connectors/import` | (T3 #875) Parse the pasted / uploaded `targets.yaml` (`yaml.safe_load`) and render the CREATE-vs-UPDATE preview table; parse errors render inline (422, no 500). Read-only — no writes. |
+| `POST` | `/ui/connectors/import/confirm` | (T3 #875) Re-parse + re-classify against the tenant's current targets, validate the whole plan up front (schema-invalid entry → inline 422, no partial write), then apply it in-process via `create_target` (new) + `update_target` (existing); renders the result summary (N created, M updated). |
+
+### Module layout
+
+* `backend/src/meho_backplane/ui/routes/connectors/__init__.py` — the umbrella `build_router()` aggregating the list / detail / probe routers in registration order.
+* `backend/src/meho_backplane/ui/routes/connectors/list_view.py` — the list handler. Sort enum, direction enum, status freshness classifier (24 h threshold), distinct-products query for the filter dropdown, Python-side re-sort layered on top of the SQL `ORDER BY` so status sorts honour the `never < stale < ok` ladder.
+* `backend/src/meho_backplane/ui/routes/connectors/detail.py` — the detail handler. Resolves the target via `targets.resolver.resolve_target`, projects it via `_project_target` (shared with probe), resolves the connector via `resolve_connector_or_label` (the same helper `/api/v1/targets/{name}/probe` uses), loads the operations matrix grouped by `operation_group` with the same tenant scoping shape `list_operation_groups` uses, loads the last 10 audit rows for the target. SSE bridge URL is the existing `/ui/broadcast/stream?target=<name>` (G10.1 already supports the `target` filter; piggy-backing keeps the SSE plumbing single-sourced).
+* `backend/src/meho_backplane/ui/routes/connectors/operator.py` — `resolve_role_probe` (fails soft to `is_tenant_admin=False` on any JWT hiccup so a transient JWKS outage doesn't 5xx the read surface) + `resolve_operator_or_403` (the rigorous write-gate dep used by the probe handler).
+* `backend/src/meho_backplane/ui/routes/connectors/probe.py` — the re-probe POST handler. Uses the same `resolve_connector_or_label` path the REST `/api/v1/targets/{name}/probe` route uses so the two surfaces stay byte-compatible. Maps `no_connector` → 501 + alert fragment, `ambiguous_connector` → 409 + alert fragment.
+
+### Connector resolution
+
+The detail page's available-operations matrix and the re-probe action both consume `resolve_connector_or_label(target)` — the same helper the `/api/v1/targets/{name}/probe` REST route uses (G0.14-T1 #1142). The detail page then resolves the matching v2-registry entry to produce the canonical `"<impl_id>-<version>"` `connector_id` the operations meta-tool query reads (`list_operation_groups`'s shape). When the registry has the chosen class under multiple keys (the K8s pattern, both a v1 wildcard and a v2 versioned key), the detail page picks the versioned key — same precedence the G0.6 dispatcher's lookup uses.
+
+### SSE wiring for recent ops
+
+The recent-ops card on the detail page is live-driven by the existing G10.1 broadcast SSE bridge: the card embeds `sse-connect="/ui/broadcast/stream?target=<urlencoded-name>"` plus `sse-swap="broadcast"`. An Alpine controller (`connectorsRecentOps`, `backend/src/meho_backplane/ui/static/src/app/connectors-feed.js`) hooks `htmx:sse-before-message`, parses each `event: broadcast` frame's JSON, and prepends a row to its bounded `events` array (cap 50; older rows trim). The card is initially seeded by the server-rendered last-10 audit rows so the page is useful even before any new event streams in.
+
+### RBAC posture for re-probe
+
+The re-probe button is rendered only when the page-load role probe returned `is_tenant_admin=True`. The button hides for operators who can't use it. The server-side authority is `resolve_operator_or_403` on the POST handler — a crafted POST hitting the endpoint with a stolen / forged form still hits the 403 gate. The probe handler also re-validates the target tenant-scoped via `resolve_target` so a cross-tenant target name never resolves on the write surface.
+
+### Cross-tenant isolation
+
+Every list / detail / probe path filters on `session_ctx.tenant_id`:
+
+* List: `WHERE targets.tenant_id = :tenant_id` is the first clause in the substrate query.
+* Detail: `resolve_target` raises 404 on a cross-tenant name.
+* Probe: same `resolve_target` gate before the write.
+* Recent ops: `WHERE audit_log.tenant_id = :tenant_id AND audit_log.target_id = :target_id` — defense in depth even though the soft-FK on `audit_log.target_id` makes a cross-tenant target_id structurally impossible.
+* Ops matrix: `(operation_group.tenant_id IS NULL OR operation_group.tenant_id = :tenant_id)` — same shape `list_operation_groups` uses for the agent surface.
+* Recent-ops SSE: the underlying `/ui/broadcast/stream` bridge takes the tenant from the session row, never from a query parameter, so the per-target filter cannot leak across tenants.
+
+### Create / edit forms (Task #874)
+
+T2 layers the **write** surface on the T1 read surface. The DaisyUI
+modal forms HTMX-submit into the REST `POST` / `PATCH`
+`/api/v1/targets` *handlers* in-process (`create_target` /
+`update_target` imported directly), so the UI and REST surfaces share
+one validation + product-registry-check + audit-binding code path —
+the same posture T1's re-probe handler uses by sharing
+`resolve_connector_or_label` with the REST probe route. The
+form-field strings are fed into `TargetCreate` / `TargetUpdate`, so
+Pydantic runs the identical coercion + validation the REST body runs
+(port 1-65535, name `min_length=1`, `auth_model` enum membership).
+
+* **Success** → the handler returns 204 + `HX-Redirect: /ui/connectors`
+  (the canonical HTMX post-mutation navigation); the list re-renders
+  with the new / edited row.
+* **Validation failure** → the handler catches the `ValidationError`,
+  projects it to a `{field → message}` map, and re-renders the modal
+  fragment (422) with the messages under each field and the operator's
+  typed values echoed back. The form targets itself
+  (`hx-target="this"`, `hx-swap="outerHTML"`) so HTMX swaps the
+  errored form in place without losing input.
+
+Client-side validation (HTML5 `required` / `minlength` / numeric
+`min`/`max` with DaisyUI `input-error` styling) gives immediate
+feedback; the server-side Pydantic pass is authoritative.
+
+**Product dropdown source.** The create dropdown is rendered from
+`registered_product_tokens()` — the canonical set `create_target`
+validates `product` against — rather than from the raw
+`GET /api/v1/connectors` ingest list, so a selectable product is
+always an acceptable product (no dropdown / validator drift, no
+surprise 422 on a product the operator could pick).
+
+**RBAC posture.** All four routes depend on `resolve_operator_or_403`
+(the same rigorous tenant_admin write-gate T1's probe uses): a
+non-admin GET (modal) or POST/PATCH (submit) hits 403 server-side. The
+list / detail templates additionally hide the "Create target" / "Edit"
+buttons from non-admins (UX); the hide is not the security boundary.
+Because the in-process REST handler's own `Depends(require_role(...))`
+is not re-run on a direct function call, the 403 gate lives on the UI
+route deps and the lifted `Operator` is passed into the handler so it
+runs under the caller's tenant scope.
+
+**Cross-tenant isolation.** The edit modal + PATCH resolve the target
+via `resolve_target(db_session, session_ctx.tenant_id, name)` → 404 on
+a cross-tenant or unknown name, so a tenant_admin in tenant B can
+neither load nor PATCH tenant A's target. Create writes
+`tenant_id = operator.tenant_id` (the REST handler never trusts a
+body-supplied tenant).
+
+**CSRF.** `POST` / `PATCH` under `/ui/` are gated by the chassis
+`CSRFMiddleware` (signed double-submit) before the handler runs. The
+modal form inherits the `X-CSRF-Token` header from the page-level
+`hx-headers` directive; each modal render re-mints + re-sets the
+`meho_csrf` cookie so the double-submit pair lines up.
+
+### Files
+
+* `backend/src/meho_backplane/ui/routes/connectors/__init__.py` — umbrella router factory.
+* `backend/src/meho_backplane/ui/routes/connectors/list_view.py` — list view handler + freshness classifier (T2 adds the `is_tenant_admin` role probe for the create button).
+* `backend/src/meho_backplane/ui/routes/connectors/detail.py` — detail handler + connector_id resolution + ops matrix query + recent-ops query.
+* `backend/src/meho_backplane/ui/routes/connectors/operator.py` — role-probe (read) + operator-403 (write).
+* `backend/src/meho_backplane/ui/routes/connectors/probe.py` — re-probe POST handler.
+* `backend/src/meho_backplane/ui/routes/connectors/forms.py` — (T2 #874) create / edit render + submit helpers; builds `TargetCreate` / `TargetUpdate`, delegates to the REST handlers, maps `ValidationError` to per-field form errors.
+* `backend/src/meho_backplane/ui/routes/connectors/forms_router.py` — (T2 #874) create / edit route registration (thin FastAPI wrappers; tenant_admin-gated deps).
+* `backend/src/meho_backplane/ui/templates/connectors/_target_form_fields.html` — (T2 #874) shared form fields for both modals.
+* `backend/src/meho_backplane/ui/templates/connectors/_create_modal.html` — (T2 #874) create modal.
+* `backend/src/meho_backplane/ui/templates/connectors/_edit_modal.html` — (T2 #874) edit modal.
+* `backend/tests/test_ui_connectors_forms.py` — (T2 #874) create / edit form tests: modal render (admin) + 403 (operator), create success + Pydantic validation errors (port out of range, empty name), edit pre-population + PATCH, cross-tenant isolation, CSRF enforcement.
+* `backend/src/meho_backplane/ui/templates/connectors/list.html` — full-page list template.
+* `backend/src/meho_backplane/ui/templates/connectors/_table_rows.html` — list rows fragment (HTMX swap target).
+* `backend/src/meho_backplane/ui/templates/connectors/detail.html` — full-page detail template.
+* `backend/src/meho_backplane/ui/templates/connectors/_fingerprint_card.html` — fingerprint card (also returned by the re-probe POST).
+* `backend/src/meho_backplane/ui/templates/connectors/_recent_ops.html` — SSE-live recent-ops card.
+* `backend/src/meho_backplane/ui/templates/connectors/_ops_matrix.html` — grouped operations matrix.
+* `backend/src/meho_backplane/ui/templates/connectors/_probe_alert.html` — failure alert fragment (no_connector / ambiguous).
+* `backend/src/meho_backplane/ui/static/src/app/connectors-feed.js` — `connectorsRecentOps` Alpine controller.
+* `backend/tests/test_ui_connectors_view.py` — auth boundary, list (full + fragment + sort + filter + cross-tenant), detail (properties + alias + 404 + cross-tenant + recent ops + ops matrix + ambiguous / no-connector branches), fingerprint card (present / never), re-probe button visibility (operator vs tenant_admin), SSE wiring + URL-encoding, re-probe (success + 403 operator + 501 no-connector + 404 unknown).
+
+### Bulk import (Task #875)
+
+T3 layers a **bulk `targets.yaml` import** surface on top of the T1 / T2
+surfaces. The operator pastes or uploads a `targets.yaml`; the server
+parses it, classifies every entry CREATE-vs-UPDATE against the caller's
+tenant, and renders a preview table; on confirm the route applies the
+plan **in-process** via the existing target CRUD handlers
+(`create_target` for new names, `update_target` for existing ones).
+
+**No `/api/v1/targets/import` endpoint exists.** This UI mirrors the
+client-orchestrated CRUD the `meho targets import` CLI tool (G0.3-T6
+#257, `cli/internal/cmd/targets/import.go`) performs: parse → list
+existing names → classify CREATE vs UPDATE → POST new / PATCH existing.
+The key-mapping + classification logic in `import_view.py` is a
+server-side port of that CLI's `mapEntry` / `buildLivePlan`, so the web
+import and the CLI import produce byte-identical writes for the same
+YAML.
+
+**Mapping rules (parity with `import.go`).**
+
+* **Known top-level keys** — `name`, `aliases`, `product`, `host`,
+  `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`, `notes`,
+  `preferred_impl_id`, `extras` — map 1:1 to `TargetCreate` /
+  `TargetUpdate` fields.
+* **Unknown keys** spill into the `extras` JSONB column (merged with an
+  explicit `extras:` block when one is present).
+* **`fingerprint`** is server-managed (probe verb is the only writer;
+  the write schemas reject it via `extra='forbid'`) → dropped with a
+  preview warning.
+* **CREATE vs UPDATE** is decided by an existing-name lookup scoped to
+  the caller's tenant (excluding soft-deleted rows — the same filter the
+  `/api/v1/targets` list route the CLI calls applies).
+* On **UPDATE** the body is **sparse** (only YAML-present keys); `name`
+  and `product` are stripped (the PATCH route rejects `name`; `product`
+  is not patched on the CLI update path). The sparse shape means
+  re-importing a YAML that omits some fields does not wipe those columns
+  — the same load-bearing contract PR #362's review on #257 pinned.
+
+**Stateless preview → confirm.** The server holds no plan between the
+two requests: the preview echoes the submitted YAML into a hidden field
+and the confirm route re-parses + re-classifies it. Re-classifying on
+confirm keeps the server the source of truth — a target created between
+preview and confirm is correctly PATCHed rather than re-CREATEd into a
+409.
+
+**RBAC + CSRF + isolation.** All three routes depend on
+`resolve_operator_or_403` (tenant_admin only; operators 403 server-side).
+CSRF is enforced by the chassis `CSRFMiddleware` on the two `POST`
+routes. Cross-tenant isolation is two-layer: the existing-name lookup
+filters on `session_ctx.tenant_id`, and the in-process `create_target` /
+`update_target` handlers write / resolve under `operator.tenant_id`, so
+an import can only ever land in the caller's own tenant.
+
+**Validate the whole plan before any write (no partial import).**
+`build_plan` constructs *and* schema-validates every `TargetCreate` /
+`TargetUpdate` body up front — before the confirm route's write loop
+runs. A structurally-valid YAML carrying a schema-invalid value (a bad
+`auth_model` enum, an out-of-range `port`, etc.) therefore fails the
+*whole* plan (`ImportParseError`, rendered as the inline 422 fragment)
+and writes nothing, rather than committing the rows ahead of the bad
+entry and then 500-ing mid-loop. This mirrors the CLI's no-partial-write
+contract (`import.go` builds the full plan before any API call fires).
+The same pre-validation runs in `render_preview`, so the preview never
+green-lights a plan the confirm step would reject.
+
+**Errors render inline.** `yaml.safe_load` failures, a non-mapping root,
+a missing / empty `targets:` list, per-entry required-field violations
+(`name` / `product` / `host`), and Pydantic schema-validation failures
+all render an inline error in the preview fragment with HTTP 422 — never
+a 500.
+
+#### Files (Task #875)
+
+* `backend/src/meho_backplane/ui/routes/connectors/import_view.py` — parse (`yaml.safe_load`) + key-mapping + CREATE/UPDATE classification (port of `import.go`'s `mapEntry` / `buildLivePlan`) + up-front Pydantic body validation (whole plan validated before any write — no partial import) + render helpers + in-process confirm.
+* `backend/src/meho_backplane/ui/routes/connectors/import_router.py` — thin FastAPI route wrappers (multipart paste + upload parse; tenant_admin-gated deps); registered before the detail route so the literal `/ui/connectors/import` paths win the first-match lookup over `/ui/connectors/{name}`.
+* `backend/src/meho_backplane/ui/templates/connectors/import.html` — full-page paste-box + upload form.
+* `backend/src/meho_backplane/ui/templates/connectors/_import_preview.html` — preview table fragment (CREATE/UPDATE badges + per-entry warnings + confirm form, or an inline parse error).
+* `backend/src/meho_backplane/ui/templates/connectors/_import_result.html` — result summary fragment (N created, M updated).
+* `backend/tests/test_ui_connectors_import.py` — `build_plan` mapping / classification unit tests (extras spill, explicit-extras merge, fingerprint drop, sparse UPDATE) + behavioural tests: auth / RBAC (403 operator, 403 missing CSRF), preview (paste + upload + parse error + missing-field error + schema-invalid-value inline error), confirm (in-process create + update, sparse PATCH preserves omitted columns, malformed-YAML no-write, schema-invalid entry 422 + zero writes), cross-tenant isolation (import lands in caller tenant only; same-name in another tenant does not flip CREATE→UPDATE).

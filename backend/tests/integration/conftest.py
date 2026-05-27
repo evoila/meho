@@ -388,10 +388,15 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   a foreign key constraint``.
         # * ``scheduled_trigger`` — migration 0020 (G11.3-T1 #822) carries
         #   real FKs to ``tenant(id)`` and ``agent_definition(id)``; same rule.
+        # * ``event_outbox`` — migration 0027 (G11.3-T3 #824) carries a real
+        #   FK to ``tenant(id)``; omitting it causes PG to reject the
+        #   TRUNCATE with ``cannot truncate a table referenced in a foreign
+        #   key constraint`` (the recurring fixture gotcha #1064 / #1065 hit).
         await conn.execute(
             text(
                 "TRUNCATE TABLE approval_request, agent_permission, "
-                "agent_principal, scheduled_trigger, agent_run, audit_log, "
+                "agent_principal, scheduled_trigger, event_outbox, "
+                "agent_run, audit_log, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",
@@ -454,7 +459,8 @@ async def pg_engine_empty_tenant(
         await conn.execute(
             text(
                 "TRUNCATE TABLE approval_request, agent_permission, "
-                "agent_principal, scheduled_trigger, agent_run, audit_log, "
+                "agent_principal, scheduled_trigger, event_outbox, "
+                "agent_run, audit_log, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",

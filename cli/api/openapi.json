@@ -38,7 +38,7 @@
           "health"
         ],
         "summary": "Ready",
-        "description": "Readiness probe.\n\nReturns 200 with ``{\"status\": \"ready\", \"checks\": [...]}`` when at\nleast one probe is registered and every probe reports ``ok``.\nReturns 503 with ``{\"status\": \"not_ready\", \"checks\": [...]}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.",
+        "description": "Readiness probe with deploy-time feature-gate visibility.\n\nReturns 200 with\n``{\"status\": \"ready\", \"checks\": [...], \"features\": {...}}`` when\nat least one probe is registered and every probe reports ``ok``.\nReturns 503 with\n``{\"status\": \"not_ready\", \"checks\": [...], \"features\": {...}}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.\n\nThe ``features`` block (G0.14-T7 #1148) enumerates the four gated\nfeatures and their configured-vs-missing-env state. It is emitted\non **both** branches \u2014 the operator's \"is this deploy correctly\nwired?\" question is independent of the probe-registry verdict.\nSee :func:`meho_backplane.features.build_features_block` for the\nblock's shape and the audit table in\n``docs/codebase/error-message-shape.md`` for why this surface\nexists (signals 16, 17).",
         "operationId": "ready_ready_get",
         "responses": {
           "200": {
@@ -409,7 +409,7 @@
           "targets"
         ],
         "summary": "List Targets",
-        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.",
+        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.\n\nSoft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)\nare excluded from the list \u2014 the same filter the resolver applies\nso list and dispatch never disagree about which targets are\nvisible to the tenant.",
         "operationId": "list_targets_api_v1_targets_get",
         "parameters": [
           {
@@ -487,7 +487,7 @@
           "targets"
         ],
         "summary": "Create Target",
-        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.",
+        "description": "Create a new target in the requesting tenant.\n\nReturns 409 when a target with the same ``name`` already exists in\nthe tenant. The ``id`` and timestamps are generated server-side.\n``tenant_id`` is always taken from the JWT \u2014 the body cannot override\nit.\n\nG0.14-T3 (#1144). The ``product`` field is validated at request time\nagainst :func:`~meho_backplane.connectors.registry.registered_product_tokens`.\nAn unknown product yields a structured 422 (see\n:func:`_build_unknown_product_detail`); the OpenAPI schema also\nexposes the enum (see :func:`meho_backplane.main.build_openapi_schema`)\nso Swagger / generator tooling surfaces the valid set before the\nrequest leaves the editor. Both layers share the same source-of-\ntruth helper so they cannot drift.\n\nValidation is skipped when the registry is empty \u2014 that state means\n\"no connectors imported\" (test isolation, or a deploy booted before\n:func:`_eager_import_connectors` ran). In production the lifespan\npopulates the registry before the first request arrives, so the\nskip branch never fires; a misregistered deploy that *did* hit it\nis recoverable via T4 #1145's PATCH-product or DELETE path.",
         "operationId": "create_target_api_v1_targets_post",
         "parameters": [
           {
@@ -655,7 +655,7 @@
           "targets"
         ],
         "summary": "Update Target",
-        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` and ``product`` are not patchable \u2014\nrename a target by deleting and re-creating it (v0.2 decision).\n``updated_at`` is always refreshed on a successful write.",
+        "description": "Partially update a target.\n\nOnly fields present in the request body are modified (Pydantic\n``exclude_unset``). ``name`` is not patchable \u2014 rename a target by\ndeleting and re-creating it (v0.2 decision). ``product`` is patchable\nas of G0.14-T4 (#1145); the new value is validated against the\nregistered connector products and an unknown product yields a\nstructured 422 listing the ``valid_products`` so an operator\ntypo-correcting a misregistered target sees the same actionable\ndiagnostic at PATCH time that they would see at probe time.\n``updated_at`` is always refreshed on a successful write.",
         "operationId": "update_target_api_v1_targets__name__patch",
         "parameters": [
           {
@@ -710,6 +710,98 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "targets"
+        ],
+        "summary": "Delete Target",
+        "description": "Soft-delete a target.\n\nG0.14-T4 (#1145) \u2014 recovery path for misregistered targets\n(signal 6 in ``claude-rdc-hetzner-dc#697``). Stamps\n``deleted_at`` on the row instead of removing it so the\nappend-only :attr:`AuditLog.target_id` soft-FK keeps pointing\nat *something* (audit is append-only per v0.1-spec \u00a76); every\nread path filters ``deleted_at IS NULL`` so the row is\ninvisible to dispatch / probe / list / discover after the\nDELETE returns.\n\nCascade-check: counts ``graph_node.target_id`` references\n(G9.1-T1 #448 substrate) and defaults to **409 with the\ncount + a ``?force=true`` hint** when the target is wired\ninto the topology graph. ``?force=true`` proceeds with the\nsoft-delete anyway \u2014 the FK is\n``ON DELETE SET NULL`` so the graph rows survive the delete\nsafely; the operator confirms by passing ``force=true``.\nAudit references are not counted because the audit table\naccumulates a row per authenticated request against the\ntarget and would always block the delete.\n\nReturns 204 on success. The audit row is written by the\n:class:`~meho_backplane.audit.AuditMiddleware` with\n``audit_op_id='targets.delete'`` (mirrors the\n``meho.connector.edit_*`` precedent so cross-tenant audit\nqueries can filter by op id prefix).\n\nRe-deletes collapse to 404 \u2014 the second DELETE goes through\n:func:`~meho_backplane.targets.resolver.resolve_target`\nwhich filters ``deleted_at IS NULL``, so the row no longer\nresolves once the first DELETE flushes.\n\n``tenant_admin`` role required (cross-tenant DELETE returns\nthe standard 404 conflation that :func:`resolve_target`\nenforces).",
+        "operationId": "delete_target_api_v1_targets__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "Target is referenced by ``graph_node`` rows; retry with ``?force=true`` to soft-delete anyway (``graph_node.target_id`` is ``ON DELETE SET NULL`` so the topology rows survive). See ``docs/codebase/error-message-shape.md`` for the convention.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "target_has_references"
+                          ]
+                        },
+                        "graph_node_refs": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "graph_node_refs",
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/targets/{name}/probe": {
@@ -718,7 +810,7 @@
           "targets"
         ],
         "summary": "Probe Target",
-        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target. Per\nthe 2026-05-14 amendment to Initiative #224 the probe verb is the\n*only* writer to the column \u2014 :class:`TargetCreate` and\n:class:`TargetUpdate` reject the field with 422.\n\nReturns 501 when no connector is registered for the target's\nproduct slug; in that case the DB row is **not** touched, so the\npreviously-cached fingerprint (if any) survives. A connector that\nraises propagates the exception (rolling back the outer\ntransaction); the DB row again stays untouched. The column\ntherefore always reflects the *last successful* probe.",
+        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target. Per\nthe 2026-05-14 amendment to Initiative #224 the probe verb is the\n*only* writer to the column \u2014 :class:`TargetCreate` and\n:class:`TargetUpdate` reject the field with 422.\n\nConnector selection uses\n:func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`\nso this route and the dispatcher's connector-resolution step\nconsult the same v2 registry through the same tie-break ladder\n(G0.14-T1 #1142). Returns:\n\n* **501** when the resolver reports ``no_connector`` (no registered\n  impl matches the target's ``(product, version)``). ``detail``\n  carries the resolver's exception message naming the target's\n  product slug + the absence of a matching candidate.\n* **409** when the resolver reports ``ambiguous_connector`` (two\n  or more impls tied through the full ladder). ``detail`` carries\n  the resolver's exception message naming the candidate set and\n  the remediation step \u2014 set ``target.preferred_impl_id`` to one\n  of them. 409 mirrors REST's \"the request can't be processed due\n  to current resource state\" semantics: the operator has to\n  disambiguate the target before this verb can resolve a single\n  connector.\n\nNeither error branch writes to the DB row; the previously-cached\nfingerprint (if any) survives. A connector that raises propagates\nthe exception (rolling back the outer transaction); the row again\nstays untouched. The column therefore always reflects the *last\nsuccessful* probe.",
         "operationId": "probe_target_api_v1_targets__name__probe_post",
         "parameters": [
           {
@@ -2155,7 +2247,7 @@
           "connectors"
         ],
         "summary": "Ingest Endpoint",
-        "description": "Run the full ingestion pipeline (T1 \u2192 T2 \u2192 T3) for one connector.\n\n``dry_run=true`` parses every spec but writes nothing; the\nresponse carries the parser's ``inserted_count`` projection and\n``grouping=None``. The real path runs the parse \u2192 register_\ningested \u2192 run_llm_grouping pipeline serially and returns the\naggregated counts + grouping result.\n\nTenant scoping: the operator's tenant_id from the JWT is used\nas the write scope unless the operator is ``tenant_admin``\n(built-in ingest, ``tenant_id=NULL``). For v0.2 the route always\nwrites under the operator's tenant_id; built-in ingest is the\nsame call shape from a tenant_admin operator whose tenant_id\nhappens to be the \"built-in\" admin tenant. The CLI / MCP\nsiblings can target the built-in scope explicitly when needed\nby hitting :class:`IngestionPipelineService` directly with\n``tenant_id=None``.",
+        "description": "Run the full ingestion pipeline (T1 \u2192 T2 \u2192 T3) for one connector.\n\n``dry_run=true`` parses every spec but writes nothing; the\nresponse carries the parser's ``inserted_count`` projection and\n``grouping=None``. The real path runs the parse \u2192 register_\ningested \u2192 run_llm_grouping pipeline serially and returns the\naggregated counts + grouping result.\n\nThe body accepts two mutually-exclusive request shapes (see\n:class:`IngestRequest`):\n\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  is a ``\"<product>/<version>\"`` reference; this handler resolves\n  it against the packaged catalog (:func:`load_catalog`) and\n  dispatches through the same ingest path as if the caller had\n  supplied the resolved quadruple.\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources. The MCP admin tool and historical clients use\n  this shape.\n\nTenant scoping: the operator's tenant_id from the JWT is used\nas the write scope unless the operator is ``tenant_admin``\n(built-in ingest, ``tenant_id=NULL``). For v0.2 the route always\nwrites under the operator's tenant_id; built-in ingest is the\nsame call shape from a tenant_admin operator whose tenant_id\nhappens to be the \"built-in\" admin tenant. The CLI / MCP\nsiblings can target the built-in scope explicitly when needed\nby hitting :class:`IngestionPipelineService` directly with\n``tenant_id=None``.",
         "operationId": "ingest_endpoint_api_v1_connectors_ingest_post",
         "parameters": [
           {
@@ -3692,286 +3784,6 @@
         }
       }
     },
-    "/api/v1/agents": {
-      "get": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "List Agents",
-        "description": "List agent definitions for the operator's tenant, name-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``operator`` and ``tenant_admin``\nboth pass; ``read_only`` is rejected by :func:`require_role`.",
-        "operationId": "list_agents_api_v1_agents_get",
-        "parameters": [
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 500,
-              "minimum": 1,
-              "default": 100,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "offset",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 0,
-              "title": "Offset"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionListResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Create Agent",
-        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
-        "operationId": "create_agent_api_v1_agents_post",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentDefinitionCreate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/agents/{name}": {
-      "get": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Show Agent",
-        "description": "Return one agent definition by name.\n\nCross-tenant name probes surface as 404 ``agent_not_found`` (not\n403) -- the conflation prevents enumerating another tenant's agents\nvia a status-code differential.",
-        "operationId": "show_agent_api_v1_agents__name__get",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Edit Agent",
-        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``.",
-        "operationId": "edit_agent_api_v1_agents__name__patch",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentDefinitionUpdate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentDefinitionRead"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Delete Agent",
-        "description": "Delete one agent definition by name.\n\n``tenant_admin`` only. A cross-tenant / absent name returns 404\n``agent_not_found`` -- never 403, so the existence of a definition\nis not leaked across the tenant boundary.",
-        "operationId": "delete_agent_api_v1_agents__name__delete",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "maxLength": 128,
-              "title": "Name"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/agents/grants": {
       "get": {
         "tags": [
@@ -4250,6 +4062,286 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Agents",
+        "description": "List agent definitions for the operator's tenant, name-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``operator`` and ``tenant_admin``\nboth pass; ``read_only`` is rejected by :func:`require_role`.",
+        "operationId": "list_agents_api_v1_agents_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Create Agent",
+        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
+        "operationId": "create_agent_api_v1_agents_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDefinitionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Show Agent",
+        "description": "Return one agent definition by name.\n\nCross-tenant name probes surface as 404 ``agent_not_found`` (not\n403) -- the conflation prevents enumerating another tenant's agents\nvia a status-code differential.",
+        "operationId": "show_agent_api_v1_agents__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Edit Agent",
+        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``.",
+        "operationId": "edit_agent_api_v1_agents__name__patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDefinitionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Delete Agent",
+        "description": "Delete one agent definition by name.\n\n``tenant_admin`` only. A cross-tenant / absent name returns 404\n``agent_not_found`` -- never 403, so the existence of a definition\nis not leaked across the tenant boundary.",
+        "operationId": "delete_agent_api_v1_agents__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -4665,6 +4757,225 @@
                 "schema": {}
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scheduler/triggers": {
+      "get": {
+        "tags": [
+          "scheduler"
+        ],
+        "summary": "List Triggers",
+        "description": "List scheduled triggers for the operator's tenant, newest-first.\n\nTenant scoping: ``operator`` / ``read_only`` callers are scoped to\n``operator.tenant_id`` and any non-null ``tenant_filter`` returns\n403. Only ``tenant_admin`` may cross tenants.",
+        "operationId": "list_triggers_api_v1_scheduler_triggers_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "cron",
+                "one_off",
+                "event"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "active",
+                "paused",
+                "cancelled",
+                "fired"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledTriggerListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "scheduler"
+        ],
+        "summary": "Create Trigger",
+        "description": "Create one scheduled trigger under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\ntrigger is created under that tenant (cross-tenant admin); when\nnull, the trigger is created under ``operator.tenant_id``. The\nschema's discriminated-union validator already proved exactly one\nof ``cron_expr`` / ``fire_at`` / ``event_filter`` is set; the\nservice runs the FK pre-flight.",
+        "operationId": "create_trigger_api_v1_scheduler_triggers_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduledTriggerCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledTriggerRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scheduler/triggers/{trigger_id}": {
+      "delete": {
+        "tags": [
+          "scheduler"
+        ],
+        "summary": "Cancel Trigger",
+        "description": "Cancel one scheduled trigger by id (transitions ``status='cancelled'``).\n\n``tenant_admin`` only. A cross-tenant / absent id returns 404\n``trigger_not_found`` -- never 403 -- so the existence of a\ntrigger is not leaked across the tenant boundary. A trigger\nalready in terminal ``fired`` state returns 409\n``trigger_already_fired`` (the lifecycle is ``fired`` -> end,\nnot ``fired`` -> ``cancelled``).\n\nCross-tenant: pass ``tenant_filter`` to cancel a trigger under\nanother tenant; ``operator`` role is locked to the JWT's tenant.\nThe check happens here even though the route is\n``tenant_admin``-gated, for forward-compat in case the role gate\nrelaxes in a future release.",
+        "operationId": "cancel_trigger_api_v1_scheduler_triggers__trigger_id__delete",
+        "parameters": [
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Trigger Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -5765,7 +6076,7 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast History",
-        "description": "``GET /ui/broadcast/history`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via a finite\n``XRANGE``, passes them as a list the template serialises with\nJinja ``| tojson`` into a ``<script type=\"application/json\">``\ndata island the shared ``broadcastFeed`` controller seeds from,\nand returns the ``broadcast/_history.html`` fragment (no\n``base.html`` chrome -- the tab swaps it into the page's history\ncontainer). The tenant comes from the validated session, never a\nquery parameter.",
+        "description": "``GET /ui/broadcast/history`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via the shared\nfail-soft read helper, passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.",
         "operationId": "ui_broadcast_history_ui_broadcast_history_get",
         "responses": {
           "200": {
@@ -5858,7 +6169,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/_SortColumn",
+              "$ref": "#/components/schemas/meho_backplane__ui__routes__topology__table___SortColumn",
               "default": "name"
             }
           },
@@ -6085,13 +6396,14 @@
         }
       }
     },
-    "/ui/knowledge": {
+    "/ui/memory/tags": {
       "get": {
         "tags": [
-          "ui-stubs"
+          "ui-memory"
         ],
-        "summary": "Ui Stub Knowledge",
-        "operationId": "ui_stub_knowledge_ui_knowledge_get",
+        "summary": "Ui Memory Tags",
+        "description": "``GET /ui/memory/tags`` -- HTMX datalist autocomplete fragment.",
+        "operationId": "ui_memory_tags_ui_memory_tags_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -6106,13 +6418,25 @@
         }
       }
     },
-    "/ui/connectors": {
+    "/ui/memory/create": {
       "get": {
         "tags": [
-          "ui-stubs"
+          "ui-memory"
         ],
-        "summary": "Ui Stub Connectors",
-        "operationId": "ui_stub_connectors_ui_connectors_get",
+        "summary": "Ui Memory Create Modal",
+        "description": "``GET /ui/memory/create`` -- HTMX-loaded create modal fragment.",
+        "operationId": "ui_memory_create_modal_ui_memory_create_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -6120,6 +6444,97 @@
               "text/html": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Create Submit",
+        "description": "``POST /ui/memory/create`` -- create one memory via the service.\n\nReturns 204 + ``HX-Redirect: /ui/memory`` so HTMX navigates back\nto the list. The form-encoded body shape mirrors the\n``RememberBody`` Pydantic model on ``/api/v1/memory``: scope is\na ``MemoryScope`` enum value, body is required, slug + tags +\nexpires_at + target_name are optional. CSRF is enforced by the\nchassis :class:`CSRFMiddleware` before this handler runs.\n\n``tags`` is a comma-separated string parsed server-side into a\nlist; the form input is one ``<input>`` rather than five (the\ntypical UX shape for the v0.2 surface). ``expires_at`` is\nparsed by FastAPI's :class:`datetime` form coercion from the\nISO-8601 string a ``<input type=\"datetime-local\">`` produces.",
+        "operationId": "ui_memory_create_submit_ui_memory_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_create_submit_ui_memory_create_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/preview": {
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Preview",
+        "description": "``POST /ui/memory/preview`` -- debounced server-side Markdown preview.\n\nTriggered by ``hx-trigger=\"keyup changed delay:300ms\"`` on the\ncreate-modal body textarea. Returns the rendered Markdown\nwrapped in the same ``<article>`` shape :file:`_body_view.html`\nuses so the preview pane and the detail view render identically.\n\nSession is required (the chassis CSRF middleware would already\nhave rejected an anonymous POST, but the session dep adds the\naudit-trail anchor; ``_require_session_dep`` runs the standard\nredirect-to-login on a missing cookie).",
+        "operationId": "ui_memory_preview_ui_memory_preview_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_preview_ui_memory_preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -6130,10 +6545,35 @@
     "/ui/memory": {
       "get": {
         "tags": [
-          "ui-stubs"
+          "ui-memory"
         ],
-        "summary": "Ui Stub Memory",
-        "operationId": "ui_stub_memory_ui_memory_get",
+        "summary": "Ui Memory List",
+        "description": "``GET /ui/memory`` -- list page or HTMX card-list fragment.",
+        "operationId": "ui_memory_list_ui_memory_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "default": "all",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Tag"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -6141,6 +6581,1226 @@
               "text/html": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/{scope}/{slug}": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Detail",
+        "description": "``GET /ui/memory/<scope>/<slug>`` -- detail page or HTMX body fragment.",
+        "operationId": "ui_memory_detail_ui_memory__scope___slug__get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Patch",
+        "description": "``PATCH /ui/memory/<scope>/<slug>`` -- save the edited body.",
+        "operationId": "ui_memory_patch_ui_memory__scope___slug__patch",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_patch_ui_memory__scope___slug__patch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Delete",
+        "description": "``DELETE /ui/memory/<scope>/<slug>`` -- delete + re-render the list.",
+        "operationId": "ui_memory_delete_ui_memory__scope___slug__delete",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/{scope}/{slug}/edit": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Edit Form",
+        "description": "``GET /ui/memory/<scope>/<slug>/edit`` -- HTMX edit-form fragment.",
+        "operationId": "ui_memory_edit_form_ui_memory__scope___slug__edit_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/{scope}/{slug}/promote": {
+      "get": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Promote Modal",
+        "description": "``GET /ui/memory/<scope>/<slug>/promote`` -- HTMX-loaded promote modal.",
+        "operationId": "ui_memory_promote_modal_ui_memory__scope___slug__promote_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Promote Submit",
+        "description": "``POST /ui/memory/<scope>/<slug>/promote`` -- promote and HX-Redirect.\n\nDelegates ladder + authority checks to G5.2's\n:func:`assert_can_promote` via :meth:`MemoryService.promote`.\nIdempotent re-run returns the same target row -- the redirect\nURL is the same on first promote and on a re-promote, matching\nthe G5.2 contract.",
+        "operationId": "ui_memory_promote_submit_ui_memory__scope___slug__promote_post",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory/bulk": {
+      "post": {
+        "tags": [
+          "ui-memory"
+        ],
+        "summary": "Ui Memory Bulk",
+        "description": "``POST /ui/memory/bulk`` -- T3 (#879) bulk delete / bulk extend-expiry.",
+        "operationId": "ui_memory_bulk_ui_memory_bulk_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_memory_bulk_ui_memory_bulk_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors List",
+        "description": "Serve ``GET /ui/connectors``. See module docstring for the\nURL contract.\n\n``dir`` (not ``direction``) is the spelling on the URL the\nissue body pinned -- the alias above keeps the Python kwarg\nreadable (``direction``) without breaking the URL contract\nthe operator sees in the address bar.",
+        "operationId": "ui_connectors_list_ui_connectors_get",
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/meho_backplane__ui__routes__connectors__list_view___SortColumn",
+              "default": "name"
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/_SortDirection",
+              "default": "asc"
+            }
+          },
+          {
+            "name": "product",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "nullable": true,
+              "title": "Product"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/create": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Create Modal",
+        "description": "``GET /ui/connectors/create`` -- HTMX-loaded create modal fragment.",
+        "operationId": "ui_connectors_create_modal_ui_connectors_create_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Create Submit",
+        "description": "``POST /ui/connectors/create`` -- create one target via the REST handler.\n\nAn unchecked ``vpn_required`` checkbox is omitted from the form\nbody entirely (HTML checkbox semantics), so FastAPI's\n``Form(default=False)`` lands the correct ``False``; a checked box\nposts the literal value the template sets and coerces to ``True``.",
+        "operationId": "ui_connectors_create_submit_ui_connectors_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_create_submit_ui_connectors_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}/edit": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Edit Modal",
+        "description": "``GET /ui/connectors/{name}/edit`` -- pre-populated edit modal fragment.",
+        "operationId": "ui_connectors_edit_modal_ui_connectors__name__edit_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}": {
+      "patch": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Edit Submit",
+        "description": "``PATCH /ui/connectors/{name}`` -- update one target via the REST handler.",
+        "operationId": "ui_connectors_edit_submit_ui_connectors__name__patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_edit_submit_ui_connectors__name__patch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Detail",
+        "description": "``GET /ui/connectors/{name}``.",
+        "operationId": "ui_connectors_detail_ui_connectors__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target name does not resolve in the caller's tenant. Returns the 404 from the shared :func:`~meho_backplane.targets.resolver.resolve_target` helper -- alias-aware, with near-miss suggestions when the substring search lands hits.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Target name resolves to multiple targets in the caller's tenant (ambiguous alias match). Returns the 409 from :func:`resolve_target`.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/import": {
+      "get": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Import Page",
+        "description": "``GET /ui/connectors/import`` -- the full import page.",
+        "operationId": "ui_connectors_import_page_ui_connectors_import_get",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Import Preview",
+        "description": "``POST /ui/connectors/import`` -- parse + render the preview table.\n\n``operator`` is resolved purely as the tenant_admin gate; the\npreview is read-only (it classifies but does not write), so the\nexisting-name lookup runs under ``session_ctx.tenant_id``.",
+        "operationId": "ui_connectors_import_preview_ui_connectors_import_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_import_preview_ui_connectors_import_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/import/confirm": {
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Import Confirm",
+        "description": "``POST /ui/connectors/import/confirm`` -- apply the plan in-process.",
+        "operationId": "ui_connectors_import_confirm_ui_connectors_import_confirm_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_connectors_import_confirm_ui_connectors_import_confirm_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors/{name}/probe": {
+      "post": {
+        "tags": [
+          "ui-connectors"
+        ],
+        "summary": "Ui Connectors Reprobe",
+        "description": "``POST /ui/connectors/{name}/probe``.",
+        "operationId": "ui_connectors_reprobe_ui_connectors__name__probe_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UISessionContext",
+                "nullable": true,
+                "title": "Session Ctx"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operator is not a tenant_admin. The re-probe verb is tenant_admin-only, mirroring the ``/api/v1/targets/{name}/probe`` REST route's posture.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "404": {
+            "description": "Target name does not resolve in the caller's tenant.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Resolver reported ambiguous connector resolution. The alert fragment names the candidate set.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "501": {
+            "description": "Resolver found no matching connector for the target's (product, fingerprint.version) pair.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb": {
+      "get": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Index",
+        "description": "Render the KB main page or HTMX results fragment.\n\nEmpty *q* \u2192 paginated entry list.\nNon-empty *q* \u2192 hybrid BM25+cosine search results.\n``HX-Request: true`` \u2192 return only the ``_results.html`` fragment.",
+        "operationId": "kb_index_ui_kb_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 500,
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/search": {
+      "post": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Search",
+        "description": "HTMX keyup-debounced search partial.\n\nReturns the ``kb/_results.html`` fragment swapped into\n``#kb-results`` via ``hx-target``. The ``q`` field comes from\nthe search form body; empty/blank \u2192 paginated list view (same\nbehaviour as ``GET /ui/kb`` with empty query).",
+        "operationId": "kb_search_ui_kb_search_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_kb_search_ui_kb_search_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/{slug}": {
+      "get": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Entry Detail",
+        "description": "Render the KB entry detail page with server-side Markdown.\n\nFetches the entry via :meth:`KbService.get_entry`, renders the\nbody via :func:`render_markdown` (markdown-it-py GFM + pygments\ncode highlight), and passes the rendered HTML + pygments CSS to\nthe ``kb/detail.html`` template.\n\nCross-tenant or missing slugs \u2192 404 (not 403, matching the\n``/api/v1/kb/{slug}`` surface posture).",
+        "operationId": "kb_entry_detail_ui_kb__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/{slug}/preview": {
+      "get": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Entry Preview",
+        "description": "HTMX hover-preview partial.\n\nReturns the ``kb/_preview.html`` fragment with the matched snippet\nannotated with query-term highlight markup (server-side ``<mark>``\nspans). Called by ``hx-trigger=\"mouseenter delay:200ms\"`` on result\ncards; the ``q`` param carries the active search query so terms can\nbe highlighted in the preview.\n\nCross-tenant or missing slugs \u2192 404.",
+        "operationId": "kb_entry_preview_ui_kb__slug__preview_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/editor-preview": {
+      "post": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Editor Preview",
+        "description": "HTMX editor live-preview partial.\n\nAccepts the current editor ``body`` as a form field, renders it\nvia :func:`render_markdown` (the same renderer as the entry-detail\nview), and returns the ``kb/_editor_preview.html`` fragment. Called\nby the CodeMirror editor's debounced HTMX POST (``hx-trigger=\"input\nchanged delay:500ms\"``). Any authenticated operator (not just\n``tenant_admin``) can call this endpoint \u2014 it is a pure read-only\nMarkdown transform, not a write.\n\nTenant identity is present (from ``session``) but not needed here;\nthe preview is stateless (no DB read) and cross-tenant safe because\nthe body comes from the operator's own input, not a stored document.",
+        "operationId": "kb_editor_preview_ui_kb_editor_preview_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_kb_editor_preview_ui_kb_editor_preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/new": {
+      "post": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Editor Save",
+        "description": "Save a new KB entry from the editor modal.\n\nRequires ``tenant_admin`` role \u2014 enforced by re-verifying the\nsession's access token through\n:func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`. Plain\n``operator`` role receives 403. The CSRF middleware gate runs\nbefore this handler (``POST /ui/*`` passes through\n:class:`~meho_backplane.ui.csrf.CSRFMiddleware`).\n\nOn success, returns ``HX-Redirect`` to the new entry's detail\npage so HTMX swaps the page without a full navigation. On\nvalidation failure (invalid slug, empty body) re-renders the\neditor modal with an inline error message.\n\nTag parsing: the ``tags`` field is a comma-separated string\n(``\"tag-a, tag-b\"``); individual values are stripped of\nwhitespace and empty strings are dropped. Tags are stored as\n``metadata[\"tags\"]`` on the entry.",
+        "operationId": "kb_editor_save_ui_kb_new_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_kb_editor_save_ui_kb_new_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -7265,6 +8925,359 @@
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
       },
+      "Body_kb_editor_preview_ui_kb_editor_preview_post": {
+        "properties": {
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_kb_editor_preview_ui_kb_editor_preview_post"
+      },
+      "Body_kb_editor_save_ui_kb_new_post": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Slug"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body"
+          },
+          "tags": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Tags",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "body"
+        ],
+        "title": "Body_kb_editor_save_ui_kb_new_post"
+      },
+      "Body_kb_search_ui_kb_search_post": {
+        "properties": {
+          "q": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Q",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_kb_search_ui_kb_search_post"
+      },
+      "Body_ui_connectors_create_submit_ui_connectors_create_post": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "title": "Name",
+            "default": ""
+          },
+          "product": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Product",
+            "default": ""
+          },
+          "host": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Host",
+            "default": ""
+          },
+          "port": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Port"
+          },
+          "auth_model": {
+            "type": "string",
+            "title": "Auth Model",
+            "default": "shared_service_account"
+          },
+          "secret_ref": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "vpn_required": {
+            "type": "boolean",
+            "title": "Vpn Required",
+            "default": false
+          },
+          "aliases": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Aliases"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 8192,
+            "nullable": true,
+            "title": "Notes"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_create_submit_ui_connectors_create_post"
+      },
+      "Body_ui_connectors_edit_submit_ui_connectors__name__patch": {
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Product",
+            "default": ""
+          },
+          "host": {
+            "type": "string",
+            "maxLength": 512,
+            "title": "Host",
+            "default": ""
+          },
+          "port": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Port"
+          },
+          "auth_model": {
+            "type": "string",
+            "title": "Auth Model",
+            "default": "shared_service_account"
+          },
+          "secret_ref": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "vpn_required": {
+            "type": "boolean",
+            "title": "Vpn Required",
+            "default": false
+          },
+          "aliases": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Aliases"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 8192,
+            "nullable": true,
+            "title": "Notes"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_edit_submit_ui_connectors__name__patch"
+      },
+      "Body_ui_connectors_import_confirm_ui_connectors_import_confirm_post": {
+        "properties": {
+          "pasted": {
+            "type": "string",
+            "maxLength": 262144,
+            "nullable": true,
+            "title": "Pasted"
+          },
+          "upload": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "nullable": true,
+            "title": "Upload"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_import_confirm_ui_connectors_import_confirm_post"
+      },
+      "Body_ui_connectors_import_preview_ui_connectors_import_post": {
+        "properties": {
+          "pasted": {
+            "type": "string",
+            "maxLength": 262144,
+            "nullable": true,
+            "title": "Pasted"
+          },
+          "upload": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "nullable": true,
+            "title": "Upload"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_connectors_import_preview_ui_connectors_import_post"
+      },
+      "Body_ui_memory_bulk_ui_memory_bulk_post": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Action"
+          },
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ids"
+          },
+          "extend_duration": {
+            "type": "string",
+            "maxLength": 8,
+            "nullable": true,
+            "title": "Extend Duration"
+          },
+          "scope": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Scope",
+            "default": "all"
+          },
+          "tag": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Tag"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "title": "Body_ui_memory_bulk_ui_memory_bulk_post"
+      },
+      "Body_ui_memory_create_submit_ui_memory_create_post": {
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body"
+          },
+          "slug": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Slug"
+          },
+          "tags": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Tags"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "target_name": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "body"
+        ],
+        "title": "Body_ui_memory_create_submit_ui_memory_create_post"
+      },
+      "Body_ui_memory_patch_ui_memory__scope___slug__patch": {
+        "properties": {
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "title": "Body_ui_memory_patch_ui_memory__scope___slug__patch"
+      },
+      "Body_ui_memory_preview_ui_memory_preview_post": {
+        "properties": {
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_memory_preview_ui_memory_preview_post"
+      },
+      "Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post": {
+        "properties": {
+          "to": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "target_name": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "session_ctx": {
+            "$ref": "#/components/schemas/UISessionContext",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "to"
+        ],
+        "title": "Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post"
+      },
       "BroadcastOverrideCreate": {
         "properties": {
           "op_id_pattern": {
@@ -7413,8 +9426,15 @@
             "title": "Op Id"
           },
           "target": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            ],
             "nullable": true,
             "title": "Target"
           },
@@ -7431,7 +9451,7 @@
           "op_id"
         ],
         "title": "CallOperationBody",
-        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` is a partial\ndescriptor (``{\"name\": \"rdc-vcenter\"}``) the handler resolves via\n:func:`~meho_backplane.targets.resolver.resolve_target`; ``None``\nmeans the operation does not need a target (typed handlers that\ndon't read it; composite handlers that do their own resolution).\n\nRecognised keys on the ``target`` dict:\n\n* ``name`` (required when ``target`` is supplied) -- the slug or\n  alias the resolver looks up in the targets registry.\n* ``fqdn`` (optional) -- per-call override for the resolved\n  target's ``fqdn`` column. Honoured by connectors that read\n  ``target.fqdn`` for vhost routing (G3.6 VCF Automation:\n  the appliance enforces strict ``Host:`` matching and returns\n  404 with empty body when reached by IP without the correct\n  vhost set). The override mutates the resolved Target in\n  memory only; the database row is not modified. Any other key\n  in the dict is silently ignored, mirroring the documented\n  forward-compatibility posture in the MCP tool schema.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` -- a v0.2.1 client still sending ``target:\nstr`` (the pre-rename single-name shape) or a typo in\n``connector_id`` now fails loud at the framework boundary instead\nof silently dispatching with the defaults. ``params`` itself is a\nfree-form ``dict`` because per-op parameter shape is enforced by\nthe descriptor's ``parameter_schema`` further down the dispatch\npath; only the meta-tool body's own fields are constrained here."
+        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` accepts either\nshape and ``None``:\n\n* **Bare string** -- ``target: \"rdc-vcenter\"``. The forward-preferred\n  shape; matches ``query_topology`` / ``query_audit`` so an agent\n  can carry a target name across the read and the write surfaces\n  without reshape. G0.13-T2 (#1132) widening of #780.\n* **Dict** -- ``target: {\"name\": \"rdc-vcenter\"}``. The original\n  shape; the handler resolves the ``name`` field and (optionally)\n  reads ``fqdn`` for vhost routing. Still accepted unchanged.\n* **None** -- the operation does not need a target (typed handlers\n  that don't read it; composite handlers that do their own\n  resolution).\n\nBoth shapes normalise to the same dict before dispatch, so the\nresolver and the connectors see one canonical form. A bare-string\n``target`` is equivalent to ``{\"name\": <string>}`` -- no ``fqdn``\noverride can be passed via the string shape; callers that need\nthe override stay on the dict.\n\nRecognised keys on the ``target`` dict:\n\n* ``name`` (required when ``target`` is supplied as a dict) -- the\n  slug or alias the resolver looks up in the targets registry.\n* ``fqdn`` (optional) -- per-call override for the resolved\n  target's ``fqdn`` column. Honoured by connectors that read\n  ``target.fqdn`` for vhost routing (G3.6 VCF Automation:\n  the appliance enforces strict ``Host:`` matching and returns\n  404 with empty body when reached by IP without the correct\n  vhost set). The override mutates the resolved Target in\n  memory only; the database row is not modified. Any other key\n  in the dict is silently ignored, mirroring the documented\n  forward-compatibility posture in the MCP tool schema.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown *body* fields\nwith 422 ``extra_forbidden`` -- a typo in ``connector_id`` or an\nunknown sibling field still fails loud. The ``target`` field's\nown union widening is orthogonal: bare-string is now a first-class\nvalid value, not an unknown field. ``params`` itself is a\nfree-form ``dict`` because per-op parameter shape is enforced by\nthe descriptor's ``parameter_schema`` further down the dispatch\npath; only the meta-tool body's own fields are constrained here."
       },
       "CandidateHint": {
         "properties": {
@@ -7746,6 +9766,10 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "preamble_status": {
+            "$ref": "#/components/schemas/PreambleInclusion",
+            "nullable": true
           }
         },
         "type": "object",
@@ -7762,7 +9786,7 @@
           "updated_at"
         ],
         "title": "Convention",
-        "description": "Full-row representation returned by GET-single / POST / PATCH.\n\nCarries the entire ``body`` text -- the natural shape for\n``GET /{slug}`` and the return value of POST/PATCH where the\ncaller wants to confirm what they wrote landed verbatim.\n``kind`` is exposed as the raw string from the DB rather than\nas :class:`ConventionKind`; the API layer's pydantic models\nbound writes to the enum but read paths surface whatever the\nDB stored (a future ``kind`` value introduced by a migration\nwould otherwise blow up the JSON encoder on every read)."
+        "description": "Full-row representation returned by GET-single / POST / PATCH.\n\nCarries the entire ``body`` text -- the natural shape for\n``GET /{slug}`` and the return value of POST/PATCH where the\ncaller wants to confirm what they wrote landed verbatim.\n``kind`` is exposed as the raw string from the DB rather than\nas :class:`ConventionKind`; the API layer's pydantic models\nbound writes to the enum but read paths surface whatever the\nDB stored (a future ``kind`` value introduced by a migration\nwould otherwise blow up the JSON encoder on every read).\n\n``preamble_status`` (G0.14-T8 #1149) is the post-write inclusion\nsignal POST/PATCH attach: ``None`` on ``GET /{slug}`` (the\naggregate budget signal lives on the list response's\n``budget_status``) and on writes against ``workflow`` /\n``reference`` kinds (those are not preamble-bound). Populated\nonly when the write touched an ``operational`` row."
       },
       "ConventionCreate": {
         "properties": {
@@ -8380,16 +10404,21 @@
           },
           "db": {
             "$ref": "#/components/schemas/DbStatus"
+          },
+          "mcp_session_id_capture": {
+            "type": "string",
+            "title": "Mcp Session Id Capture"
           }
         },
         "type": "object",
         "required": [
           "operator",
           "vault",
-          "db"
+          "db",
+          "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"always\"`` \u2014 any ``Mcp-Session-Id`` header the client sends is\n  captured into ``audit_log.agent_session_id``; a missing header is\n  accepted (the row's session id lands as NULL). This is the\n  default and what G8.2 audit-replay needs to light up on a stock\n  deploy.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in\n  compliance deploys that forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent)."
       },
       "IngestKbRequest": {
         "properties": {
@@ -8420,18 +10449,21 @@
             "type": "string",
             "maxLength": 64,
             "minLength": 1,
+            "nullable": true,
             "title": "Product"
           },
           "version": {
             "type": "string",
             "maxLength": 64,
             "minLength": 1,
+            "nullable": true,
             "title": "Version"
           },
           "impl_id": {
             "type": "string",
             "maxLength": 128,
             "minLength": 1,
+            "nullable": true,
             "title": "Impl Id"
           },
           "specs": {
@@ -8440,8 +10472,14 @@
             },
             "type": "array",
             "maxItems": 16,
-            "minItems": 1,
             "title": "Specs"
+          },
+          "catalog_entry": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Catalog Entry"
           },
           "base_url": {
             "type": "string",
@@ -8457,14 +10495,8 @@
         },
         "additionalProperties": false,
         "type": "object",
-        "required": [
-          "product",
-          "version",
-          "impl_id",
-          "specs"
-        ],
         "title": "IngestRequest",
-        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL).\n\n``extra=\"forbid\"`` rejects unknown body fields with 422\n``extra_forbidden`` (G0.9-T2 / #729) \u2014 silent-drop on a typo\nwould otherwise mean the pipeline runs with the wrong impl_id\nand the operator only finds out at review-time."
+        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\nTwo mutually-exclusive request shapes:\n\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources the caller already knows. The MCP admin tool and\n  the historical CLI manual mode use this shape.\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  carries a ``\"<product>/<version>\"`` reference; the route\n  handler resolves the entry against the packaged catalog (see\n  :mod:`meho_backplane.operations.ingest.catalog`) and fills in\n  ``product`` / ``version`` / ``impl_id`` / ``specs[]`` from the\n  catalog entry before dispatching through the existing ingest\n  path. REST-native agent runtimes that can't shell out to the\n  CLI use this shape; the CLI's ``--catalog`` flag has been\n  refactored to POST this shape rather than resolving the entry\n  client-side.\n\nThe two shapes are mutually exclusive: a body that sets\n``catalog_entry`` alongside any of ``product`` / ``version`` /\n``impl_id`` / ``specs[]`` fails 422 ``catalog_entry_conflict`` at\nthe validator below. A body that sets neither fails 422\n``ingest_request_underspecified``. ``base_url`` and ``dry_run``\nare accepted in both shapes.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL).\n\n``extra=\"forbid\"`` rejects unknown body fields with 422\n``extra_forbidden`` (G0.9-T2 / #729) \u2014 silent-drop on a typo\nwould otherwise mean the pipeline runs with the wrong impl_id\nand the operator only finds out at review-time."
       },
       "IngestResponse": {
         "properties": {
@@ -8974,6 +11006,40 @@
         ],
         "title": "PermissionVerdict",
         "description": "Three-state verdict returned by the permission resolver.\n\n:attr:`AUTO_EXECUTE` \u2014 the op proceeds without human review.\n:attr:`NEEDS_APPROVAL` \u2014 the op is parked pending an operator\ndecision; the approval queue (G11.2-T4) handles the resume path.\n:attr:`DENY` \u2014 the op is refused immediately with a structured,\nagent-reasonable error.\n\nThe vocabulary is intentionally closed: a fourth verdict would\nrequire a code + migration change, which is the cheapest way to\nprevent drift between the DB layer and the policy engine."
+      },
+      "PreambleInclusion": {
+        "properties": {
+          "included": {
+            "type": "boolean",
+            "title": "Included"
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 1.0,
+            "nullable": true,
+            "title": "Position"
+          },
+          "token_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Token Count"
+          },
+          "would_drop_slugs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Would Drop Slugs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "included",
+          "token_count",
+          "would_drop_slugs"
+        ],
+        "title": "PreambleInclusion",
+        "description": "Whether a just-written convention reaches the session preamble.\n\nG0.14-T8 (#1149, signal 18) -- the post-write feedback shape\n``POST /api/v1/conventions`` and ``PATCH /api/v1/conventions/{slug}``\nattach to the response when the convention is ``kind='operational'``.\nWithout it, the operator gets a ``201`` (or ``200`` on PATCH), assumes\nthe rule is in effect, and the agent silently never sees it because\nthe preamble packer dropped it on budget overflow.\n\nFields:\n\n* ``included`` -- ``True`` when the slug landed in the assembled\n  preamble (after the priority-ranked pack against\n  :data:`DEFAULT_MAX_PREAMBLE_TOKENS`). ``False`` when the packer\n  dropped it whole on overflow.\n* ``position`` -- 1-based index of the convention in the assembled\n  preamble's packed order (the packer iterates ``priority DESC,\n  created_at ASC``; ``position=1`` means highest-priority slot in\n  the operator's tenant). ``None`` when ``included=False``.\n* ``token_count`` -- the convention body's own estimated token\n  cost via :func:`estimate_tokens`. Useful for the operator to\n  see why a near-budget body got dropped (it weighed more than\n  the remaining headroom).\n* ``would_drop_slugs`` -- the full ``dropped_slugs`` list the\n  packer produced on this assembly. When ``included=True`` this\n  names *other* slugs that fell out of the preamble (the just-\n  written convention may have pushed a lower-priority neighbour\n  out); when ``included=False`` the list contains *this* slug\n  plus any others dropped under the same pack. The shape lets\n  a single ``meho conventions create ...`` round-trip surface\n  both the personal outcome (did mine land?) and the collateral\n  damage (did mine push someone else out?).\n\nWhy a separate model instead of inlining fields on\n:class:`Convention`: the response shape ``Convention`` is used\nby ``GET /{slug}`` too, where ``preamble_status`` would be\nredundant (operators inspecting a row already have the\n``GET /api/v1/conventions``'s ``budget_status`` envelope for\naggregate budget signal). Keeping the inclusion shape on a\nsub-model means GET-single can drop the field cleanly while\nPOST/PATCH attach it."
       },
       "PromoteBody": {
         "properties": {
@@ -9597,6 +11663,226 @@
         "title": "RetrieveResponse",
         "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
       },
+      "ScheduledTriggerCreate": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ScheduledTriggerKind"
+          },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Agent Definition Id"
+          },
+          "cron_expr": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Fire At"
+          },
+          "event_filter": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Event Filter"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Timezone",
+            "default": "UTC"
+          },
+          "inputs": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Inputs"
+          },
+          "identity_sub": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Identity Sub",
+            "default": "__scheduler__"
+          },
+          "in_flight_policy": {
+            "$ref": "#/components/schemas/ScheduledTriggerInFlightPolicy",
+            "default": "fail_into_audit"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "agent_definition_id"
+        ],
+        "title": "ScheduledTriggerCreate",
+        "description": "Request body for ``POST /api/v1/scheduler/triggers``.\n\nDiscriminated by *kind*: exactly one of ``cron_expr`` / ``fire_at``\n/ ``event_filter`` must be set, matching the DB-side\n``ck_scheduled_trigger_kind_fields`` invariant. The\n:meth:`_validate_discriminated_union` validator enforces this at\nthe wire so a malformed body surfaces as 422 rather than as a\nflush-time :class:`IntegrityError`.\n\n*agent_definition_id* is the existing-definition reference -- the\nrepository's FK check rejects an orphan id with 422 at insert; no\nvalidation is duplicated here.\n\n*identity_sub* is the OIDC ``sub`` the scheduler impersonates when\nfiring the trigger (distinct from *created_by_sub* which the\nboundary derives from the operator). Defaulted to\n``\"__scheduler__\"`` to match the migration-time backstop the\nORM-level default sets, so a minimal create body still validates.\n\n*in_flight_policy* defaults to ``fail_into_audit`` per the consumer\ndoc; operators wanting at-least-once semantics opt into ``resume``.\n\n*tenant_id* (optional) lets a tenant-admin caller create triggers in\nanother tenant for cross-tenant admin operations; ``operator`` role\ncallers leave it ``None`` and the boundary pins it to the JWT's\ntenant id. The boundary enforces the RBAC -- this schema only\ncarries the field."
+      },
+      "ScheduledTriggerInFlightPolicy": {
+        "type": "string",
+        "enum": [
+          "resume",
+          "fail_into_audit"
+        ],
+        "title": "ScheduledTriggerInFlightPolicy",
+        "description": "Closed policy of what happens to a fired run that gets killed mid-flight.\n\nInitiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;\nT4 #825 owns the resume/fail mechanics. The closed enum keeps the\nstorage shape and the dispatch behaviour aligned across the\nInitiative.\n\nMembers:\n\n* :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to\n  resume a killed run from its last recorded state. At-least-once\n  semantics; the underlying agent run should be idempotent-friendly.\n* :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed`` with\n  a clean audit row explaining the interruption; the next trigger\n  tick fires a fresh run. The consumer doc (``agent-runtime-for-ops-\n  spec.md`` \u00a7P2) explicitly accepts this outcome as the default\n  policy -- which is why Option A (extend roll-our-own) is viable at\n  all without DBOS-style automatic resume.\n\nDefault at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --\nthe conservative policy that requires no extra infrastructure (just\naudit) and matches the consumer's accepted-outcome statement.\nOperators opt into :attr:`RESUME` per definition."
+      },
+      "ScheduledTriggerKind": {
+        "type": "string",
+        "enum": [
+          "cron",
+          "one_off",
+          "event"
+        ],
+        "title": "ScheduledTriggerKind",
+        "description": "Closed enum of trigger shapes the G11.3 scheduler dispatches.\n\nInitiative #804 (G11.3 Scheduler), Task #822 (T1). One\n:class:`ScheduledTrigger` row carries exactly one of three shapes,\nselected by this discriminator; the discriminated-union invariant is\nenforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``\nthat pairs each kind with its mandatory column.\n\nMembers:\n\n* :attr:`CRON` -- recurring trigger driven by a 5-field cron\n  expression (``cron_expr`` column). The dispatcher (T2 #823) reads\n  the expression via ``croniter`` and materialises ``next_fire_at``.\n* :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time\n  (``fire_at`` column). The dispatcher fires it once then marks\n  ``status = 'cancelled'`` (or the row stays inactive via\n  ``next_fire_at IS NULL``).\n* :attr:`EVENT` -- event-subscription trigger keyed on a JSONB\n  filter (``event_filter`` column). The transactional outbox (T3\n  #824) matches rows against the filter and dispatches.\n\nClosed enum -- the vocabulary is fixed at v0.2; widening it is a\ncoordinated DB + model change so the enum and the\n:data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0020``'s\nfrozen tuple) cannot drift. The lock-step discipline mirrors\n:class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard\nin :mod:`tests.test_db_scheduled_trigger` enforces equality at\nunit-test time."
+      },
+      "ScheduledTriggerListResponse": {
+        "properties": {
+          "triggers": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduledTriggerRead"
+            },
+            "type": "array",
+            "title": "Triggers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "triggers"
+        ],
+        "title": "ScheduledTriggerListResponse",
+        "description": "Response envelope for ``GET /api/v1/scheduler/triggers``.\n\nWrapped in ``{\"triggers\": [...]}`` so a future paging / cursor\nfield can land non-breakingly -- the same shape\n:class:`~meho_backplane.api.v1.agents.AgentDefinitionListResponse`\nadopted."
+      },
+      "ScheduledTriggerRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Agent Definition Id"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ScheduledTriggerKind"
+          },
+          "cron_expr": {
+            "type": "string",
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Fire At"
+          },
+          "event_filter": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Event Filter"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ScheduledTriggerStatus"
+          },
+          "in_flight_policy": {
+            "$ref": "#/components/schemas/ScheduledTriggerInFlightPolicy"
+          },
+          "next_fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Next Fire At"
+          },
+          "last_fired_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Fired At"
+          },
+          "inputs": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Inputs"
+          },
+          "identity_sub": {
+            "type": "string",
+            "title": "Identity Sub"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "agent_definition_id",
+          "kind",
+          "cron_expr",
+          "timezone",
+          "fire_at",
+          "event_filter",
+          "status",
+          "in_flight_policy",
+          "next_fire_at",
+          "last_fired_at",
+          "inputs",
+          "identity_sub",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ScheduledTriggerRead",
+        "description": "Response shape for one ``scheduled_trigger`` row.\n\nMirrors :class:`~meho_backplane.db.models.ScheduledTrigger`'s column\nset, projected to the wire types the JSON renderer can serialise.\n``frozen=True`` matches the :mod:`meho_backplane.agents.schemas`\nposture so a route handler cannot accidentally mutate the row after\nreturning it."
+      },
+      "ScheduledTriggerStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "paused",
+          "cancelled",
+          "fired"
+        ],
+        "title": "ScheduledTriggerStatus",
+        "description": "Closed lifecycle status of a :class:`ScheduledTrigger`.\n\nInitiative #804 (G11.3 Scheduler), Task #822 (T1). The admin\nsurface (T5 #826) walks triggers through this state machine; the\ndispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.\n\nMembers:\n\n* :attr:`ACTIVE` -- the trigger is eligible for dispatch.\n* :attr:`PAUSED` -- the trigger is temporarily disabled by an\n  operator. ``next_fire_at`` is preserved so resuming reactivates\n  without recomputing.\n* :attr:`CANCELLED` -- terminal. The trigger row is retained for\n  audit purposes but never fires again.\n* :attr:`FIRED` -- terminal one-off state. Migration ``0025`` (T2\n  #823) widened the enum so a one-off trigger transitions\n  ``ACTIVE -> FIRED`` after its single dispatch instead of going\n  to ``CANCELLED`` (which carries operator-intent semantics).\n  :class:`ScheduledTrigger` rows in this state are retained for\n  audit (last-fired-at + identity_sub) but never re-dispatched."
+      },
       "SkippedConnector": {
         "properties": {
           "name": {
@@ -9841,6 +12127,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Deleted At"
           }
         },
         "type": "object",
@@ -9885,7 +12177,25 @@
             "type": "string",
             "maxLength": 100,
             "minLength": 1,
-            "title": "Product"
+            "title": "Product",
+            "enum": [
+              "bind9",
+              "gcloud",
+              "harbor",
+              "hetzner-robot",
+              "holodeck",
+              "k8s",
+              "nsx",
+              "pfsense",
+              "sddc-manager",
+              "vault",
+              "vcf-automation",
+              "vcf-fleet",
+              "vcf-logs",
+              "vcf-operations",
+              "vmware"
+            ],
+            "description": "Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss."
           },
           "host": {
             "type": "string",
@@ -9994,6 +12304,13 @@
             "nullable": true,
             "title": "Aliases"
           },
+          "product": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Product"
+          },
           "host": {
             "type": "string",
             "maxLength": 512,
@@ -10047,7 +12364,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "TargetUpdate",
-        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` and ``product`` are absent \u2014 rename = delete\n+ create.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable."
+        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` is absent \u2014 rename = delete + create.\n\n``product`` is patchable as of G0.14-T4 (#1145). The original\nG0.3 contract treated ``product`` as immutable after creation\non the theory that the operator should delete + re-create on a\ntypo, but the v0.6.0 dogfood pass (signal 6) showed the\ncombination of \"no DELETE route\" + \"no PATCH on product\" left a\nmisregistered target permanently broken \u2014 name and alias slots\noccupied, ``secret_ref`` pointing at a stranded Vault path. T4\ncloses the gap by adding DELETE *and* allowing PATCH on\n``product``. The route handler validates the new value against\nthe set of registered connector products and rejects unknown\nvalues with a structured 422 mirroring the ``/probe`` 501\nshape \u2014 so a typo at PATCH time produces the same actionable\ndiagnostic as the typo would at probe time, instead of\nsilently breaking the working target.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable."
       },
       "TargetsDiscoverResult": {
         "properties": {
@@ -10467,6 +12784,32 @@
         "title": "TopologyTimelineResult",
         "description": "Page of timeline rows plus the forward-only continuation cursor.\n\n``next_cursor`` is :data:`None` when fewer than ``limit`` rows\nwere available (the query reached the end of the matching set).\nConsumers iterate by re-issuing the same filter with\n``cursor = next_cursor`` until ``next_cursor`` is None.\n\nThe cursor is opaque (base64-encoded JSON over ``(valid_from,\nhistory_id, source)``) -- consumers treat it as a token. Stability\nunder concurrent inserts: a new history row landing in the window\nbetween page N and page N+1 is naturally placed by the keyset\ncompare (``(valid_from, history_id) < (cursor.ts, cursor.id)``)\nand either appears on a later page (if it falls below the cursor)\nor never (if it lands above the cursor). No row is duplicated or\nskipped by the act of paging."
       },
+      "UISessionContext": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Session Id"
+          },
+          "operator_sub": {
+            "type": "string",
+            "title": "Operator Sub"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "operator_sub",
+          "tenant_id"
+        ],
+        "title": "UISessionContext",
+        "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims)."
+      },
       "UsageReport": {
         "properties": {
           "since": {
@@ -10812,16 +13155,14 @@
         "title": "_EdgeEndpoint",
         "description": "Inbound JSON shape for one annotation endpoint.\n\nMirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:\n``name`` is required, ``kind`` is the optional disambiguator for a\nbare name that resolves to multiple :class:`GraphNode` rows in the\ntenant. Frozen so the route handler cannot accidentally rebind the\nfield; ``extra=\"forbid\"`` rejects typo'd keys at the boundary\n(``{from: {nme: ...}}`` is a 422, not a silently-ignored body)."
       },
-      "_SortColumn": {
+      "_SortDirection": {
         "type": "string",
         "enum": [
-          "name",
-          "kind",
-          "last_seen",
-          "first_seen"
+          "asc",
+          "desc"
         ],
-        "title": "_SortColumn",
-        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
+        "title": "_SortDirection",
+        "description": "Sort direction -- ``asc`` (default) or ``desc``."
       },
       "_ViewMode": {
         "type": "string",
@@ -10831,6 +13172,29 @@
         ],
         "title": "_ViewMode",
         "description": "Closed enum of view modes exposed on ``GET /ui/topology``.\n\n``table`` is the default (T1 / #880); ``graph`` switches to the\nCytoscape.js surface (T2 / #881). The enum's ``str`` mixin keeps\ntemplate URL building stable -- ``str(_ViewMode.GRAPH)`` is\n``\"graph\"`` (not ``\"_ViewMode.GRAPH\"``). An out-of-range value\nfails Pydantic validation (422) at the HTTP boundary so the route\nbody never sees an unknown mode."
+      },
+      "meho_backplane__ui__routes__connectors__list_view___SortColumn": {
+        "type": "string",
+        "enum": [
+          "name",
+          "product",
+          "host",
+          "last_probed_at",
+          "status"
+        ],
+        "title": "_SortColumn",
+        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors the human-meaningful columns in the rendered table. An\nout-of-enum value fails Pydantic validation at the HTTP boundary\nwith a 422 carrying the candidate list in the error context. The\nenum's ``str`` mixin keeps the template's ``{{ sort }}`` rendering\n+ ``href`` building stable -- ``str(_SortColumn.NAME)`` is\n``\"name\"`` (not ``\"_SortColumn.NAME\"``)."
+      },
+      "meho_backplane__ui__routes__topology__table___SortColumn": {
+        "type": "string",
+        "enum": [
+          "name",
+          "kind",
+          "last_seen",
+          "first_seen"
+        ],
+        "title": "_SortColumn",
+        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
       }
     }
   }

@@ -1,0 +1,3 @@
+[
+  {"rule": "mask-github-uuid", "pattern": "uuid", "action": "mask", "count": 1, "path": "issue.id"}
+]

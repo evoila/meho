@@ -23,6 +23,13 @@ from meho_backplane.broadcast.events import (
     classify_op,
     redact_payload,
 )
+from meho_backplane.broadcast.history import (
+    DEFAULT_WINDOW_MINUTES,
+    OP_CLASS_ENUM,
+    InvalidSinceError,
+    list_recent_events_fail_soft,
+    list_recent_events_strict,
+)
 from meho_backplane.broadcast.overrides import (
     compute_effective_broadcast_detail,
     invalidate_tenant_cache,
@@ -45,14 +52,19 @@ __all__ = [
     "BROADCAST_EVENTS_PUBLISHED_TOTAL",
     "BROADCAST_MAXLEN",
     "BROADCAST_PUBLISH_ERRORS_TOTAL",
+    "DEFAULT_WINDOW_MINUTES",
+    "OP_CLASS_ENUM",
     "AgentAnnouncementEvent",
     "BroadcastEvent",
+    "InvalidSinceError",
     "broadcast_readiness_probe",
     "classify_op",
     "compute_effective_broadcast_detail",
     "dispose_broadcast_client",
     "get_broadcast_client",
     "invalidate_tenant_cache",
+    "list_recent_events_fail_soft",
+    "list_recent_events_strict",
     "publish_agent_announcement",
     "publish_event",
     "read_request_override",

@@ -90,11 +90,418 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-write preamble-inclusion feedback on the conventions write
+  surface (G0.14-T8 #1149).** `POST /api/v1/conventions` and
+  `PATCH /api/v1/conventions/{slug}` now attach a `preamble_status`
+  sub-document to the response when the convention is
+  `kind='operational'`. Fields: `included` (whether the slug landed
+  in the assembled preamble), `position` (1-based index in the
+  packed order, `null` when dropped), `token_count` (the convention
+  body's own estimated token cost), and `would_drop_slugs` (the
+  full dropped-slug list from this pack — names other slugs the
+  write displaced, or includes the just-written slug when it was
+  itself dropped). Closes the `claude-rdc-hetzner-dc#697` signal 18
+  failure mode: previously an operator who wrote a convention got a
+  `201` with no indication whether the row would ever reach an
+  agent session; with `preamble_status` the answer arrives in the
+  same round-trip. `preamble_status` is `null` on `GET /{slug}`
+  (the aggregate budget signal lives on the list response's
+  `budget_status`) and `null` for writes against `workflow` /
+  `reference` kinds. (#1149)
+- **`/ready` features block + agent-runtime 503 symmetry +
+  `docs/RELEASING.md` post-deploy enablement** (G0.14-T7 #1148).
+  `GET /ready` now carries a structured `features` block enumerating
+  the four v0.6.0 gated surfaces (`agent_runtime`, `ui_surface`,
+  `audit_replay`, `approval_queue`) with `configured: bool`,
+  `missing_env: [...]`, and a `docs` reference per feature — one
+  GET answers "which features will work out of the box on my
+  deploy?". The 503 from `POST /api/v1/agent-principals` when the
+  Keycloak admin client is unwired now carries the symmetric
+  `/ui/auth/login` shape (three-clause: domain code +
+  `KEYCLOAK_ADMIN_URL / KEYCLOAK_ADMIN_CLIENT_ID /
+  KEYCLOAK_ADMIN_CLIENT_SECRET` + `docs/cross-repo/keycloak-agent-client.md`),
+  exposed as the new `KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL` constant.
+  `docs/RELEASING.md` gains §6a "Post-deploy enablement" walking
+  operators through each gate. T11-convention-compliant per
+  `docs/codebase/error-message-shape.md` (audit table updated).
+  Closes `claude-rdc-hetzner-dc#697` signals 16 + 17.
+
 ### Changed
 
-- **`k8s-1.x` typed connector — `shared_service_account` auth model live
-  (G3.10-T4 [#948](https://github.com/evoila/meho/issues/948)).** The
-  default
+- **`call_operation` accepts bare-string `target` alongside dict —
+  additive convergence with `query_topology` / `query_audit`
+  (G0.13-T2 #1132 / #780 follow-up).** The `call_operation` MCP tool
+  and `POST /api/v1/operations/call` REST route now accept the target
+  reference in either shape: bare string `"rdc-vault"` (the preferred
+  forward shape, matching the read tools) or the existing dict
+  `{"name": "rdc-vault"}` (still works, unchanged for callers pinned
+  to it). Both reduce to the same dispatch via an internal normaliser.
+  The dict shape remains the only one that opens the `fqdn` per-call
+  vhost override field. Resolves the "most-cited daily-driver sharp
+  edge" `target-shape-inconsistency-across-tools` signal from the
+  RDC v0.6.0 closed-loop dogfood (`claude-rdc-hetzner-dc#697`).
+  Non-breaking: agents pinned to the dict shape are not affected.
+- Generalise the `tenant_conventions` seed migration: the previously
+  shipped `rdc-internal` tenant + 8 consumer-specific operational
+  conventions (extracted from one consumer's `CLAUDE.md`) are
+  superseded on `upgrade head` by a generic `default` tenant + 2
+  illustrative conventions that demonstrate the feature without
+  baking in a specific consumer's identity. Operator deploys that
+  had already migrated to head with the old seed will see the
+  `rdc-internal` seeded rows removed on the next `upgrade head`
+  (the `rdc-internal` tenant row itself is preserved; only the
+  rows the seed migration authored are removed -- operator-curated
+  edits under seeded slugs survive). The consumer-side migration
+  template for re-applying the rdc-internal-specific content lives
+  in [`docs/architecture/conventions-seed.md`](docs/architecture/conventions-seed.md).
+  Closes the operational impact from signal-12 of the v0.6.0
+  consumer dogfood: previously, every adopting customer's MCP
+  `initialize.instructions` flowed the original consumer's
+  operational discipline + repo references into their agent session
+  start. (#1137)
+
+### Fixed
+
+- Dispatcher resolver error surfacing — the typed/composite branch
+  now mirrors the ingested branch's explicit `no_connector` label
+  on `NoMatchingConnector`, and both branches catch
+  `AmbiguousConnectorResolution` and surface it as a structured
+  `ambiguous_connector` error with the resolver's diagnostic
+  message (candidate set + remediation step) in
+  `extras.exception_message`. The `/api/v1/targets/{name}/probe`
+  route now consults the same shared resolver helper as the
+  dispatcher so the two surfaces always agree on whether a
+  target's connector resolves; ambiguous probes return 409 with
+  the resolver's message. Closes G0.14-T1 signals 7, 8, 19 from
+  `claude-rdc-hetzner-dc#697`. (#1142)
+- `/api/v1/feed` no longer drops to a bare HTTP 500 when the
+  broadcast subsystem is unreachable. The SSE generator now catches
+  `redis.exceptions.RedisError` (covers `ConnectionError`,
+  `TimeoutError`, `ResponseError`) inside the XREAD loop, emits a
+  single `event: feed_error` frame carrying a T11-compliant
+  `{code, message, doc}` payload
+  (`broadcast_subsystem_unavailable`), and closes the stream
+  cleanly so the browser `EventSource` reconnect machinery does
+  not tight-loop on the failure. The empty-stream case (fresh
+  deploy, no events published yet) was already handled — redis-py
+  returns `None` for an absent stream key, which falls through to
+  the existing heartbeat path. Closes G0.14-T5 signal 10 from
+  `claude-rdc-hetzner-dc#697`. (#1146)
+- **G0.13-T1 auth-invalid-token classifier extended to authlib
+  `DecodeError`.** Promotes the decode-stage failure for a non-JWT
+  bearer (e.g. `Bearer not-a-real-jwt`) at `/api/v1/health` from the
+  residual `invalid_token` to the specific `malformed_jws` 401 detail
+  code in `_classify_decode_error`, closing the v0.6.0 dogfood gap
+  where the G0.9.1-T12 (#797) classifier only covered claim-stage
+  failures. The residual `invalid_token` now applies only to
+  non-`DecodeError` failures (`alg: none` via
+  `UnsupportedAlgorithmError`, future `JoseError` subclasses,
+  post-refresh kid miss). Operators / tooling matching
+  `{detail: invalid_token}` for non-JWT bearers now see
+  `{detail: malformed_jws}`
+  ([#1131](https://github.com/evoila/meho/issues/1131) / #1152).
+- **G0.14-T6 audit-replay session-id capture decoupled from
+  `MCP_REQUIRE_SESSION_ID`.** `_bind_mcp_session_id` in
+  `mcp/server.py` now captures any `Mcp-Session-Id` header the
+  client sends into `audit_log.agent_session_id` unconditionally —
+  the env var strictly gates enforcement (the missing-header reject)
+  and no longer also gates capture. G8.2 audit-replay therefore
+  lights up automatically on any default deploy whose MCP clients
+  include the header (Claude Code does by default), with no operator
+  intervention. A request with no header (or a malformed one) leaves
+  `agent_session_id` as NULL — the recursive-CTE replay walks NULLs
+  out naturally — replacing the prior fresh-uuid4-per-call fallback
+  that polluted the session search surface with one-row "sessions".
+  `GET /api/v1/health` gains a new `mcp_session_id_capture` field
+  (`"always"` / `"enforced"`) so operators can confirm the deploy's
+  capture mode at a glance; `docs/RELEASING.md` documents the
+  post-deploy auto-enablement story. Closes G0.14-T6 signal 11 from
+  `claude-rdc-hetzner-dc#697`. (#1147)
+
+## [0.6.0] - 2026-05-26
+
+**MVP5 — tier-3 standalone connector wave, agent runtime + identity +
+approvals (P1+P3), tenant conventions Layer-2 starter, audit replay,
+topology history+diff, broadcast meta-tools, and the first operator web
+UI surfaces.** This is a substantial minor release that — beyond the
+planned v0.6 scope of G3.7 tier-3 connectors (pfSense, gcloud, Hetzner
+Robot) and G7.1 tenant conventions — also lands the entire **G11.1
+agent runtime** (in-process Pydantic AI loop, definition store,
+composition, lifecycle, async invocation surface), the **G11.2 agent
+identity / RBAC / approval** plumbing (Keycloak agent clients, per-(
+principal, op, target) permission model, durable approval queue,
+delegation context for client_credentials autonomous auth), the
+**G11.3-T1** scheduler substrate, the **G8.2 audit replay** end-to-end
+surface (substrate + REST + MCP + CLI), the **G3.9 + G3.10 live
+operator-context Vault credential read** wave (State 2 wiring across
+vmware-rest / k8s / nsx / harbor / sddc-manager / vROps / vRLI / Fleet /
+vcf-automation), the **G10.0** OAuth2.1 + PKCE BFF auth flow, the first
+two **G10 operator-UI surfaces** (broadcast live feed + topology graph),
+the **G3.8 Holodeck** typed connector, the **G6.4 broadcast meta-tools**
+that make the G7.1 consumer-onboarding CLAUDE.md broadcast-discipline
+contract executable, and the **G0.6.1** JsonFluxReducer wiring.
+**Breaking changes: 1 — see Changed (breaking) section.**
+
+### Changed (breaking)
+
+- **MCP `add_to_memory` body field renamed `content` -> `body`
+  (deferred-callout from G0.9.1-T7, #779).** The rename actually
+  landed in this release window (the original task targeted v0.3.2 in
+  its CHANGELOG AC, but the release tagged as v0.6.0 due to the v0.3.2
+  slip; the breaking-change callout evaporated in the transition).
+  Live consumers pinned to the v0.3.1 wire field received a 422
+  `missing required field: body` with no migration breadcrumb. v0.6.x
+  ships a **one-cycle compatibility shim**: the MCP `add_to_memory`
+  tool accepts both `body` (canonical) and `content` (deprecated
+  alias). When `content` is supplied, a structured
+  `add_to_memory_field_deprecated` warning log line fires with
+  `replacement="body"`, `removal_version="0.7"`, and
+  `body_supplied=<bool>`. When both fields are supplied, `body` wins.
+  **The shim is removed in v0.7** -- agents and SDKs pinned to
+  `content` must migrate to `body` before the v0.7 release.
+  Acceptance criteria from #779 (v0.3.2 callout) are satisfied
+  retroactively here against the actual release window.
+  ([#1134](https://github.com/evoila/meho/issues/1134))
+
+### Added
+
+- **Agent runtime (P1) — in-process Pydantic AI tool-use loop
+  (G11.1).** New `AgentRun` seam wraps Pydantic AI with bounded
+  in-process execution
+  ([#808](https://github.com/evoila/meho/issues/808) / #1032), an
+  `agent_definition` model + storage + admin CRUD identifies registered
+  agents by `identity_ref`, mode, toolset, and budget
+  ([#809](https://github.com/evoila/meho/issues/809) / #1035), toolset
+  resolution + a handler→agent-tool adapter expose the existing
+  meta-tools / connector ops to the loop without per-op re-registration
+  ([#810](https://github.com/evoila/meho/issues/810) / #1040), and the
+  full invocation surface — sync **and** async (handle / poll / SSE) —
+  ships on REST + MCP + CLI
+  ([#811](https://github.com/evoila/meho/issues/811) / #1043).
+  Agent-invokes-agent composition is depth-capped, budget-aware, and
+  audit-linked ([#812](https://github.com/evoila/meho/issues/812) /
+  #1042 / #1085) with `ChildRunFinalizer` closing the child
+  `agent_run` row when the parent run completes
+  ([#1087](https://github.com/evoila/meho/issues/1087) / #1088). The
+  `agent_run` record + enforced lifecycle + cancellation are persisted
+  end-to-end ([#813](https://github.com/evoila/meho/issues/813) /
+  #1031). Session ID = audit linkage throughout.
+
+- **Agent identity + RBAC + approval (P3) (G11.2).** Agent principals
+  are first-class Keycloak clients with a `kind=agent`
+  principal-discriminator across the audit and policy paths
+  ([#815](https://github.com/evoila/meho/issues/815) / #1050,
+  follow-up #1089 re-landed a revoke kill switch + `disable_client`
+  GET-then-PUT cleanup dropped by the stale-head squash on #1050). A
+  resource-server delegation context captures both human initiator and
+  acting agent in audit rows and enables `client_credentials`
+  autonomous auth ([#816](https://github.com/evoila/meho/issues/816) /
+  #1096). The per-(principal, op, target) **permission model** with
+  verdict resolution at `policy_gate` replaces the prior unconditional
+  pass-through ([#820](https://github.com/evoila/meho/issues/820) /
+  #1052). A **durable approval queue** — pending row + resume endpoint
+  + two synchronised audit rows — handles long-running operator
+  approvals across restarts
+  ([#817](https://github.com/evoila/meho/issues/817) / #1086). Agent
+  permission **grants are time-bounded** with an expiry sweeper
+  ([#819](https://github.com/evoila/meho/issues/819) / #1066). An
+  operator-facing **approval surfacing channel** (list / inspect /
+  approve / reject) ships on REST + MCP (elicitation URL-mode) + CLI
+  ([#818](https://github.com/evoila/meho/issues/818) / #1069). And
+  `AgentDefinition.identity_ref` is validated at write-time against the
+  agent-principal registry ([#1099](https://github.com/evoila/meho/issues/1099)
+  / #1108).
+
+- **Scheduler substrate (P2) (G11.3-T1).** New `scheduled_trigger`
+  table + the substrate decision (Option A — roll-our-own over Postgres
+  advisory locks + LISTEN/NOTIFY, deferring Celery/APScheduler until
+  v0.7 actually fires triggers)
+  ([#822](https://github.com/evoila/meho/issues/822) / #1064).
+
+- **Audit replay end-to-end (G8.2).** New `audit_log.agent_session_id`
+  column + index + `AuditLog` ORM field
+  ([#1017](https://github.com/evoila/meho/issues/1017)) wired through
+  the MCP capture of `Mcp-Session-Id` (with
+  `MCP_REQUIRE_SESSION_ID` enforcement on production deployments;
+  [#1026](https://github.com/evoila/meho/issues/1026)). A recursive-CTE
+  `replay_session` substrate + `ReplayNode` shape powers the replay
+  ([#1024](https://github.com/evoila/meho/issues/1024)), surfaced as
+  `GET /api/v1/audit/sessions/{session_id}/replay` with a 10k
+  count-first 413 cap
+  ([#1033](https://github.com/evoila/meho/issues/1033)), an MCP
+  `meho.audit.replay` admin tool + `meho.audit.*` classifier +
+  `query_audit(shape:tree)` shape
+  ([#1034](https://github.com/evoila/meho/issues/1034)), and a
+  `meho audit replay` + `meho audit query --session-id` CLI verb pair
+  ([#1036](https://github.com/evoila/meho/issues/1036)).
+
+- **Tenant conventions + Layer-2 starter — complete (G7.1).** New
+  `tenant_conventions` + `tenant_convention_history` tables (Alembic
+  migration 0013) with unique `(tenant_id, slug)` and full history
+  capture ([#313](https://github.com/evoila/meho/issues/313) / #1029),
+  Pydantic schemas + 3 tenant-scoped + RBAC-gated API routes mounted
+  at `/api/v1/conventions` (list/create at the collection,
+  show/update/delete at `/api/v1/conventions/{slug}`, history at
+  `/api/v1/conventions/{slug}/history`;
+  [#314](https://github.com/evoila/meho/issues/314) / #1039), `meho
+  conventions list / show / create / edit / delete / history` CLI
+  verbs with editor integration for `edit`
+  ([#315](https://github.com/evoila/meho/issues/315) / #1046),
+  session-preamble assembler + MCP `initialize` integration +
+  per-slug `meho://tenant/{id}/conventions/{slug}` MCP resource
+  ([#316](https://github.com/evoila/meho/issues/316) / #1047), seed
+  migration that bootstraps the `rdc-internal` tenant + 8 operational
+  conventions extracted from the consumer's CLAUDE.md
+  ([#317](https://github.com/evoila/meho/issues/317) / #1045), and a
+  `BudgetStatus` surface on `GET /api/v1/conventions` that makes
+  `meho conventions list` exit 5 on overflow
+  ([#1094](https://github.com/evoila/meho/issues/1094) / #1105).
+
+- **Tier-3 standalone connectors (G3.7) — pfSense / gcloud / Hetzner
+  Robot.** Three new typed connectors, each shipping at **State 2**
+  per
+  [`docs/codebase/connector-release-readiness.md`](./docs/codebase/connector-release-readiness.md):
+  - **`pfsense-2.7`** — `SshConnector` subclass with key-only auth
+    (password rejected), fingerprint + shell-access probe, registry v2
+    ([#844](https://github.com/evoila/meho/issues/844) / #908); 7 read
+    ops via `register_typed_operation` parsing `pfctl` / `config.xml`
+    into JSONFlux state handles
+    ([#847](https://github.com/evoila/meho/issues/847) / #916); CLI
+    verbs + MCP review + recorded-fixture / fake-shell E2E + onboarding
+    doc ([#850](https://github.com/evoila/meho/issues/850) / #933).
+  - **`gcloud`** — `HttpConnector` with `google-auth` ADC +
+    impersonation (service-account JSON keys refused on op /
+    fingerprint / probe paths), fingerprint + probe, registry v2
+    ([#845](https://github.com/evoila/meho/issues/845) / #907); 8 read
+    ops (REST via google-auth bearer) via `register_typed_operation`
+    + JSONFlux envelope
+    ([#848](https://github.com/evoila/meho/issues/848) / #918); CLI
+    verbs + MCP review + `respx` E2E +
+    `CI_GCLOUD_CREDENTIALS_PRESENT`-gated integration +
+    onboarding doc
+    ([#851](https://github.com/evoila/meho/issues/851) / #935).
+  - **`hetzner-robot-2026-04`** — `HttpConnector` with HTTP Basic
+    (Webservice user), no-retry-on-401 (Robot blocks the source IP for
+    10 min on repeated 401s), `_post_form` helper, fingerprint + probe,
+    registry v2 ([#846](https://github.com/evoila/meho/issues/846) /
+    #906); Robot OpenAPI spec ingested, operator-reviewed, and enabled
+    as a ~10-op read-only core
+    ([#849](https://github.com/evoila/meho/issues/849) / #919); CLI
+    verbs + MCP review (401-IP-block warning) + sandbox E2E +
+    onboarding doc
+    ([#852](https://github.com/evoila/meho/issues/852) / #934).
+
+- **VCF Holodeck typed connector (G3.8).** `HolodeckConnector` skeleton
+  + `pwsh` helper ([#1004](https://github.com/evoila/meho/issues/1004)),
+  7 typed read ops + read-only `kubectl`
+  ([#1005](https://github.com/evoila/meho/issues/1005)), CLI verbs +
+  MCP review + recorded-fixture E2E + onboarding doc
+  ([#1007](https://github.com/evoila/meho/issues/1007)), with a
+  multi-word `kubectl` verb follow-up
+  ([#1020](https://github.com/evoila/meho/issues/1020) / #1023).
+
+- **Live operator-context Vault credential read across the connector
+  fleet (G3.9 + G3.10) — State 2 for the full fleet.** A shared
+  operator-context Vault KV-v2 basic-credentials helper
+  ([#954](https://github.com/evoila/meho/issues/954)) and an
+  `HttpConnector` auth-surface that threads `Operator` identity
+  end-to-end ([#957](https://github.com/evoila/meho/issues/957)) power
+  the wave. **`vmware-rest`** now performs the live operator-context
+  Vault read with full E2E + onboarding
+  ([#963](https://github.com/evoila/meho/issues/963)). The G3.10 wave
+  wires the same pattern across **nsx / harbor / sddc-manager**
+  ([#972](https://github.com/evoila/meho/issues/972)),
+  **vROps / vRLI / Fleet** via the shared `_shared/vcf_auth` loader
+  ([#973](https://github.com/evoila/meho/issues/973)),
+  **vcf-automation** dual-plane
+  ([#971](https://github.com/evoila/meho/issues/971)), and
+  **k8s** via `load_kubeconfig_from_vault` (typed handler) with
+  recorded + live k3d/Vault E2E
+  ([#948](https://github.com/evoila/meho/issues/948) / #975). All ship
+  **State 2** per
+  [`docs/codebase/connector-release-readiness.md`](./docs/codebase/connector-release-readiness.md):
+  fail-closed on empty `operator.raw_jwt` (the system-call carve-out)
+  and unset `secret_ref`. Operator recipe at
+  [`kubernetes-onboarding.md`](./docs/cross-repo/kubernetes-onboarding.md);
+  `per_user` / `impersonation` remain out of scope for k8s.
+
+- **Topology history + diff verbs (G9.3-T3/T4) — companion to v0.5.1
+  timeline.** New `meho topology history <name>` +
+  `GET /api/v1/topology/history/{name}` + `query_topology(kind=history)`
+  expose per-node/edge mutation history
+  ([#936](https://github.com/evoila/meho/issues/936)); `meho topology
+  diff <ts1> <ts2>` + `GET /api/v1/topology/diff` +
+  `query_topology(kind="diff", ts1=..., ts2=...)` returns the net change
+  set folded to `created` / `updated` / `removed` with a 1000-row cap
+  bounded at the SQL layer
+  ([#931](https://github.com/evoila/meho/issues/931), follow-up SQL
+  bound #987 / #1000). Cross-Initiative integration suite covers the
+  full history surface ([#1027](https://github.com/evoila/meho/issues/1027)).
+
+  > **Groundwork — connector populators land in v0.7.** The topology
+  > substrate (graph_node/edge tables, history table, refresh service,
+  > diff endpoint, annotate endpoint, UI surfaces) is shipped at v0.6.0,
+  > but no shipped connector overrides the base-class no-op
+  > `Connector.discover_topology` hook yet, so
+  > `POST /api/v1/topology/refresh/{target_name}` returns zero-row deltas
+  > for k8s and vmware-rest targets out of the box. Operators populate
+  > nodes/edges via `meho topology nodes create` /
+  > `topology_create_node` + `meho topology annotate` until per-product
+  > populators land. Sister callout to the G10-UI "groundwork — no
+  > operator surface enabled yet" framing.
+
+- **Operator web UI — BFF auth flow + first two surfaces (G10.0 / G10.1
+  / G10.5).** G10.0 completes the chassis with `/ui/auth/{login,
+  callback, logout}` (OAuth2.1 + PKCE) + session middleware +
+  `meho-web` Keycloak client
+  ([#865](https://github.com/evoila/meho/issues/865) / #959), FastAPI
+  `/ui` integration + dashboard + 5 stubs + CSRF + chassis smoke test
+  ([#866](https://github.com/evoila/meho/issues/866) / #960). G10.1
+  ships the **broadcast live feed view** (`/ui/broadcast` + HTMX SSE
+  bridge + 1000-row cap; [#867](https://github.com/evoila/meho/issues/867)
+  / #1030), filters by op_class / principal / target / op_id + event
+  detail drawer + PII visualization
+  ([#868](https://github.com/evoila/meho/issues/868) / #1041), and
+  wall-monitor mode (`?wall=1`) + Last-24h replay tab + cross-tenant
+  isolation ([#869](https://github.com/evoila/meho/issues/869) /
+  #1044). G10.5 ships the **topology UI** — tabular view + node detail
+  drawer ([#880](https://github.com/evoila/meho/issues/880) / #974),
+  Cytoscape.js graph view (vendored, cose-bilkent layout, 500-node
+  cap; [#881](https://github.com/evoila/meho/issues/881) / #1048), and
+  dependents/dependencies + path query overlays with 30s polling
+  refresh ([#882](https://github.com/evoila/meho/issues/882) / #1049).
+
+- **Broadcast meta-tools (G6.4) — MCP
+  `meho.broadcast.{recent,announce,watch}`.** Off-roadmap catch-up that
+  makes the G7.1 Layer-2 starter's broadcast-discipline contract
+  (before-start / intent / in-flight / completion) actually executable
+  for consumer agents. `meho.broadcast.recent`
+  ([#1091](https://github.com/evoila/meho/issues/1091) / #1097),
+  `meho.broadcast.announce`
+  ([#1092](https://github.com/evoila/meho/issues/1092) / #1101), and
+  `meho.broadcast.watch` (long-poll `XREAD BLOCK` ≤30s;
+  [#1093](https://github.com/evoila/meho/issues/1093) / #1100) now
+  ship; the UI history route still uses a separate fail-soft path while
+  the shared helper extraction is in flight
+  ([#1103](https://github.com/evoila/meho/issues/1103), tracked under
+  off-roadmap Initiative G6.4 #1090).
+
+  > **MCP protocol-version negotiation.** The MCP server speaks
+  > revision `2025-06-18` and returns it as `protocolVersion` on every
+  > `initialize` response, regardless of the version the client sent
+  > in the request. Older clients pinned to `2024-11-05` see the
+  > server's `2025-06-18` capabilities in subsequent responses (silent
+  > upgrade rather than fail-close — MCP spec leaves negotiation to the
+  > server). Clients that need a specific protocol revision must check
+  > the `initialize.result.protocolVersion` field and adapt.
+
+### Changed
+
+- **`k8s-1.x` typed connector — `shared_service_account` auth model
+  live (G3.10-T4
+  [#948](https://github.com/evoila/meho/issues/948)).** The default
   [`load_kubeconfig_from_vault`](./backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py)
   now performs the live operator-context KV-v2 read (forwarding the
   operator's Keycloak JWT to Vault's JWT/OIDC auth method, reading the
@@ -107,6 +514,143 @@ connector-related release-notes line.
   and unset `secret_ref`. Operator recipe:
   [`kubernetes-onboarding.md`](./docs/cross-repo/kubernetes-onboarding.md).
   `per_user` / `impersonation` remain out of scope.
+
+- **JsonFluxReducer wired as the default reducer (G0.6.1).** Real
+  `JsonFluxReducer` lands + `set_default_reducer` wiring replaces the
+  prior `PassThroughReducer` placeholder
+  ([#962](https://github.com/evoila/meho/issues/962)). The JSONFlux
+  tree is now vendored under `meho_backplane` (Apache-2.0;
+  [#958](https://github.com/evoila/meho/issues/958)) and the seam
+  comments / `ForceHandleReducer` shim are removed
+  ([#977](https://github.com/evoila/meho/issues/977)).
+
+- **CLI shared dispatch + error-classify helpers extracted
+  ([#923](https://github.com/evoila/meho/issues/923)).** Two refactors
+  split `meho operation call` and friends into reusable cores so
+  connector verbs reuse the same URL resolution + error classification
+  ([#937](https://github.com/evoila/meho/issues/937) / #938).
+
+### Fixed
+
+- **Connector credential-cache fail-closed bypass.** A fast-path in
+  `harbor` and `sddc-manager` could short-circuit credential
+  resolution past the cache guard
+  ([#1018](https://github.com/evoila/meho/issues/1018)); the G3.10
+  hygiene follow-up adds defense-in-depth fail-closed on the cache
+  fast-path itself with an architecture-doc carve-out
+  ([#980](https://github.com/evoila/meho/issues/980)).
+- **G3.10 `secret_ref` shape guard in `_resolve_secret_ref`** —
+  fail-closed on malformed `secret_ref` + normalised fixtures
+  ([#1006](https://github.com/evoila/meho/issues/1006)).
+- **Harbor robot ops dispatched `Operator`** is now threaded end-to-end
+  (production-callable; previously masked by a stale test)
+  ([#998](https://github.com/evoila/meho/issues/998)).
+- **G3.7 gcloud SA-JSON-key gate** now fires on op / fingerprint /
+  probe paths, not just the auth setup
+  ([#999](https://github.com/evoila/meho/issues/999)). CLI output
+  correctness: honest `iam` footer + `decodeRowsResult`
+  absent-vs-empty distinction
+  ([#995](https://github.com/evoila/meho/issues/995)).
+- **Typed-SSH connectors surface `probe()` / `about()` failures**
+  instead of swallowing them
+  ([#997](https://github.com/evoila/meho/issues/997)).
+- **`ensure_tenant` ON CONFLICT arbitration** now lists every unique
+  index, fixing a tenancy race
+  ([#983](https://github.com/evoila/meho/issues/983) / #992).
+- **Topology `query_diff` fetch bounded at the SQL layer**, not just
+  in the Python aggregator
+  ([#987](https://github.com/evoila/meho/issues/987) / #1000).
+  **Topology soft-delete reachability** reconciled across docs + UI
+  overlay parity ([#1068](https://github.com/evoila/meho/issues/1068)).
+- **G10.0 UI auth hygiene** — auth-flow fail-closed (`#964`) follow-up
+  ([#970](https://github.com/evoila/meho/issues/970)), tightened
+  BFF auth-flow tests + MD038 fix
+  ([#968](https://github.com/evoila/meho/issues/968)), UI auth 302
+  OpenAPI typing + dashboard `aria-label`
+  ([#969](https://github.com/evoila/meho/issues/969)).
+- **Backplane / broadcast / migration deployments now declare
+  `ephemeral-storage` limits** (kubernetes:S6870;
+  [#932](https://github.com/evoila/meho/issues/932)).
+
+### Documentation
+
+- **G7.1-T6 Layer-2 starter — `docs/examples/consumer-onboarding/`**
+  — `CLAUDE.md`, `ONBOARDING.md`, `README.md` for consumer agents
+  inheriting the MEHO operator-contract (broadcast-discipline +
+  conventions auto-load); closes #318
+  ([#1028](https://github.com/evoila/meho/issues/1028)).
+- **G8.2-T8 audit-replay operator runbook**
+  ([`docs/codebase/audit-replay.md`](./docs/codebase/audit-replay.md);
+  [#1037](https://github.com/evoila/meho/issues/1037)).
+- **G3.9-T4 Vault `meho-mcp` templated policy + Keycloak→Vault
+  identity deploy runbook**
+  ([#953](https://github.com/evoila/meho/issues/953)).
+- **G3.9 connector-auth ADR + research + 2026-05-22 roadmap replan**
+  ([#951](https://github.com/evoila/meho/issues/951)) — the design
+  decision that motivates the G3.9 / G3.10 State 2 wave.
+- **ADR for jsonflux vendoring license path** (Option B,
+  Apache-2.0; [#955](https://github.com/evoila/meho/issues/955)) —
+  the license-compatibility decision behind #958.
+- **G0.6.1-T5 `docs/codebase/jsonflux.md`** + sync runbooks +
+  reducer-default sweep
+  ([#967](https://github.com/evoila/meho/issues/967)).
+- **Roadmap refresh** to shipped reality (v0.5.1 latest, v0.6 next)
+  ([#1021](https://github.com/evoila/meho/issues/1021)).
+- Connector docstring corrections: cache-guard docstrings clarify
+  loader is primary gate
+  ([#994](https://github.com/evoila/meho/issues/994));
+  `PassThroughReducer default` wording corrected post-#753 in
+  connectors + operations docs
+  ([#996](https://github.com/evoila/meho/issues/996) / #1002).
+
+### Internal (CI / build / quality — no operator-facing change)
+
+- **Go coverage wired to SonarCloud** (completes the Sonar coverage
+  story across the polyglot codebase;
+  [#952](https://github.com/evoila/meho/issues/952)).
+- **`asyncssh` EPL-2.0 dual-license allowed** in the dependency
+  license gate ([#976](https://github.com/evoila/meho/issues/976)).
+- **xdist subset isolation** — idempotent v2 re-register fixes a
+  flake where running a test subset under `-n` could trip
+  `already-registered`
+  ([#1019](https://github.com/evoila/meho/issues/1019) / #1022).
+- **`run_typed_op_registrars` per-boot cost amortised in tests**
+  ([#901](https://github.com/evoila/meho/issues/901) / #1025).
+- **Registry isolation** — `conftest` snapshots and restores the
+  default reducer between tests
+  ([#990](https://github.com/evoila/meho/issues/990)); G3.7
+  force-handle tests migrated off the `ForceHandleReducer` shim
+  ([#991](https://github.com/evoila/meho/issues/991)); de-flaked
+  `status --watch` `fakeFeed` tests with request-wait
+  ([#1003](https://github.com/evoila/meho/issues/1003)).
+- **G11.2-T7 live-Keycloak `client_credentials` integration test +
+  reusable testcontainer fixture**
+  ([#1098](https://github.com/evoila/meho/issues/1098) / #1104).
+- **G8.2-T7 PG replay acceptance suite** —
+  tree / tenant / cycle / 413 / broadcast + E2E
+  ([#1038](https://github.com/evoila/meho/issues/1038)).
+- **Dependency bumps**: `uvicorn[standard]`
+  ([#1059](https://github.com/evoila/meho/issues/1059)),
+  `python-frontmatter` 1.2.0→1.3.0
+  ([#1060](https://github.com/evoila/meho/issues/1060)),
+  `ruff` 0.15.13→0.15.14
+  ([#1061](https://github.com/evoila/meho/issues/1061)),
+  `sqlalchemy[asyncio]`
+  ([#1062](https://github.com/evoila/meho/issues/1062)),
+  `fastapi` 0.136.1→0.136.3
+  ([#1063](https://github.com/evoila/meho/issues/1063)),
+  `docker/login-action` 4.1.0→4.2.0
+  ([#1057](https://github.com/evoila/meho/issues/1057)),
+  `docker/build-push-action` 7.1.0→7.2.0
+  ([#1055](https://github.com/evoila/meho/issues/1055)),
+  `docker/setup-buildx-action` 4.0.0→4.1.0
+  ([#1054](https://github.com/evoila/meho/issues/1054)),
+  `docker/metadata-action` 6.0.0→6.1.0
+  ([#1053](https://github.com/evoila/meho/issues/1053)),
+  `github/codeql-action` 4.35.5→4.36.0
+  ([#1058](https://github.com/evoila/meho/issues/1058)),
+  `golangci/golangci-lint-action` 9.2.0→9.2.1
+  ([#1056](https://github.com/evoila/meho/issues/1056)).
 
 ## [0.5.1] - 2026-05-22
 

@@ -1,0 +1,4 @@
+{
+  "log": "GET /api/v1/foo with Bearer eyJhbGciOiJIUzI1NiJ9opaque0123 -> 200 OK",
+  "ok": true
+}

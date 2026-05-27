@@ -1,0 +1,4 @@
+[
+  {"rule": "strip-bearer-token", "pattern": "bearer_token", "action": "redact", "count": 1, "path": "headers.authorization"},
+  {"rule": "strip-bearer-token", "pattern": "bearer_token", "action": "redact", "count": 1, "path": "items.0.trace"}
+]

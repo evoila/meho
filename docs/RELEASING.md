@@ -110,6 +110,42 @@ This is the step that keeps getting skipped. Do it in the
 Open the PR (CHANGELOG roll + any release-only edits), get it reviewed,
 merge to `main`.
 
+Before merging, run the **release-body path-freshness gate**. The same
+recurring class of defect that motivated #928 at PR time (snapshot
+drifts from the route table) shows up at release time as paths cited
+in the release body that don't exist as written. Three consecutive
+releases shipped with this drift (v0.5.0 missing notes entirely,
+v0.5.1 catalog-vs-dispatch mismatch, v0.6.0 audit/replay +
+tenant_conventions mismatch — see
+[`docs/codebase/release-body-freshness.md`](codebase/release-body-freshness.md)).
+
+```bash
+# Extract the candidate release body to a file (the
+# cli-release.yml workflow uses the same awk shape).
+PREV=$(git describe --tags --abbrev=0 HEAD)
+VERSION=X.Y.Z   # the version you picked in step 1
+awk -v pat="${VERSION//./\\.}" '
+  BEGIN { in_section = 0 }
+  $0 ~ "^## \\[" pat "\\]" { in_section = 1; next }
+  in_section && /^## / { exit }
+  in_section { print }
+' CHANGELOG.md > /tmp/release-body.md
+
+# Assert every cited path resolves in the published OpenAPI snapshot.
+cd backend
+uv run python ../scripts/release/check_release_body_paths.py \
+  --release-body /tmp/release-body.md \
+  --openapi-snapshot ../cli/api/openapi.json
+```
+
+Exit 0 → proceed. Exit 1 → the script lists each unresolved citation
+plus the closest matching snapshot path; amend the release body to
+cite the shipped path (or pass `--allow-path` if the citation is
+intentionally outside the snapshot's surface). The script tolerates
+concrete IDs in citations (UUIDs / digits resolve against the
+matching templated form) so example URLs in prose don't trip the
+gate.
+
 ### 4. Tag + push
 
 ```bash
@@ -135,6 +171,92 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 - [ ] Deploy to `rke2-infra`.
 - [ ] Run smoke; confirm **smoke-green** (same pattern as
   v0.2.0 / v0.3.0 / v0.3.1).
+- [ ] Audit replay (G8.2) auto-lights-up when MCP clients send
+  `Mcp-Session-Id` — no env var required after G0.14-T6 #1147.
+  Older clients that don't send the header continue to work; audit
+  rows just won't carry `agent_session_id`. To confirm the deploy is
+  in the expected capture mode (`always` by default; `enforced` when
+  `MCP_REQUIRE_SESSION_ID=true`), inspect
+  `GET /api/v1/health`'s `mcp_session_id_capture` field.
+
+### 6a. Post-deploy enablement — gated features
+
+As of v0.6.0 the backplane ships four feature surfaces that **the
+image alone does not light up** — each needs additional deploy
+configuration that the smoke pass at step 6 does *not* exercise
+(`claude-rdc-hetzner-dc#697` signals 16 + 17). An operator who
+expects "smoke green = everything works" hits a 503 (best case)
+or a silent NULL column (audit replay, pre-G0.14-T6) the first
+time they reach for one of these surfaces.
+
+The state of each gate is visible on `GET /ready`'s `features`
+block (G0.14-T7 #1148) — one structured GET answers "which
+features will work out of the box?":
+
+```json
+{
+  "features": {
+    "agent_runtime":  {"configured": false, "missing_env": ["KEYCLOAK_ADMIN_URL", "..."], "docs": "..."},
+    "ui_surface":     {"configured": false, "missing_env": ["UI_KEYCLOAK_CLIENT_ID", "..."], "docs": "..."},
+    "audit_replay":   {"configured": true,  "capture_mode": "enforced", "missing_env": []},
+    "approval_queue": {"configured": false, "depends_on": "agent_runtime"}
+  }
+}
+```
+
+Walk the four gates in the order an operator hits them:
+
+- [ ] **UI surface** (Helm `ui.*` values; affects every `/ui/auth/*`
+  request). Set `UI_KEYCLOAK_CLIENT_ID` and `UI_KEYCLOAK_CLIENT_SECRET`
+  in the backplane pod's environment — the secret renders from Vault
+  via the deploy's existing render-into-env chain (the same one that
+  lands `DATABASE_URL` / `UI_SESSION_ENCRYPTION_KEY`). Provision the
+  confidential `meho-web` Keycloak client per
+  [`docs/cross-repo/keycloak-web-client.md`](cross-repo/keycloak-web-client.md).
+  Without these, `GET /ui/auth/login` returns 503 `ui_oauth_not_configured`
+  and the operator console cannot complete OAuth.
+
+- [ ] **Agent runtime** (`POST /api/v1/agent-principals` lifecycle;
+  affects everything downstream that needs an agent identity). Set
+  `KEYCLOAK_ADMIN_URL`, `KEYCLOAK_ADMIN_CLIENT_ID`, and
+  `KEYCLOAK_ADMIN_CLIENT_SECRET`. Provision the confidential
+  admin Keycloak client (with `manage-clients` service-account role
+  on the realm) per
+  [`docs/cross-repo/keycloak-agent-client.md`](cross-repo/keycloak-agent-client.md).
+  Without these, `POST /api/v1/agent-principals` returns 503
+  `keycloak_admin_not_configured: KEYCLOAK_ADMIN_URL / KEYCLOAK_ADMIN_CLIENT_ID
+  / KEYCLOAK_ADMIN_CLIENT_SECRET are unset.` — the named env vars are
+  exactly the three to set.
+
+- [ ] **Audit replay** (MCP session-id capture for the audit log's
+  `agent_session_id` column). No env var required for capture once
+  G0.14-T6 (#1147) lands — capture is unconditional, no operator
+  knob. Until T6 lands, capture is gated on `MCP_REQUIRE_SESSION_ID=true`
+  (which also flips a missing header into a `-32600` reject before
+  dispatch). The `/ready` `features.audit_replay.capture_mode` field
+  exposes the current state — `"enforced"` pre-T6,
+  `"always"` post-T6. Operators tracking the audit-replay readiness
+  signal off `/ready` get a stable contract across the T6 transition.
+
+- [ ] **Approval queue** (agent-grant approval surface;
+  `POST /api/v1/agents/grants` and the agent grant lifecycle). No
+  separate env vars — the queue activates automatically once
+  **agent runtime** above is configured. The `/ready` block exposes
+  `approval_queue.depends_on: "agent_runtime"` so operators know
+  there is no second admin client to provision.
+
+Verify the gates by re-hitting `GET /ready` after each provisioning
+step and reading the `features` block:
+
+```bash
+curl -s "https://<your-meho-host>/ready" | jq '.features'
+```
+
+Every gate should read `"configured": true` (or
+`"capture_mode": "always"` for `audit_replay` post-T6) when fully
+enabled. Any `"configured": false` with a non-empty `missing_env`
+list is an unfinished provisioning step — name the listed env vars
+into the pod's environment and re-deploy.
 
 ### 7. Post-release
 
@@ -148,11 +270,17 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
        re-run + wait for success); version picked
 [ ] 2. CHANGELOG: completeness audited, missing bullets backfilled,
        [Unreleased] rolled to [X.Y.Z] (post-tag work left behind)
-[ ] 3. Release-cutting PR merged to main
+[ ] 3. Release-body path-freshness gate green
+       (scripts/release/check_release_body_paths.py — sister to #928);
+       release-cutting PR merged to main
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published
 [ ] 6. Deployed to rke2-infra; smoke-green
+[ ] 6a. Post-deploy enablement — for each gate in /ready features:
+        configure the env vars per the cited Vault doc; verify gate
+        flips to configured (or capture_mode=always for audit_replay
+        post-T6)
 [ ] 7. Initiative closed; board/roadmap updated; consumers notified
 ```
 
@@ -172,3 +300,20 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
   inconclusive, not a pass. Step 1 now makes both gates explicit:
   confirm the tagged commit's `main` run is a real `success`, and
   re-run any `cancelled` run before trusting it.
+
+## v0.7 follow-ups (deprecation removals)
+
+When cutting v0.7, drop these v0.6.x compatibility shims:
+
+- **MCP `add_to_memory.content` -> `body` alias shim** (G0.13-T4,
+  #1134). Remove the `content` field from
+  `backend/src/meho_backplane/mcp/tools/memory.py`'s `inputSchema`
+  `properties`; drop the `anyOf` clause; restore
+  `required: ["body", "scope"]`. Drop the body/content resolution
+  branch + the `add_to_memory_field_deprecated` log emission from
+  `_add_to_memory_handler`. Update
+  `backend/tests/test_mcp_tools_memory.py` to assert `content` is
+  rejected by the JSON-Schema gate (re-introduce a variant of the
+  deleted `test_tools_call_add_to_memory_rejects_legacy_content_field`
+  test). CHANGELOG `[0.7.0]` entry under **Removed** naming the shim
+  and pointing at this paragraph.

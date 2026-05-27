@@ -1,0 +1,10 @@
+{
+  "status": "ok",
+  "headers": {
+    "authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature"
+  },
+  "items": [
+    {"id": 1, "trace": "fetched with Bearer abc123def456ghi789 via curl"},
+    {"id": 2, "trace": "no token here"}
+  ]
+}

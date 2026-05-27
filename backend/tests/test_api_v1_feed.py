@@ -699,6 +699,150 @@ class TestFeedGenerator:
         assert len(frames) == 1
         assert "id: 1715600000001-0" in frames[0]
 
+    async def test_xread_connection_error_emits_feed_error_then_closes(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """Transport-down on first XREAD → T11-compliant SSE error frame, clean close.
+
+        The bug class this test pins (G0.14-T5 #1146 / signal 10 of
+        ``claude-rdc-hetzner-dc#697``): an unguarded ``await
+        client.xread(...)`` propagated a ``redis.exceptions.RedisError``
+        family member through Starlette into FastAPI's default handler.
+        Because the SSE response had already sent
+        ``http.response.start``, FastAPI could not swap to a 5xx body
+        — the consumer saw a bare HTTP 500 with no JSON envelope.
+
+        Post-fix contract: the failure is caught inside
+        ``_feed_generator``; one structured ``event: feed_error`` frame
+        is yielded carrying the T11 three-clause shape (code +
+        component-naming message + doc reference); the loop ``break``\\ s
+        so the generator's ``__anext__`` raises ``StopAsyncIteration``
+        next and Starlette closes the SSE stream cleanly.
+        """
+        import redis.exceptions as redis_exc
+
+        broadcast_client = get_broadcast_client()
+        mock = AsyncMock(side_effect=redis_exc.ConnectionError("connection refused"))
+        with patch.object(broadcast_client, "xread", new=mock):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            frames: list[str] = []
+            async for chunk in gen:
+                frames.append(chunk)
+            # Generator exhausts on its own after the error frame —
+            # no aclose() needed; the ``break`` path falls through
+            # the outer ``try`` to natural termination.
+
+        assert len(frames) == 1
+        frame = frames[0]
+        assert frame.startswith("event: feed_error\n")
+        assert "\nid:" not in frame  # error frames are not part of the replay cursor
+        data_line = next(line for line in frame.split("\n") if line.startswith("data: "))
+        decoded = json.loads(data_line[len("data: ") :])
+        # T11 three-clause: stable snake_case code, component-naming
+        # human message with a doc reference, doc path the operator
+        # can resolve from their checked-out clone.
+        assert decoded["code"] == "broadcast_subsystem_unavailable"
+        assert decoded["doc"] == "docs/codebase/error-message-shape.md"
+        assert f"meho:feed:{_TENANT_A}" in decoded["message"]
+        assert "ConnectionError" in decoded["message"]
+        assert "docs/codebase/error-message-shape.md" in decoded["message"]
+
+    async def test_xread_response_error_emits_feed_error_then_closes(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """``ResponseError`` (e.g. wrong-type-at-key) also produces the structured frame.
+
+        ``redis.exceptions.ResponseError`` is the redis-py shape Valkey
+        returns when an XREAD lands against a key that exists but
+        carries a non-stream value (a schema-level misconfiguration
+        the operator's ``BROADCAST_REDIS_URL`` could land in). Same
+        operator-side remediation as ``ConnectionError`` ("check the
+        broadcast subsystem and read the doc"); same SSE error frame.
+        """
+        import redis.exceptions as redis_exc
+
+        broadcast_client = get_broadcast_client()
+        mock = AsyncMock(
+            side_effect=redis_exc.ResponseError(
+                "WRONGTYPE Operation against a key holding the wrong kind of value"
+            )
+        )
+        with patch.object(broadcast_client, "xread", new=mock):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            frames: list[str] = []
+            async for chunk in gen:
+                frames.append(chunk)
+
+        assert len(frames) == 1
+        data_line = next(line for line in frames[0].split("\n") if line.startswith("data: "))
+        decoded = json.loads(data_line[len("data: ") :])
+        assert decoded["code"] == "broadcast_subsystem_unavailable"
+        assert "ResponseError" in decoded["message"]
+        # The raw redis-py message is **not** echoed — info-leak
+        # boundary from the T11 doc keeps transport-level prose
+        # (which can name broker hostnames, internal IPs) out of the
+        # response body. Only the exception class name lands.
+        assert "WRONGTYPE" not in decoded["message"]
+
+    async def test_xread_error_mid_stream_emits_feed_error_after_prior_events(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """First call returns events, second call raises → events flow then error frame."""
+        import redis.exceptions as redis_exc
+
+        broadcast_client = get_broadcast_client()
+        event = _make_event(tenant_id=_TENANT_A)
+        items = [("1715600000000-0", {"event": event.model_dump_json()})]
+        call_count = {"n": 0}
+
+        async def _xread_side_effect(*_a: object, **_k: object) -> object:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return [(f"meho:feed:{_TENANT_A}", items)]
+            raise redis_exc.TimeoutError("BLOCK timed out at the transport layer")
+
+        mock = AsyncMock(side_effect=_xread_side_effect)
+        with patch.object(broadcast_client, "xread", new=mock):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            frames: list[str] = []
+            async for chunk in gen:
+                frames.append(chunk)
+
+        # First frame is the event from the successful XREAD; second
+        # is the error frame from the failing one. Order matters —
+        # the consumer sees real events up until the failure point.
+        assert len(frames) == 2
+        assert frames[0].startswith("event: broadcast\n")
+        assert frames[1].startswith("event: feed_error\n")
+        decoded = json.loads(
+            next(line for line in frames[1].split("\n") if line.startswith("data: "))[
+                len("data: ") :
+            ]
+        )
+        assert decoded["code"] == "broadcast_subsystem_unavailable"
+        assert "TimeoutError" in decoded["message"]
+
 
 # ---------------------------------------------------------------------------
 # Cursor resolution

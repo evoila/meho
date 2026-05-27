@@ -746,6 +746,166 @@ async def test_list_class_only_entries_excluded_under_status_narrowing(
 
 
 # ---------------------------------------------------------------------------
+# G0.13-T3 (#1133) next_step hint contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _registered_class_only_with_uncatalogued_entry() -> Iterator[None]:
+    """Register one v2 connector whose ``(product, version)`` is NOT in the catalog.
+
+    Drives the not-in-catalog branch of :func:`_next_step_for_registered`.
+    Uses a deliberately synthetic ``("custom-vendor", "1.0")`` triple — no
+    catalog entry exists under that pair (the catalog ships seven curated
+    products and ``custom-vendor`` is not one of them), so the hint must
+    fall through to the manual-mode rationale.
+
+    Re-uses :class:`HarborConnector` as the placeholder class because it
+    has a no-arg construct path and the test only exercises the listing —
+    the class is never instantiated.
+    """
+    from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.connectors.registry import (
+        all_connectors_v2,
+        register_connector_v2,
+    )
+
+    existing = all_connectors_v2()
+    if ("custom-vendor", "1.0", "custom-rest") not in existing:
+        register_connector_v2(
+            product="custom-vendor",
+            version="1.0",
+            impl_id="custom-rest",
+            cls=HarborConnector,
+        )
+    yield
+
+
+@pytest.mark.asyncio
+async def test_list_registered_row_carries_catalog_next_step_hint(
+    client: TestClient,
+    _registered_class_only_connectors: None,
+) -> None:
+    """Catalog-hit branch: ``state="registered"`` rows carry the ``--catalog`` verb.
+
+    G0.13-T3 (#1133) AC #1 + #3 (catalog-hit half):
+    rows with ``state="registered"`` include a ``next_step`` field with
+    ``verb`` + ``rationale``, and the hint correctly distinguishes "catalog
+    has it" — the verb points at ``meho connector ingest --catalog
+    <product>/<version>``.
+
+    SDDC is the load-bearing case: the listing emits ``product="sddc"``
+    (parser-derived), but the catalog stores ``product="sddc-manager"``
+    (registry-side). The hint must use the catalog's native key, i.e.
+    ``--catalog sddc-manager/9.0`` not ``--catalog sddc/9.0``. Harbor
+    exercises the trivial case where registry and parsed product agree.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+
+    harbor = by_id["harbor-rest-2.x"]
+    assert harbor["state"] == "registered"
+    assert harbor["next_step"] is not None
+    assert harbor["next_step"]["verb"] == "meho connector ingest --catalog harbor/2.x"
+    assert "catalog" in harbor["next_step"]["rationale"]
+    assert "ingest" in harbor["next_step"]["rationale"]
+
+    sddc = by_id["sddc-rest-9.0"]
+    assert sddc["state"] == "registered"
+    assert sddc["next_step"] is not None
+    # Catalog lookup must use the *registry's* product ("sddc-manager"),
+    # not the parsed product ("sddc") — see _next_step_for_registered.
+    assert sddc["next_step"]["verb"] == "meho connector ingest --catalog sddc-manager/9.0"
+    assert "catalog" in sddc["next_step"]["rationale"]
+
+
+@pytest.mark.asyncio
+async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
+    client: TestClient,
+    _registered_class_only_with_uncatalogued_entry: None,
+) -> None:
+    """Catalog-miss branch: not-in-catalog rows point at manual-mode ingest.
+
+    G0.13-T3 (#1133) AC #2 + #3 (catalog-miss half): when the catalog
+    doesn't carry the registered connector, the rationale says so and
+    points at manual-mode ``meho connector ingest`` with ``--spec``.
+
+    Uses a synthetic ``("custom-vendor", "1.0")`` v2 registration with
+    no catalog entry. The hint must:
+
+    * point at ``meho connector ingest --product custom-vendor --version
+      1.0 --impl custom-rest --spec <upstream-openapi-uri>`` (the
+      manual-mode invocation), echoing the registry's natural key so
+      the operator copies the right values verbatim;
+    * carry a rationale that says the catalog has no entry so the
+      operator knows they need to source the OpenAPI spec themselves.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+
+    custom = by_id["custom-rest-1.0"]
+    assert custom["state"] == "registered"
+    assert custom["next_step"] is not None
+    verb = custom["next_step"]["verb"]
+    assert "--catalog" not in verb
+    assert "--product custom-vendor" in verb
+    assert "--version 1.0" in verb
+    assert "--impl custom-rest" in verb
+    assert "--spec" in verb
+    rationale = custom["next_step"]["rationale"]
+    assert "not in catalog" in rationale
+    assert "--spec" in rationale
+
+
+@pytest.mark.asyncio
+async def test_list_ingested_row_omits_next_step_hint(
+    client: TestClient,
+) -> None:
+    """``state="ingested"`` rows set ``next_step=None`` (no operator action remains).
+
+    G0.13-T3 (#1133) AC #1 (ingested-rows half): an ingested connector's
+    dispatcher resolves operations against it, so there is no workflow-
+    completion verb to surface. The contract is ``next_step=null`` (we
+    chose the null shape, documented in the schema, rather than the
+    field-omission alternative — both were called out as
+    implementer's-call in the task body).
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        group_count=1,
+        ops_per_group=2,
+    )
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+
+    vmware = by_id["vmware-rest-9.0"]
+    assert vmware["state"] == "ingested"
+    # Field is present in the wire shape (Pydantic emits the default) and
+    # explicitly null — the catalog-completion verb only applies to the
+    # registered-but-not-yet-ingested branch.
+    assert "next_step" in vmware
+    assert vmware["next_step"] is None
+
+
+# ---------------------------------------------------------------------------
 # G0.9.1-T1 (#773) listing-integrity contract
 # ---------------------------------------------------------------------------
 
@@ -1093,6 +1253,41 @@ async def test_get_review_cross_tenant_returns_404(
             headers=_authed(token),
         )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_review_builtin_connector_visible_to_non_admin_operator(
+    client: TestClient,
+) -> None:
+    """G0.13-T5 (#1135): GET /{id}/review on a global (``tenant_id IS NULL``) row.
+
+    The listing endpoint promises "operator's-tenant rows +
+    built-ins" and surfaces them; the review endpoint must honour
+    the same scope rather than 404 on every global. Verifies the
+    full HTTP-to-service two-pass round-trip for a non-admin
+    operator role (the role that hit the bug on the daily-driver
+    path).
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=None,
+        product="vmware",
+        impl_id="vmware-rest",
+        group_count=2,
+        ops_per_group=3,
+    )
+    key, token = _operator_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors/vmware-rest-9.0/review",
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["connector_id"] == "vmware-rest-9.0"
+    assert body["tenant_id"] is None
+    assert body["total_op_count"] == 6
 
 
 # ---------------------------------------------------------------------------
@@ -1802,6 +1997,359 @@ paths:
         )
     assert response.status_code == 422, response.text
     assert "version='7.0'" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# G0.14-T9 (#1150) — catalog-driven REST ingest shape
+# ---------------------------------------------------------------------------
+
+
+def _patch_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    entries: list[dict[str, Any]],
+) -> None:
+    """Install a fake packaged catalog for the route's resolver.
+
+    The route handler calls :func:`load_catalog`, which is cached with
+    ``functools.lru_cache``. The cleanest swap is to drop the cache and
+    monkey-patch the module-level callable on the symbol the route
+    actually imports — without that, an earlier test in the file may
+    have warmed the cache against the on-disk catalog and the patched
+    entries never reach the resolver.
+    """
+    from meho_backplane.operations.ingest import catalog as _catalog_mod
+    from meho_backplane.operations.ingest.catalog import (
+        ConnectorSpecCatalog,
+        ConnectorSpecEntry,
+    )
+
+    fake = ConnectorSpecCatalog(entries=tuple(ConnectorSpecEntry(**e) for e in entries))
+    _catalog_mod.load_catalog.cache_clear()
+    # The route imports ``load_catalog`` via the
+    # ``meho_backplane.operations.ingest`` package; patching the
+    # package attribute is what the handler resolves at call time.
+    import meho_backplane.api.v1.connectors_ingest as _route_mod
+
+    monkeypatch.setattr(_route_mod, "load_catalog", lambda: fake)
+
+
+def test_ingest_catalog_entry_resolves_and_ingests_successfully(
+    client: TestClient,
+    tmp_path: Any,
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G0.14-T9: ``{catalog_entry: "vmware/9.0"}`` resolves server-side and ingests.
+
+    The packaged catalog is patched to a single entry pointing at a
+    local-file spec so the request body can stay minimal. The
+    response carries the same shape an explicit-quadruple request
+    against the resolved triple would produce — the catalog-driven
+    shape is sugar over the existing ingest path.
+    """
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: catalog
+  version: '9.0'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "vmware-t9",
+                "version": "9.0",
+                "impl_id": "vmware-rest-t9",
+                "requires_connector_class": "VmwareRestConnector",
+                "upstream": (str(spec_path),),
+            },
+        ],
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "vmware-t9/9.0", "dry_run": True},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ingestion"]["inserted_count"] == 1
+    # The resolved triple round-trips into the connector_id the response
+    # echoes (`<impl_id>-<version>`) so a REST client sees the resolved
+    # identity without needing to re-derive it.
+    assert body["ingestion"]["connector_id"] == "vmware-rest-t9-9.0"
+
+
+def test_ingest_catalog_entry_unknown_returns_structured_422(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G0.14-T9: unknown ``catalog_entry`` → structured 422 per T11 convention.
+
+    The detail body carries ``detail="catalog_entry_not_found"`` plus
+    the offending value and the list of valid alternatives so an agent
+    can branch + retry without re-fetching the catalog.
+    """
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "vmware-t9",
+                "version": "9.0",
+                "impl_id": "vmware-rest-t9",
+                "requires_connector_class": "VmwareRestConnector",
+                "upstream": ("https://example.lab/spec.yaml",),
+            },
+        ],
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "nope/1.0"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "catalog_entry_not_found"
+    assert detail["catalog_entry"] == "nope/1.0"
+    assert detail["available_entries"] == ["vmware-t9/9.0"]
+    assert "error-message-shape" in detail["message"]
+
+
+def test_ingest_catalog_entry_and_quadruple_supplied_returns_422_conflict(
+    client: TestClient,
+) -> None:
+    """G0.14-T9: both request shapes supplied → 422 ``catalog_entry_conflict``.
+
+    The validator on :class:`IngestRequest` rejects the mixed body at
+    the framework boundary (FastAPI surfaces validator failures as 422
+    with the message in ``detail[0]["msg"]``); per T11 convention the
+    stable classifier is embedded in the message so clients can branch.
+    """
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "catalog_entry": "vmware/9.0",
+                "product": "vmware",
+                "version": "9.0",
+                "impl_id": "vmware-rest",
+                "specs": [{"uri": "/abs/spec.yaml"}],
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    # FastAPI renders validator failures as a list of error objects;
+    # the message carries the convention's snake_case classifier so a
+    # client can branch on ``catalog_entry_conflict`` without parsing
+    # prose.
+    messages = [e["msg"] for e in detail]
+    assert any("catalog_entry_conflict" in m for m in messages), messages
+
+
+def test_ingest_empty_body_returns_422_underspecified(
+    client: TestClient,
+) -> None:
+    """G0.14-T9: neither request shape supplied → 422
+    ``ingest_request_underspecified``.
+
+    The empty-body shape used to fail "Field required" four times
+    (one per quadruple field). The new validator collapses that into
+    one classifier-bearing message so the operator's error is
+    actionable: pick a shape.
+    """
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    messages = [e["msg"] for e in detail]
+    assert any("ingest_request_underspecified" in m for m in messages), messages
+
+
+def test_ingest_catalog_entry_malformed_ref_returns_422(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G0.14-T9: ``catalog_entry`` without a ``/`` separator → structured 422.
+
+    A reference shape miss is distinct from "valid shape, not in
+    catalog" so an agent can branch differently — the first means
+    "fix the slash"; the second means "pick a different entry".
+    """
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "vmware-t9",
+                "version": "9.0",
+                "impl_id": "vmware-rest-t9",
+                "requires_connector_class": "VmwareRestConnector",
+                "upstream": ("https://example.lab/spec.yaml",),
+            },
+        ],
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "vmware9.0"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "catalog_entry_malformed"
+    assert detail["catalog_entry"] == "vmware9.0"
+    assert "error-message-shape" in detail["message"]
+
+
+def test_ingest_catalog_entry_typed_connector_returns_422(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G0.14-T9: a typed-connector entry (``upstream=null``) → structured 422.
+
+    The catalog ships typed connectors (vault, k8s, bind9) with
+    ``upstream=null`` — there is no spec to ingest, but the entry
+    exists in the catalog. The detail names the resolved triple so an
+    interactive operator sees the entry exists but is intentionally
+    typed.
+    """
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "vault-t9",
+                "version": "1.x",
+                "impl_id": "vault-t9",
+                "requires_connector_class": "VaultConnector",
+                "upstream": None,
+            },
+        ],
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "vault-t9/1.x"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "catalog_entry_typed_connector"
+    assert detail["catalog_entry"] == "vault-t9/1.x"
+    assert detail["product"] == "vault-t9"
+    assert detail["impl_id"] == "vault-t9"
+
+
+def test_ingest_catalog_entry_templated_upstream_returns_422(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G0.14-T9: an fqdn-templated upstream URL → structured 422.
+
+    Appliance-served catalog entries (NSX manager's
+    ``https://<nsx-mgr-fqdn>/...``) cannot be dereferenced server-side
+    — the placeholder needs an operator-supplied FQDN. The detail
+    names the templated URL so the operator sees what to fill in and
+    points at the explicit-quadruple fallback.
+    """
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "nsx-t9",
+                "version": "4.2",
+                "impl_id": "nsx-rest-t9",
+                "requires_connector_class": "NsxConnector",
+                "upstream": ("https://<nsx-mgr-fqdn>/api/v1/spec/openapi/nsx_api.yaml",),
+            },
+        ],
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "nsx-t9/4.2"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "catalog_entry_templated_upstream"
+    assert detail["catalog_entry"] == "nsx-t9/4.2"
+    assert detail["templated_upstream"] == [
+        "https://<nsx-mgr-fqdn>/api/v1/spec/openapi/nsx_api.yaml",
+    ]
+
+
+def test_ingest_explicit_quadruple_still_works_regression(
+    client: TestClient,
+    tmp_path: Any,
+) -> None:
+    """G0.14-T9 regression guard: the historical explicit-quadruple shape
+    still parses + validates after the schema gained ``catalog_entry``.
+
+    The MCP admin tool and any pre-G0.14-T9 REST client send this
+    shape; a regression here would break both. The smoke is just the
+    dry-run happy path; the rest of the test file covers the deep
+    ingest mechanics.
+    """
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: t
+  version: '1'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "test-quadruple",
+                "version": "1.0",
+                "impl_id": "test-impl",
+                "specs": [{"uri": str(spec_path)}],
+                "dry_run": True,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["ingestion"]["inserted_count"] == 1
 
 
 # Silence unused-import lints on test seams reserved for sibling tasks.

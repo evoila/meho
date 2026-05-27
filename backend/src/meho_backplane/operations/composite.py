@@ -101,6 +101,7 @@ if TYPE_CHECKING:  # pragma: no cover - imports for type checking only
 
 __all__ = [
     "COMPOSITE_DEPTH_TOP_LEVEL",
+    "CompositeL2DependencyMissing",
     "CompositeRecursionLimitExceeded",
     "DispatchChild",
     "composite_depth_var",
@@ -164,6 +165,73 @@ class CompositeRecursionLimitExceeded(RuntimeError):  # noqa: N818 -- name pinne
             f"composite recursion limit exceeded: attempted depth "
             f"{attempted_depth} > max_depth {max_depth}; "
             f"op_id chain: {chain_repr}"
+        )
+
+
+class CompositeL2DependencyMissing(RuntimeError):  # noqa: N818 -- parallels CompositeRecursionLimitExceeded
+    """Raised when a composite's declared L2 sub-ops are not all registered.
+
+    G0.14-T10 (#1151). The vmware-rest composites dispatch into raw-REST
+    primitives (``GET:/vcenter/datastore`` etc.) that ship as ``ingested``
+    descriptors -- they are not part of the default catalog and only land
+    after an operator runs ``meho connector ingest --catalog
+    <product>/<version>``. Until that ingest happens, calling a composite
+    that depends on those primitives crashes mid-dispatch with the
+    dispatcher's generic ``unknown_op`` error on the sub-op call; the
+    composite parent then surfaces that as a ``connector_error`` wrapping
+    a ``RuntimeError`` whose text is essentially "composite sub-op
+    'GET:/vcenter/datastore' returned status='error': unknown_op:
+    GET:/vcenter/datastore" -- correct, but missing the remediation the
+    operator needs (which catalog command to run, which doc to read).
+
+    This exception is the structured equivalent. Each composite handler
+    (via the
+    :mod:`~meho_backplane.connectors.vmware_rest.composites._preflight`
+    helper) walks its declared sub-op_ids before any ``dispatch_child``
+    call, validates each is registered in ``endpoint_descriptor``, and
+    raises this exception listing the missing ops + the catalog command.
+
+    The dispatcher catches this exception specifically (ahead of the
+    generic exception branch) and surfaces it as a structured
+    ``composite_l2_missing`` :class:`OperationResult` shape per the
+    ``docs/codebase/error-message-shape.md`` convention (G0.14-T11
+    #1141) -- the error response carries the code, the missing ops,
+    and the catalog command operators must run.
+
+    The :func:`__str__` form is operator-readable so an upstream consumer
+    that string-matches on the exception text still gets the salient
+    diagnostic.
+
+    Attributes
+    ----------
+    composite_op_id:
+        The composite's own op_id (``vmware.composite.datastore.usage``)
+        -- the call site the operator dispatched.
+    missing_op_ids:
+        Tuple of sub-op_ids that are not registered in
+        ``endpoint_descriptor`` and would cause an ``unknown_op`` failure
+        on dispatch.
+    catalog_command:
+        The operator-facing CLI command to run (``meho connector ingest
+        --catalog vmware/9.0`` etc.). Resolved per-composite from the
+        connector's ``(product, version)``.
+    """
+
+    def __init__(
+        self,
+        *,
+        composite_op_id: str,
+        missing_op_ids: tuple[str, ...],
+        catalog_command: str,
+    ) -> None:
+        self.composite_op_id = composite_op_id
+        self.missing_op_ids = missing_op_ids
+        self.catalog_command = catalog_command
+        missing_repr = ", ".join(missing_op_ids) if missing_op_ids else "(none)"
+        super().__init__(
+            f"composite_l2_missing: {composite_op_id!r} depends on L2 sub-ops "
+            f"not registered in the catalog: [{missing_repr}]. Run "
+            f"{catalog_command!r} to ingest them, then retry."
         )
 
 

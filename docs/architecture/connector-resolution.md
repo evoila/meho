@@ -165,11 +165,28 @@ behaviour the shipped Vault and Kubernetes connectors get for free.
   came up empty so operators can spot a registration gap.
 - `AmbiguousConnectorResolution` (subclass of `LookupError`) — two or
   more candidates after the full ladder. Carries a sorted
-  `candidates: list[tuple[str, str, str]]` field for diagnostics.
+  `candidates: list[tuple[str, str, str]]` field for diagnostics; the
+  message names the candidate set + the remediation step ("set
+  `target.preferred_impl_id` to one of them") so operators can
+  resolve the ambiguity from the message alone.
 
 Both are `LookupError` subclasses so existing exception-handling
 patterns (broad `except LookupError`) keep working without surface
 changes.
+
+### Shared exception-to-label helper
+
+[`resolve_connector_or_label(target)`](../../backend/src/meho_backplane/connectors/resolver.py)
+wraps `resolve_connector(target)` and translates the two exception
+classes above to structured `(cls, label, exception_message)`
+tuples. Both the dispatcher's connector-resolution step
+([`_resolve_connector_instance`](../../backend/src/meho_backplane/operations/dispatcher.py))
+and the `/api/v1/targets/{name}/probe` route consult this helper —
+the single source of truth ensures the two surfaces never disagree on
+whether a target's connector resolves. The pre-G0.14 asymmetry
+(consumer feedback signal 19 in `claude-rdc-hetzner-dc#697` —
+`/probe` consulted the v1 `get_connector` lookup while dispatch
+consulted v2 `resolve_connector`) is closed by this helper.
 
 ## References
 

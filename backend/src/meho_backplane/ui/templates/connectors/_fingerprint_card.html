@@ -1,0 +1,84 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Fingerprint card fragment (Task #873 work item #2 / #6).
+
+  Rendered in two contexts:
+    * Included by ``detail.html`` on the initial full-page render.
+    * Returned standalone by ``POST /ui/connectors/{name}/probe`` so
+      a re-probe action swaps this fragment into ``#fingerprint-card``
+      without a full-page reload.
+
+  Surfaces the cached fingerprint (product, version, build, raw
+  extras JSON for forensic shape) plus the re-probe action. The
+  re-probe button is rendered only when ``is_tenant_admin`` is true;
+  the server-side gate in the probe handler is the authority, but
+  the template hides the affordance from operators who can't use it.
+
+  When the target has no fingerprint yet (``fingerprint IS NULL``)
+  the card renders an explanatory "never probed" state plus the
+  re-probe button (so a tenant_admin can seed the fingerprint with
+  one click).
+-#}
+<article
+  id="fingerprint-card"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  aria-label="Target fingerprint"
+>
+  <div class="card-body space-y-2">
+    <header class="flex items-center justify-between">
+      <h2 class="card-title text-base">Fingerprint</h2>
+      {% if is_tenant_admin %}
+        <button
+          type="button"
+          class="btn btn-primary btn-xs"
+          hx-post="/ui/connectors/{{ target.name | urlencode }}/probe"
+          hx-target="#fingerprint-card"
+          hx-swap="outerHTML"
+          hx-disabled-elt="this"
+          aria-label="Re-probe {{ target.name }}"
+        >
+          Re-probe
+        </button>
+      {% endif %}
+    </header>
+
+    {% if target.fingerprint %}
+      <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+        {% if target.fingerprint.get("product") %}
+          <dt class="opacity-60">product</dt>
+          <dd>{{ target.fingerprint.product }}</dd>
+        {% endif %}
+        {% if target.fingerprint.get("version") %}
+          <dt class="opacity-60">version</dt>
+          <dd class="font-mono">{{ target.fingerprint.version }}</dd>
+        {% endif %}
+        {% if target.fingerprint.get("build") %}
+          <dt class="opacity-60">build</dt>
+          <dd class="font-mono text-xs">{{ target.fingerprint.build }}</dd>
+        {% endif %}
+        {% if target.fingerprint.get("captured_at") %}
+          <dt class="opacity-60">captured_at</dt>
+          <dd class="text-xs">{{ target.fingerprint.captured_at }}</dd>
+        {% endif %}
+        <dt class="opacity-60">last_probed_at</dt>
+        <dd class="text-xs">{{ target.updated_at.isoformat() }}</dd>
+      </dl>
+      <details class="mt-2">
+        <summary class="cursor-pointer text-xs opacity-70">Raw fingerprint JSON</summary>
+        <pre class="mt-2 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ target.fingerprint | tojson(indent=2) }}</pre>
+      </details>
+    {% else %}
+      <p class="text-sm opacity-70">
+        No fingerprint captured yet.
+        {% if is_tenant_admin %}
+          Click <strong>Re-probe</strong> to invoke the connector probe and
+          cache the fingerprint.
+        {% else %}
+          A tenant_admin can capture one via the re-probe action.
+        {% endif %}
+      </p>
+    {% endif %}
+  </div>
+</article>

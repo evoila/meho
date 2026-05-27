@@ -183,7 +183,9 @@ upgrade specific configmap-name patterns (managed-by
 1. The connector package's `__init__.py` calls
    `register_connector_v2(product="k8s", version="1.x",
    impl_id="k8s", cls=KubernetesConnector)` at import time. The v1
-   entry under `"k8s"` is preserved for chassis-route compat.
+   entry under `"k8s"` is preserved so `get_connector("k8s")`-keyed
+   callers (`/api/v1/targets/{name}/probe`) keep resolving the class
+   without the dispatcher's v2 resolver path.
 2. The same module appends
    `register_kubernetes_typed_operations` to the typed-op registrar
    list via `register_typed_op_registrar`.
@@ -195,6 +197,33 @@ upgrade specific configmap-name patterns (managed-by
 The walk is **idempotent**: a second registrar run hits the body-hash
 skip-re-embed branch and avoids re-encoding the descriptions, so pod
 restarts on unchanged code stay cheap.
+
+### Resolver tie-break (wildcard vs. versioned)
+
+K8s is the shipped case for the resolver's
+**`versioned_over_wildcard`** demotion step (G0.14-T2 #1143): the
+package registers under both `("k8s", "", "")` (v1 wildcard, for
+`get_connector` callers) and `("k8s", "1.x", "k8s")` (v2 versioned,
+for `connector_id="k8s-1.x"`-keyed dispatch). When a Target is
+created with `product="k8s"` and no fingerprint version (the common
+first-use case — the operator runs `POST /api/v1/targets` before
+`POST /api/v1/targets/{name}/probe`), both registry entries match
+the `(product=k8s, version=None)` filter step. The
+`KubernetesConnector` class doesn't advertise a
+`supported_version_range`, so both entries score
+`(_SPECIFICITY_UNBOUNDED, 0.0)` on the specificity ladder.
+
+The resolver's step 1 catches this: when ≥1 entry carries a
+non-empty `(version, impl_id)` slot, the wildcard `(product, "", "")`
+is demoted before the rest of the ladder runs. The versioned entry
+wins; the operator never sees the
+`AmbiguousConnectorResolution` bare-500 (signal 9 in
+`claude-rdc-hetzner-dc#697`). The rule generalizes to any future
+connector that uses the same double-registration shape — only
+wildcards lose to a co-registered versioned sibling, never the
+reverse. When the wildcard is the *only* candidate (a connector
+that registered v1-only), it still wins; the demotion step is
+conditional on a versioned entry being present.
 
 ### Op dispatch (per request)
 

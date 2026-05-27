@@ -35,13 +35,26 @@ phases the parent Initiative names:
    structured ``no_connector`` error.
 6. Branch on ``descriptor.source_kind`` -- ``ingested`` / ``typed`` /
    ``composite``. See :mod:`meho_backplane.operations._branches`.
-7. JSONFlux-wrap the response via the :class:`Reducer` (production default
-   is :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`,
+7. **Connector-boundary redaction** (G11.4-T2 #1071) -- the raw
+   response is captured, the
+   :func:`~meho_backplane.redaction.middleware.apply_connector_boundary_redaction`
+   helper resolves a per-(connector_id, tenant, op)
+   :class:`~meho_backplane.redaction.policy.RedactionPolicy` (falling
+   through to the conservative default-safe policy when no override
+   is registered) and runs the
+   :mod:`~meho_backplane.redaction.engine`. The caller / LLM only ever
+   sees the redacted view; the raw payload + the engine's manifest
+   land on the audit row (migration ``0030``).
+8. JSONFlux-wrap the **redacted** response via the :class:`Reducer`
+   (production default is
+   :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`,
    installed at startup; the import-time default is the
    :class:`~meho_backplane.operations.reducer.PassThroughReducer` shim).
-8. Write the audit row synchronously + publish a broadcast event
+9. Write the audit row synchronously + publish a broadcast event
    (:func:`~meho_backplane.operations._audit.audit_and_broadcast_safe`).
-9. Return the :class:`OperationResult`.
+   The audit row carries the raw payload, the redaction manifest, and
+   the resolved policy id.
+10. Return the :class:`OperationResult`.
 
 The dispatch function is async; safe to call from FastAPI routes, MCP
 tool handlers, and from composite handlers (recursive).
@@ -58,6 +71,18 @@ Detail payloads land in ``extras``. Codes:
 * ``unknown_op`` -- the natural key didn't resolve a descriptor.
 * ``invalid_params`` -- params failed JSON Schema validation.
 * ``no_connector`` -- resolver couldn't pick a connector for the target.
+  ``extras["exception_message"]`` carries the
+  :exc:`~meho_backplane.connectors.NoMatchingConnector` text when the
+  resolver was the source (G0.14-T1 #1142); pre-#1142 ingested-branch
+  misses pass through the bare ``(product, version)`` form.
+* ``ambiguous_connector`` -- the resolver matched two or more
+  connectors and the tie-break ladder couldn't pick. The
+  :exc:`~meho_backplane.connectors.AmbiguousConnectorResolution`
+  message naming the candidate set + the remediation step lands in
+  ``extras["exception_message"]``. G0.14-T1 (#1142) added this branch
+  to both the ``ingested`` and ``typed``/``composite`` source-kind
+  paths; pre-#1142 the exception bubbled past the dispatcher as a
+  bare 500.
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -109,10 +134,10 @@ from typing import Any
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import (
-    NoMatchingConnector,
     OperationResult,
+    ResolutionLabel,
     ResultHandle,
-    resolve_connector,
+    resolve_connector_or_label,
 )
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
@@ -126,7 +151,9 @@ from meho_backplane.operations._branches import (
     dispatch_typed,
 )
 from meho_backplane.operations._errors import (
+    result_ambiguous_connector,
     result_awaiting_approval,
+    result_composite_l2_missing,
     result_connector_error,
     result_denied,
     result_handler_unreachable,
@@ -153,6 +180,7 @@ from meho_backplane.operations._validate import (
     validate_params,
 )
 from meho_backplane.operations.composite import (
+    CompositeL2DependencyMissing,
     CompositeRecursionLimitExceeded,
     DispatchChild,
     get_dispatch_child,
@@ -160,6 +188,11 @@ from meho_backplane.operations.composite import (
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
+)
+from meho_backplane.redaction import (
+    RedactionMiddlewareResult,
+    apply_connector_boundary_redaction,
+    manifest_to_audit_payload,
 )
 
 __all__ = [
@@ -216,34 +249,72 @@ type Dispatcher = Callable[..., Awaitable[OperationResult]]
 async def _resolve_connector_instance(
     descriptor: EndpointDescriptor,
     target: Any,
-) -> tuple[Connector | None, str | None]:
+) -> tuple[Connector | None, ResolutionLabel | None, str | None]:
     """Resolve a connector instance for *target* per ``descriptor.source_kind``.
 
-    Returns ``(instance, error_reason)``:
+    Returns ``(instance, error_reason, exception_message)``:
 
-    * ``(instance, None)`` -- resolver picked a class; instance is the
-      cached singleton.
-    * ``(None, None)`` -- no connector needed (typed/composite with a
-      module-level handler, or no target).
-    * ``(None, "no_connector")`` -- ingested op with no resolver match;
-      the caller surfaces this as the ``no_connector`` error.
+    * ``(instance, None, None)`` -- resolver picked a class; instance is
+      the cached singleton.
+    * ``(None, None, None)`` -- no connector needed (typed/composite
+      with ``target is None`` -- a module-level handler that doesn't
+      consume a target).
+    * ``(None, "no_connector", msg)`` -- resolver miss; the caller
+      surfaces this as the ``no_connector`` error and lands ``msg``
+      (the :exc:`~meho_backplane.connectors.NoMatchingConnector`
+      exception text) under ``extras["exception_message"]`` on the
+      :class:`OperationResult`.
+    * ``(None, "ambiguous_connector", msg)`` -- resolver matched two
+      or more candidates and the tie-break ladder couldn't pick; the
+      caller surfaces this as the ``ambiguous_connector`` error and
+      lands ``msg`` (the
+      :exc:`~meho_backplane.connectors.AmbiguousConnectorResolution`
+      text — already naming the candidates + the remediation step)
+      under ``extras["exception_message"]``.
 
-    Split out so the dispatcher's main body doesn't need three nested
-    branches around resolver semantics.
+    G0.14-T1 (#1142) restructured this helper to:
+
+    1. Mirror the ``ingested`` branch's explicit resolver-miss label on
+       the ``typed``/``composite`` branch. Pre-#1142 the typed branch
+       silently returned ``(None, None)`` on
+       :exc:`NoMatchingConnector`, which let unbound-method handlers
+       proceed to :func:`_maybe_bind_method` (which then left them
+       unbound) and re-surface as the misleading "typed handler
+       reached dispatch still unbound" :exc:`RuntimeError` from
+       :func:`~meho_backplane.operations._branches.dispatch_typed`.
+       The clean ``no_connector`` is the upstream diagnosis.
+    2. Catch :exc:`AmbiguousConnectorResolution` on both branches.
+       Pre-#1142 the exception propagated past the dispatcher into
+       FastAPI, surfacing as a bare HTTP 500 with no JSON body — and
+       the message itself is the most diagnostic single string in the
+       MEHO surface (it names the target's ``(product, version)``,
+       the conflicting candidates, and the remediation step). The
+       label routes through
+       :func:`~meho_backplane.operations._errors.result_ambiguous_connector`
+       so operators see the resolver's diagnostic verbatim.
+
+    Both branches share the
+    :func:`~meho_backplane.connectors.resolve_connector_or_label`
+    helper so the dispatcher and the ``/api/v1/targets/{name}/probe``
+    route reach the same yes/no/ambiguous answer for the same target
+    (consumer feedback signal 19, ``claude-rdc-hetzner-dc#697``).
     """
     if descriptor.source_kind == "ingested":
-        try:
-            connector_cls = resolve_connector(target)
-        except NoMatchingConnector:
-            return None, "no_connector"
-        return get_or_create_connector_instance(connector_cls), None
+        cls, label, exc_message = resolve_connector_or_label(target)
+        if label is not None:
+            return None, label, exc_message
+        # cls is guaranteed non-None here (label is None ⇔ cls is set).
+        assert cls is not None
+        return get_or_create_connector_instance(cls), None, None
     if descriptor.source_kind in ("typed", "composite") and target is not None:
-        try:
-            optional_cls = resolve_connector(target)
-        except NoMatchingConnector:
-            return None, None
-        return get_or_create_connector_instance(optional_cls), None
-    return None, None
+        cls, label, exc_message = resolve_connector_or_label(target)
+        if label is not None:
+            return None, label, exc_message
+        assert cls is not None
+        return get_or_create_connector_instance(cls), None, None
+    # No target → no resolution attempt. Composite/typed module-level
+    # handlers that don't bind to a connector instance land here.
+    return None, None, None
 
 
 def _maybe_bind_method(
@@ -343,6 +414,7 @@ def _elapsed_ms(started: float) -> float:
 async def _execute_and_audit(
     *,
     op_id: str,
+    connector_id: str,
     descriptor: EndpointDescriptor,
     connector_instance: Connector | None,
     operator: Operator,
@@ -351,54 +423,99 @@ async def _execute_and_audit(
     params_hash: str,
     started: float,
 ) -> OperationResult:
-    """Run the source_kind branch, reduce, audit, broadcast, return.
+    """Run the source_kind branch, redact, reduce, audit, broadcast, return.
 
     Wraps the dispatch's success path (steps 6-9) so the main
     :func:`dispatch` body stays a flat sequence of phase calls.
     Failures inside the branch land as ``handler_unreachable`` /
-    ``connector_error`` :class:`OperationResult` shapes; the audit row
-    still gets written before the return so the operator-visible
-    record is consistent with the dispatcher's reply.
+    ``composite_l2_missing`` / ``connector_error`` :class:`OperationResult`
+    shapes; the audit row still gets written before the return so the
+    operator-visible record is consistent with the dispatcher's reply.
+
+    G11.4-T2 (#1071) inserts the connector-boundary redaction
+    middleware between the handler's raw return and the JSONFlux
+    reducer: the raw payload is captured, the redaction engine
+    rewrites secret-shaped string leaves, and the redacted view is
+    what the reducer (and therefore the caller / LLM) sees. The
+    audit row records both the raw payload (verbatim) and the
+    engine's manifest so an auditor can reconstruct the
+    pre-redaction view and a CI gate (#1073) can prove the
+    redactor stays deterministic across policy revisions.
     """
     audit_id = uuid.uuid4()
-    try:
-        raw = await _run_source_kind_branch(
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            audit_id=audit_id,
-        )
-    except (ImportError, TypeError) as exc:
-        # ImportError -- handler_ref couldn't be resolved.
-        # TypeError -- resolved symbol wasn't callable.
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
-        )
-        return result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms)
-    except Exception as exc:
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
-        )
-        return result_connector_error(op_id, exc, duration_ms)
+    branch_result = await _run_branch_with_error_handling(
+        op_id=op_id,
+        descriptor=descriptor,
+        connector_instance=connector_instance,
+        operator=operator,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        audit_id=audit_id,
+        started=started,
+    )
+    if isinstance(branch_result, OperationResult):
+        return branch_result
+    raw = branch_result
 
+    # Step 7a -- connector-boundary redaction (G11.4-T2 #1071). The raw
+    # payload is captured for the audit row before the engine runs;
+    # the engine's redacted output is what flows into the JSONFlux
+    # reducer and ultimately back to the caller. Errors inside the
+    # middleware surface as ``connector_error`` so the dispatcher's
+    # never-raises contract is preserved -- a redactor failure must
+    # not leak raw payloads through a 500 with no audit record.
+    redaction = _apply_redaction_middleware(
+        raw=raw,
+        connector_id=connector_id,
+        operator=operator,
+        op_id=op_id,
+    )
+    if isinstance(redaction, OperationResult):
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="error",
+            duration_ms=_elapsed_ms(started),
+        )
+        return redaction
+
+    return await _reduce_and_audit_success(
+        op_id=op_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        audit_id=audit_id,
+        redaction=redaction,
+        started=started,
+    )
+
+
+async def _reduce_and_audit_success(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    redaction: RedactionMiddlewareResult,
+    started: float,
+) -> OperationResult:
+    """Run the reducer on the redacted payload, write the success-path
+    audit row, and wrap the reduced summary into the final
+    :class:`OperationResult`. Extracted from :func:`_execute_and_audit`
+    so the orchestrator stays under the code-quality function-size cap
+    and the redaction/reduce/audit ordering stays the only thing this
+    helper expresses."""
+    serialised_manifest = manifest_to_audit_payload(redaction.manifest)
     reduced = await _reduce_or_error(
         op_id=op_id,
         descriptor=descriptor,
@@ -407,8 +524,11 @@ async def _execute_and_audit(
         params=params,
         params_hash=params_hash,
         audit_id=audit_id,
-        raw=raw,
+        raw=redaction.redacted,
         started=started,
+        raw_payload_for_audit=redaction.raw,
+        redaction_manifest_for_audit=serialised_manifest,
+        redaction_policy_id=redaction.policy_id,
     )
     if isinstance(reduced, OperationResult):
         return reduced
@@ -423,8 +543,135 @@ async def _execute_and_audit(
         params_hash=params_hash,
         result_status="ok",
         duration_ms=duration_ms,
+        raw_payload=redaction.raw,
+        redaction_manifest=serialised_manifest,
+        redaction_policy_id=redaction.policy_id,
     )
     return wrap_ok_result(op_id, summary, duration_ms, handle)
+
+
+async def _run_branch_with_error_handling(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    connector_instance: Connector | None,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    started: float,
+) -> Any | OperationResult:
+    """Invoke the source_kind branch; convert handler errors to OperationResults.
+
+    Extracted from :func:`_execute_and_audit` so the success-path code
+    is the linear "redact → reduce → audit → return" sequence. The
+    handler's :exc:`ImportError` / :exc:`TypeError` map to
+    ``handler_unreachable`` (the importlib walk failed or resolved a
+    non-callable); every other exception maps to ``connector_error``.
+    Both paths write the audit row before returning so the operator-
+    visible record is consistent with the structured failure.
+
+    G0.14-T10 (#1151) adds a structured ``composite_l2_missing`` catch
+    ahead of the generic ``except Exception`` so the vmware composite
+    pre-flight signal (the catalog-command remediation step) survives
+    the audit + reduce pipeline rather than collapsing into the
+    opaque ``connector_error`` envelope.
+    """
+    try:
+        return await _run_source_kind_branch(
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            audit_id=audit_id,
+        )
+    except (ImportError, TypeError) as exc:
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="error",
+            duration_ms=duration_ms,
+        )
+        return result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms)
+    except CompositeL2DependencyMissing as l2_exc:
+        # G0.14-T10 (#1151): pre-flight detected missing L2 sub-ops.
+        # Structured ``composite_l2_missing`` per
+        # ``docs/codebase/error-message-shape.md`` rather than the
+        # generic ``connector_error`` below. The catch sits ahead of
+        # the generic ``except Exception`` so the structured shape wins.
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="error",
+            duration_ms=duration_ms,
+        )
+        return result_composite_l2_missing(
+            op_id, l2_exc.missing_op_ids, l2_exc.catalog_command, duration_ms
+        )
+    except Exception as exc:
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="error",
+            duration_ms=duration_ms,
+        )
+        return result_connector_error(op_id, exc, duration_ms)
+
+
+def _apply_redaction_middleware(
+    *,
+    raw: Any,
+    connector_id: str,
+    operator: Operator,
+    op_id: str,
+) -> RedactionMiddlewareResult | OperationResult:
+    """Wrap :func:`apply_connector_boundary_redaction` with error capture.
+
+    The middleware is pure-Python regex over a Pydantic-validated
+    policy; it can fail only on (a) the lazy default-policy YAML
+    load (e.g. a packaging accident drops ``default.yaml``) or
+    (b) an unforeseen Python-level exception inside the engine.
+    The dispatcher must convert either to a structured
+    ``connector_error`` :class:`OperationResult` rather than letting
+    the exception bubble -- the never-raises contract is the only
+    reason "store raw → redact → reduce" is safe at runtime. If we
+    raised instead, the caller would see a 500 with **no audit
+    record of the raw response**, defeating the trust-boundary
+    discipline this middleware exists to enforce.
+
+    The ``tenant`` label passes through as the operator's tenant id
+    in string form (the resolver compares against the policy
+    schema's ``Annotated[str | None]`` field). ``None`` tenant id
+    (the chassis-era audit shape) flows through as ``None`` so the
+    resolver only matches a non-tenant-scoped override.
+    """
+    tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
+    try:
+        return apply_connector_boundary_redaction(
+            raw,
+            connector_id=connector_id,
+            tenant=tenant,
+            op=op_id,
+        )
+    except Exception as exc:
+        return result_connector_error(op_id, exc, 0.0)
 
 
 async def _reduce_or_error(
@@ -438,6 +685,9 @@ async def _reduce_or_error(
     audit_id: uuid.UUID,
     raw: Any,
     started: float,
+    raw_payload_for_audit: Any | None = None,
+    redaction_manifest_for_audit: list[dict[str, Any]] | None = None,
+    redaction_policy_id: str | None = None,
 ) -> tuple[Any, ResultHandle | None] | OperationResult:
     """Run the JSONFlux reducer; return ``(summary, handle)`` or a structured error.
 
@@ -451,6 +701,14 @@ async def _reduce_or_error(
     :class:`OperationResult` — same shape the handler-call exception path
     produces — and the audit row + broadcast event still fire so the
     failure is observable.
+
+    *raw_payload_for_audit* / *redaction_manifest_for_audit* /
+    *redaction_policy_id* carry the connector-boundary redaction
+    artefacts through to the error-path audit row (G11.4-T2 #1071):
+    even when the reducer fails, the audit trail still records the
+    raw payload + manifest from the (successful) redaction step so
+    a debugger has the same pre-redaction evidence available as on
+    the success path.
     """
     reducer_context: dict[str, Any] = {
         "op_id": op_id,
@@ -478,6 +736,9 @@ async def _reduce_or_error(
             params_hash=params_hash,
             result_status="error",
             duration_ms=duration_ms,
+            raw_payload=raw_payload_for_audit,
+            redaction_manifest=redaction_manifest_for_audit,
+            redaction_policy_id=redaction_policy_id,
         )
         return result_connector_error(op_id, exc, duration_ms)
 
@@ -559,6 +820,9 @@ async def _handle_needs_approval(
         )
 
 
+# code-quality-allow: 8-phase orchestrator -- phases stay linear so the
+# 8-numbered-steps contract in the module docstring stays grep-visible;
+# splitting would scatter structured-error returns + obscure never-raises.
 async def dispatch(
     *,
     operator: Operator,
@@ -672,13 +936,36 @@ async def dispatch(
             )
 
     # --- Step 5: connector resolution -------------------------------------
-    connector_instance, resolution_error = await _resolve_connector_instance(descriptor, target)
+    connector_instance, resolution_error, exception_message = await _resolve_connector_instance(
+        descriptor, target
+    )
     if resolution_error == "no_connector":
-        return result_no_connector(op_id, product, version, _elapsed_ms(started))
+        return result_no_connector(
+            op_id,
+            product,
+            version,
+            _elapsed_ms(started),
+            exception_message=exception_message,
+        )
+    if resolution_error == "ambiguous_connector":
+        # The exception's message is the single most diagnostic string
+        # the resolver computes (candidate list + remediation step);
+        # surface it verbatim under ``extras["exception_message"]``.
+        # ``exception_message`` is guaranteed non-None for this label
+        # by ``resolve_connector_or_label``'s contract — the empty
+        # string fallback is a defensive type-check guard, never hit.
+        return result_ambiguous_connector(
+            op_id,
+            product,
+            version,
+            exception_message or "",
+            _elapsed_ms(started),
+        )
 
     # --- Steps 6/7/8/9: branch + reduce + audit + broadcast ---------------
     return await _execute_and_audit(
         op_id=op_id,
+        connector_id=connector_id,
         descriptor=descriptor,
         connector_instance=connector_instance,
         operator=operator,

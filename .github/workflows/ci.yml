@@ -231,7 +231,44 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run python -m meho_backplane.retrieval.warm
 
+      - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
+        # G11.4-T3 (#1072) ships the Tier-2 Presidio NER adapter
+        # (capability-flagged per policy). The acceptance gate
+        # (``Tier-2 redacts a free-text field containing a person
+        # name / IP / FQDN``) requires a spaCy model on the host;
+        # spaCy ships no model out of the box and Presidio's
+        # AnalyzerEngine raises ``Tier2NotAvailableError`` without one.
+        # ``en_core_web_sm`` (~12 MB) is the fast-CI choice; production
+        # Docker images bake ``en_core_web_lg`` (~560 MB, the Presidio
+        # documented default for higher NER recall). The acceptance
+        # tests in tests/test_redaction_presidio.py and the Tier-2
+        # middleware test gate on ``spacy.util.is_package(...)``,
+        # accepting either model -- so this step suffices for the
+        # unit lane's correctness signal without paying the ``lg``
+        # download wall every run.
+        #
+        # ``MEHO_REDACTION_SPACY_MODEL`` is the runtime override the
+        # presidio.py adapter reads; setting it here pins the unit
+        # job's engine to the ``sm`` model regardless of the
+        # adapter's default. Production deployments leave the env
+        # unset and let the adapter pick the documented default.
+        run: |
+          uv run python -m spacy download en_core_web_sm
+          # Smoke-test the import path so a presidio<->spacy model-
+          # version mismatch fails THIS PR, not the integration lane.
+          MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
+            uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
+
       - name: Pytest (unit + coverage)
+        env:
+          # Pin Tier-2's spaCy model to the unit-lane choice so the
+          # acceptance tests in test_redaction_presidio.py + the
+          # tier2 path in test_redaction_middleware.py exercise the
+          # real engine path instead of skipping. The integration
+          # lane stays on the adapter's documented default
+          # (en_core_web_lg) once that lane provisions the heavier
+          # model.
+          MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
         # PARALLELIZED via pytest-xdist (#585 unblocked this). The
         # serial sweep was the job's dominant cost (~49 min in CI vs
         # ~5 min local). #585 added process-wide global-registry

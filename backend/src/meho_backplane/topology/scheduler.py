@@ -212,12 +212,21 @@ async def _refresh_one_target(
 
 
 async def _run_one_sweep(state: _SchedulerState) -> None:
-    """Walk every tenant's targets once, refreshing each in isolation.
+    """Walk every tenant's live targets once, refreshing each in isolation.
 
     Targets are enumerated tenant-by-tenant so the per-tenant boundary
     the rest of the graph enforces is visible in the iteration shape
     itself. A failure refreshing any single target is swallowed by
     :func:`_refresh_one_target`; this sweep always completes.
+
+    Soft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)
+    are excluded — same filter the resolver, REST list, MCP
+    ``list_targets``, and the broadcast feed dropdown apply. Without
+    this, a tenant_admin's DELETE would leave the scheduler probing
+    the dead row every cadence: connector calls, audit rows, broadcast
+    events, and graph_node reconciliation against a retired target,
+    partially defeating the credential-hygiene use-case the soft-delete
+    surface exists to enable.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -225,7 +234,14 @@ async def _run_one_sweep(state: _SchedulerState) -> None:
         targets_by_tenant: dict[uuid.UUID, list[Target]] = {}
         for tid in tenant_ids:
             rows = list(
-                (await session.execute(select(Target).where(Target.tenant_id == tid)))
+                (
+                    await session.execute(
+                        select(Target).where(
+                            Target.tenant_id == tid,
+                            Target.deleted_at.is_(None),
+                        )
+                    )
+                )
                 .scalars()
                 .all()
             )

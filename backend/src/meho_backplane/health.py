@@ -22,6 +22,17 @@ deliberately ships no timeout / retry / circuit-breaker around probes —
 if a probe hangs, ``/ready`` hangs, and the kubelet's own readiness
 timeout takes the pod out of rotation.
 
+``/ready`` also exposes a ``features`` block built by
+:func:`~meho_backplane.features.build_features_block` (G0.14-T7
+#1148). The block enumerates the four gated features
+(``agent_runtime``, ``ui_surface``, ``audit_replay``,
+``approval_queue``) with their configured / missing-env state so an
+operator's single GET answers "which features will work out of the
+box on my deploy?". The block is **always present** — emitted on both
+the 200 and 503 branches — and is independent of the probe-registry
+verdict: a probe failure surfaces under ``checks``, a feature gate
+surfaces under ``features``, and the two never mask each other.
+
 Usage::
 
     from meho_backplane.health import register_probe, ProbeResult
@@ -38,6 +49,9 @@ from dataclasses import asdict, dataclass
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+
+from meho_backplane.features import build_features_block
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "ProbeFn",
@@ -176,20 +190,32 @@ async def healthz() -> dict[str, str]:
 
 @router.get("/ready")
 async def ready() -> JSONResponse:
-    """Readiness probe.
+    """Readiness probe with deploy-time feature-gate visibility.
 
-    Returns 200 with ``{"status": "ready", "checks": [...]}`` when at
-    least one probe is registered and every probe reports ``ok``.
-    Returns 503 with ``{"status": "not_ready", "checks": [...]}``
+    Returns 200 with
+    ``{"status": "ready", "checks": [...], "features": {...}}`` when
+    at least one probe is registered and every probe reports ``ok``.
+    Returns 503 with
+    ``{"status": "not_ready", "checks": [...], "features": {...}}``
     otherwise — including the fail-closed empty-registry case at the
     chassis stage. The empty case is handled explicitly because
     ``all([])`` is vacuously ``True`` in Python, which would otherwise
     flip the chassis to "ready" with zero evidence.
+
+    The ``features`` block (G0.14-T7 #1148) enumerates the four gated
+    features and their configured-vs-missing-env state. It is emitted
+    on **both** branches — the operator's "is this deploy correctly
+    wired?" question is independent of the probe-registry verdict.
+    See :func:`meho_backplane.features.build_features_block` for the
+    block's shape and the audit table in
+    ``docs/codebase/error-message-shape.md`` for why this surface
+    exists (signals 16, 17).
     """
     results = await run_probes_async()
     ready_ok = bool(results) and all(r.ok for r in results)
     payload = {
         "status": "ready" if ready_ok else "not_ready",
         "checks": [asdict(r) for r in results],
+        "features": build_features_block(get_settings()),
     }
     return JSONResponse(content=payload, status_code=200 if ready_ok else 503)

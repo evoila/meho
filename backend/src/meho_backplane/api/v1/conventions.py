@@ -60,7 +60,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.audit import bind_preallocated_audit_id
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.conventions.preamble import assemble_preamble
+from meho_backplane.conventions.preamble import (
+    assemble_preamble,
+    assemble_preamble_detailed,
+)
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
     BudgetStatus,
@@ -71,6 +74,7 @@ from meho_backplane.conventions.schemas import (
     ConventionListResponse,
     ConventionSummary,
     ConventionUpdate,
+    PreambleInclusion,
     estimate_tokens,
 )
 from meho_backplane.db.engine import get_session
@@ -251,6 +255,74 @@ def _enforce_patch_budget(
     except ValueError:
         existing_kind = ConventionKind.REFERENCE
     _enforce_budget(new_body, existing_kind)
+
+
+async def _compute_preamble_status(
+    *,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    slug: str,
+    kind: ConventionKind,
+) -> PreambleInclusion | None:
+    """Resolve preamble inclusion for the just-written *(tenant, slug)* pair.
+
+    G0.14-T8 (#1149, signal 18). Returns ``None`` for kinds that
+    don't enter the preamble (``workflow`` / ``reference``); a
+    populated :class:`PreambleInclusion` for ``operational`` rows.
+
+    The function runs
+    :func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`
+    through the route handler's *session* so the pack reflects the
+    in-progress write. SQLAlchemy 2.x reads within the same
+    transaction see flushed-but-not-committed rows, so the caller
+    must :meth:`session.flush` the convention INSERT/UPDATE before
+    calling; the read here will then include it. Threading the
+    route's session through (over opening a new one) means the
+    feedback reflects the same state the post-commit MCP
+    ``initialize`` handler will see -- no risk of an in-flight
+    concurrent write from another request changing the answer
+    mid-response.
+
+    Three reads from the detailed assembly drive the four output
+    fields:
+
+    * ``kept_slugs.index(slug) + 1`` -> ``position`` (1-based, or
+      ``None`` when this slug was dropped).
+    * ``slug in kept_slugs`` -> ``included``.
+    * ``token_counts[slug]`` -> ``token_count`` (own body weight).
+    * ``dropped_slugs`` -> ``would_drop_slugs`` (verbatim).
+
+    The ``slug`` argument is the slug as written (POST: ``body.slug``;
+    PATCH: the path parameter — PATCH cannot rename, so the slug
+    is stable across the update). ``kind`` is the convention's
+    current kind: POST uses the request body's kind; PATCH uses the
+    existing row's kind (PATCH cannot change kind per the
+    :class:`ConventionUpdate` schema).
+    """
+    if kind is not ConventionKind.OPERATIONAL:
+        # ``workflow`` / ``reference`` are not preamble-bound -- a
+        # write against them does not affect the assembled preamble,
+        # so the operator's "did this land in the preamble?" question
+        # doesn't apply. Returning ``None`` (over a stub
+        # ``PreambleInclusion(included=False, ...)``) keeps the
+        # response shape honest: ``preamble_status`` present iff the
+        # write was a preamble-bound one.
+        return None
+    assembly = await assemble_preamble_detailed(tenant_id, session=session)
+    included = slug in assembly.kept_slugs
+    position = assembly.kept_slugs.index(slug) + 1 if included else None
+    # ``token_counts`` carries every considered slug (kept + dropped);
+    # the just-written slug must appear there because the assembler
+    # ran after the write flushed. The ``get`` fallback is paranoia
+    # against an unforeseen race (e.g. a concurrent DELETE) and
+    # short-circuits to 0 so the response shape still validates.
+    token_count = assembly.token_counts.get(slug, 0)
+    return PreambleInclusion(
+        included=included,
+        position=position,
+        token_count=token_count,
+        would_drop_slugs=assembly.dropped_slugs,
+    )
 
 
 async def _load_convention(
@@ -461,11 +533,25 @@ async def create_convention(
     # Refresh so any DB-side defaults are visible on the returned
     # row (mirrors the broadcast_overrides + memory surfaces).
     await session.refresh(convention)
+    # G0.14-T8 (#1149, signal 18) preamble-status feedback.
+    # The convention has flushed inside the route's session (above
+    # at ``session.flush()``); reads through the same session see it,
+    # so the preamble assembler resolves the just-written slug's
+    # position against the post-write state. ``None`` for
+    # workflow/reference (preamble-unbound kinds).
+    preamble_status = await _compute_preamble_status(
+        session=session,
+        tenant_id=operator.tenant_id,
+        slug=body.slug,
+        kind=body.kind,
+    )
     # Conditional MCP resources/updated notification (T4 #316).
     # No-op while ``resources.subscribe`` is False; structured emit
     # call site is in place for the v0.2.next subscribe flip.
     _maybe_emit_resource_updated(tenant_id=operator.tenant_id, slug=body.slug)
-    return Convention.model_validate(convention)
+    return Convention.model_validate(convention).model_copy(
+        update={"preamble_status": preamble_status},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -534,11 +620,31 @@ async def update_convention(
     session.add(history)
     await session.flush()
     await session.refresh(existing)
+    # G0.14-T8 (#1149, signal 18) preamble-status feedback. PATCH
+    # cannot change kind per :class:`ConventionUpdate`, so the
+    # post-PATCH kind is the existing row's kind; resolve back to
+    # the enum for the helper. An existing row carrying a kind
+    # outside the closed :class:`ConventionKind` vocabulary
+    # (possible per T1's Out of scope on DB-level enum) falls back
+    # to ``REFERENCE`` -- the safe direction; reference-kind
+    # short-circuits to ``preamble_status=None`` (preamble-unbound).
+    try:
+        existing_kind = ConventionKind(existing.kind)
+    except ValueError:
+        existing_kind = ConventionKind.REFERENCE
+    preamble_status = await _compute_preamble_status(
+        session=session,
+        tenant_id=operator.tenant_id,
+        slug=slug,
+        kind=existing_kind,
+    )
     # Conditional MCP resources/updated notification (T4 #316).
     # No-op while ``resources.subscribe`` is False; structured emit
     # call site is in place for the v0.2.next subscribe flip.
     _maybe_emit_resource_updated(tenant_id=operator.tenant_id, slug=slug)
-    return Convention.model_validate(existing)
+    return Convention.model_validate(existing).model_copy(
+        update={"preamble_status": preamble_status},
+    )
 
 
 # ---------------------------------------------------------------------------

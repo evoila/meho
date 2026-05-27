@@ -1,0 +1,57 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Edit-in-place form for the Memory detail page (Initiative #341 Task
+  #877). Replaces the body view (``#memory-body``) on Edit click;
+  Save submits ``hx-patch`` and replaces the form with the rendered
+  body view; Cancel reloads the body view via ``hx-get`` against the
+  same detail route.
+
+  CSRF posture: the page-level ``hx-headers`` directive on
+  ``memory/detail.html`` echoes the token; HTMX inherits the header
+  through the swapped fragment, so the textarea form does not need
+  its own ``hx-headers`` override.
+
+  Form encoding: ``hx-encoding="multipart/form-data"`` is **not**
+  used because the body field is text-only and the chassis CSRF
+  middleware accepts the token from either header or form field.
+  The default ``application/x-www-form-urlencoded`` is the cheapest
+  shape for the wire.
+-#}
+<form
+  id="memory-body"
+  class="bg-base-100 border-base-300 border rounded-box p-4 space-y-3"
+  hx-patch="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}"
+  hx-target="this"
+  hx-swap="outerHTML"
+  hx-disabled-elt="find button[type=submit]"
+  aria-label="Edit memory body"
+>
+  <label class="form-control">
+    <span class="label-text">Body (Markdown)</span>
+    <textarea
+      name="body"
+      class="textarea textarea-bordered min-h-[16rem] font-mono text-sm"
+      required
+      maxlength="{{ max_body_length }}"
+      aria-label="Memory body in Markdown"
+    >{{ entry.body_raw }}</textarea>
+    <div class="text-xs opacity-60 mt-1">
+      Up to {{ max_body_length }} characters. Tags + expiry are preserved across save.
+    </div>
+  </label>
+  <div class="flex justify-end gap-2">
+    <button
+      type="button"
+      class="btn btn-sm btn-ghost"
+      hx-get="/ui/memory/{{ entry.scope | urlencode }}/{{ entry.slug | urlencode }}"
+      hx-target="#memory-body"
+      hx-swap="outerHTML"
+      data-action="cancel-edit"
+    >
+      Cancel
+    </button>
+    <button type="submit" class="btn btn-sm btn-primary" data-action="save">Save</button>
+  </div>
+</form>

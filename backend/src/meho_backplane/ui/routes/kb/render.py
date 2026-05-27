@@ -11,10 +11,12 @@ CSS class spans — no client-side JS highlighter needed.
 Design decisions
 ----------------
 
-* ``markdown-it-py`` ``commonmark`` preset with ``table`` and
-  ``strikethrough`` enabled explicitly — the ``gfm-like`` preset also
-  enables ``html=True`` which allows raw HTML injection from kb bodies;
-  ``commonmark`` + selective rule enables keeps that surface closed.
+* ``markdown-it-py`` ``commonmark`` preset with ``html=False`` forced
+  on construction and ``table`` + ``strikethrough`` enabled explicitly.
+  The ``commonmark`` preset enables ``html`` by default (the CommonMark
+  spec permits raw HTML passthrough), so it is overridden to
+  ``html=False`` — raw HTML in a kb body is escaped, not rendered,
+  keeping the stored-XSS surface closed.
 * ``pygments`` ``HtmlFormatter`` with ``nowrap=True`` so the output is
   bare ``<span>`` tokens; the template wraps them in a
   ``<pre class="highlight"><code class="language-{lang}">`` block for
@@ -26,9 +28,9 @@ Design decisions
   double-escape the already-sanitised HTML. The ``markdown-it-py``
   renderer itself HTML-encodes user-supplied text (heading content,
   paragraph text, link targets) before inserting it into the output;
-  ``commonmark`` with ``html=False`` (the default) strips raw HTML from
-  the body entirely. Both together mean the rendered output is safe to
-  pass through ``Markup``.
+  the explicit ``html=False`` (see :func:`_build_md`) escapes raw HTML
+  in the body rather than passing it through. Both together mean the
+  rendered output is safe to pass through ``Markup``.
 * ``TextLexer`` fallback: an unknown / missing lang attribute falls back
   to ``pygments.lexers.TextLexer`` (plain text, no span decoration)
   rather than guessing. Guessing frequently mis-classifies prose
@@ -106,12 +108,14 @@ def _highlight_code(code: str, lang: str, attrs: str) -> str:
 def _build_md() -> MarkdownIt:
     """Construct the shared ``MarkdownIt`` instance.
 
-    Called once at module load. ``commonmark`` preset keeps ``html=False``
-    (raw HTML stripped, not passed through). ``table`` enables GFM-style
-    pipe tables; ``strikethrough`` enables ``~~text~~``.
+    Called once at module load. The ``commonmark`` preset enables
+    ``html`` (the CommonMark spec permits raw HTML passthrough), so it is
+    overridden to ``html=False`` explicitly here — raw HTML in a kb body
+    is escaped, not rendered, closing the stored-XSS surface. ``table``
+    enables GFM-style pipe tables; ``strikethrough`` enables ``~~text~~``.
     """
     return (
-        MarkdownIt(options_update={"highlight": _highlight_code})
+        MarkdownIt("commonmark", {"html": False, "highlight": _highlight_code})
         .enable("table")
         .enable("strikethrough")
     )
@@ -125,8 +129,8 @@ def render_markdown(body: str) -> Markup:
 
     Returns :class:`markupsafe.Markup` so Jinja2's autoescape does not
     double-escape the generated HTML spans. The rendered string is safe
-    because ``markdown-it-py`` HTML-encodes user text and ``html=False``
-    strips any raw HTML tags from the source.
+    because ``markdown-it-py`` HTML-encodes user text and the explicit
+    ``html=False`` escapes any raw HTML tags in the source.
 
     Thread-safe: holds the module-level lock for the duration of the
     ``render()`` call.

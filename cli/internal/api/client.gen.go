@@ -166,6 +166,27 @@ const (
 	RetireChecklistRequestSurfaceOperations RetireChecklistRequestSurface = "operations"
 )
 
+// Defines values for ScheduledTriggerInFlightPolicy.
+const (
+	FailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
+	Resume        ScheduledTriggerInFlightPolicy = "resume"
+)
+
+// Defines values for ScheduledTriggerKind.
+const (
+	ScheduledTriggerKindCron   ScheduledTriggerKind = "cron"
+	ScheduledTriggerKindEvent  ScheduledTriggerKind = "event"
+	ScheduledTriggerKindOneOff ScheduledTriggerKind = "one_off"
+)
+
+// Defines values for ScheduledTriggerStatus.
+const (
+	ScheduledTriggerStatusActive    ScheduledTriggerStatus = "active"
+	ScheduledTriggerStatusCancelled ScheduledTriggerStatus = "cancelled"
+	ScheduledTriggerStatusFired     ScheduledTriggerStatus = "fired"
+	ScheduledTriggerStatusPaused    ScheduledTriggerStatus = "paused"
+)
+
 // Defines values for SurfaceChecklistSurface.
 const (
 	SurfaceChecklistSurfaceKb         SurfaceChecklistSurface = "kb"
@@ -201,6 +222,25 @@ const (
 	SurfaceResultVerdictYellow SurfaceResultVerdict = "yellow"
 )
 
+// Defines values for TargetCreateProduct.
+const (
+	Bind9         TargetCreateProduct = "bind9"
+	Gcloud        TargetCreateProduct = "gcloud"
+	Harbor        TargetCreateProduct = "harbor"
+	HetznerRobot  TargetCreateProduct = "hetzner-robot"
+	Holodeck      TargetCreateProduct = "holodeck"
+	K8s           TargetCreateProduct = "k8s"
+	Nsx           TargetCreateProduct = "nsx"
+	Pfsense       TargetCreateProduct = "pfsense"
+	SddcManager   TargetCreateProduct = "sddc-manager"
+	Vault         TargetCreateProduct = "vault"
+	VcfAutomation TargetCreateProduct = "vcf-automation"
+	VcfFleet      TargetCreateProduct = "vcf-fleet"
+	VcfLogs       TargetCreateProduct = "vcf-logs"
+	VcfOperations TargetCreateProduct = "vcf-operations"
+	Vmware        TargetCreateProduct = "vmware"
+)
+
 // Defines values for TopologyDiffEntryChangeKind.
 const (
 	Created TopologyDiffEntryChangeKind = "created"
@@ -214,18 +254,33 @@ const (
 	Node TopologyDiffEntrySource = "node"
 )
 
-// Defines values for UnderscoreSortColumn.
+// Defines values for UnderscoreSortDirection.
 const (
-	FirstSeen UnderscoreSortColumn = "first_seen"
-	Kind      UnderscoreSortColumn = "kind"
-	LastSeen  UnderscoreSortColumn = "last_seen"
-	Name      UnderscoreSortColumn = "name"
+	Asc  UnderscoreSortDirection = "asc"
+	Desc UnderscoreSortDirection = "desc"
 )
 
 // Defines values for UnderscoreViewMode.
 const (
 	Graph UnderscoreViewMode = "graph"
 	Table UnderscoreViewMode = "table"
+)
+
+// Defines values for MehoBackplaneUiRoutesConnectorsListViewSortColumn.
+const (
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnHost         MehoBackplaneUiRoutesConnectorsListViewSortColumn = "host"
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnLastProbedAt MehoBackplaneUiRoutesConnectorsListViewSortColumn = "last_probed_at"
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnName         MehoBackplaneUiRoutesConnectorsListViewSortColumn = "name"
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnProduct      MehoBackplaneUiRoutesConnectorsListViewSortColumn = "product"
+	MehoBackplaneUiRoutesConnectorsListViewSortColumnStatus       MehoBackplaneUiRoutesConnectorsListViewSortColumn = "status"
+)
+
+// Defines values for MehoBackplaneUiRoutesTopologyTableSortColumn.
+const (
+	MehoBackplaneUiRoutesTopologyTableSortColumnFirstSeen MehoBackplaneUiRoutesTopologyTableSortColumn = "first_seen"
+	MehoBackplaneUiRoutesTopologyTableSortColumnKind      MehoBackplaneUiRoutesTopologyTableSortColumn = "kind"
+	MehoBackplaneUiRoutesTopologyTableSortColumnLastSeen  MehoBackplaneUiRoutesTopologyTableSortColumn = "last_seen"
+	MehoBackplaneUiRoutesTopologyTableSortColumnName      MehoBackplaneUiRoutesTopologyTableSortColumn = "name"
 )
 
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
@@ -242,6 +297,21 @@ const (
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceKb         UsageEndpointApiV1RetrieveUsageGetParamsSurface = "kb"
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceMemory     UsageEndpointApiV1RetrieveUsageGetParamsSurface = "memory"
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceOperations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
+)
+
+// Defines values for ListTriggersApiV1SchedulerTriggersGetParamsKind.
+const (
+	ListTriggersApiV1SchedulerTriggersGetParamsKindCron   ListTriggersApiV1SchedulerTriggersGetParamsKind = "cron"
+	ListTriggersApiV1SchedulerTriggersGetParamsKindEvent  ListTriggersApiV1SchedulerTriggersGetParamsKind = "event"
+	ListTriggersApiV1SchedulerTriggersGetParamsKindOneOff ListTriggersApiV1SchedulerTriggersGetParamsKind = "one_off"
+)
+
+// Defines values for ListTriggersApiV1SchedulerTriggersGetParamsStatus.
+const (
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusActive    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "active"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusCancelled ListTriggersApiV1SchedulerTriggersGetParamsStatus = "cancelled"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusFired     ListTriggersApiV1SchedulerTriggersGetParamsStatus = "fired"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusPaused    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "paused"
 )
 
 // AgentDefinitionCreate POST body -- the inputs “create“ consumes. Pydantic v2 strict.
@@ -839,6 +909,210 @@ type BaselineMetricsOverride struct {
 	PrecisionAt5 float32 `json:"precision_at_5"`
 }
 
+// BodyKbEditorPreviewUiKbEditorPreviewPost defines model for Body_kb_editor_preview_ui_kb_editor_preview_post.
+type BodyKbEditorPreviewUiKbEditorPreviewPost struct {
+	Body *string `json:"body,omitempty"`
+}
+
+// BodyKbEditorSaveUiKbNewPost defines model for Body_kb_editor_save_ui_kb_new_post.
+type BodyKbEditorSaveUiKbNewPost struct {
+	Body string  `json:"body"`
+	Slug string  `json:"slug"`
+	Tags *string `json:"tags,omitempty"`
+}
+
+// BodyKbSearchUiKbSearchPost defines model for Body_kb_search_ui_kb_search_post.
+type BodyKbSearchUiKbSearchPost struct {
+	Q *string `json:"q,omitempty"`
+}
+
+// BodyUiConnectorsCreateSubmitUiConnectorsCreatePost defines model for Body_ui_connectors_create_submit_ui_connectors_create_post.
+type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
+	Aliases   *string `json:"aliases"`
+	AuthModel *string `json:"auth_model,omitempty"`
+	Host      *string `json:"host,omitempty"`
+	Name      *string `json:"name,omitempty"`
+	Notes     *string `json:"notes"`
+	Port      *string `json:"port"`
+	Product   *string `json:"product,omitempty"`
+	SecretRef *string `json:"secret_ref"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx  *UISessionContext `json:"session_ctx,omitempty"`
+	VpnRequired *bool             `json:"vpn_required,omitempty"`
+}
+
+// BodyUiConnectorsEditSubmitUiConnectorsNamePatch defines model for Body_ui_connectors_edit_submit_ui_connectors__name__patch.
+type BodyUiConnectorsEditSubmitUiConnectorsNamePatch struct {
+	Aliases   *string `json:"aliases"`
+	AuthModel *string `json:"auth_model,omitempty"`
+	Host      *string `json:"host,omitempty"`
+	Notes     *string `json:"notes"`
+	Port      *string `json:"port"`
+	Product   *string `json:"product,omitempty"`
+	SecretRef *string `json:"secret_ref"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx  *UISessionContext `json:"session_ctx,omitempty"`
+	VpnRequired *bool             `json:"vpn_required,omitempty"`
+}
+
+// BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost defines model for Body_ui_connectors_import_confirm_ui_connectors_import_confirm_post.
+type BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost struct {
+	Pasted *string `json:"pasted"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Upload     *string           `json:"upload"`
+}
+
+// BodyUiConnectorsImportPreviewUiConnectorsImportPost defines model for Body_ui_connectors_import_preview_ui_connectors_import_post.
+type BodyUiConnectorsImportPreviewUiConnectorsImportPost struct {
+	Pasted *string `json:"pasted"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Upload     *string           `json:"upload"`
+}
+
+// BodyUiMemoryBulkUiMemoryBulkPost defines model for Body_ui_memory_bulk_ui_memory_bulk_post.
+type BodyUiMemoryBulkUiMemoryBulkPost struct {
+	Action         string    `json:"action"`
+	ExtendDuration *string   `json:"extend_duration"`
+	Ids            *[]string `json:"ids,omitempty"`
+	Scope          *string   `json:"scope,omitempty"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Tag        *string           `json:"tag"`
+}
+
+// BodyUiMemoryCreateSubmitUiMemoryCreatePost defines model for Body_ui_memory_create_submit_ui_memory_create_post.
+type BodyUiMemoryCreateSubmitUiMemoryCreatePost struct {
+	Body      string     `json:"body"`
+	ExpiresAt *time.Time `json:"expires_at"`
+
+	// Scope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	Scope MemoryScope `json:"scope"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Slug       *string           `json:"slug"`
+	Tags       *string           `json:"tags"`
+	TargetName *string           `json:"target_name"`
+}
+
+// BodyUiMemoryPatchUiMemoryScopeSlugPatch defines model for Body_ui_memory_patch_ui_memory__scope___slug__patch.
+type BodyUiMemoryPatchUiMemoryScopeSlugPatch struct {
+	Body string `json:"body"`
+
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+}
+
+// BodyUiMemoryPreviewUiMemoryPreviewPost defines model for Body_ui_memory_preview_ui_memory_preview_post.
+type BodyUiMemoryPreviewUiMemoryPreviewPost struct {
+	Body *string `json:"body,omitempty"`
+}
+
+// BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost defines model for Body_ui_memory_promote_submit_ui_memory__scope___slug__promote_post.
+type BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost struct {
+	// SessionCtx Per-request session identity exposed on ``request.state``.
+	//
+	// Frozen so a route handler that stashes the context on a logger
+	// or forwards it to a service layer cannot accidentally mutate
+	// fields downstream. The shape mirrors :class:`Operator` for the
+	// fields T5 (#866) needs to render an authenticated page header;
+	// ``raw_jwt`` / ``tenant_role`` are intentionally absent because
+	// the session-cookie path does not load them today (the encrypted
+	// row carries only the access token, not the decoded claims).
+	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	TargetName *string           `json:"target_name"`
+
+	// To One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	To MemoryScope `json:"to"`
+}
+
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.
 //
 // “extra="forbid"“ rejects unknown fields with 422 -- catches a
@@ -937,16 +1211,30 @@ type BudgetStatus struct {
 // CallOperationBody Request body for the “POST /api/v1/operations/call“ route.
 //
 // Mirrors the :func:`call_operation` “arguments“ shape so the route
-// and the MCP handler share validation. “target“ is a partial
-// descriptor (“{"name": "rdc-vcenter"}“) the handler resolves via
-// :func:`~meho_backplane.targets.resolver.resolve_target`; “None“
-// means the operation does not need a target (typed handlers that
-// don't read it; composite handlers that do their own resolution).
+// and the MCP handler share validation. “target“ accepts either
+// shape and “None“:
+//
+//   - **Bare string** -- “target: "rdc-vcenter"“. The forward-preferred
+//     shape; matches “query_topology“ / “query_audit“ so an agent
+//     can carry a target name across the read and the write surfaces
+//     without reshape. G0.13-T2 (#1132) widening of #780.
+//   - **Dict** -- “target: {"name": "rdc-vcenter"}“. The original
+//     shape; the handler resolves the “name“ field and (optionally)
+//     reads “fqdn“ for vhost routing. Still accepted unchanged.
+//   - **None** -- the operation does not need a target (typed handlers
+//     that don't read it; composite handlers that do their own
+//     resolution).
+//
+// Both shapes normalise to the same dict before dispatch, so the
+// resolver and the connectors see one canonical form. A bare-string
+// “target“ is equivalent to “{"name": <string>}“ -- no “fqdn“
+// override can be passed via the string shape; callers that need
+// the override stay on the dict.
 //
 // Recognised keys on the “target“ dict:
 //
-//   - “name“ (required when “target“ is supplied) -- the slug or
-//     alias the resolver looks up in the targets registry.
+//   - “name“ (required when “target“ is supplied as a dict) -- the
+//     slug or alias the resolver looks up in the targets registry.
 //   - “fqdn“ (optional) -- per-call override for the resolved
 //     target's “fqdn“ column. Honoured by connectors that read
 //     “target.fqdn“ for vhost routing (G3.6 VCF Automation:
@@ -957,19 +1245,30 @@ type BudgetStatus struct {
 //     in the dict is silently ignored, mirroring the documented
 //     forward-compatibility posture in the MCP tool schema.
 //
-// “extra="forbid"“ (G0.9-T2 / #729) rejects unknown fields with
-// 422 “extra_forbidden“ -- a v0.2.1 client still sending “target:
-// str“ (the pre-rename single-name shape) or a typo in
-// “connector_id“ now fails loud at the framework boundary instead
-// of silently dispatching with the defaults. “params“ itself is a
+// “extra="forbid"“ (G0.9-T2 / #729) rejects unknown *body* fields
+// with 422 “extra_forbidden“ -- a typo in “connector_id“ or an
+// unknown sibling field still fails loud. The “target“ field's
+// own union widening is orthogonal: bare-string is now a first-class
+// valid value, not an unknown field. “params“ itself is a
 // free-form “dict“ because per-op parameter shape is enforced by
 // the descriptor's “parameter_schema“ further down the dispatch
 // path; only the meta-tool body's own fields are constrained here.
 type CallOperationBody struct {
-	ConnectorId string                  `json:"connector_id"`
-	OpId        string                  `json:"op_id"`
-	Params      *map[string]interface{} `json:"params,omitempty"`
-	Target      *map[string]interface{} `json:"target"`
+	ConnectorId string                    `json:"connector_id"`
+	OpId        string                    `json:"op_id"`
+	Params      *map[string]interface{}   `json:"params,omitempty"`
+	Target      *CallOperationBody_Target `json:"target"`
+}
+
+// CallOperationBodyTarget0 defines model for .
+type CallOperationBodyTarget0 = string
+
+// CallOperationBodyTarget1 defines model for .
+type CallOperationBodyTarget1 map[string]interface{}
+
+// CallOperationBody_Target defines model for CallOperationBody.Target.
+type CallOperationBody_Target struct {
+	union json.RawMessage
 }
 
 // CandidateHint One candidate target a connector's :meth:`Connector.list_candidates` returns.
@@ -1093,17 +1392,67 @@ type ConnectorSpecEntry struct {
 // bound writes to the enum but read paths surface whatever the
 // DB stored (a future “kind“ value introduced by a migration
 // would otherwise blow up the JSON encoder on every read).
+//
+// “preamble_status“ (G0.14-T8 #1149) is the post-write inclusion
+// signal POST/PATCH attach: “None“ on “GET /{slug}“ (the
+// aggregate budget signal lives on the list response's
+// “budget_status“) and on writes against “workflow“ /
+// “reference“ kinds (those are not preamble-bound). Populated
+// only when the write touched an “operational“ row.
 type Convention struct {
 	Body         string             `json:"body"`
 	CreatedAt    time.Time          `json:"created_at"`
 	CreatedBySub *string            `json:"created_by_sub"`
 	Id           openapi_types.UUID `json:"id"`
 	Kind         string             `json:"kind"`
-	Priority     int                `json:"priority"`
-	Slug         string             `json:"slug"`
-	TenantId     openapi_types.UUID `json:"tenant_id"`
-	Title        string             `json:"title"`
-	UpdatedAt    time.Time          `json:"updated_at"`
+
+	// PreambleStatus Whether a just-written convention reaches the session preamble.
+	//
+	// G0.14-T8 (#1149, signal 18) -- the post-write feedback shape
+	// ``POST /api/v1/conventions`` and ``PATCH /api/v1/conventions/{slug}``
+	// attach to the response when the convention is ``kind='operational'``.
+	// Without it, the operator gets a ``201`` (or ``200`` on PATCH), assumes
+	// the rule is in effect, and the agent silently never sees it because
+	// the preamble packer dropped it on budget overflow.
+	//
+	// Fields:
+	//
+	// * ``included`` -- ``True`` when the slug landed in the assembled
+	//   preamble (after the priority-ranked pack against
+	//   :data:`DEFAULT_MAX_PREAMBLE_TOKENS`). ``False`` when the packer
+	//   dropped it whole on overflow.
+	// * ``position`` -- 1-based index of the convention in the assembled
+	//   preamble's packed order (the packer iterates ``priority DESC,
+	//   created_at ASC``; ``position=1`` means highest-priority slot in
+	//   the operator's tenant). ``None`` when ``included=False``.
+	// * ``token_count`` -- the convention body's own estimated token
+	//   cost via :func:`estimate_tokens`. Useful for the operator to
+	//   see why a near-budget body got dropped (it weighed more than
+	//   the remaining headroom).
+	// * ``would_drop_slugs`` -- the full ``dropped_slugs`` list the
+	//   packer produced on this assembly. When ``included=True`` this
+	//   names *other* slugs that fell out of the preamble (the just-
+	//   written convention may have pushed a lower-priority neighbour
+	//   out); when ``included=False`` the list contains *this* slug
+	//   plus any others dropped under the same pack. The shape lets
+	//   a single ``meho conventions create ...`` round-trip surface
+	//   both the personal outcome (did mine land?) and the collateral
+	//   damage (did mine push someone else out?).
+	//
+	// Why a separate model instead of inlining fields on
+	// :class:`Convention`: the response shape ``Convention`` is used
+	// by ``GET /{slug}`` too, where ``preamble_status`` would be
+	// redundant (operators inspecting a row already have the
+	// ``GET /api/v1/conventions``'s ``budget_status`` envelope for
+	// aggregate budget signal). Keeping the inclusion shape on a
+	// sub-model means GET-single can drop the field cleanly while
+	// POST/PATCH attach it.
+	PreambleStatus *PreambleInclusion `json:"preamble_status,omitempty"`
+	Priority       int                `json:"priority"`
+	Slug           string             `json:"slug"`
+	TenantId       openapi_types.UUID `json:"tenant_id"`
+	Title          string             `json:"title"`
+	UpdatedAt      time.Time          `json:"updated_at"`
 }
 
 // ConventionCreate POST body for “/api/v1/conventions“.
@@ -1563,6 +1912,26 @@ type HTTPValidationError struct {
 }
 
 // HealthResponse “GET /api/v1/health“ response body.
+//
+// “mcp_session_id_capture“ (G0.14-T6 #1147) reports the deploy's
+// audit-replay capture mode in a single field:
+//
+//   - “"always"“ — any “Mcp-Session-Id“ header the client sends is
+//     captured into “audit_log.agent_session_id“; a missing header is
+//     accepted (the row's session id lands as NULL). This is the
+//     default and what G8.2 audit-replay needs to light up on a stock
+//     deploy.
+//   - “"enforced"“ — capture works the same way **plus** a missing
+//     header is a JSON-RPC “-32600“ reject before any audit row is
+//     written. Flipped on by “MCP_REQUIRE_SESSION_ID=true“ in
+//     compliance deploys that forbid header-less calls.
+//
+// The field is the canonical operator-facing surface for the
+// capture state until T7 #1148's “/ready“ features block ships
+// the richer enumeration (T7's “audit_replay“ block pulls from
+// the same
+// :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
+// helper so both surfaces stay consistent).
 type HealthResponse struct {
 	// Db Database migration status.
 	//
@@ -1576,7 +1945,8 @@ type HealthResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
-	Db DbStatus `json:"db"`
+	Db                  DbStatus `json:"db"`
+	McpSessionIdCapture string   `json:"mcp_session_id_capture"`
 
 	// Operator Operator identity surface exposed to the CLI.
 	//
@@ -1621,6 +1991,30 @@ type IngestKbRequest struct {
 // ingestion (vCenter's “vcenter.yaml“ + “vi-json.yaml“) lands as
 // multiple “SpecSource“ entries in one request.
 //
+// Two mutually-exclusive request shapes:
+//
+//   - **Explicit-quadruple shape** — “product“ + “version“ +
+//     “impl_id“ + “specs[]“ carry the resolved triple plus the
+//     spec sources the caller already knows. The MCP admin tool and
+//     the historical CLI manual mode use this shape.
+//   - **Catalog-driven shape** (G0.14-T9 / #1150) — “catalog_entry“
+//     carries a “"<product>/<version>"“ reference; the route
+//     handler resolves the entry against the packaged catalog (see
+//     :mod:`meho_backplane.operations.ingest.catalog`) and fills in
+//     “product“ / “version“ / “impl_id“ / “specs[]“ from the
+//     catalog entry before dispatching through the existing ingest
+//     path. REST-native agent runtimes that can't shell out to the
+//     CLI use this shape; the CLI's “--catalog“ flag has been
+//     refactored to POST this shape rather than resolving the entry
+//     client-side.
+//
+// The two shapes are mutually exclusive: a body that sets
+// “catalog_entry“ alongside any of “product“ / “version“ /
+// “impl_id“ / “specs[]“ fails 422 “catalog_entry_conflict“ at
+// the validator below. A body that sets neither fails 422
+// “ingest_request_underspecified“. “base_url“ and “dry_run“
+// are accepted in both shapes.
+//
 // “dry_run=True“ skips both the DB writes and the grouping pass:
 // only :func:`parse_openapi` runs, and the response carries
 // :class:`IngestionResultModel` counts derived from the parse output
@@ -1637,12 +2031,13 @@ type IngestKbRequest struct {
 // would otherwise mean the pipeline runs with the wrong impl_id
 // and the operator only finds out at review-time.
 type IngestRequest struct {
-	BaseUrl *string      `json:"base_url"`
-	DryRun  *bool        `json:"dry_run,omitempty"`
-	ImplId  string       `json:"impl_id"`
-	Product string       `json:"product"`
-	Specs   []SpecSource `json:"specs"`
-	Version string       `json:"version"`
+	BaseUrl      *string       `json:"base_url"`
+	CatalogEntry *string       `json:"catalog_entry"`
+	DryRun       *bool         `json:"dry_run,omitempty"`
+	ImplId       *string       `json:"impl_id"`
+	Product      *string       `json:"product"`
+	Specs        *[]SpecSource `json:"specs,omitempty"`
+	Version      *string       `json:"version"`
 }
 
 // IngestResponse Response shape for “POST /api/v1/connectors/ingest“.
@@ -1917,6 +2312,54 @@ type OperatorIdentity struct {
 // require a code + migration change, which is the cheapest way to
 // prevent drift between the DB layer and the policy engine.
 type PermissionVerdict string
+
+// PreambleInclusion Whether a just-written convention reaches the session preamble.
+//
+// G0.14-T8 (#1149, signal 18) -- the post-write feedback shape
+// “POST /api/v1/conventions“ and “PATCH /api/v1/conventions/{slug}“
+// attach to the response when the convention is “kind='operational'“.
+// Without it, the operator gets a “201“ (or “200“ on PATCH), assumes
+// the rule is in effect, and the agent silently never sees it because
+// the preamble packer dropped it on budget overflow.
+//
+// Fields:
+//
+//   - “included“ -- “True“ when the slug landed in the assembled
+//     preamble (after the priority-ranked pack against
+//     :data:`DEFAULT_MAX_PREAMBLE_TOKENS`). “False“ when the packer
+//     dropped it whole on overflow.
+//   - “position“ -- 1-based index of the convention in the assembled
+//     preamble's packed order (the packer iterates “priority DESC,
+//     created_at ASC“; “position=1“ means highest-priority slot in
+//     the operator's tenant). “None“ when “included=False“.
+//   - “token_count“ -- the convention body's own estimated token
+//     cost via :func:`estimate_tokens`. Useful for the operator to
+//     see why a near-budget body got dropped (it weighed more than
+//     the remaining headroom).
+//   - “would_drop_slugs“ -- the full “dropped_slugs“ list the
+//     packer produced on this assembly. When “included=True“ this
+//     names *other* slugs that fell out of the preamble (the just-
+//     written convention may have pushed a lower-priority neighbour
+//     out); when “included=False“ the list contains *this* slug
+//     plus any others dropped under the same pack. The shape lets
+//     a single “meho conventions create ...“ round-trip surface
+//     both the personal outcome (did mine land?) and the collateral
+//     damage (did mine push someone else out?).
+//
+// Why a separate model instead of inlining fields on
+// :class:`Convention`: the response shape “Convention“ is used
+// by “GET /{slug}“ too, where “preamble_status“ would be
+// redundant (operators inspecting a row already have the
+// “GET /api/v1/conventions“'s “budget_status“ envelope for
+// aggregate budget signal). Keeping the inclusion shape on a
+// sub-model means GET-single can drop the field cleanly while
+// POST/PATCH attach it.
+type PreambleInclusion struct {
+	Included       bool     `json:"included"`
+	Position       *int     `json:"position"`
+	TokenCount     int      `json:"token_count"`
+	WouldDropSlugs []string `json:"would_drop_slugs"`
+}
 
 // PromoteBody POST body for “/api/v1/memory/{scope}/{slug}/promote“.
 //
@@ -2209,6 +2652,287 @@ type RetrieveResponse struct {
 	QueryDurationMs float32        `json:"query_duration_ms"`
 }
 
+// ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
+//
+// Discriminated by *kind*: exactly one of “cron_expr“ / “fire_at“
+// / “event_filter“ must be set, matching the DB-side
+// “ck_scheduled_trigger_kind_fields“ invariant. The
+// :meth:`_validate_discriminated_union` validator enforces this at
+// the wire so a malformed body surfaces as 422 rather than as a
+// flush-time :class:`IntegrityError`.
+//
+// *agent_definition_id* is the existing-definition reference -- the
+// repository's FK check rejects an orphan id with 422 at insert; no
+// validation is duplicated here.
+//
+// *identity_sub* is the OIDC “sub“ the scheduler impersonates when
+// firing the trigger (distinct from *created_by_sub* which the
+// boundary derives from the operator). Defaulted to
+// “"__scheduler__"“ to match the migration-time backstop the
+// ORM-level default sets, so a minimal create body still validates.
+//
+// *in_flight_policy* defaults to “fail_into_audit“ per the consumer
+// doc; operators wanting at-least-once semantics opt into “resume“.
+//
+// *tenant_id* (optional) lets a tenant-admin caller create triggers in
+// another tenant for cross-tenant admin operations; “operator“ role
+// callers leave it “None“ and the boundary pins it to the JWT's
+// tenant id. The boundary enforces the RBAC -- this schema only
+// carries the field.
+type ScheduledTriggerCreate struct {
+	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
+	CronExpr          *string                 `json:"cron_expr"`
+	EventFilter       *map[string]interface{} `json:"event_filter"`
+	FireAt            *time.Time              `json:"fire_at"`
+	IdentitySub       *string                 `json:"identity_sub,omitempty"`
+
+	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+	// T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+	// storage shape and the dispatch behaviour aligned across the
+	// Initiative.
+	//
+	// Members:
+	//
+	// * :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+	//   resume a killed run from its last recorded state. At-least-once
+	//   semantics; the underlying agent run should be idempotent-friendly.
+	// * :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed`` with
+	//   a clean audit row explaining the interruption; the next trigger
+	//   tick fires a fresh run. The consumer doc (``agent-runtime-for-ops-
+	//   spec.md`` §P2) explicitly accepts this outcome as the default
+	//   policy -- which is why Option A (extend roll-our-own) is viable at
+	//   all without DBOS-style automatic resume.
+	//
+	// Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+	// the conservative policy that requires no extra infrastructure (just
+	// audit) and matches the consumer's accepted-outcome statement.
+	// Operators opt into :attr:`RESUME` per definition.
+	InFlightPolicy *ScheduledTriggerInFlightPolicy `json:"in_flight_policy,omitempty"`
+	Inputs         *map[string]interface{}         `json:"inputs"`
+
+	// Kind Closed enum of trigger shapes the G11.3 scheduler dispatches.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+	// :class:`ScheduledTrigger` row carries exactly one of three shapes,
+	// selected by this discriminator; the discriminated-union invariant is
+	// enforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``
+	// that pairs each kind with its mandatory column.
+	//
+	// Members:
+	//
+	// * :attr:`CRON` -- recurring trigger driven by a 5-field cron
+	//   expression (``cron_expr`` column). The dispatcher (T2 #823) reads
+	//   the expression via ``croniter`` and materialises ``next_fire_at``.
+	// * :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+	//   (``fire_at`` column). The dispatcher fires it once then marks
+	//   ``status = 'cancelled'`` (or the row stays inactive via
+	//   ``next_fire_at IS NULL``).
+	// * :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+	//   filter (``event_filter`` column). The transactional outbox (T3
+	//   #824) matches rows against the filter and dispatches.
+	//
+	// Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+	// coordinated DB + model change so the enum and the
+	// :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0020``'s
+	// frozen tuple) cannot drift. The lock-step discipline mirrors
+	// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+	// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+	// unit-test time.
+	Kind     ScheduledTriggerKind `json:"kind"`
+	TenantId *openapi_types.UUID  `json:"tenant_id"`
+	Timezone *string              `json:"timezone,omitempty"`
+}
+
+// ScheduledTriggerInFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
+//
+// Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+// T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+// storage shape and the dispatch behaviour aligned across the
+// Initiative.
+//
+// Members:
+//
+//   - :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+//     resume a killed run from its last recorded state. At-least-once
+//     semantics; the underlying agent run should be idempotent-friendly.
+//   - :attr:`FAIL_INTO_AUDIT` -- the killed run is marked “failed“ with
+//     a clean audit row explaining the interruption; the next trigger
+//     tick fires a fresh run. The consumer doc (“agent-runtime-for-ops-
+//     spec.md“ §P2) explicitly accepts this outcome as the default
+//     policy -- which is why Option A (extend roll-our-own) is viable at
+//     all without DBOS-style automatic resume.
+//
+// Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+// the conservative policy that requires no extra infrastructure (just
+// audit) and matches the consumer's accepted-outcome statement.
+// Operators opt into :attr:`RESUME` per definition.
+type ScheduledTriggerInFlightPolicy string
+
+// ScheduledTriggerKind Closed enum of trigger shapes the G11.3 scheduler dispatches.
+//
+// Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+// :class:`ScheduledTrigger` row carries exactly one of three shapes,
+// selected by this discriminator; the discriminated-union invariant is
+// enforced by the DB-side “ck_scheduled_trigger_kind_fields“ “CHECK“
+// that pairs each kind with its mandatory column.
+//
+// Members:
+//
+//   - :attr:`CRON` -- recurring trigger driven by a 5-field cron
+//     expression (“cron_expr“ column). The dispatcher (T2 #823) reads
+//     the expression via “croniter“ and materialises “next_fire_at“.
+//   - :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+//     (“fire_at“ column). The dispatcher fires it once then marks
+//     “status = 'cancelled'“ (or the row stays inactive via
+//     “next_fire_at IS NULL“).
+//   - :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+//     filter (“event_filter“ column). The transactional outbox (T3
+//     #824) matches rows against the filter and dispatches.
+//
+// Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+// coordinated DB + model change so the enum and the
+// :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration “0020“'s
+// frozen tuple) cannot drift. The lock-step discipline mirrors
+// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+// unit-test time.
+type ScheduledTriggerKind string
+
+// ScheduledTriggerListResponse Response envelope for “GET /api/v1/scheduler/triggers“.
+//
+// Wrapped in “{"triggers": [...]}“ so a future paging / cursor
+// field can land non-breakingly -- the same shape
+// :class:`~meho_backplane.api.v1.agents.AgentDefinitionListResponse`
+// adopted.
+type ScheduledTriggerListResponse struct {
+	Triggers []ScheduledTriggerRead `json:"triggers"`
+}
+
+// ScheduledTriggerRead Response shape for one “scheduled_trigger“ row.
+//
+// Mirrors :class:`~meho_backplane.db.models.ScheduledTrigger`'s column
+// set, projected to the wire types the JSON renderer can serialise.
+// “frozen=True“ matches the :mod:`meho_backplane.agents.schemas`
+// posture so a route handler cannot accidentally mutate the row after
+// returning it.
+type ScheduledTriggerRead struct {
+	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
+	CreatedAt         time.Time               `json:"created_at"`
+	CreatedBySub      string                  `json:"created_by_sub"`
+	CronExpr          *string                 `json:"cron_expr"`
+	EventFilter       *map[string]interface{} `json:"event_filter"`
+	FireAt            *time.Time              `json:"fire_at"`
+	Id                openapi_types.UUID      `json:"id"`
+	IdentitySub       string                  `json:"identity_sub"`
+
+	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+	// T4 #825 owns the resume/fail mechanics. The closed enum keeps the
+	// storage shape and the dispatch behaviour aligned across the
+	// Initiative.
+	//
+	// Members:
+	//
+	// * :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+	//   resume a killed run from its last recorded state. At-least-once
+	//   semantics; the underlying agent run should be idempotent-friendly.
+	// * :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed`` with
+	//   a clean audit row explaining the interruption; the next trigger
+	//   tick fires a fresh run. The consumer doc (``agent-runtime-for-ops-
+	//   spec.md`` §P2) explicitly accepts this outcome as the default
+	//   policy -- which is why Option A (extend roll-our-own) is viable at
+	//   all without DBOS-style automatic resume.
+	//
+	// Default at the migration / ORM layer is :attr:`FAIL_INTO_AUDIT` --
+	// the conservative policy that requires no extra infrastructure (just
+	// audit) and matches the consumer's accepted-outcome statement.
+	// Operators opt into :attr:`RESUME` per definition.
+	InFlightPolicy ScheduledTriggerInFlightPolicy `json:"in_flight_policy"`
+	Inputs         *map[string]interface{}        `json:"inputs"`
+
+	// Kind Closed enum of trigger shapes the G11.3 scheduler dispatches.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+	// :class:`ScheduledTrigger` row carries exactly one of three shapes,
+	// selected by this discriminator; the discriminated-union invariant is
+	// enforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``
+	// that pairs each kind with its mandatory column.
+	//
+	// Members:
+	//
+	// * :attr:`CRON` -- recurring trigger driven by a 5-field cron
+	//   expression (``cron_expr`` column). The dispatcher (T2 #823) reads
+	//   the expression via ``croniter`` and materialises ``next_fire_at``.
+	// * :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+	//   (``fire_at`` column). The dispatcher fires it once then marks
+	//   ``status = 'cancelled'`` (or the row stays inactive via
+	//   ``next_fire_at IS NULL``).
+	// * :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+	//   filter (``event_filter`` column). The transactional outbox (T3
+	//   #824) matches rows against the filter and dispatches.
+	//
+	// Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+	// coordinated DB + model change so the enum and the
+	// :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0020``'s
+	// frozen tuple) cannot drift. The lock-step discipline mirrors
+	// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
+	// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
+	// unit-test time.
+	Kind        ScheduledTriggerKind `json:"kind"`
+	LastFiredAt *time.Time           `json:"last_fired_at"`
+	NextFireAt  *time.Time           `json:"next_fire_at"`
+
+	// Status Closed lifecycle status of a :class:`ScheduledTrigger`.
+	//
+	// Initiative #804 (G11.3 Scheduler), Task #822 (T1). The admin
+	// surface (T5 #826) walks triggers through this state machine; the
+	// dispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.
+	//
+	// Members:
+	//
+	// * :attr:`ACTIVE` -- the trigger is eligible for dispatch.
+	// * :attr:`PAUSED` -- the trigger is temporarily disabled by an
+	//   operator. ``next_fire_at`` is preserved so resuming reactivates
+	//   without recomputing.
+	// * :attr:`CANCELLED` -- terminal. The trigger row is retained for
+	//   audit purposes but never fires again.
+	// * :attr:`FIRED` -- terminal one-off state. Migration ``0025`` (T2
+	//   #823) widened the enum so a one-off trigger transitions
+	//   ``ACTIVE -> FIRED`` after its single dispatch instead of going
+	//   to ``CANCELLED`` (which carries operator-intent semantics).
+	//   :class:`ScheduledTrigger` rows in this state are retained for
+	//   audit (last-fired-at + identity_sub) but never re-dispatched.
+	Status    ScheduledTriggerStatus `json:"status"`
+	TenantId  openapi_types.UUID     `json:"tenant_id"`
+	Timezone  string                 `json:"timezone"`
+	UpdatedAt time.Time              `json:"updated_at"`
+}
+
+// ScheduledTriggerStatus Closed lifecycle status of a :class:`ScheduledTrigger`.
+//
+// Initiative #804 (G11.3 Scheduler), Task #822 (T1). The admin
+// surface (T5 #826) walks triggers through this state machine; the
+// dispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.
+//
+// Members:
+//
+//   - :attr:`ACTIVE` -- the trigger is eligible for dispatch.
+//   - :attr:`PAUSED` -- the trigger is temporarily disabled by an
+//     operator. “next_fire_at“ is preserved so resuming reactivates
+//     without recomputing.
+//   - :attr:`CANCELLED` -- terminal. The trigger row is retained for
+//     audit purposes but never fires again.
+//   - :attr:`FIRED` -- terminal one-off state. Migration “0025“ (T2
+//     #823) widened the enum so a one-off trigger transitions
+//     “ACTIVE -> FIRED“ after its single dispatch instead of going
+//     to “CANCELLED“ (which carries operator-intent semantics).
+//     :class:`ScheduledTrigger` rows in this state are retained for
+//     audit (last-fired-at + identity_sub) but never re-dispatched.
+type ScheduledTriggerStatus string
+
 // SkippedConnector One connector that did not contribute candidates for a product.
 //
 // “name“ is the connector implementation key (the “impl_id“ from
@@ -2314,6 +3038,7 @@ type Target struct {
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
 	AuthModel       AuthModel               `json:"auth_model"`
 	CreatedAt       time.Time               `json:"created_at"`
+	DeletedAt       *time.Time              `json:"deleted_at"`
 	Extras          map[string]interface{}  `json:"extras"`
 	Fingerprint     *map[string]interface{} `json:"fingerprint"`
 	Fqdn            *string                 `json:"fqdn"`
@@ -2354,10 +3079,15 @@ type TargetCreate struct {
 	Notes           *string                 `json:"notes"`
 	Port            *int                    `json:"port"`
 	PreferredImplId *string                 `json:"preferred_impl_id"`
-	Product         string                  `json:"product"`
-	SecretRef       *string                 `json:"secret_ref"`
-	VpnRequired     *bool                   `json:"vpn_required,omitempty"`
+
+	// Product Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss.
+	Product     TargetCreateProduct `json:"product"`
+	SecretRef   *string             `json:"secret_ref"`
+	VpnRequired *bool               `json:"vpn_required,omitempty"`
 }
+
+// TargetCreateProduct Connector product slug. Must match the “product“ field of a registered connector class; see “GET /api/v1/connectors“ for the live list and “docs/codebase/error-message-shape.md“ for the 422 shape returned on miss.
+type TargetCreateProduct string
 
 // TargetSummary Short shape for list endpoints.
 //
@@ -2378,8 +3108,22 @@ type TargetSummary struct {
 // All fields are optional. The route handler applies only the fields
 // that are not “None“; callers must send an explicit “null“ JSON
 // value to clear a nullable column (“fqdn“, “secret_ref“,
-// “notes“). “name“ and “product“ are absent — rename = delete
-// + create.
+// “notes“). “name“ is absent — rename = delete + create.
+//
+// “product“ is patchable as of G0.14-T4 (#1145). The original
+// G0.3 contract treated “product“ as immutable after creation
+// on the theory that the operator should delete + re-create on a
+// typo, but the v0.6.0 dogfood pass (signal 6) showed the
+// combination of "no DELETE route" + "no PATCH on product" left a
+// misregistered target permanently broken — name and alias slots
+// occupied, “secret_ref“ pointing at a stranded Vault path. T4
+// closes the gap by adding DELETE *and* allowing PATCH on
+// “product“. The route handler validates the new value against
+// the set of registered connector products and rejects unknown
+// values with a structured 422 mirroring the “/probe“ 501
+// shape — so a typo at PATCH time produces the same actionable
+// diagnostic as the typo would at probe time, instead of
+// silently breaking the working target.
 //
 // “fingerprint“ is **not** accepted via PATCH — it is server-managed
 // and rewritten by every successful probe. Sending “fingerprint“
@@ -2396,6 +3140,7 @@ type TargetUpdate struct {
 	Notes           *string                 `json:"notes"`
 	Port            *int                    `json:"port"`
 	PreferredImplId *string                 `json:"preferred_impl_id"`
+	Product         *string                 `json:"product"`
 	SecretRef       *string                 `json:"secret_ref"`
 	VpnRequired     *bool                   `json:"vpn_required"`
 }
@@ -2734,6 +3479,21 @@ type TopologyTimelineResult struct {
 	Rows       []TopologyTimelineEntry `json:"rows"`
 }
 
+// UISessionContext Per-request session identity exposed on “request.state“.
+//
+// Frozen so a route handler that stashes the context on a logger
+// or forwards it to a service layer cannot accidentally mutate
+// fields downstream. The shape mirrors :class:`Operator` for the
+// fields T5 (#866) needs to render an authenticated page header;
+// “raw_jwt“ / “tenant_role“ are intentionally absent because
+// the session-cookie path does not load them today (the encrypted
+// row carries only the access token, not the decoded claims).
+type UISessionContext struct {
+	OperatorSub string             `json:"operator_sub"`
+	SessionId   openapi_types.UUID `json:"session_id"`
+	TenantId    openapi_types.UUID `json:"tenant_id"`
+}
+
 // UsageReport Top-level shape returned by :func:`compute_usage` + the API route.
 //
 // “buckets“ is sorted by “(date, surface)“ ascending — the text
@@ -3024,17 +3784,8 @@ type UnderscoreEdgeEndpoint struct {
 	Name string  `json:"name"`
 }
 
-// UnderscoreSortColumn Closed enum of sort columns exposed in the URL.
-//
-// Mirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`
-// -- redeclared at the route boundary so an out-of-range value
-// fails Pydantic validation (422 with the candidate list in the
-// error context) before the substrate's defensive
-// :class:`ValueError` guard runs. The enum's “str“ mixin keeps
-// the template's “{{ sort }}“ rendering / “href“ building
-// stable -- “str(SortColumn.NAME)“ is “"name"“ (not
-// “"_SortColumn.NAME"“).
-type UnderscoreSortColumn string
+// UnderscoreSortDirection Sort direction -- “asc“ (default) or “desc“.
+type UnderscoreSortDirection string
 
 // UnderscoreViewMode Closed enum of view modes exposed on “GET /ui/topology“.
 //
@@ -3045,6 +3796,28 @@ type UnderscoreSortColumn string
 // fails Pydantic validation (422) at the HTTP boundary so the route
 // body never sees an unknown mode.
 type UnderscoreViewMode string
+
+// MehoBackplaneUiRoutesConnectorsListViewSortColumn Closed enum of sort columns exposed in the URL.
+//
+// Mirrors the human-meaningful columns in the rendered table. An
+// out-of-enum value fails Pydantic validation at the HTTP boundary
+// with a 422 carrying the candidate list in the error context. The
+// enum's “str“ mixin keeps the template's “{{ sort }}“ rendering
+// + “href“ building stable -- “str(_SortColumn.NAME)“ is
+// “"name"“ (not “"_SortColumn.NAME"“).
+type MehoBackplaneUiRoutesConnectorsListViewSortColumn string
+
+// MehoBackplaneUiRoutesTopologyTableSortColumn Closed enum of sort columns exposed in the URL.
+//
+// Mirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`
+// -- redeclared at the route boundary so an out-of-range value
+// fails Pydantic validation (422 with the candidate list in the
+// error context) before the substrate's defensive
+// :class:`ValueError` guard runs. The enum's “str“ mixin keeps
+// the template's “{{ sort }}“ rendering / “href“ building
+// stable -- “str(SortColumn.NAME)“ is “"name"“ (not
+// “"_SortColumn.NAME"“).
+type MehoBackplaneUiRoutesTopologyTableSortColumn string
 
 // ListAgentPrincipalsApiV1AgentPrincipalsGetParams defines parameters for ListAgentPrincipalsApiV1AgentPrincipalsGet.
 type ListAgentPrincipalsApiV1AgentPrincipalsGetParams struct {
@@ -3424,6 +4197,33 @@ type UsageEndpointApiV1RetrieveUsageGetParams struct {
 // UsageEndpointApiV1RetrieveUsageGetParamsSurface defines parameters for UsageEndpointApiV1RetrieveUsageGet.
 type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
+// ListTriggersApiV1SchedulerTriggersGetParams defines parameters for ListTriggersApiV1SchedulerTriggersGet.
+type ListTriggersApiV1SchedulerTriggersGetParams struct {
+	Limit         *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int                                               `form:"offset,omitempty" json:"offset,omitempty"`
+	Kind          *ListTriggersApiV1SchedulerTriggersGetParamsKind   `form:"kind,omitempty" json:"kind,omitempty"`
+	Status        *ListTriggersApiV1SchedulerTriggersGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TenantFilter  *openapi_types.UUID                                `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string                                            `json:"authorization,omitempty"`
+}
+
+// ListTriggersApiV1SchedulerTriggersGetParamsKind defines parameters for ListTriggersApiV1SchedulerTriggersGet.
+type ListTriggersApiV1SchedulerTriggersGetParamsKind string
+
+// ListTriggersApiV1SchedulerTriggersGetParamsStatus defines parameters for ListTriggersApiV1SchedulerTriggersGet.
+type ListTriggersApiV1SchedulerTriggersGetParamsStatus string
+
+// CreateTriggerApiV1SchedulerTriggersPostParams defines parameters for CreateTriggerApiV1SchedulerTriggersPost.
+type CreateTriggerApiV1SchedulerTriggersPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams defines parameters for CancelTriggerApiV1SchedulerTriggersTriggerIdDelete.
+type CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
 	Product       *string `form:"product,omitempty" json:"product,omitempty"`
@@ -3441,6 +4241,12 @@ type CreateTargetApiV1TargetsPostParams struct {
 type DiscoverTargetsApiV1TargetsDiscoverGetParams struct {
 	Product       string  `form:"product" json:"product"`
 	SeedTarget    *string `form:"seed_target,omitempty" json:"seed_target,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteTargetApiV1TargetsNameDeleteParams defines parameters for DeleteTargetApiV1TargetsNameDelete.
+type DeleteTargetApiV1TargetsNameDeleteParams struct {
+	Force         *bool   `form:"force,omitempty" json:"force,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -3602,9 +4408,34 @@ type UiBroadcastStreamUiBroadcastStreamGetParams struct {
 	Since *string `form:"since,omitempty" json:"since,omitempty"`
 }
 
+// UiConnectorsListUiConnectorsGetParams defines parameters for UiConnectorsListUiConnectorsGet.
+type UiConnectorsListUiConnectorsGetParams struct {
+	Sort    *MehoBackplaneUiRoutesConnectorsListViewSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
+	Dir     *UnderscoreSortDirection                           `form:"dir,omitempty" json:"dir,omitempty"`
+	Product *string                                            `form:"product,omitempty" json:"product,omitempty"`
+}
+
+// KbIndexUiKbGetParams defines parameters for KbIndexUiKbGet.
+type KbIndexUiKbGetParams struct {
+	Q      *string `form:"q,omitempty" json:"q,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int    `form:"offset,omitempty" json:"offset,omitempty"`
+}
+
+// KbEntryPreviewUiKbSlugPreviewGetParams defines parameters for KbEntryPreviewUiKbSlugPreviewGet.
+type KbEntryPreviewUiKbSlugPreviewGetParams struct {
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+}
+
+// UiMemoryListUiMemoryGetParams defines parameters for UiMemoryListUiMemoryGet.
+type UiMemoryListUiMemoryGetParams struct {
+	Scope *string `form:"scope,omitempty" json:"scope,omitempty"`
+	Tag   *string `form:"tag,omitempty" json:"tag,omitempty"`
+}
+
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
-	Sort *UnderscoreSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
+	Sort *MehoBackplaneUiRoutesTopologyTableSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
 
 	// Direction Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``).
 	Direction *string             `form:"direction,omitempty" json:"direction,omitempty"`
@@ -3696,6 +4527,9 @@ type EvalEndpointApiV1RetrieveEvalPostJSONRequestBody = EvalRequest
 // RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody defines body for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost for application/json ContentType.
 type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody = RetireChecklistRequest
 
+// CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody defines body for CreateTriggerApiV1SchedulerTriggersPost for application/json ContentType.
+type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCreate
+
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
 
@@ -3707,6 +4541,72 @@ type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotate
 
 // BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody defines body for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost for application/json ContentType.
 type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody = UnderscoreBulkImportRequest
+
+// UiConnectorsListUiConnectorsGetJSONRequestBody defines body for UiConnectorsListUiConnectorsGet for application/json ContentType.
+type UiConnectorsListUiConnectorsGetJSONRequestBody = UISessionContext
+
+// UiConnectorsCreateModalUiConnectorsCreateGetJSONRequestBody defines body for UiConnectorsCreateModalUiConnectorsCreateGet for application/json ContentType.
+type UiConnectorsCreateModalUiConnectorsCreateGetJSONRequestBody = UISessionContext
+
+// UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody defines body for UiConnectorsCreateSubmitUiConnectorsCreatePost for application/x-www-form-urlencoded ContentType.
+type UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody = BodyUiConnectorsCreateSubmitUiConnectorsCreatePost
+
+// UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody defines body for UiConnectorsImportPageUiConnectorsImportGet for application/json ContentType.
+type UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody = UISessionContext
+
+// UiConnectorsImportPreviewUiConnectorsImportPostMultipartRequestBody defines body for UiConnectorsImportPreviewUiConnectorsImportPost for multipart/form-data ContentType.
+type UiConnectorsImportPreviewUiConnectorsImportPostMultipartRequestBody = BodyUiConnectorsImportPreviewUiConnectorsImportPost
+
+// UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody defines body for UiConnectorsImportConfirmUiConnectorsImportConfirmPost for multipart/form-data ContentType.
+type UiConnectorsImportConfirmUiConnectorsImportConfirmPostMultipartRequestBody = BodyUiConnectorsImportConfirmUiConnectorsImportConfirmPost
+
+// UiConnectorsDetailUiConnectorsNameGetJSONRequestBody defines body for UiConnectorsDetailUiConnectorsNameGet for application/json ContentType.
+type UiConnectorsDetailUiConnectorsNameGetJSONRequestBody = UISessionContext
+
+// UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody defines body for UiConnectorsEditSubmitUiConnectorsNamePatch for application/x-www-form-urlencoded ContentType.
+type UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody = BodyUiConnectorsEditSubmitUiConnectorsNamePatch
+
+// UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody defines body for UiConnectorsEditModalUiConnectorsNameEditGet for application/json ContentType.
+type UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody = UISessionContext
+
+// UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody defines body for UiConnectorsReprobeUiConnectorsNameProbePost for application/json ContentType.
+type UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody = UISessionContext
+
+// KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody defines body for KbEditorPreviewUiKbEditorPreviewPost for application/x-www-form-urlencoded ContentType.
+type KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody = BodyKbEditorPreviewUiKbEditorPreviewPost
+
+// KbEditorSaveUiKbNewPostFormdataRequestBody defines body for KbEditorSaveUiKbNewPost for application/x-www-form-urlencoded ContentType.
+type KbEditorSaveUiKbNewPostFormdataRequestBody = BodyKbEditorSaveUiKbNewPost
+
+// KbSearchUiKbSearchPostFormdataRequestBody defines body for KbSearchUiKbSearchPost for application/x-www-form-urlencoded ContentType.
+type KbSearchUiKbSearchPostFormdataRequestBody = BodyKbSearchUiKbSearchPost
+
+// UiMemoryBulkUiMemoryBulkPostFormdataRequestBody defines body for UiMemoryBulkUiMemoryBulkPost for application/x-www-form-urlencoded ContentType.
+type UiMemoryBulkUiMemoryBulkPostFormdataRequestBody = BodyUiMemoryBulkUiMemoryBulkPost
+
+// UiMemoryCreateModalUiMemoryCreateGetJSONRequestBody defines body for UiMemoryCreateModalUiMemoryCreateGet for application/json ContentType.
+type UiMemoryCreateModalUiMemoryCreateGetJSONRequestBody = UISessionContext
+
+// UiMemoryCreateSubmitUiMemoryCreatePostFormdataRequestBody defines body for UiMemoryCreateSubmitUiMemoryCreatePost for application/x-www-form-urlencoded ContentType.
+type UiMemoryCreateSubmitUiMemoryCreatePostFormdataRequestBody = BodyUiMemoryCreateSubmitUiMemoryCreatePost
+
+// UiMemoryPreviewUiMemoryPreviewPostFormdataRequestBody defines body for UiMemoryPreviewUiMemoryPreviewPost for application/x-www-form-urlencoded ContentType.
+type UiMemoryPreviewUiMemoryPreviewPostFormdataRequestBody = BodyUiMemoryPreviewUiMemoryPreviewPost
+
+// UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody defines body for UiMemoryDeleteUiMemoryScopeSlugDelete for application/json ContentType.
+type UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody = UISessionContext
+
+// UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody defines body for UiMemoryPatchUiMemoryScopeSlugPatch for application/x-www-form-urlencoded ContentType.
+type UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody = BodyUiMemoryPatchUiMemoryScopeSlugPatch
+
+// UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody defines body for UiMemoryEditFormUiMemoryScopeSlugEditGet for application/json ContentType.
+type UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody = UISessionContext
+
+// UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetJSONRequestBody defines body for UiMemoryPromoteModalUiMemoryScopeSlugPromoteGet for application/json ContentType.
+type UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetJSONRequestBody = UISessionContext
+
+// UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody defines body for UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost for application/x-www-form-urlencoded ContentType.
+type UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody = BodyUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost
 
 // AsApproveResponseBodyDispatchResult0 returns the union data inside the ApproveResponseBody_DispatchResult as a ApproveResponseBodyDispatchResult0
 func (t ApproveResponseBody_DispatchResult) AsApproveResponseBodyDispatchResult0() (ApproveResponseBodyDispatchResult0, error) {
@@ -3766,6 +4666,68 @@ func (t ApproveResponseBody_DispatchResult) MarshalJSON() ([]byte, error) {
 }
 
 func (t *ApproveResponseBody_DispatchResult) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsCallOperationBodyTarget0 returns the union data inside the CallOperationBody_Target as a CallOperationBodyTarget0
+func (t CallOperationBody_Target) AsCallOperationBodyTarget0() (CallOperationBodyTarget0, error) {
+	var body CallOperationBodyTarget0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCallOperationBodyTarget0 overwrites any union data inside the CallOperationBody_Target as the provided CallOperationBodyTarget0
+func (t *CallOperationBody_Target) FromCallOperationBodyTarget0(v CallOperationBodyTarget0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCallOperationBodyTarget0 performs a merge with any union data inside the CallOperationBody_Target, using the provided CallOperationBodyTarget0
+func (t *CallOperationBody_Target) MergeCallOperationBodyTarget0(v CallOperationBodyTarget0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCallOperationBodyTarget1 returns the union data inside the CallOperationBody_Target as a CallOperationBodyTarget1
+func (t CallOperationBody_Target) AsCallOperationBodyTarget1() (CallOperationBodyTarget1, error) {
+	var body CallOperationBodyTarget1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCallOperationBodyTarget1 overwrites any union data inside the CallOperationBody_Target as the provided CallOperationBodyTarget1
+func (t *CallOperationBody_Target) FromCallOperationBodyTarget1(v CallOperationBodyTarget1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCallOperationBodyTarget1 performs a merge with any union data inside the CallOperationBody_Target, using the provided CallOperationBodyTarget1
+func (t *CallOperationBody_Target) MergeCallOperationBodyTarget1(v CallOperationBodyTarget1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t CallOperationBody_Target) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *CallOperationBody_Target) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }
@@ -4156,6 +5118,17 @@ type ClientInterface interface {
 	// UsageEndpointApiV1RetrieveUsageGet request
 	UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListTriggersApiV1SchedulerTriggersGet request
+	ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateTriggerApiV1SchedulerTriggersPostWithBody request with any body
+	CreateTriggerApiV1SchedulerTriggersPostWithBody(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateTriggerApiV1SchedulerTriggersPost(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CancelTriggerApiV1SchedulerTriggersTriggerIdDelete request
+	CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -4166,6 +5139,9 @@ type ClientInterface interface {
 
 	// DiscoverTargetsApiV1TargetsDiscoverGet request
 	DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteTargetApiV1TargetsNameDelete request
+	DeleteTargetApiV1TargetsNameDelete(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DescribeTargetApiV1TargetsNameGet request
 	DescribeTargetApiV1TargetsNameGet(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4254,14 +5230,129 @@ type ClientInterface interface {
 	// UiBroadcastStreamUiBroadcastStreamGet request
 	UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiStubConnectorsUiConnectorsGet request
-	UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiConnectorsListUiConnectorsGetWithBody request with any body
+	UiConnectorsListUiConnectorsGetWithBody(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiStubKnowledgeUiKnowledgeGet request
-	UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiConnectorsListUiConnectorsGet(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, body UiConnectorsListUiConnectorsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiStubMemoryUiMemoryGet request
-	UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiConnectorsCreateModalUiConnectorsCreateGetWithBody request with any body
+	UiConnectorsCreateModalUiConnectorsCreateGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsCreateModalUiConnectorsCreateGet(ctx context.Context, body UiConnectorsCreateModalUiConnectorsCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsCreateSubmitUiConnectorsCreatePostWithBody request with any body
+	UiConnectorsCreateSubmitUiConnectorsCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsCreateSubmitUiConnectorsCreatePostWithFormdataBody(ctx context.Context, body UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsImportPageUiConnectorsImportGetWithBody request with any body
+	UiConnectorsImportPageUiConnectorsImportGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsImportPageUiConnectorsImportGet(ctx context.Context, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsImportPreviewUiConnectorsImportPostWithBody request with any body
+	UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody request with any body
+	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsDetailUiConnectorsNameGetWithBody request with any body
+	UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBody request with any body
+	UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBody(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsEditModalUiConnectorsNameEditGetWithBody request with any body
+	UiConnectorsEditModalUiConnectorsNameEditGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsEditModalUiConnectorsNameEditGet(ctx context.Context, name string, body UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsReprobeUiConnectorsNameProbePostWithBody request with any body
+	UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbIndexUiKbGet request
+	KbIndexUiKbGet(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbEditorPreviewUiKbEditorPreviewPostWithBody request with any body
+	KbEditorPreviewUiKbEditorPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KbEditorPreviewUiKbEditorPreviewPostWithFormdataBody(ctx context.Context, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbEditorSaveUiKbNewPostWithBody request with any body
+	KbEditorSaveUiKbNewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KbEditorSaveUiKbNewPostWithFormdataBody(ctx context.Context, body KbEditorSaveUiKbNewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbSearchUiKbSearchPostWithBody request with any body
+	KbSearchUiKbSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KbSearchUiKbSearchPostWithFormdataBody(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbEntryDetailUiKbSlugGet request
+	KbEntryDetailUiKbSlugGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbEntryPreviewUiKbSlugPreviewGet request
+	KbEntryPreviewUiKbSlugPreviewGet(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryListUiMemoryGet request
+	UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryBulkUiMemoryBulkPostWithBody request with any body
+	UiMemoryBulkUiMemoryBulkPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryBulkUiMemoryBulkPostWithFormdataBody(ctx context.Context, body UiMemoryBulkUiMemoryBulkPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryCreateModalUiMemoryCreateGetWithBody request with any body
+	UiMemoryCreateModalUiMemoryCreateGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryCreateModalUiMemoryCreateGet(ctx context.Context, body UiMemoryCreateModalUiMemoryCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryCreateSubmitUiMemoryCreatePostWithBody request with any body
+	UiMemoryCreateSubmitUiMemoryCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryCreateSubmitUiMemoryCreatePostWithFormdataBody(ctx context.Context, body UiMemoryCreateSubmitUiMemoryCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryPreviewUiMemoryPreviewPostWithBody request with any body
+	UiMemoryPreviewUiMemoryPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryPreviewUiMemoryPreviewPostWithFormdataBody(ctx context.Context, body UiMemoryPreviewUiMemoryPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryTagsUiMemoryTagsGet request
+	UiMemoryTagsUiMemoryTagsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody request with any body
+	UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryDeleteUiMemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryDetailUiMemoryScopeSlugGet request
+	UiMemoryDetailUiMemoryScopeSlugGet(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryPatchUiMemoryScopeSlugPatchWithBody request with any body
+	UiMemoryPatchUiMemoryScopeSlugPatchWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody request with any body
+	UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryEditFormUiMemoryScopeSlugEditGet(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithBody request with any body
+	UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryPromoteModalUiMemoryScopeSlugPromoteGet(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBody request with any body
+	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -5377,6 +6468,54 @@ func (c *Client) UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params 
 	return c.Client.Do(req)
 }
 
+func (c *Client) ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListTriggersApiV1SchedulerTriggersGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateTriggerApiV1SchedulerTriggersPostWithBody(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateTriggerApiV1SchedulerTriggersPost(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateTriggerApiV1SchedulerTriggersPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest(c.Server, triggerId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListTargetsApiV1TargetsGetRequest(c.Server, params)
 	if err != nil {
@@ -5415,6 +6554,18 @@ func (c *Client) CreateTargetApiV1TargetsPost(ctx context.Context, params *Creat
 
 func (c *Client) DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteTargetApiV1TargetsNameDelete(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteTargetApiV1TargetsNameDeleteRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5785,8 +6936,8 @@ func (c *Client) UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, para
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiStubConnectorsUiConnectorsGetRequest(c.Server)
+func (c *Client) UiConnectorsListUiConnectorsGetWithBody(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsListUiConnectorsGetRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5797,8 +6948,8 @@ func (c *Client) UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiStubKnowledgeUiKnowledgeGetRequest(c.Server)
+func (c *Client) UiConnectorsListUiConnectorsGet(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, body UiConnectorsListUiConnectorsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsListUiConnectorsGetRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5809,8 +6960,548 @@ func (c *Client) UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors .
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiStubMemoryUiMemoryGetRequest(c.Server)
+func (c *Client) UiConnectorsCreateModalUiConnectorsCreateGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsCreateModalUiConnectorsCreateGetRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsCreateModalUiConnectorsCreateGet(ctx context.Context, body UiConnectorsCreateModalUiConnectorsCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsCreateModalUiConnectorsCreateGetRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsCreateSubmitUiConnectorsCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsCreateSubmitUiConnectorsCreatePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsCreateSubmitUiConnectorsCreatePostWithFormdataBody(ctx context.Context, body UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsCreateSubmitUiConnectorsCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsImportPageUiConnectorsImportGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsImportPageUiConnectorsImportGetRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsImportPageUiConnectorsImportGet(ctx context.Context, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsImportPageUiConnectorsImportGetRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsImportPreviewUiConnectorsImportPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsDetailUiConnectorsNameGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(c.Server, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsDetailUiConnectorsNameGet(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsDetailUiConnectorsNameGetRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithBody(c.Server, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBody(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithFormdataBody(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsEditModalUiConnectorsNameEditGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsEditModalUiConnectorsNameEditGetRequestWithBody(c.Server, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsEditModalUiConnectorsNameEditGet(ctx context.Context, name string, body UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsEditModalUiConnectorsNameEditGetRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(c.Server, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsReprobeUiConnectorsNameProbePostRequest(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbIndexUiKbGet(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbIndexUiKbGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEditorPreviewUiKbEditorPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEditorPreviewUiKbEditorPreviewPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEditorPreviewUiKbEditorPreviewPostWithFormdataBody(ctx context.Context, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEditorPreviewUiKbEditorPreviewPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEditorSaveUiKbNewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEditorSaveUiKbNewPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEditorSaveUiKbNewPostWithFormdataBody(ctx context.Context, body KbEditorSaveUiKbNewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEditorSaveUiKbNewPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbSearchUiKbSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbSearchUiKbSearchPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbSearchUiKbSearchPostWithFormdataBody(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbSearchUiKbSearchPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEntryDetailUiKbSlugGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEntryDetailUiKbSlugGetRequest(c.Server, slug)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEntryPreviewUiKbSlugPreviewGet(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEntryPreviewUiKbSlugPreviewGetRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryListUiMemoryGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryBulkUiMemoryBulkPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryBulkUiMemoryBulkPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryBulkUiMemoryBulkPostWithFormdataBody(ctx context.Context, body UiMemoryBulkUiMemoryBulkPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryBulkUiMemoryBulkPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryCreateModalUiMemoryCreateGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryCreateModalUiMemoryCreateGetRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryCreateModalUiMemoryCreateGet(ctx context.Context, body UiMemoryCreateModalUiMemoryCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryCreateModalUiMemoryCreateGetRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryCreateSubmitUiMemoryCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryCreateSubmitUiMemoryCreatePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryCreateSubmitUiMemoryCreatePostWithFormdataBody(ctx context.Context, body UiMemoryCreateSubmitUiMemoryCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryCreateSubmitUiMemoryCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPreviewUiMemoryPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPreviewUiMemoryPreviewPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPreviewUiMemoryPreviewPostWithFormdataBody(ctx context.Context, body UiMemoryPreviewUiMemoryPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPreviewUiMemoryPreviewPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryTagsUiMemoryTagsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryTagsUiMemoryTagsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryDeleteUiMemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequest(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryDetailUiMemoryScopeSlugGet(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryDetailUiMemoryScopeSlugGetRequest(c.Server, scope, slug)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPatchUiMemoryScopeSlugPatchWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithFormdataBody(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryEditFormUiMemoryScopeSlugEditGet(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequest(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPromoteModalUiMemoryScopeSlugPromoteGet(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetRequest(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithBody(c.Server, scope, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithFormdataBody(c.Server, scope, slug, body)
 	if err != nil {
 		return nil, err
 	}
@@ -9953,6 +11644,260 @@ func NewUsageEndpointApiV1RetrieveUsageGetRequest(server string, params *UsageEn
 	return req, nil
 }
 
+// NewListTriggersApiV1SchedulerTriggersGetRequest generates requests for ListTriggersApiV1SchedulerTriggersGet
+func NewListTriggersApiV1SchedulerTriggersGetRequest(server string, params *ListTriggersApiV1SchedulerTriggersGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/scheduler/triggers")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateTriggerApiV1SchedulerTriggersPostRequest calls the generic CreateTriggerApiV1SchedulerTriggersPost builder with application/json body
+func NewCreateTriggerApiV1SchedulerTriggersPostRequest(server string, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody generates requests for CreateTriggerApiV1SchedulerTriggersPost with any type of body
+func NewCreateTriggerApiV1SchedulerTriggersPostRequestWithBody(server string, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/scheduler/triggers")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest generates requests for CancelTriggerApiV1SchedulerTriggersTriggerIdDelete
+func NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest(server string, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "trigger_id", runtime.ParamLocationPath, triggerId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/scheduler/triggers/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListTargetsApiV1TargetsGetRequest generates requests for ListTargetsApiV1TargetsGet
 func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV1TargetsGetParams) (*http.Request, error) {
 	var err error
@@ -10158,6 +12103,77 @@ func NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(server string, params *Dis
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteTargetApiV1TargetsNameDeleteRequest generates requests for DeleteTargetApiV1TargetsNameDelete
+func NewDeleteTargetApiV1TargetsNameDeleteRequest(server string, name string, params *DeleteTargetApiV1TargetsNameDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Force != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "force", runtime.ParamLocationQuery, *params.Force); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -12114,8 +14130,19 @@ func NewUiBroadcastStreamUiBroadcastStreamGetRequest(server string, params *UiBr
 	return req, nil
 }
 
-// NewUiStubConnectorsUiConnectorsGetRequest generates requests for UiStubConnectorsUiConnectorsGet
-func NewUiStubConnectorsUiConnectorsGetRequest(server string) (*http.Request, error) {
+// NewUiConnectorsListUiConnectorsGetRequest calls the generic UiConnectorsListUiConnectorsGet builder with application/json body
+func NewUiConnectorsListUiConnectorsGetRequest(server string, params *UiConnectorsListUiConnectorsGetParams, body UiConnectorsListUiConnectorsGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsListUiConnectorsGetRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUiConnectorsListUiConnectorsGetRequestWithBody generates requests for UiConnectorsListUiConnectorsGet with any type of body
+func NewUiConnectorsListUiConnectorsGetRequestWithBody(server string, params *UiConnectorsListUiConnectorsGetParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -12133,6 +14160,509 @@ func NewUiStubConnectorsUiConnectorsGetRequest(server string) (*http.Request, er
 		return nil, err
 	}
 
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Sort != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "sort", runtime.ParamLocationQuery, *params.Sort); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Dir != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "dir", runtime.ParamLocationQuery, *params.Dir); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Product != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "product", runtime.ParamLocationQuery, *params.Product); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsCreateModalUiConnectorsCreateGetRequest calls the generic UiConnectorsCreateModalUiConnectorsCreateGet builder with application/json body
+func NewUiConnectorsCreateModalUiConnectorsCreateGetRequest(server string, body UiConnectorsCreateModalUiConnectorsCreateGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsCreateModalUiConnectorsCreateGetRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewUiConnectorsCreateModalUiConnectorsCreateGetRequestWithBody generates requests for UiConnectorsCreateModalUiConnectorsCreateGet with any type of body
+func NewUiConnectorsCreateModalUiConnectorsCreateGetRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsCreateSubmitUiConnectorsCreatePostRequestWithFormdataBody calls the generic UiConnectorsCreateSubmitUiConnectorsCreatePost builder with application/x-www-form-urlencoded body
+func NewUiConnectorsCreateSubmitUiConnectorsCreatePostRequestWithFormdataBody(server string, body UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiConnectorsCreateSubmitUiConnectorsCreatePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiConnectorsCreateSubmitUiConnectorsCreatePostRequestWithBody generates requests for UiConnectorsCreateSubmitUiConnectorsCreatePost with any type of body
+func NewUiConnectorsCreateSubmitUiConnectorsCreatePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsImportPageUiConnectorsImportGetRequest calls the generic UiConnectorsImportPageUiConnectorsImportGet builder with application/json body
+func NewUiConnectorsImportPageUiConnectorsImportGetRequest(server string, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsImportPageUiConnectorsImportGetRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewUiConnectorsImportPageUiConnectorsImportGetRequestWithBody generates requests for UiConnectorsImportPageUiConnectorsImportGet with any type of body
+func NewUiConnectorsImportPageUiConnectorsImportGetRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/import")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsImportPreviewUiConnectorsImportPostRequestWithBody generates requests for UiConnectorsImportPreviewUiConnectorsImportPost with any type of body
+func NewUiConnectorsImportPreviewUiConnectorsImportPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/import")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody generates requests for UiConnectorsImportConfirmUiConnectorsImportConfirmPost with any type of body
+func NewUiConnectorsImportConfirmUiConnectorsImportConfirmPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/import/confirm")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsDetailUiConnectorsNameGetRequest calls the generic UiConnectorsDetailUiConnectorsNameGet builder with application/json body
+func NewUiConnectorsDetailUiConnectorsNameGetRequest(server string, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server, name, "application/json", bodyReader)
+}
+
+// NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody generates requests for UiConnectorsDetailUiConnectorsNameGet with any type of body
+func NewUiConnectorsDetailUiConnectorsNameGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithFormdataBody calls the generic UiConnectorsEditSubmitUiConnectorsNamePatch builder with application/x-www-form-urlencoded body
+func NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithFormdataBody(server string, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithBody(server, name, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithBody generates requests for UiConnectorsEditSubmitUiConnectorsNamePatch with any type of body
+func NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsEditModalUiConnectorsNameEditGetRequest calls the generic UiConnectorsEditModalUiConnectorsNameEditGet builder with application/json body
+func NewUiConnectorsEditModalUiConnectorsNameEditGetRequest(server string, name string, body UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsEditModalUiConnectorsNameEditGetRequestWithBody(server, name, "application/json", bodyReader)
+}
+
+// NewUiConnectorsEditModalUiConnectorsNameEditGetRequestWithBody generates requests for UiConnectorsEditModalUiConnectorsNameEditGet with any type of body
+func NewUiConnectorsEditModalUiConnectorsNameEditGetRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/edit", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiConnectorsReprobeUiConnectorsNameProbePostRequest calls the generic UiConnectorsReprobeUiConnectorsNameProbePost builder with application/json body
+func NewUiConnectorsReprobeUiConnectorsNameProbePostRequest(server string, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server, name, "application/json", bodyReader)
+}
+
+// NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody generates requests for UiConnectorsReprobeUiConnectorsNameProbePost with any type of body
+func NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server string, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/probe", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKbIndexUiKbGetRequest generates requests for KbIndexUiKbGet
+func NewKbIndexUiKbGetRequest(server string, params *KbIndexUiKbGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -12141,8 +14671,19 @@ func NewUiStubConnectorsUiConnectorsGetRequest(server string) (*http.Request, er
 	return req, nil
 }
 
-// NewUiStubKnowledgeUiKnowledgeGetRequest generates requests for UiStubKnowledgeUiKnowledgeGet
-func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, error) {
+// NewKbEditorPreviewUiKbEditorPreviewPostRequestWithFormdataBody calls the generic KbEditorPreviewUiKbEditorPreviewPost builder with application/x-www-form-urlencoded body
+func NewKbEditorPreviewUiKbEditorPreviewPostRequestWithFormdataBody(server string, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewKbEditorPreviewUiKbEditorPreviewPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewKbEditorPreviewUiKbEditorPreviewPostRequestWithBody generates requests for KbEditorPreviewUiKbEditorPreviewPost with any type of body
+func NewKbEditorPreviewUiKbEditorPreviewPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -12150,7 +14691,123 @@ func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, erro
 		return nil, err
 	}
 
-	operationPath := fmt.Sprintf("/ui/knowledge")
+	operationPath := fmt.Sprintf("/ui/kb/editor-preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKbEditorSaveUiKbNewPostRequestWithFormdataBody calls the generic KbEditorSaveUiKbNewPost builder with application/x-www-form-urlencoded body
+func NewKbEditorSaveUiKbNewPostRequestWithFormdataBody(server string, body KbEditorSaveUiKbNewPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewKbEditorSaveUiKbNewPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewKbEditorSaveUiKbNewPostRequestWithBody generates requests for KbEditorSaveUiKbNewPost with any type of body
+func NewKbEditorSaveUiKbNewPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/new")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKbSearchUiKbSearchPostRequestWithFormdataBody calls the generic KbSearchUiKbSearchPost builder with application/x-www-form-urlencoded body
+func NewKbSearchUiKbSearchPostRequestWithFormdataBody(server string, body KbSearchUiKbSearchPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewKbSearchUiKbSearchPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewKbSearchUiKbSearchPostRequestWithBody generates requests for KbSearchUiKbSearchPost with any type of body
+func NewKbSearchUiKbSearchPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/search")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKbEntryDetailUiKbSlugGetRequest generates requests for KbEntryDetailUiKbSlugGet
+func NewKbEntryDetailUiKbSlugGetRequest(server string, slug string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/%s", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -12168,8 +14825,64 @@ func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, erro
 	return req, nil
 }
 
-// NewUiStubMemoryUiMemoryGetRequest generates requests for UiStubMemoryUiMemoryGet
-func NewUiStubMemoryUiMemoryGetRequest(server string) (*http.Request, error) {
+// NewKbEntryPreviewUiKbSlugPreviewGetRequest generates requests for KbEntryPreviewUiKbSlugPreviewGet
+func NewKbEntryPreviewUiKbSlugPreviewGetRequest(server string, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/%s/preview", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiMemoryListUiMemoryGetRequest generates requests for UiMemoryListUiMemoryGet
+func NewUiMemoryListUiMemoryGetRequest(server string, params *UiMemoryListUiMemoryGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -12187,10 +14900,546 @@ func NewUiStubMemoryUiMemoryGetRequest(server string) (*http.Request, error) {
 		return nil, err
 	}
 
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Tag != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tag", runtime.ParamLocationQuery, *params.Tag); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewUiMemoryBulkUiMemoryBulkPostRequestWithFormdataBody calls the generic UiMemoryBulkUiMemoryBulkPost builder with application/x-www-form-urlencoded body
+func NewUiMemoryBulkUiMemoryBulkPostRequestWithFormdataBody(server string, body UiMemoryBulkUiMemoryBulkPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiMemoryBulkUiMemoryBulkPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiMemoryBulkUiMemoryBulkPostRequestWithBody generates requests for UiMemoryBulkUiMemoryBulkPost with any type of body
+func NewUiMemoryBulkUiMemoryBulkPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/bulk")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryCreateModalUiMemoryCreateGetRequest calls the generic UiMemoryCreateModalUiMemoryCreateGet builder with application/json body
+func NewUiMemoryCreateModalUiMemoryCreateGetRequest(server string, body UiMemoryCreateModalUiMemoryCreateGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiMemoryCreateModalUiMemoryCreateGetRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewUiMemoryCreateModalUiMemoryCreateGetRequestWithBody generates requests for UiMemoryCreateModalUiMemoryCreateGet with any type of body
+func NewUiMemoryCreateModalUiMemoryCreateGetRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryCreateSubmitUiMemoryCreatePostRequestWithFormdataBody calls the generic UiMemoryCreateSubmitUiMemoryCreatePost builder with application/x-www-form-urlencoded body
+func NewUiMemoryCreateSubmitUiMemoryCreatePostRequestWithFormdataBody(server string, body UiMemoryCreateSubmitUiMemoryCreatePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiMemoryCreateSubmitUiMemoryCreatePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiMemoryCreateSubmitUiMemoryCreatePostRequestWithBody generates requests for UiMemoryCreateSubmitUiMemoryCreatePost with any type of body
+func NewUiMemoryCreateSubmitUiMemoryCreatePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryPreviewUiMemoryPreviewPostRequestWithFormdataBody calls the generic UiMemoryPreviewUiMemoryPreviewPost builder with application/x-www-form-urlencoded body
+func NewUiMemoryPreviewUiMemoryPreviewPostRequestWithFormdataBody(server string, body UiMemoryPreviewUiMemoryPreviewPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiMemoryPreviewUiMemoryPreviewPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiMemoryPreviewUiMemoryPreviewPostRequestWithBody generates requests for UiMemoryPreviewUiMemoryPreviewPost with any type of body
+func NewUiMemoryPreviewUiMemoryPreviewPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryTagsUiMemoryTagsGetRequest generates requests for UiMemoryTagsUiMemoryTagsGet
+func NewUiMemoryTagsUiMemoryTagsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/tags")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequest calls the generic UiMemoryDeleteUiMemoryScopeSlugDelete builder with application/json body
+func NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequest(server string, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody(server, scope, slug, "application/json", bodyReader)
+}
+
+// NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody generates requests for UiMemoryDeleteUiMemoryScopeSlugDelete with any type of body
+func NewUiMemoryDeleteUiMemoryScopeSlugDeleteRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryDetailUiMemoryScopeSlugGetRequest generates requests for UiMemoryDetailUiMemoryScopeSlugGet
+func NewUiMemoryDetailUiMemoryScopeSlugGetRequest(server string, scope MemoryScope, slug string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithFormdataBody calls the generic UiMemoryPatchUiMemoryScopeSlugPatch builder with application/x-www-form-urlencoded body
+func NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithFormdataBody(server string, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody(server, scope, slug, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody generates requests for UiMemoryPatchUiMemoryScopeSlugPatch with any type of body
+func NewUiMemoryPatchUiMemoryScopeSlugPatchRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequest calls the generic UiMemoryEditFormUiMemoryScopeSlugEditGet builder with application/json body
+func NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequest(server string, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody(server, scope, slug, "application/json", bodyReader)
+}
+
+// NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody generates requests for UiMemoryEditFormUiMemoryScopeSlugEditGet with any type of body
+func NewUiMemoryEditFormUiMemoryScopeSlugEditGetRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s/edit", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetRequest calls the generic UiMemoryPromoteModalUiMemoryScopeSlugPromoteGet builder with application/json body
+func NewUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetRequest(server string, scope MemoryScope, slug string, body UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetRequestWithBody(server, scope, slug, "application/json", bodyReader)
+}
+
+// NewUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetRequestWithBody generates requests for UiMemoryPromoteModalUiMemoryScopeSlugPromoteGet with any type of body
+func NewUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s/promote", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithFormdataBody calls the generic UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost builder with application/x-www-form-urlencoded body
+func NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithFormdataBody(server string, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithBody(server, scope, slug, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithBody generates requests for UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePost with any type of body
+func NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithBody(server string, scope MemoryScope, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory/%s/%s/promote", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -12791,6 +16040,17 @@ type ClientWithResponsesInterface interface {
 	// UsageEndpointApiV1RetrieveUsageGetWithResponse request
 	UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error)
 
+	// ListTriggersApiV1SchedulerTriggersGetWithResponse request
+	ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error)
+
+	// CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse request with any body
+	CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error)
+
+	CreateTriggerApiV1SchedulerTriggersPostWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error)
+
+	// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse request
+	CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error)
+
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
 
@@ -12801,6 +16061,9 @@ type ClientWithResponsesInterface interface {
 
 	// DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request
 	DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error)
+
+	// DeleteTargetApiV1TargetsNameDeleteWithResponse request
+	DeleteTargetApiV1TargetsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteTargetApiV1TargetsNameDeleteResponse, error)
 
 	// DescribeTargetApiV1TargetsNameGetWithResponse request
 	DescribeTargetApiV1TargetsNameGetWithResponse(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*DescribeTargetApiV1TargetsNameGetResponse, error)
@@ -12889,14 +16152,129 @@ type ClientWithResponsesInterface interface {
 	// UiBroadcastStreamUiBroadcastStreamGetWithResponse request
 	UiBroadcastStreamUiBroadcastStreamGetWithResponse(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error)
 
-	// UiStubConnectorsUiConnectorsGetWithResponse request
-	UiStubConnectorsUiConnectorsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubConnectorsUiConnectorsGetResponse, error)
+	// UiConnectorsListUiConnectorsGetWithBodyWithResponse request with any body
+	UiConnectorsListUiConnectorsGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsListUiConnectorsGetResponse, error)
 
-	// UiStubKnowledgeUiKnowledgeGetWithResponse request
-	UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error)
+	UiConnectorsListUiConnectorsGetWithResponse(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, body UiConnectorsListUiConnectorsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsListUiConnectorsGetResponse, error)
 
-	// UiStubMemoryUiMemoryGetWithResponse request
-	UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error)
+	// UiConnectorsCreateModalUiConnectorsCreateGetWithBodyWithResponse request with any body
+	UiConnectorsCreateModalUiConnectorsCreateGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsCreateModalUiConnectorsCreateGetResponse, error)
+
+	UiConnectorsCreateModalUiConnectorsCreateGetWithResponse(ctx context.Context, body UiConnectorsCreateModalUiConnectorsCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsCreateModalUiConnectorsCreateGetResponse, error)
+
+	// UiConnectorsCreateSubmitUiConnectorsCreatePostWithBodyWithResponse request with any body
+	UiConnectorsCreateSubmitUiConnectorsCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsCreateSubmitUiConnectorsCreatePostResponse, error)
+
+	UiConnectorsCreateSubmitUiConnectorsCreatePostWithFormdataBodyWithResponse(ctx context.Context, body UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsCreateSubmitUiConnectorsCreatePostResponse, error)
+
+	// UiConnectorsImportPageUiConnectorsImportGetWithBodyWithResponse request with any body
+	UiConnectorsImportPageUiConnectorsImportGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error)
+
+	UiConnectorsImportPageUiConnectorsImportGetWithResponse(ctx context.Context, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error)
+
+	// UiConnectorsImportPreviewUiConnectorsImportPostWithBodyWithResponse request with any body
+	UiConnectorsImportPreviewUiConnectorsImportPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportPreviewUiConnectorsImportPostResponse, error)
+
+	// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse request with any body
+	UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error)
+
+	// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with any body
+	UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
+
+	UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error)
+
+	// UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse request with any body
+	UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
+
+	UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBodyWithResponse(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
+
+	// UiConnectorsEditModalUiConnectorsNameEditGetWithBodyWithResponse request with any body
+	UiConnectorsEditModalUiConnectorsNameEditGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditModalUiConnectorsNameEditGetResponse, error)
+
+	UiConnectorsEditModalUiConnectorsNameEditGetWithResponse(ctx context.Context, name string, body UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsEditModalUiConnectorsNameEditGetResponse, error)
+
+	// UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse request with any body
+	UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
+
+	UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
+
+	// KbIndexUiKbGetWithResponse request
+	KbIndexUiKbGetWithResponse(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*KbIndexUiKbGetResponse, error)
+
+	// KbEditorPreviewUiKbEditorPreviewPostWithBodyWithResponse request with any body
+	KbEditorPreviewUiKbEditorPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error)
+
+	KbEditorPreviewUiKbEditorPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error)
+
+	// KbEditorSaveUiKbNewPostWithBodyWithResponse request with any body
+	KbEditorSaveUiKbNewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbEditorSaveUiKbNewPostResponse, error)
+
+	KbEditorSaveUiKbNewPostWithFormdataBodyWithResponse(ctx context.Context, body KbEditorSaveUiKbNewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbEditorSaveUiKbNewPostResponse, error)
+
+	// KbSearchUiKbSearchPostWithBodyWithResponse request with any body
+	KbSearchUiKbSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error)
+
+	KbSearchUiKbSearchPostWithFormdataBodyWithResponse(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error)
+
+	// KbEntryDetailUiKbSlugGetWithResponse request
+	KbEntryDetailUiKbSlugGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*KbEntryDetailUiKbSlugGetResponse, error)
+
+	// KbEntryPreviewUiKbSlugPreviewGetWithResponse request
+	KbEntryPreviewUiKbSlugPreviewGetWithResponse(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*KbEntryPreviewUiKbSlugPreviewGetResponse, error)
+
+	// UiMemoryListUiMemoryGetWithResponse request
+	UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error)
+
+	// UiMemoryBulkUiMemoryBulkPostWithBodyWithResponse request with any body
+	UiMemoryBulkUiMemoryBulkPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryBulkUiMemoryBulkPostResponse, error)
+
+	UiMemoryBulkUiMemoryBulkPostWithFormdataBodyWithResponse(ctx context.Context, body UiMemoryBulkUiMemoryBulkPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryBulkUiMemoryBulkPostResponse, error)
+
+	// UiMemoryCreateModalUiMemoryCreateGetWithBodyWithResponse request with any body
+	UiMemoryCreateModalUiMemoryCreateGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryCreateModalUiMemoryCreateGetResponse, error)
+
+	UiMemoryCreateModalUiMemoryCreateGetWithResponse(ctx context.Context, body UiMemoryCreateModalUiMemoryCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryCreateModalUiMemoryCreateGetResponse, error)
+
+	// UiMemoryCreateSubmitUiMemoryCreatePostWithBodyWithResponse request with any body
+	UiMemoryCreateSubmitUiMemoryCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryCreateSubmitUiMemoryCreatePostResponse, error)
+
+	UiMemoryCreateSubmitUiMemoryCreatePostWithFormdataBodyWithResponse(ctx context.Context, body UiMemoryCreateSubmitUiMemoryCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryCreateSubmitUiMemoryCreatePostResponse, error)
+
+	// UiMemoryPreviewUiMemoryPreviewPostWithBodyWithResponse request with any body
+	UiMemoryPreviewUiMemoryPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPreviewUiMemoryPreviewPostResponse, error)
+
+	UiMemoryPreviewUiMemoryPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body UiMemoryPreviewUiMemoryPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPreviewUiMemoryPreviewPostResponse, error)
+
+	// UiMemoryTagsUiMemoryTagsGetWithResponse request
+	UiMemoryTagsUiMemoryTagsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiMemoryTagsUiMemoryTagsGetResponse, error)
+
+	// UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse request with any body
+	UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error)
+
+	UiMemoryDeleteUiMemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error)
+
+	// UiMemoryDetailUiMemoryScopeSlugGetWithResponse request
+	UiMemoryDetailUiMemoryScopeSlugGetWithResponse(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*UiMemoryDetailUiMemoryScopeSlugGetResponse, error)
+
+	// UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse request with any body
+	UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error)
+
+	UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error)
+
+	// UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse request with any body
+	UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error)
+
+	UiMemoryEditFormUiMemoryScopeSlugEditGetWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error)
+
+	// UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithBodyWithResponse request with any body
+	UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse, error)
+
+	UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse, error)
+
+	// UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBodyWithResponse request with any body
+	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse, error)
+
+	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse, error)
 
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
@@ -14436,6 +17814,74 @@ func (r UsageEndpointApiV1RetrieveUsageGetResponse) StatusCode() int {
 	return 0
 }
 
+type ListTriggersApiV1SchedulerTriggersGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ScheduledTriggerListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListTriggersApiV1SchedulerTriggersGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListTriggersApiV1SchedulerTriggersGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateTriggerApiV1SchedulerTriggersPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *ScheduledTriggerRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateTriggerApiV1SchedulerTriggersPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateTriggerApiV1SchedulerTriggersPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListTargetsApiV1TargetsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -14499,6 +17945,36 @@ func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteTargetApiV1TargetsNameDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON409      *struct {
+		Detail struct {
+			GraphNodeRefs int                                             `json:"graph_node_refs"`
+			Kind          DeleteTargetApiV1TargetsNameDelete409DetailKind `json:"kind"`
+			Message       string                                          `json:"message"`
+		} `json:"detail"`
+	}
+	JSON422 *HTTPValidationError
+}
+type DeleteTargetApiV1TargetsNameDelete409DetailKind string
+
+// Status returns HTTPResponse.Status
+func (r DeleteTargetApiV1TargetsNameDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteTargetApiV1TargetsNameDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -15133,13 +18609,14 @@ func (r UiBroadcastStreamUiBroadcastStreamGetResponse) StatusCode() int {
 	return 0
 }
 
-type UiStubConnectorsUiConnectorsGetResponse struct {
+type UiConnectorsListUiConnectorsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
-func (r UiStubConnectorsUiConnectorsGetResponse) Status() string {
+func (r UiConnectorsListUiConnectorsGetResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -15147,20 +18624,21 @@ func (r UiStubConnectorsUiConnectorsGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r UiStubConnectorsUiConnectorsGetResponse) StatusCode() int {
+func (r UiConnectorsListUiConnectorsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
 	return 0
 }
 
-type UiStubKnowledgeUiKnowledgeGetResponse struct {
+type UiConnectorsCreateModalUiConnectorsCreateGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
-func (r UiStubKnowledgeUiKnowledgeGetResponse) Status() string {
+func (r UiConnectorsCreateModalUiConnectorsCreateGetResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -15168,20 +18646,21 @@ func (r UiStubKnowledgeUiKnowledgeGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r UiStubKnowledgeUiKnowledgeGetResponse) StatusCode() int {
+func (r UiConnectorsCreateModalUiConnectorsCreateGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
 	return 0
 }
 
-type UiStubMemoryUiMemoryGetResponse struct {
+type UiConnectorsCreateSubmitUiConnectorsCreatePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
-func (r UiStubMemoryUiMemoryGetResponse) Status() string {
+func (r UiConnectorsCreateSubmitUiConnectorsCreatePostResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -15189,7 +18668,556 @@ func (r UiStubMemoryUiMemoryGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r UiStubMemoryUiMemoryGetResponse) StatusCode() int {
+func (r UiConnectorsCreateSubmitUiConnectorsCreatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsImportPageUiConnectorsImportGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsImportPageUiConnectorsImportGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsImportPageUiConnectorsImportGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsImportPreviewUiConnectorsImportPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsImportPreviewUiConnectorsImportPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsImportPreviewUiConnectorsImportPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsDetailUiConnectorsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsDetailUiConnectorsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsDetailUiConnectorsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsEditSubmitUiConnectorsNamePatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsEditSubmitUiConnectorsNamePatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsEditSubmitUiConnectorsNamePatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsEditModalUiConnectorsNameEditGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsEditModalUiConnectorsNameEditGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsEditModalUiConnectorsNameEditGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsReprobeUiConnectorsNameProbePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbIndexUiKbGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbIndexUiKbGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbIndexUiKbGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbEditorPreviewUiKbEditorPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbEditorPreviewUiKbEditorPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbEditorPreviewUiKbEditorPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbEditorSaveUiKbNewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbEditorSaveUiKbNewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbEditorSaveUiKbNewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbSearchUiKbSearchPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbSearchUiKbSearchPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbSearchUiKbSearchPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbEntryDetailUiKbSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbEntryDetailUiKbSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbEntryDetailUiKbSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbEntryPreviewUiKbSlugPreviewGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbEntryPreviewUiKbSlugPreviewGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbEntryPreviewUiKbSlugPreviewGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryListUiMemoryGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryListUiMemoryGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryListUiMemoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryBulkUiMemoryBulkPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryBulkUiMemoryBulkPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryBulkUiMemoryBulkPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryCreateModalUiMemoryCreateGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryCreateModalUiMemoryCreateGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryCreateModalUiMemoryCreateGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryCreateSubmitUiMemoryCreatePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryCreateSubmitUiMemoryCreatePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryCreateSubmitUiMemoryCreatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryPreviewUiMemoryPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryPreviewUiMemoryPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryPreviewUiMemoryPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryTagsUiMemoryTagsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryTagsUiMemoryTagsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryTagsUiMemoryTagsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryDeleteUiMemoryScopeSlugDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryDeleteUiMemoryScopeSlugDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryDeleteUiMemoryScopeSlugDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryDetailUiMemoryScopeSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryDetailUiMemoryScopeSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryDetailUiMemoryScopeSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryPatchUiMemoryScopeSlugPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryPatchUiMemoryScopeSlugPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryPatchUiMemoryScopeSlugPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryEditFormUiMemoryScopeSlugEditGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryEditFormUiMemoryScopeSlugEditGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryEditFormUiMemoryScopeSlugEditGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -16065,6 +20093,41 @@ func (c *ClientWithResponses) UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx
 	return ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp)
 }
 
+// ListTriggersApiV1SchedulerTriggersGetWithResponse request returning *ListTriggersApiV1SchedulerTriggersGetResponse
+func (c *ClientWithResponses) ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error) {
+	rsp, err := c.ListTriggersApiV1SchedulerTriggersGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListTriggersApiV1SchedulerTriggersGetResponse(rsp)
+}
+
+// CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse request with arbitrary body returning *CreateTriggerApiV1SchedulerTriggersPostResponse
+func (c *ClientWithResponses) CreateTriggerApiV1SchedulerTriggersPostWithBodyWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	rsp, err := c.CreateTriggerApiV1SchedulerTriggersPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateTriggerApiV1SchedulerTriggersPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateTriggerApiV1SchedulerTriggersPostWithResponse(ctx context.Context, params *CreateTriggerApiV1SchedulerTriggersPostParams, body CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	rsp, err := c.CreateTriggerApiV1SchedulerTriggersPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateTriggerApiV1SchedulerTriggersPostResponse(rsp)
+}
+
+// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse request returning *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse
+func (c *ClientWithResponses) CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error) {
+	rsp, err := c.CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx, triggerId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse(rsp)
+}
+
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
 func (c *ClientWithResponses) ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error) {
 	rsp, err := c.ListTargetsApiV1TargetsGet(ctx, params, reqEditors...)
@@ -16098,6 +20161,15 @@ func (c *ClientWithResponses) DiscoverTargetsApiV1TargetsDiscoverGetWithResponse
 		return nil, err
 	}
 	return ParseDiscoverTargetsApiV1TargetsDiscoverGetResponse(rsp)
+}
+
+// DeleteTargetApiV1TargetsNameDeleteWithResponse request returning *DeleteTargetApiV1TargetsNameDeleteResponse
+func (c *ClientWithResponses) DeleteTargetApiV1TargetsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteTargetApiV1TargetsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteTargetApiV1TargetsNameDeleteResponse, error) {
+	rsp, err := c.DeleteTargetApiV1TargetsNameDelete(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteTargetApiV1TargetsNameDeleteResponse(rsp)
 }
 
 // DescribeTargetApiV1TargetsNameGetWithResponse request returning *DescribeTargetApiV1TargetsNameGetResponse
@@ -16367,31 +20439,416 @@ func (c *ClientWithResponses) UiBroadcastStreamUiBroadcastStreamGetWithResponse(
 	return ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp)
 }
 
-// UiStubConnectorsUiConnectorsGetWithResponse request returning *UiStubConnectorsUiConnectorsGetResponse
-func (c *ClientWithResponses) UiStubConnectorsUiConnectorsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubConnectorsUiConnectorsGetResponse, error) {
-	rsp, err := c.UiStubConnectorsUiConnectorsGet(ctx, reqEditors...)
+// UiConnectorsListUiConnectorsGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsListUiConnectorsGetResponse
+func (c *ClientWithResponses) UiConnectorsListUiConnectorsGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsListUiConnectorsGetResponse, error) {
+	rsp, err := c.UiConnectorsListUiConnectorsGetWithBody(ctx, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUiStubConnectorsUiConnectorsGetResponse(rsp)
+	return ParseUiConnectorsListUiConnectorsGetResponse(rsp)
 }
 
-// UiStubKnowledgeUiKnowledgeGetWithResponse request returning *UiStubKnowledgeUiKnowledgeGetResponse
-func (c *ClientWithResponses) UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error) {
-	rsp, err := c.UiStubKnowledgeUiKnowledgeGet(ctx, reqEditors...)
+func (c *ClientWithResponses) UiConnectorsListUiConnectorsGetWithResponse(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, body UiConnectorsListUiConnectorsGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsListUiConnectorsGetResponse, error) {
+	rsp, err := c.UiConnectorsListUiConnectorsGet(ctx, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp)
+	return ParseUiConnectorsListUiConnectorsGetResponse(rsp)
 }
 
-// UiStubMemoryUiMemoryGetWithResponse request returning *UiStubMemoryUiMemoryGetResponse
-func (c *ClientWithResponses) UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error) {
-	rsp, err := c.UiStubMemoryUiMemoryGet(ctx, reqEditors...)
+// UiConnectorsCreateModalUiConnectorsCreateGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsCreateModalUiConnectorsCreateGetResponse
+func (c *ClientWithResponses) UiConnectorsCreateModalUiConnectorsCreateGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsCreateModalUiConnectorsCreateGetResponse, error) {
+	rsp, err := c.UiConnectorsCreateModalUiConnectorsCreateGetWithBody(ctx, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUiStubMemoryUiMemoryGetResponse(rsp)
+	return ParseUiConnectorsCreateModalUiConnectorsCreateGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsCreateModalUiConnectorsCreateGetWithResponse(ctx context.Context, body UiConnectorsCreateModalUiConnectorsCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsCreateModalUiConnectorsCreateGetResponse, error) {
+	rsp, err := c.UiConnectorsCreateModalUiConnectorsCreateGet(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsCreateModalUiConnectorsCreateGetResponse(rsp)
+}
+
+// UiConnectorsCreateSubmitUiConnectorsCreatePostWithBodyWithResponse request with arbitrary body returning *UiConnectorsCreateSubmitUiConnectorsCreatePostResponse
+func (c *ClientWithResponses) UiConnectorsCreateSubmitUiConnectorsCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsCreateSubmitUiConnectorsCreatePostResponse, error) {
+	rsp, err := c.UiConnectorsCreateSubmitUiConnectorsCreatePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsCreateSubmitUiConnectorsCreatePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsCreateSubmitUiConnectorsCreatePostWithFormdataBodyWithResponse(ctx context.Context, body UiConnectorsCreateSubmitUiConnectorsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsCreateSubmitUiConnectorsCreatePostResponse, error) {
+	rsp, err := c.UiConnectorsCreateSubmitUiConnectorsCreatePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsCreateSubmitUiConnectorsCreatePostResponse(rsp)
+}
+
+// UiConnectorsImportPageUiConnectorsImportGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsImportPageUiConnectorsImportGetResponse
+func (c *ClientWithResponses) UiConnectorsImportPageUiConnectorsImportGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error) {
+	rsp, err := c.UiConnectorsImportPageUiConnectorsImportGetWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsImportPageUiConnectorsImportGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsImportPageUiConnectorsImportGetWithResponse(ctx context.Context, body UiConnectorsImportPageUiConnectorsImportGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error) {
+	rsp, err := c.UiConnectorsImportPageUiConnectorsImportGet(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsImportPageUiConnectorsImportGetResponse(rsp)
+}
+
+// UiConnectorsImportPreviewUiConnectorsImportPostWithBodyWithResponse request with arbitrary body returning *UiConnectorsImportPreviewUiConnectorsImportPostResponse
+func (c *ClientWithResponses) UiConnectorsImportPreviewUiConnectorsImportPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportPreviewUiConnectorsImportPostResponse, error) {
+	rsp, err := c.UiConnectorsImportPreviewUiConnectorsImportPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsImportPreviewUiConnectorsImportPostResponse(rsp)
+}
+
+// UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse request with arbitrary body returning *UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse
+func (c *ClientWithResponses) UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error) {
+	rsp, err := c.UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp)
+}
+
+// UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDetailUiConnectorsNameGetResponse
+func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	rsp, err := c.UiConnectorsDetailUiConnectorsNameGetWithBody(ctx, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsDetailUiConnectorsNameGetWithResponse(ctx context.Context, name string, body UiConnectorsDetailUiConnectorsNameGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	rsp, err := c.UiConnectorsDetailUiConnectorsNameGet(ctx, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp)
+}
+
+// UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse request with arbitrary body returning *UiConnectorsEditSubmitUiConnectorsNamePatchResponse
+func (c *ClientWithResponses) UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error) {
+	rsp, err := c.UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsEditSubmitUiConnectorsNamePatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBodyWithResponse(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error) {
+	rsp, err := c.UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBody(ctx, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsEditSubmitUiConnectorsNamePatchResponse(rsp)
+}
+
+// UiConnectorsEditModalUiConnectorsNameEditGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsEditModalUiConnectorsNameEditGetResponse
+func (c *ClientWithResponses) UiConnectorsEditModalUiConnectorsNameEditGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditModalUiConnectorsNameEditGetResponse, error) {
+	rsp, err := c.UiConnectorsEditModalUiConnectorsNameEditGetWithBody(ctx, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsEditModalUiConnectorsNameEditGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsEditModalUiConnectorsNameEditGetWithResponse(ctx context.Context, name string, body UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsEditModalUiConnectorsNameEditGetResponse, error) {
+	rsp, err := c.UiConnectorsEditModalUiConnectorsNameEditGet(ctx, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsEditModalUiConnectorsNameEditGetResponse(rsp)
+}
+
+// UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse request with arbitrary body returning *UiConnectorsReprobeUiConnectorsNameProbePostResponse
+func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error) {
+	rsp, err := c.UiConnectorsReprobeUiConnectorsNameProbePostWithBody(ctx, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error) {
+	rsp, err := c.UiConnectorsReprobeUiConnectorsNameProbePost(ctx, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
+}
+
+// KbIndexUiKbGetWithResponse request returning *KbIndexUiKbGetResponse
+func (c *ClientWithResponses) KbIndexUiKbGetWithResponse(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*KbIndexUiKbGetResponse, error) {
+	rsp, err := c.KbIndexUiKbGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbIndexUiKbGetResponse(rsp)
+}
+
+// KbEditorPreviewUiKbEditorPreviewPostWithBodyWithResponse request with arbitrary body returning *KbEditorPreviewUiKbEditorPreviewPostResponse
+func (c *ClientWithResponses) KbEditorPreviewUiKbEditorPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error) {
+	rsp, err := c.KbEditorPreviewUiKbEditorPreviewPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEditorPreviewUiKbEditorPreviewPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) KbEditorPreviewUiKbEditorPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error) {
+	rsp, err := c.KbEditorPreviewUiKbEditorPreviewPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEditorPreviewUiKbEditorPreviewPostResponse(rsp)
+}
+
+// KbEditorSaveUiKbNewPostWithBodyWithResponse request with arbitrary body returning *KbEditorSaveUiKbNewPostResponse
+func (c *ClientWithResponses) KbEditorSaveUiKbNewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbEditorSaveUiKbNewPostResponse, error) {
+	rsp, err := c.KbEditorSaveUiKbNewPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEditorSaveUiKbNewPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) KbEditorSaveUiKbNewPostWithFormdataBodyWithResponse(ctx context.Context, body KbEditorSaveUiKbNewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbEditorSaveUiKbNewPostResponse, error) {
+	rsp, err := c.KbEditorSaveUiKbNewPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEditorSaveUiKbNewPostResponse(rsp)
+}
+
+// KbSearchUiKbSearchPostWithBodyWithResponse request with arbitrary body returning *KbSearchUiKbSearchPostResponse
+func (c *ClientWithResponses) KbSearchUiKbSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error) {
+	rsp, err := c.KbSearchUiKbSearchPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbSearchUiKbSearchPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) KbSearchUiKbSearchPostWithFormdataBodyWithResponse(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error) {
+	rsp, err := c.KbSearchUiKbSearchPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbSearchUiKbSearchPostResponse(rsp)
+}
+
+// KbEntryDetailUiKbSlugGetWithResponse request returning *KbEntryDetailUiKbSlugGetResponse
+func (c *ClientWithResponses) KbEntryDetailUiKbSlugGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*KbEntryDetailUiKbSlugGetResponse, error) {
+	rsp, err := c.KbEntryDetailUiKbSlugGet(ctx, slug, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEntryDetailUiKbSlugGetResponse(rsp)
+}
+
+// KbEntryPreviewUiKbSlugPreviewGetWithResponse request returning *KbEntryPreviewUiKbSlugPreviewGetResponse
+func (c *ClientWithResponses) KbEntryPreviewUiKbSlugPreviewGetWithResponse(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*KbEntryPreviewUiKbSlugPreviewGetResponse, error) {
+	rsp, err := c.KbEntryPreviewUiKbSlugPreviewGet(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEntryPreviewUiKbSlugPreviewGetResponse(rsp)
+}
+
+// UiMemoryListUiMemoryGetWithResponse request returning *UiMemoryListUiMemoryGetResponse
+func (c *ClientWithResponses) UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error) {
+	rsp, err := c.UiMemoryListUiMemoryGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryListUiMemoryGetResponse(rsp)
+}
+
+// UiMemoryBulkUiMemoryBulkPostWithBodyWithResponse request with arbitrary body returning *UiMemoryBulkUiMemoryBulkPostResponse
+func (c *ClientWithResponses) UiMemoryBulkUiMemoryBulkPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryBulkUiMemoryBulkPostResponse, error) {
+	rsp, err := c.UiMemoryBulkUiMemoryBulkPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryBulkUiMemoryBulkPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryBulkUiMemoryBulkPostWithFormdataBodyWithResponse(ctx context.Context, body UiMemoryBulkUiMemoryBulkPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryBulkUiMemoryBulkPostResponse, error) {
+	rsp, err := c.UiMemoryBulkUiMemoryBulkPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryBulkUiMemoryBulkPostResponse(rsp)
+}
+
+// UiMemoryCreateModalUiMemoryCreateGetWithBodyWithResponse request with arbitrary body returning *UiMemoryCreateModalUiMemoryCreateGetResponse
+func (c *ClientWithResponses) UiMemoryCreateModalUiMemoryCreateGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryCreateModalUiMemoryCreateGetResponse, error) {
+	rsp, err := c.UiMemoryCreateModalUiMemoryCreateGetWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryCreateModalUiMemoryCreateGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryCreateModalUiMemoryCreateGetWithResponse(ctx context.Context, body UiMemoryCreateModalUiMemoryCreateGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryCreateModalUiMemoryCreateGetResponse, error) {
+	rsp, err := c.UiMemoryCreateModalUiMemoryCreateGet(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryCreateModalUiMemoryCreateGetResponse(rsp)
+}
+
+// UiMemoryCreateSubmitUiMemoryCreatePostWithBodyWithResponse request with arbitrary body returning *UiMemoryCreateSubmitUiMemoryCreatePostResponse
+func (c *ClientWithResponses) UiMemoryCreateSubmitUiMemoryCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryCreateSubmitUiMemoryCreatePostResponse, error) {
+	rsp, err := c.UiMemoryCreateSubmitUiMemoryCreatePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryCreateSubmitUiMemoryCreatePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryCreateSubmitUiMemoryCreatePostWithFormdataBodyWithResponse(ctx context.Context, body UiMemoryCreateSubmitUiMemoryCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryCreateSubmitUiMemoryCreatePostResponse, error) {
+	rsp, err := c.UiMemoryCreateSubmitUiMemoryCreatePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryCreateSubmitUiMemoryCreatePostResponse(rsp)
+}
+
+// UiMemoryPreviewUiMemoryPreviewPostWithBodyWithResponse request with arbitrary body returning *UiMemoryPreviewUiMemoryPreviewPostResponse
+func (c *ClientWithResponses) UiMemoryPreviewUiMemoryPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPreviewUiMemoryPreviewPostResponse, error) {
+	rsp, err := c.UiMemoryPreviewUiMemoryPreviewPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPreviewUiMemoryPreviewPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryPreviewUiMemoryPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body UiMemoryPreviewUiMemoryPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPreviewUiMemoryPreviewPostResponse, error) {
+	rsp, err := c.UiMemoryPreviewUiMemoryPreviewPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPreviewUiMemoryPreviewPostResponse(rsp)
+}
+
+// UiMemoryTagsUiMemoryTagsGetWithResponse request returning *UiMemoryTagsUiMemoryTagsGetResponse
+func (c *ClientWithResponses) UiMemoryTagsUiMemoryTagsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiMemoryTagsUiMemoryTagsGetResponse, error) {
+	rsp, err := c.UiMemoryTagsUiMemoryTagsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryTagsUiMemoryTagsGetResponse(rsp)
+}
+
+// UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse request with arbitrary body returning *UiMemoryDeleteUiMemoryScopeSlugDeleteResponse
+func (c *ClientWithResponses) UiMemoryDeleteUiMemoryScopeSlugDeleteWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error) {
+	rsp, err := c.UiMemoryDeleteUiMemoryScopeSlugDeleteWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryDeleteUiMemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryDeleteUiMemoryScopeSlugDeleteJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error) {
+	rsp, err := c.UiMemoryDeleteUiMemoryScopeSlugDelete(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse(rsp)
+}
+
+// UiMemoryDetailUiMemoryScopeSlugGetWithResponse request returning *UiMemoryDetailUiMemoryScopeSlugGetResponse
+func (c *ClientWithResponses) UiMemoryDetailUiMemoryScopeSlugGetWithResponse(ctx context.Context, scope MemoryScope, slug string, reqEditors ...RequestEditorFn) (*UiMemoryDetailUiMemoryScopeSlugGetResponse, error) {
+	rsp, err := c.UiMemoryDetailUiMemoryScopeSlugGet(ctx, scope, slug, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryDetailUiMemoryScopeSlugGetResponse(rsp)
+}
+
+// UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse request with arbitrary body returning *UiMemoryPatchUiMemoryScopeSlugPatchResponse
+func (c *ClientWithResponses) UiMemoryPatchUiMemoryScopeSlugPatchWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error) {
+	rsp, err := c.UiMemoryPatchUiMemoryScopeSlugPatchWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPatchUiMemoryScopeSlugPatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error) {
+	rsp, err := c.UiMemoryPatchUiMemoryScopeSlugPatchWithFormdataBody(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse(rsp)
+}
+
+// UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse request with arbitrary body returning *UiMemoryEditFormUiMemoryScopeSlugEditGetResponse
+func (c *ClientWithResponses) UiMemoryEditFormUiMemoryScopeSlugEditGetWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error) {
+	rsp, err := c.UiMemoryEditFormUiMemoryScopeSlugEditGetWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryEditFormUiMemoryScopeSlugEditGetWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryEditFormUiMemoryScopeSlugEditGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error) {
+	rsp, err := c.UiMemoryEditFormUiMemoryScopeSlugEditGet(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse(rsp)
+}
+
+// UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithBodyWithResponse request with arbitrary body returning *UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse
+func (c *ClientWithResponses) UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse, error) {
+	rsp, err := c.UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse, error) {
+	rsp, err := c.UiMemoryPromoteModalUiMemoryScopeSlugPromoteGet(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse(rsp)
+}
+
+// UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBodyWithResponse request with arbitrary body returning *UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse
+func (c *ClientWithResponses) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse, error) {
+	rsp, err := c.UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBody(ctx, scope, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse, error) {
+	rsp, err := c.UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBody(ctx, scope, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse(rsp)
 }
 
 // UiTopologyTableUiTopologyGetWithResponse request returning *UiTopologyTableUiTopologyGetResponse
@@ -18541,6 +22998,98 @@ func ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp *http.Response) (*Usage
 	return response, nil
 }
 
+// ParseListTriggersApiV1SchedulerTriggersGetResponse parses an HTTP response from a ListTriggersApiV1SchedulerTriggersGetWithResponse call
+func ParseListTriggersApiV1SchedulerTriggersGetResponse(rsp *http.Response) (*ListTriggersApiV1SchedulerTriggersGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListTriggersApiV1SchedulerTriggersGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ScheduledTriggerListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateTriggerApiV1SchedulerTriggersPostResponse parses an HTTP response from a CreateTriggerApiV1SchedulerTriggersPostWithResponse call
+func ParseCreateTriggerApiV1SchedulerTriggersPostResponse(rsp *http.Response) (*CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateTriggerApiV1SchedulerTriggersPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest ScheduledTriggerRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse parses an HTTP response from a CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse call
+func ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse(rsp *http.Response) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListTargetsApiV1TargetsGetResponse parses an HTTP response from a ListTargetsApiV1TargetsGetWithResponse call
 func ParseListTargetsApiV1TargetsGetResponse(rsp *http.Response) (*ListTargetsApiV1TargetsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -18627,6 +23176,45 @@ func ParseDiscoverTargetsApiV1TargetsDiscoverGetResponse(rsp *http.Response) (*D
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteTargetApiV1TargetsNameDeleteResponse parses an HTTP response from a DeleteTargetApiV1TargetsNameDeleteWithResponse call
+func ParseDeleteTargetApiV1TargetsNameDeleteResponse(rsp *http.Response) (*DeleteTargetApiV1TargetsNameDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteTargetApiV1TargetsNameDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest struct {
+			Detail struct {
+				GraphNodeRefs int                                             `json:"graph_node_refs"`
+				Kind          DeleteTargetApiV1TargetsNameDelete409DetailKind `json:"kind"`
+				Message       string                                          `json:"message"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -19448,15 +24036,561 @@ func ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp *http.Response) (*Ui
 	return response, nil
 }
 
-// ParseUiStubConnectorsUiConnectorsGetResponse parses an HTTP response from a UiStubConnectorsUiConnectorsGetWithResponse call
-func ParseUiStubConnectorsUiConnectorsGetResponse(rsp *http.Response) (*UiStubConnectorsUiConnectorsGetResponse, error) {
+// ParseUiConnectorsListUiConnectorsGetResponse parses an HTTP response from a UiConnectorsListUiConnectorsGetWithResponse call
+func ParseUiConnectorsListUiConnectorsGetResponse(rsp *http.Response) (*UiConnectorsListUiConnectorsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiStubConnectorsUiConnectorsGetResponse{
+	response := &UiConnectorsListUiConnectorsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsCreateModalUiConnectorsCreateGetResponse parses an HTTP response from a UiConnectorsCreateModalUiConnectorsCreateGetWithResponse call
+func ParseUiConnectorsCreateModalUiConnectorsCreateGetResponse(rsp *http.Response) (*UiConnectorsCreateModalUiConnectorsCreateGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsCreateModalUiConnectorsCreateGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsCreateSubmitUiConnectorsCreatePostResponse parses an HTTP response from a UiConnectorsCreateSubmitUiConnectorsCreatePostWithResponse call
+func ParseUiConnectorsCreateSubmitUiConnectorsCreatePostResponse(rsp *http.Response) (*UiConnectorsCreateSubmitUiConnectorsCreatePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsCreateSubmitUiConnectorsCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsImportPageUiConnectorsImportGetResponse parses an HTTP response from a UiConnectorsImportPageUiConnectorsImportGetWithResponse call
+func ParseUiConnectorsImportPageUiConnectorsImportGetResponse(rsp *http.Response) (*UiConnectorsImportPageUiConnectorsImportGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsImportPageUiConnectorsImportGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsImportPreviewUiConnectorsImportPostResponse parses an HTTP response from a UiConnectorsImportPreviewUiConnectorsImportPostWithResponse call
+func ParseUiConnectorsImportPreviewUiConnectorsImportPostResponse(rsp *http.Response) (*UiConnectorsImportPreviewUiConnectorsImportPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsImportPreviewUiConnectorsImportPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse parses an HTTP response from a UiConnectorsImportConfirmUiConnectorsImportConfirmPostWithResponse call
+func ParseUiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse(rsp *http.Response) (*UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsImportConfirmUiConnectorsImportConfirmPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsDetailUiConnectorsNameGetResponse parses an HTTP response from a UiConnectorsDetailUiConnectorsNameGetWithResponse call
+func ParseUiConnectorsDetailUiConnectorsNameGetResponse(rsp *http.Response) (*UiConnectorsDetailUiConnectorsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsDetailUiConnectorsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsEditSubmitUiConnectorsNamePatchResponse parses an HTTP response from a UiConnectorsEditSubmitUiConnectorsNamePatchWithResponse call
+func ParseUiConnectorsEditSubmitUiConnectorsNamePatchResponse(rsp *http.Response) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsEditSubmitUiConnectorsNamePatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsEditModalUiConnectorsNameEditGetResponse parses an HTTP response from a UiConnectorsEditModalUiConnectorsNameEditGetWithResponse call
+func ParseUiConnectorsEditModalUiConnectorsNameEditGetResponse(rsp *http.Response) (*UiConnectorsEditModalUiConnectorsNameEditGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsEditModalUiConnectorsNameEditGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse parses an HTTP response from a UiConnectorsReprobeUiConnectorsNameProbePostWithResponse call
+func ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp *http.Response) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsReprobeUiConnectorsNameProbePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbIndexUiKbGetResponse parses an HTTP response from a KbIndexUiKbGetWithResponse call
+func ParseKbIndexUiKbGetResponse(rsp *http.Response) (*KbIndexUiKbGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbIndexUiKbGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbEditorPreviewUiKbEditorPreviewPostResponse parses an HTTP response from a KbEditorPreviewUiKbEditorPreviewPostWithResponse call
+func ParseKbEditorPreviewUiKbEditorPreviewPostResponse(rsp *http.Response) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbEditorPreviewUiKbEditorPreviewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbEditorSaveUiKbNewPostResponse parses an HTTP response from a KbEditorSaveUiKbNewPostWithResponse call
+func ParseKbEditorSaveUiKbNewPostResponse(rsp *http.Response) (*KbEditorSaveUiKbNewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbEditorSaveUiKbNewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbSearchUiKbSearchPostResponse parses an HTTP response from a KbSearchUiKbSearchPostWithResponse call
+func ParseKbSearchUiKbSearchPostResponse(rsp *http.Response) (*KbSearchUiKbSearchPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbSearchUiKbSearchPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbEntryDetailUiKbSlugGetResponse parses an HTTP response from a KbEntryDetailUiKbSlugGetWithResponse call
+func ParseKbEntryDetailUiKbSlugGetResponse(rsp *http.Response) (*KbEntryDetailUiKbSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbEntryDetailUiKbSlugGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbEntryPreviewUiKbSlugPreviewGetResponse parses an HTTP response from a KbEntryPreviewUiKbSlugPreviewGetWithResponse call
+func ParseKbEntryPreviewUiKbSlugPreviewGetResponse(rsp *http.Response) (*KbEntryPreviewUiKbSlugPreviewGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbEntryPreviewUiKbSlugPreviewGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryListUiMemoryGetResponse parses an HTTP response from a UiMemoryListUiMemoryGetWithResponse call
+func ParseUiMemoryListUiMemoryGetResponse(rsp *http.Response) (*UiMemoryListUiMemoryGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryListUiMemoryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryBulkUiMemoryBulkPostResponse parses an HTTP response from a UiMemoryBulkUiMemoryBulkPostWithResponse call
+func ParseUiMemoryBulkUiMemoryBulkPostResponse(rsp *http.Response) (*UiMemoryBulkUiMemoryBulkPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryBulkUiMemoryBulkPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryCreateModalUiMemoryCreateGetResponse parses an HTTP response from a UiMemoryCreateModalUiMemoryCreateGetWithResponse call
+func ParseUiMemoryCreateModalUiMemoryCreateGetResponse(rsp *http.Response) (*UiMemoryCreateModalUiMemoryCreateGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryCreateModalUiMemoryCreateGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryCreateSubmitUiMemoryCreatePostResponse parses an HTTP response from a UiMemoryCreateSubmitUiMemoryCreatePostWithResponse call
+func ParseUiMemoryCreateSubmitUiMemoryCreatePostResponse(rsp *http.Response) (*UiMemoryCreateSubmitUiMemoryCreatePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryCreateSubmitUiMemoryCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryPreviewUiMemoryPreviewPostResponse parses an HTTP response from a UiMemoryPreviewUiMemoryPreviewPostWithResponse call
+func ParseUiMemoryPreviewUiMemoryPreviewPostResponse(rsp *http.Response) (*UiMemoryPreviewUiMemoryPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryPreviewUiMemoryPreviewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryTagsUiMemoryTagsGetResponse parses an HTTP response from a UiMemoryTagsUiMemoryTagsGetWithResponse call
+func ParseUiMemoryTagsUiMemoryTagsGetResponse(rsp *http.Response) (*UiMemoryTagsUiMemoryTagsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryTagsUiMemoryTagsGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
@@ -19464,33 +24598,157 @@ func ParseUiStubConnectorsUiConnectorsGetResponse(rsp *http.Response) (*UiStubCo
 	return response, nil
 }
 
-// ParseUiStubKnowledgeUiKnowledgeGetResponse parses an HTTP response from a UiStubKnowledgeUiKnowledgeGetWithResponse call
-func ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp *http.Response) (*UiStubKnowledgeUiKnowledgeGetResponse, error) {
+// ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse parses an HTTP response from a UiMemoryDeleteUiMemoryScopeSlugDeleteWithResponse call
+func ParseUiMemoryDeleteUiMemoryScopeSlugDeleteResponse(rsp *http.Response) (*UiMemoryDeleteUiMemoryScopeSlugDeleteResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiStubKnowledgeUiKnowledgeGetResponse{
+	response := &UiMemoryDeleteUiMemoryScopeSlugDeleteResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil
 }
 
-// ParseUiStubMemoryUiMemoryGetResponse parses an HTTP response from a UiStubMemoryUiMemoryGetWithResponse call
-func ParseUiStubMemoryUiMemoryGetResponse(rsp *http.Response) (*UiStubMemoryUiMemoryGetResponse, error) {
+// ParseUiMemoryDetailUiMemoryScopeSlugGetResponse parses an HTTP response from a UiMemoryDetailUiMemoryScopeSlugGetWithResponse call
+func ParseUiMemoryDetailUiMemoryScopeSlugGetResponse(rsp *http.Response) (*UiMemoryDetailUiMemoryScopeSlugGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiStubMemoryUiMemoryGetResponse{
+	response := &UiMemoryDetailUiMemoryScopeSlugGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse parses an HTTP response from a UiMemoryPatchUiMemoryScopeSlugPatchWithResponse call
+func ParseUiMemoryPatchUiMemoryScopeSlugPatchResponse(rsp *http.Response) (*UiMemoryPatchUiMemoryScopeSlugPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryPatchUiMemoryScopeSlugPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse parses an HTTP response from a UiMemoryEditFormUiMemoryScopeSlugEditGetWithResponse call
+func ParseUiMemoryEditFormUiMemoryScopeSlugEditGetResponse(rsp *http.Response) (*UiMemoryEditFormUiMemoryScopeSlugEditGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryEditFormUiMemoryScopeSlugEditGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse parses an HTTP response from a UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetWithResponse call
+func ParseUiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse(rsp *http.Response) (*UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryPromoteModalUiMemoryScopeSlugPromoteGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse parses an HTTP response from a UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithResponse call
+func ParseUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse(rsp *http.Response) (*UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

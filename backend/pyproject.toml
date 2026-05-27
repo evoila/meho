@@ -34,9 +34,18 @@ dependencies = [
     "msgspec>=0.20.0",
     "tabulate>=0.9.0",
     "pydantic-ai-slim[anthropic]>=1.102.0",
-    "markdown-it-py>=3.0",
+    "croniter>=6.2.2",
+    "markdown-it-py[linkify]>=3.0",
     "pygments>=2.18",
     "python-multipart>=0.0.12",
+    # G11.4-T3 (#1072) -- Tier-2 free-text NER redaction. Both pins are
+    # the 2026-03-15 release (the most recent at task-file time); the
+    # version is also called out in the issue body. Loaded **lazily**
+    # by :mod:`meho_backplane.redaction.presidio` so a Tier-1-only
+    # policy never imports them at runtime (the dep is still installed
+    # but stays untouched until a policy with a ``tier2`` block fires).
+    "presidio-analyzer==2.2.362",
+    "presidio-anonymizer==2.2.362",
 ]
 
 [dependency-groups]
@@ -250,6 +259,17 @@ ignore_missing_imports = true
 module = ["asyncssh.*"]
 ignore_missing_imports = true
 
+# pygments (G10.4-T1 #877) ships no ``py.typed`` marker as of 2.20.
+# Used by :mod:`meho_backplane.ui.routes.memory.render` for the
+# server-side Markdown code-block syntax highlighter; the call sites
+# are scoped to one module so the untyped surface stays narrow.
+# ``markdown-it-py`` itself ships ``py.typed``, no override needed.
+# Drop this override if upstream ships stubs (``types-Pygments`` is
+# available on PyPI but would add a build-time dep).
+[[tool.mypy.overrides]]
+module = ["pygments", "pygments.*"]
+ignore_missing_imports = true
+
 # defusedxml (G3.7-T2 #847) ships no ``py.typed`` marker as of 0.7.1.
 # Used by :mod:`meho_backplane.connectors.pfsense.ops_read` to parse the
 # pfSense ``config.xml`` safely (XXE-hardened drop-in for the stdlib
@@ -305,6 +325,37 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["meho_backplane.jsonflux.*"]
 disable_error_code = ["type-arg", "attr-defined"]
+
+# ``croniter`` ships without type stubs (no ``types-croniter`` exists
+# at the version we pin, 6.2.2+). The scheduler loop / cron module
+# imports it for cron-expression parsing; under the repo's strict
+# mypy config (no ``--ignore-missing-imports`` flag), the bare import
+# fails with ``Library stubs not installed for "croniter"``. Match
+# the pattern the ``tabulate`` / ``asyncssh`` overrides above use.
+[[tool.mypy.overrides]]
+module = ["croniter.*"]
+ignore_missing_imports = true
+
+# Microsoft Presidio (G11.4-T3 #1072) ships ``py.typed`` markers in
+# recent releases, but the ``presidio_analyzer.nlp_engine`` and
+# ``presidio_anonymizer.entities`` submodules expose APIs whose
+# parameter types resolve to ``Any`` under strict mode (the
+# ``NlpEngineProvider`` config dict and the ``OperatorConfig`` params
+# are deliberately untyped on the upstream surface). The Tier-2
+# adapter module (:mod:`meho_backplane.redaction.presidio`) localises
+# every Presidio call into one place, so the override scope stays
+# narrow. Drop this override if upstream ships stricter stubs.
+[[tool.mypy.overrides]]
+module = ["presidio_analyzer.*", "presidio_anonymizer.*"]
+ignore_missing_imports = true
+# ``AnonymizerEngine.__init__`` is documented but typed only as
+# ``def __init__(self)`` with no annotations -- strict mode flags
+# the construction call as ``no-untyped-call``. Disable that one
+# error code for the Tier-2 adapter; every other strict check
+# (return-any, untyped-def, arg-type on our own code) stays in force.
+[[tool.mypy.overrides]]
+module = ["meho_backplane.redaction.presidio"]
+disable_error_code = ["no-untyped-call", "arg-type"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

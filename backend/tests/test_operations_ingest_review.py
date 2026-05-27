@@ -326,6 +326,127 @@ async def test_get_review_payload_no_audit_row_written() -> None:
     assert await _count_audit_rows() == 0
 
 
+@pytest.mark.asyncio
+async def test_get_review_payload_falls_back_to_builtin_for_operator_tenant() -> None:
+    """G0.13-T5 (#1135): operator's-tenant probe falling through to built-in.
+
+    The listing endpoint already returns built-in (``tenant_id IS
+    NULL``) connectors to every operator. The review endpoint's
+    docstring promises the same scope but the route handler calls
+    ``get_review_payload(connector_id, operator.tenant_id)`` — a
+    single-pass lookup with ``WHERE tenant_id = X`` misses every
+    global row. The fix here makes the service do a two-pass lookup:
+    own-tenant first, then ``tenant_id IS NULL``. The non-admin
+    operator role is used deliberately — the bug only surfaced for
+    that role (admins could pass ``tenant_id=None`` directly).
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=None,  # built-in / global connector
+        group_count=2,
+        ops_per_group=3,
+        review_status="staged",
+    )
+    operator = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.OPERATOR,
+    )
+    service = ReviewService(operator)
+
+    payload = await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+
+    assert payload.connector_id == "vmware-rest-9.0"
+    assert payload.tenant_id is None  # rendered scope reflects the fallback
+    assert payload.total_op_count == 6
+    assert len(payload.groups) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_does_not_fall_back_for_cross_tenant_probe() -> None:
+    """G0.13-T5 (#1135): cross-tenant probes stay 404, not 200.
+
+    The fallback only triggers when the caller passes the operator's
+    own tenant_id. A probe with a *different* tenant_id (operator A
+    asking after tenant B's connector) must keep the existing
+    cross-tenant 404 conflation — otherwise the fix would open a
+    cross-tenant info-leak surface.
+    """
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    # Built-in connector exists; tenant B has nothing.
+    await _seed_connector(
+        tenant_id=None,
+        group_count=1,
+        ops_per_group=1,
+        review_status="staged",
+    )
+    operator = _make_operator(
+        tenant_id=tenant_a,
+        role=TenantRole.OPERATOR,
+    )
+    service = ReviewService(operator)
+
+    with pytest.raises(ConnectorNotFoundError):
+        await service.get_review_payload("vmware-rest-9.0", tenant_b)
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_non_existent_connector_still_404() -> None:
+    """G0.13-T5 (#1135): genuinely missing connector_id still raises after both passes.
+
+    The two-pass fallback must not mask the "connector doesn't exist
+    anywhere" case: neither the operator's-tenant probe nor the
+    built-in probe finds a row, so the exception still propagates.
+    """
+    operator_tenant = uuid.uuid4()
+    operator = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.OPERATOR,
+    )
+    service = ReviewService(operator)
+
+    with pytest.raises(ConnectorNotFoundError):
+        await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_prefers_tenant_row_over_builtin() -> None:
+    """G0.13-T5 (#1135): when both exist, the operator's-tenant row wins the first pass.
+
+    Defensive guard against the bait-and-switch failure mode: if an
+    operator's tenant has a curated row at ``(product, version,
+    impl_id)`` *and* a built-in row exists at the same key, the
+    fallback must not silently return the built-in. First-pass wins;
+    fallback is only consulted on miss.
+    """
+    operator_tenant = uuid.uuid4()
+    # Tenant-curated row (3 ops total).
+    await _seed_connector(
+        tenant_id=operator_tenant,
+        group_count=1,
+        ops_per_group=3,
+        review_status="staged",
+    )
+    # Built-in row at the same triple (5 ops total — distinct count
+    # so we can tell which payload we got).
+    await _seed_connector(
+        tenant_id=None,
+        group_count=1,
+        ops_per_group=5,
+        review_status="staged",
+    )
+    operator = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.OPERATOR,
+    )
+    service = ReviewService(operator)
+
+    payload = await service.get_review_payload("vmware-rest-9.0", operator_tenant)
+
+    assert payload.tenant_id == operator_tenant
+    assert payload.total_op_count == 3
+
+
 # ---------------------------------------------------------------------------
 # edit_group
 # ---------------------------------------------------------------------------

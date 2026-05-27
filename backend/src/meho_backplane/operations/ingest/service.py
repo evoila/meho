@@ -227,8 +227,54 @@ class ReviewService:
 
         No audit row is written; the surrounding HTTP / MCP request
         already audits the read at the chassis layer.
+
+        Visibility scope mirrors :func:`list_ingested_connectors`:
+        an operator sees rows under their own tenant **and** built-in
+        (``tenant_id IS NULL``) rows. When *tenant_id* equals the
+        operator's tenant and that probe misses, the lookup falls
+        back to ``tenant_id IS NULL`` so a ``GET
+        /api/v1/connectors/{id}/review`` against a global connector
+        returns 200 instead of 404 (G0.13-T5 #1135). When *tenant_id*
+        is passed explicitly as ``None`` (MCP admin path), the
+        existing admin-only gate stays; when it's any other UUID
+        (cross-tenant probe), the lookup stays single-pass and the
+        cross-tenant 404 conflation is preserved.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
+        try:
+            return await self._render_payload(connector_id, scope)
+        except ConnectorNotFoundError:
+            if tenant_id is None or tenant_id != self._operator.tenant_id:
+                # Explicit built-in probe (MCP admin path) or genuine
+                # cross-tenant probe — no fall-through. The original
+                # 404 stays.
+                raise
+            # Operator's own-tenant probe missed; try the built-in
+            # scope. Build a fresh scope tuple with tenant_id=None;
+            # bypass _authorize_scope's admin-only gate intentionally
+            # because read access to built-ins is operator-level
+            # (matches the list endpoint).
+            fallback_scope = ConnectorScope(
+                product=scope.product,
+                version=scope.version,
+                impl_id=scope.impl_id,
+                tenant_id=None,
+            )
+            return await self._render_payload(connector_id, fallback_scope)
+
+    async def _render_payload(
+        self,
+        connector_id: str,
+        scope: ConnectorScope,
+    ) -> ConnectorReviewPayload:
+        """Load groups + ops for *scope* and pack them into the payload.
+
+        Raises :class:`ConnectorNotFoundError` when no group rows
+        exist under *scope*. Extracted from :meth:`get_review_payload`
+        so the two-pass tenant lookup there can reuse the same
+        rendering pipeline against a fallback scope without
+        duplicating the DB roundtrip + payload assembly.
+        """
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
             groups = await load_groups(session, scope, connector_id)

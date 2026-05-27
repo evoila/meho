@@ -90,7 +90,7 @@ def _resolve_gh_spec() -> str | None:
     ),
 )
 @pytest.mark.xfail(
-    strict=False,
+    strict=True,
     reason=(
         "G0.7 parser only inlines #/components/schemas/* and "
         "#/components/parameters/* refs; the GitHub spec uses "

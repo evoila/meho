@@ -138,9 +138,8 @@ def _registered_connectors() -> set[str]:
     here — swallowing the duplicate-key ``RuntimeError`` — makes the
     coverage assertion order-independent under pytest-xdist.
     """
-    from meho_backplane.connectors.github import GitHubRestConnector
-
     from meho_backplane.connectors.bind9 import Bind9Connector
+    from meho_backplane.connectors.github import GitHubRestConnector
     from meho_backplane.connectors.harbor import HarborConnector
     from meho_backplane.connectors.kubernetes import KubernetesConnector
     from meho_backplane.connectors.nsx import NsxConnector

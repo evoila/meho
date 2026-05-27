@@ -203,6 +203,7 @@ type clientRep struct {
 	RedirectURIs              []string                   `json:"redirectUris"`
 	WebOrigins                []string                   `json:"webOrigins"`
 	DefaultClientScopes       []string                   `json:"defaultClientScopes,omitempty"`
+	OptionalClientScopes      []string                   `json:"optionalClientScopes,omitempty"`
 	ProtocolMappers           []protocolMapperRep        `json:"-"` // never marshalled on create — installed separately
 	Extra                     map[string]json.RawMessage `json:"-"` // preserved from GET
 }
@@ -502,6 +503,60 @@ func (c *adminClient) addClientDefaultScope(
 		return &errKeycloakAPI{
 			method:     http.MethodPut,
 			url:        "clients/" + clientUUID + "/default-client-scopes/" + scopeID,
+			statusCode: status, body: string(body),
+		}
+	}
+	return nil
+}
+
+// listClientOptionalScopes GETs the optional-client-scopes currently
+// assigned to a client. Mirrors listClientDefaultScopes — the Keycloak
+// admin REST API exposes default and optional scopes via parallel
+// endpoints (`/default-client-scopes` vs `/optional-client-scopes`)
+// with identical request/response shapes. The result drives the
+// idempotency check before PUTting more.
+func (c *adminClient) listClientOptionalScopes(
+	ctx context.Context, clientUUID string,
+) ([]scopeRep, error) {
+	status, body, err := c.do(
+		ctx, http.MethodGet,
+		"clients/"+clientUUID+"/optional-client-scopes", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, &errKeycloakAPI{
+			method:     http.MethodGet,
+			url:        "clients/" + clientUUID + "/optional-client-scopes",
+			statusCode: status, body: string(body),
+		}
+	}
+	var got []scopeRep
+	if err := json.Unmarshal(body, &got); err != nil {
+		return nil, fmt.Errorf("decode listClientOptionalScopes: %w", err)
+	}
+	return got, nil
+}
+
+// addClientOptionalScope PUTs to /optional-client-scopes/{scopeId} to
+// add one scope. Same idempotency semantics as
+// addClientDefaultScope — a second PUT to a scope that is already an
+// optional returns 204.
+func (c *adminClient) addClientOptionalScope(
+	ctx context.Context, clientUUID, scopeID string,
+) error {
+	status, body, err := c.do(
+		ctx, http.MethodPut,
+		"clients/"+clientUUID+"/optional-client-scopes/"+scopeID,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return &errKeycloakAPI{
+			method:     http.MethodPut,
+			url:        "clients/" + clientUUID + "/optional-client-scopes/" + scopeID,
 			statusCode: status, body: string(body),
 		}
 	}

@@ -1640,6 +1640,15 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      the access token (RFC 9068 §2.2.1 requires it).
   5. The `meho-admins` top-level group + an admin user joined to
      it, with a password set via `/users/{id}/reset-password`.
+  6. Optional client scope `offline_access` on the MCP client only —
+     the realm's built-in `offline_access` scope is attached to
+     `meho-mcp-client` as **optional** (not default — only flows that
+     ask for a refresh token mint one). The CLI device-code client
+     (`meho-cli`) deliberately does **not** get it: RFC 8628
+     device-code clients re-run the device dance rather than hold a
+     long-lived refresh token, and a stolen device-code refresh token
+     has worse blast-radius than re-prompting the operator. Closes
+     the W7 wall of `deploy/values-examples/README.md` (#912).
 
 ### Idempotency
 
@@ -1652,6 +1661,10 @@ Every step does a "does this exist?" check before mutating:
   skip.
 - Default scopes: `GET /clients/{uuid}/default-client-scopes`;
   missing scope → PUT; already present → skip.
+- Optional scopes: `GET /clients/{uuid}/optional-client-scopes`;
+  missing scope → PUT; already present → skip. Only applied to the
+  MCP client (the CLI client's optional-scope set is left untouched
+  for the RFC 8628 rationale above).
 - Group: `GET /groups?search=<name>` (filtered client-side to exact
   match); missing → POST.
 - User: `GET /users?exact=true&username=<name>`; missing → POST then

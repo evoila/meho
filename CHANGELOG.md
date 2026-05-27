@@ -92,6 +92,26 @@ connector-related release-notes line.
 
 ### Added
 
+- **`meho admin keycloak bootstrap-clients` assigns the
+  `offline_access` optional client scope to the MCP browser-flow
+  client (G0.9.1 follow-up #912).** The verb now reconciles the
+  realm's built-in `offline_access` scope onto `meho-mcp-client` as
+  an **optional** scope — mirroring the existing default-scopes
+  reconcile path (`GET /clients/{uuid}/optional-client-scopes` →
+  PUT on miss, skip on hit). Closes the fifth auth-onramp wall (W7)
+  hit on the 2026-05-22 RDC dogfood after #790 + #791 shipped:
+  Claude Code's MCP client always requests `offline_access` to mint
+  a refresh token (OIDC Core §11), and without the scope attached
+  Keycloak rejected the authorization request with `invalid_scope`
+  (RFC 6749 §5.2) before the user saw a login page. The CLI
+  device-code client (`meho-cli`) is deliberately **not** given
+  `offline_access` — RFC 8628 device-code clients re-run the device
+  dance rather than hold a long-lived refresh token, and a stolen
+  device-code refresh token has worse blast-radius than re-prompting
+  the operator. `deploy/values-examples/README.md`'s troubleshooting
+  matrix grows from four to five walls (W7 added) and the MCP-client
+  recipe surfaces the optional scope with the CLI-asymmetry
+  rationale. (#912)
 - **Per-write preamble-inclusion feedback on the conventions write
   surface (G0.14-T8 #1149).** `POST /api/v1/conventions` and
   `PATCH /api/v1/conventions/{slug}` now attach a `preamble_status`

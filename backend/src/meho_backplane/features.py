@@ -100,17 +100,35 @@ def _agent_runtime_block(settings: Settings) -> dict[str, Any]:
 def _ui_surface_block(settings: Settings) -> dict[str, Any]:
     """Whether the operator-console BFF login flow is operative.
 
-    Configured iff both :attr:`Settings.ui_keycloak_client_id` and
-    :attr:`Settings.ui_keycloak_client_secret` are non-empty. Either
-    unset surfaces as a 503 from ``GET /ui/auth/login`` carrying the
-    gold-standard :data:`~meho_backplane.ui.auth.flow.MISSING_CLIENT_SECRET_DETAIL`
-    message; the doc reference here matches the one that 503 cites.
+    Configured iff all three :attr:`Settings.ui_keycloak_client_id`,
+    :attr:`Settings.ui_keycloak_client_secret`, and
+    :attr:`Settings.ui_session_encryption_key` are non-empty. Any of
+    the three unset breaks the flow at runtime:
+
+    * ``UI_KEYCLOAK_CLIENT_ID`` / ``UI_KEYCLOAK_CLIENT_SECRET`` unset →
+      503 from ``GET /ui/auth/login`` carrying the gold-standard
+      :data:`~meho_backplane.ui.auth.flow.MISSING_CLIENT_SECRET_DETAIL`
+      message.
+    * ``UI_SESSION_ENCRYPTION_KEY`` unset →
+      :class:`~meho_backplane.ui.auth.session_store.MissingSessionEncryptionKeyError`
+      on the first session-cookie write attempt; the BFF cannot
+      Fernet-encrypt the session payload without it. G0.15-T5 (#1214)
+      added this third env var to ``missing_env`` so the ``/ready``
+      self-doc enumerates the full set the operator must wire —
+      previously the block advertised two, the operator set those,
+      redeployed, and hit a 500 on first login.
+
+    The doc reference matches the one the 503 cites and where all
+    three env vars are documented under Check 3 of
+    ``docs/cross-repo/keycloak-web-client.md``.
     """
     missing: list[str] = []
     if not settings.ui_keycloak_client_id:
         missing.append("UI_KEYCLOAK_CLIENT_ID")
     if not settings.ui_keycloak_client_secret:
         missing.append("UI_KEYCLOAK_CLIENT_SECRET")
+    if not settings.ui_session_encryption_key:
+        missing.append("UI_SESSION_ENCRYPTION_KEY")
     return {
         "configured": not missing,
         "missing_env": missing,

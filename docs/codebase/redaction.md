@@ -170,8 +170,12 @@ specificity ladder, from most specific to least:
 3. `(connector_id, tenant)` — per-connector, per-tenant.
 4. `connector_id` — per-connector default.
 5. `tenant` — tenant-wide default across every connector.
-6. The packaged **default-safe** policy
-   (`policies/default.yaml`) — the conservative fallback.
+6. `(None, None, None)` — wildcard global override registered via
+   `register_policy(policy)` with no scope kwargs.
+
+When no override at any of those six levels matches, the resolver
+falls through to the packaged **default-safe** policy
+(`policies/default.yaml`) — the conservative unconditional fallback.
 
 The default-safe policy is the load-bearing guarantee: a connector
 landing without a registered override **still gets credentials
@@ -181,7 +185,10 @@ are deliberately not in the default — most connector responses are
 mostly identifiers, and a global default that redacts them would
 blank operator-facing summaries. Operators wanting them at the global
 level register a wider policy via `register_policy(policy)` (no
-connector/tenant/op filter = global override).
+connector/tenant/op filter = global override; step 6 above). The
+distinction matters: the registered wildcard policy fires *before*
+the packaged default, so it can extend or replace the default's rule
+set without touching `policies/default.yaml`.
 
 Policy registration is process-global mutable state. Tests call
 `clear_overrides()` in a fixture teardown to keep registrations from

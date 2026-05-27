@@ -558,15 +558,52 @@ These scopes coexist with the `meho-mcp-audience` mapper +
 4 default scopes from Steps 3–4 — a CIMD client still needs the
 same downstream claim shape (`sub`, `aud`, `tenant_id`,
 `tenant_role`, `groups`) the backplane validator enforces. The
-realm-level mappers that emit `tenant_id` / `tenant_role` /
-`groups` must be reachable from the CIMD client's resolved
-metadata; in practice that means either (a) those mappers live
-on a realm-level *default* client scope every client inherits,
-or (b) the CIMD client's metadata document explicitly carries
-them. The first form (realm-default scope) is the simpler
-deployer posture and is what the pre-registration recipe's
-mappers already do via the realm's `meho-backplane`-cloned
-scopes — re-use that surface for CIMD.
+shared claim-shape requirement is **not optional**: a CIMD
+client whose token reaches the backplane without `tenant_id` /
+`tenant_role` is rejected at the decode stage (Wall #2 / Wall
+#3) with `invalid_audience` / `missing_tenant_claim` /
+opaque `invalid_token`, the same failure modes the
+pre-registration recipe's Step 3 mappers exist to prevent.
+>
+> **Mechanism note (load-bearing).** The pre-registration
+> recipe at Step 3 above attaches the five claim mappers
+> (`audience-meho-backplane`, `meho-mcp-audience`, `tenant-id`,
+> `tenant-role`, `groups-claim`) to each client **directly**
+> (per-client protocol mappers cloned from `meho-backplane`
+> onto `meho-cli` / `meho-mcp-client`). That mechanism does
+> **not** carry forward to a CIMD-resolved client — there is
+> no per-client mapper-cloning step in CIMD because the client
+> isn't pre-registered. A CIMD-capable client picks up its
+> claim shape through one of two surfaces, and the deployer
+> must choose one explicitly:
+>
+> - **(Preferred) Attach the equivalent mappers to a realm-
+>   level *default* client scope every client inherits.**
+>   Create a new realm client scope (e.g. `meho-backplane-
+>   claims`), assign it the five mappers Step 3 lists,
+>   mark it **Default** in **Realm Settings → Client
+>   Scopes → Default Client Scopes**, and every newly-
+>   resolved client — pre-registered *and* CIMD — gets the
+>   same claim shape automatically. This is the simpler
+>   deployer posture and the one the rest of this recipe
+>   assumes.
+> - **(Alternative) Carry the claims in the CIMD client's
+>   metadata document.** The `draft-ietf-oauth-client-id-
+>   metadata-document` shape allows clients to declare
+>   `client_metadata` fields the AS forwards into tokens;
+>   for a CIMD-only deployment posture this avoids the
+>   realm-default-scope edit. The trade-off is that
+>   the operator no longer owns the claim values — they
+>   live in whatever the CIMD client publishes — which is
+>   why the realm-default-scope form is recommended for
+>   MEHO's tenant-claim shape.
+>
+> Do **not** rely on the per-client mappers Step 3 attaches
+> to `meho-cli` / `meho-mcp-client` to reach a CIMD-resolved
+> client. They won't — and the failure presents as the same
+> `invalid_audience` / `missing_tenant_claim` wall a deployer
+> running the pre-registration recipe without Step 3 would
+> hit.
 
 #### Step C3 — Create the `cimd-profile` client-policy profile
 

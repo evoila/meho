@@ -456,8 +456,9 @@ class GitHubRestConnector(HttpConnector):
     async def register_operations(cls) -> None:
         """Intentional no-op — T1 ships zero typed ops.
 
-        The L2 catalog entry (T3 #1223) registers the ingested ops via
-        the ``meho connector ingest --catalog gh/v3`` path; this
+        The L2 catalog entry (T3 #1223, canonicalised by T8 #1242)
+        registers the ingested ops via the
+        ``meho connector ingest --catalog gh/3`` path; this
         classmethod stays a stub the lifespan can call cheaply. Lands
         in the registrar list via the package ``__init__`` so the
         symmetry with vault / kubernetes registration is preserved

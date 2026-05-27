@@ -13,20 +13,24 @@ exception carries the operator-facing CLI command to run to ingest the
 catalog entry that lands the missing ops.
 
 The catalog row for the GitHub REST API is keyed under ``product=gh,
-version=v3, impl_id=gh-rest`` (see
+version=3, impl_id=gh-rest`` (see
 ``backend/src/meho_backplane/operations/ingest/catalog.yaml`` row added
-by G3.11-T3 #1228). The operator command shape matches the verb shipped
-in #405 (G0.7-T5) and re-affirmed by T9 (#1182):
+by G3.11-T3 #1228 and canonicalised by G3.11-T8 #1242 -- Resolution A
+aligned the catalog ``version`` field with the registry's digit-prefix
+form so the dispatcher's tuple lookup against ingested rows resolves
+cleanly). The operator command shape matches the verb shipped in
+#405 (G0.7-T5) and re-affirmed by T9 (#1182):
 
-    meho connector ingest --catalog gh/v3
+    meho connector ingest --catalog gh/3
 
-The catalog version label (``v3``) intentionally differs from the
-connector-registry version slot (``3``) -- the latter is constrained by
-:func:`~meho_backplane.operations._lookup.parse_connector_id`'s
-digit-prefix regex (``^[0-9][A-Za-z0-9._]*$``) while the catalog YAML
-preserves the operator-visible "v3" label GitHub itself uses for its
-REST API. The helper takes the catalog label as input (not the registry
-slot) so a future version bump ships in one place.
+Pre-T8 #1242 the catalog version label was ``v3`` (the upstream API
+label) and the registry slot was ``3``; the helper bridged the two by
+taking the catalog label as input. Post-T8 both are ``"3"`` -- the
+helper still takes the catalog label as a parameter (not the registry
+slot) for forward-compatibility with future version bumps, but the
+default value tracks the catalog's canonical form. The upstream "v3"
+label is preserved in :class:`FingerprintResult.version` and in the
+catalog row's ``notes`` for operator recognition.
 """
 
 from __future__ import annotations
@@ -34,18 +38,18 @@ from __future__ import annotations
 __all__ = ["catalog_command_for_github_rest"]
 
 
-def catalog_command_for_github_rest(catalog_version: str = "v3") -> str:
+def catalog_command_for_github_rest(catalog_version: str = "3") -> str:
     """Return the ``meho connector ingest --catalog gh/<version>`` command.
 
     Parameters
     ----------
     catalog_version:
-        The catalog row's ``version`` label (``"v3"`` for the v0.7.x
+        The catalog row's ``version`` label (``"3"`` for the v0.7.x
         default that matches the row in ``catalog.yaml`` G3.11-T3
-        #1228). Pass-through to the ``--catalog`` argument value
-        (``gh/v3``). Distinct from the registry's digit-prefix version
-        slot (``"3"``) the parser requires; the catalog label is what
-        operators type at the CLI.
+        #1228 as canonicalised by G3.11-T8 #1242). Pass-through to
+        the ``--catalog`` argument value (``gh/3``); the default
+        matches the post-T8 catalog form so operators ingest the
+        same triple the dispatcher resolves.
 
     Returns
     -------

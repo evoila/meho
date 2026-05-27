@@ -18,9 +18,12 @@ Coverage:
   op and exits 2.
 * Dry-run: reads rows, reports what *would* flip, commits nothing.
 * Triple-narrowness: only rows under
-  ``(product="gh", version="v3", impl_id="gh-rest")`` are touched
+  ``(product="gh", version="3", impl_id="gh-rest")`` are touched
   -- rows under different triples (and tenant-scoped clones of the
-  same op_id) are left alone.
+  same op_id) are left alone. G3.11-T8 (#1242) reconciled the
+  catalog ``version`` field to the digit-prefix form, so the
+  script's triple now matches both ``catalog.yaml`` and the
+  ``register_connector_v2`` registration.
 
 The connector-registry / embedding-service stubs aren't needed
 here -- the script reads/writes ``endpoint_descriptor`` directly
@@ -104,7 +107,7 @@ def _make_seed_row(
         path=op_id.split(":", 1)[1],
         summary=f"Stub for {op_id}",
         description=f"Stub description for {op_id}",
-        tags=["spec:gh/v3"],
+        tags=["spec:gh/3"],
         parameter_schema={"type": "object", "properties": {}},
         response_schema={"type": "object"},
         safety_level=safety_level,
@@ -170,8 +173,14 @@ def test_target_annotation_values_match_schema_vocabulary() -> None:
 
 
 def test_connector_triple_matches_catalog_entry() -> None:
-    """``(gh, v3, gh-rest)`` matches the catalog.yaml gh/v3 entry."""
-    assert (GH_PRODUCT, GH_VERSION, GH_IMPL_ID) == ("gh", "v3", "gh-rest")
+    """``(gh, 3, gh-rest)`` matches the catalog.yaml gh/3 entry.
+
+    G3.11-T8 (#1242, Resolution A) reconciled the catalog ``version``
+    field from ``"v3"`` (the upstream API label) to ``"3"`` (the
+    dispatcher's parse-friendly digit form) so the triple matches both
+    ``catalog.yaml`` and the registered ``register_connector_v2`` entry.
+    """
+    assert (GH_PRODUCT, GH_VERSION, GH_IMPL_ID) == ("gh", "3", "gh-rest")
 
 
 # ---------------------------------------------------------------------------
@@ -312,12 +321,12 @@ async def test_does_not_touch_rows_under_other_connector_triples(
         method="PUT",
     )
     session.add(other)
-    # Don't seed the gh/v3/gh-rest row at all -- only the foreign one.
+    # Don't seed the gh/3/gh-rest row at all -- only the foreign one.
     await session.commit()
 
     report = await annotate_github_write_ops(get_sessionmaker())
 
-    # Every gh/v3/gh-rest row is reported missing; the foreign-triple
+    # Every gh/3/gh-rest row is reported missing; the foreign-triple
     # row is untouched.
     assert len(report.missing) == 4
 

@@ -9,7 +9,8 @@ Mirrors :mod:`meho_backplane.connectors.vmware_rest.composites._preflight`
 (``GET:/repos/{owner}/{repo}/pulls/{pull_number}`` etc.). The L2 ops
 ship as ``ingested`` descriptors -- they only land in
 ``endpoint_descriptor`` after an operator runs
-``meho connector ingest --catalog gh/v3``.
+``meho connector ingest --catalog gh/3`` (G3.11-T8 #1242 canonicalised
+the catalog ``version`` field from ``v3`` to ``3``).
 
 A composite handler that calls
 :func:`~meho_backplane.operations.composite.DispatchChild` against an
@@ -126,7 +127,7 @@ async def preflight_l2_dependencies(
         One or more sub-op-ids are not registered. The exception's
         ``missing_op_ids`` lists every absent sub-op (not just the
         first-found), and ``catalog_command`` carries the
-        ``meho connector ingest --catalog gh/v3`` invocation operators
+        ``meho connector ingest --catalog gh/3`` invocation operators
         must run.
 
     Notes

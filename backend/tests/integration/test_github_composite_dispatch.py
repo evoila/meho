@@ -43,7 +43,7 @@ a GitHub App credential provisioned in Vault, and the catalog ingested::
       backend/tests/integration/test_github_composite_dispatch.py
 
 The full ingest round-trip (``POST /api/v1/connectors/ingest`` with
-``catalog_entry: gh/v3``) is exercised by the operator runbook in
+``catalog_entry: gh/3``) is exercised by the operator runbook in
 ``docs/cross-repo/github-connector.md`` (G3.11-T6); this test only
 covers the composite-dispatch leg downstream of that.
 """
@@ -86,7 +86,7 @@ def test_pr_status_summary_dispatches_against_live_pr() -> None:
 
     The intended shape, once the parser fix lands:
 
-    1. Ingest the catalog entry ``gh/v3`` (registers ~700 L2 ops).
+    1. Ingest the catalog entry ``gh/3`` (registers ~700 L2 ops).
     2. Dispatch ``gh.composite.pr_status_summary`` with ``owner=evoila,
        repo=meho, pull_number=754`` (or another live PR on a repo the
        App can read).

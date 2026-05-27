@@ -268,4 +268,5 @@ wiring.
   - T5 [#1225](https://github.com/evoila/meho/issues/1225) —
     `requires_approval=true` on 4 write ops.
   - T6 [#1226](https://github.com/evoila/meho/issues/1226) — connector
-    operator runbook.
+    operator runbook
+    ([`docs/cross-repo/github-connector.md`](../cross-repo/github-connector.md)).

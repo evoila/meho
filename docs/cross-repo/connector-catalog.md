@@ -69,7 +69,7 @@ Each entry is validated by `ConnectorSpecEntry`:
 | `sddc-manager` 9.0 | generic | SDDC Manager API (appliance-served; Broadcom Developer Portal) |
 | `harbor` 2.x | generic | `goharbor` `api/v2.0/swagger.yaml` — **Swagger 2.0**, needs conversion to OpenAPI 3.x before ingest |
 | `nsx` 4.2 | generic | `/api/v1/spec/openapi/nsx_api.yaml` (appliance-served; Broadcom Developer Portal mirror) |
-| `gh` v3 | generic | `rest-api-description/main/descriptions/api.github.com/api.github.com.json` — OpenAPI 3.0.3, direct-resolvable, `info.version` 1.1.4, ~700 paths / ~40 tags. Auth: GitHub App installation tokens (or fine-grained PAT). |
+| `gh` v3 | generic | `rest-api-description/main/descriptions/api.github.com/api.github.com.json` — OpenAPI 3.0.3, direct-resolvable, `info.version` 1.1.4, ~700 paths / ~40 tags. Auth: GitHub App installation tokens (or fine-grained PAT). First-day on-ramp: [`github-connector.md`](./github-connector.md); credential setup: [`github-app-credential.md`](./github-app-credential.md). |
 | `vault` 1.x | typed | none (hand-coded connector) |
 | `k8s` 1.x | typed | none (typed; per-minor OpenAPI ingest is a future Goal #214 investigation) |
 | `bind9` 9.x | typed | none (SSH-only; no REST surface) |

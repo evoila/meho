@@ -256,7 +256,11 @@ Walk the four gates in the order an operator hits them:
   row with `product: gh`, `secret_ref: <vault-path>`,
   `auth_model: shared_service_account`. Without these, `meho
   targets probe <gh-target>` returns 503 `github_app_not_installed`
-  or `github_jwt_mint_failed` and no `gh.*` op can dispatch.
+  or `github_jwt_mint_failed` and no `gh.*` op can dispatch. Once
+  the credential side is green, follow
+  [`docs/cross-repo/github-connector.md`](cross-repo/github-connector.md)
+  for the end-to-end first-day on-ramp (target probe → catalog
+  ingest → group enable → write-op annotation → composite smoke-test).
 
 Verify the gates by re-hitting `GET /ready` after each provisioning
 step and reading the `features` block:

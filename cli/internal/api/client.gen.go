@@ -770,8 +770,13 @@ type ApproveResponseBody_DispatchResult struct {
 //   - “op_id“ / “op_class“ / “result_status“ — computed at query time
 //   - “parent_audit_id“ ← “audit_log.parent_audit_id“ (lineage; #398)
 //   - “agent_session_id“ ← “audit_log.agent_session_id“ (MCP session; #1009)
-//   - “principal_name“ / “broadcast_event_id“ — v0.2 placeholders, always
-//     None
+//   - “principal_name“ ← “payload['principal_name']“ when set. The MCP
+//     audit-write helper (“write_mcp_audit_row“) populates it from
+//     “Operator.name“ since G0.15-T3 #1212; HTTP-chassis rows remain
+//     None pending a separate fix to bind “name“ to contextvars in
+//     “verify_jwt_and_bind“.
+//   - “broadcast_event_id“ — v0.2 placeholder, always None (FK direction
+//     is reversed: “BroadcastEvent.audit_id“ points at the audit row).
 type AuditEntry struct {
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`

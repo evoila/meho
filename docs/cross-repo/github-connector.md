@@ -670,12 +670,14 @@ identity GitHub attributed it to. That is the full chain.
 dispatch from the agent fans out to (currently) 3 sub-calls
 against GitHub (`pulls.get`, `pulls.list_commits`, `checks.list_for_ref`).
 Each sub-call writes its own audit row, all carrying the same
-`agent_session_id` and a `parent_op_id` pointing back to the
-composite. `meho audit query --op-id 'gh.composite.*' --json`
-returns the composite rows; replacing the filter with
-`--parent-op-id 'gh.composite.pr_status_summary'` returns the
-sub-call fan-out. The G8.2 audit-replay tree renders this as a
-nested view.
+`agent_session_id` and a `parent_audit_id` (UUID) pointing back to the
+composite parent row. `meho audit query --op-id 'gh.composite.*' --json`
+returns the composite rows; `meho audit replay <session-id>` then
+renders the parent + sub-call fan-out as a nested tree. The G8.2
+audit-replay surface is the supported way to inspect the linkage
+today; flat per-parent filtering on the CLI lands in a later release
+(the `--parent-audit-id` flag exists on `meho audit query` but the v0.2
+backend rejects it with HTTP 400 pending the recursive-CTE endpoint).
 
 ## Common failure modes
 
@@ -768,7 +770,7 @@ install the App on additional installations (each installation
 token has its own 5000/hour bucket) and partition target rows by
 installation.
 
-### `403 op_not_dispatchable_via_pat` — PR not found in private repo
+### `404 github_app_not_installed` — PR not visible
 
 **What you see:**
 

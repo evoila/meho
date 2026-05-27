@@ -442,9 +442,11 @@ def test_upload_single_slug_override() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert "alert-success" in body
-    assert "custom-slug" in body
-    # Original filename should NOT appear as the slug.
-    assert "original-name" not in body or "custom-slug" in body
+    # The override must be the rendered slug — assert on the entry URL so the
+    # check is precise (the filename "original-name.md" may legitimately appear
+    # elsewhere in the response, e.g. as the uploaded-file label).
+    assert "/ui/kb/custom-slug" in body
+    assert "/ui/kb/original-name" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +628,18 @@ def test_upload_idempotent_same_body() -> None:
     assert r2.status_code == 200
     assert "alert-success" in r1.text
     assert "alert-success" in r2.text
+
+    # No-op assertion (AC3): the second upload must NOT create a duplicate.
+    # Re-uploading identical content is body_hash-idempotent, so exactly one
+    # entry for the slug must exist after both uploads, with a stable id.
+    async def _entries() -> list[object]:
+        from meho_backplane.kb import KbService
+
+        return await KbService().list_entries(_TENANT_A, limit=50, offset=0)
+
+    entries = asyncio.run(_entries())
+    matching = [e for e in entries if e.slug == "idempotent"]
+    assert len(matching) == 1, f"expected 1 entry, found {len(matching)} (duplicate on re-upload)"
 
 
 # ---------------------------------------------------------------------------

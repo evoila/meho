@@ -46,31 +46,36 @@
         <a href="/ui/kb/{{ row.slug }}" class="link link-primary ml-2">View entry &rarr;</a>
       </span>
     </div>
-    {# OOB: insert the new entry into the KB list table body, if visible. #}
+    {# OOB: insert the new entry into the KB list table body, if visible.
+       The <tr> is wrapped in <template> because a bare <tr> is not a valid
+       standalone DOM fragment (HTML spec) — HTMX strips the wrapper after
+       parsing the out-of-band swap. https://htmx.org/attributes/hx-swap-oob/ #}
     {% if row.entry %}
-      <tr
-        hx-swap-oob="afterbegin:#kb-results-body"
-        class="bg-success/10"
-      >
-        <td class="font-mono">
-          <a href="/ui/kb/{{ row.entry.slug }}" class="link link-primary">{{ row.entry.slug }}</a>
-        </td>
-        <td class="hidden sm:table-cell opacity-70">
-          {{ row.entry.metadata.get("kind", "kb-entry") }}
-        </td>
-        <td class="hidden md:table-cell opacity-70 text-xs">
-          {{ row.entry.updated_at.strftime("%Y-%m-%d %H:%M") }}
-        </td>
-        <td>
-          <a
-            href="/ui/kb/{{ row.entry.slug }}"
-            class="btn btn-ghost btn-xs"
-            aria-label="View entry {{ row.entry.slug }}"
-          >
-            View
-          </a>
-        </td>
-      </tr>
+      <template>
+        <tr
+          hx-swap-oob="afterbegin:#kb-results-body"
+          class="bg-success/10"
+        >
+          <td class="font-mono">
+            <a href="/ui/kb/{{ row.entry.slug }}" class="link link-primary">{{ row.entry.slug }}</a>
+          </td>
+          <td class="hidden sm:table-cell opacity-70">
+            {{ row.entry.metadata.get("kind", "kb-entry") }}
+          </td>
+          <td class="hidden md:table-cell opacity-70 text-xs">
+            {{ row.entry.updated_at.strftime("%Y-%m-%d %H:%M") }}
+          </td>
+          <td>
+            <a
+              href="/ui/kb/{{ row.entry.slug }}"
+              class="btn btn-ghost btn-xs"
+              aria-label="View entry {{ row.entry.slug }}"
+            >
+              View
+            </a>
+          </td>
+        </tr>
+      </template>
     {% endif %}
   {% else %}
     <div
@@ -136,33 +141,38 @@
         </table>
       </div>
 
-      {# OOB: insert all success rows into the KB list table body, if visible. #}
+      {# OOB: insert all success rows into the KB list table body, if visible.
+         Each <tr> is wrapped in <template> — a bare <tr> is not a valid
+         standalone DOM fragment, so HTMX needs the wrapper to parse the
+         out-of-band swap. https://htmx.org/attributes/hx-swap-oob/ #}
       {% for row in rows %}
         {% if row.status == "success" and row.entry %}
-          <tr
-            hx-swap-oob="afterbegin:#kb-results-body"
-            class="bg-success/10"
-            aria-label="Newly uploaded entry {{ row.entry.slug }}"
-          >
-            <td class="font-mono">
-              <a href="/ui/kb/{{ row.entry.slug }}" class="link link-primary">{{ row.entry.slug }}</a>
-            </td>
-            <td class="hidden sm:table-cell opacity-70">
-              {{ row.entry.metadata.get("kind", "kb-entry") }}
-            </td>
-            <td class="hidden md:table-cell opacity-70 text-xs">
-              {{ row.entry.updated_at.strftime("%Y-%m-%d %H:%M") }}
-            </td>
-            <td>
-              <a
-                href="/ui/kb/{{ row.entry.slug }}"
-                class="btn btn-ghost btn-xs"
-                aria-label="View entry {{ row.entry.slug }}"
-              >
-                View
-              </a>
-            </td>
-          </tr>
+          <template>
+            <tr
+              hx-swap-oob="afterbegin:#kb-results-body"
+              class="bg-success/10"
+              aria-label="Newly uploaded entry {{ row.entry.slug }}"
+            >
+              <td class="font-mono">
+                <a href="/ui/kb/{{ row.entry.slug }}" class="link link-primary">{{ row.entry.slug }}</a>
+              </td>
+              <td class="hidden sm:table-cell opacity-70">
+                {{ row.entry.metadata.get("kind", "kb-entry") }}
+              </td>
+              <td class="hidden md:table-cell opacity-70 text-xs">
+                {{ row.entry.updated_at.strftime("%Y-%m-%d %H:%M") }}
+              </td>
+              <td>
+                <a
+                  href="/ui/kb/{{ row.entry.slug }}"
+                  class="btn btn-ghost btn-xs"
+                  aria-label="View entry {{ row.entry.slug }}"
+                >
+                  View
+                </a>
+              </td>
+            </tr>
+          </template>
         {% endif %}
       {% endfor %}
     </div>

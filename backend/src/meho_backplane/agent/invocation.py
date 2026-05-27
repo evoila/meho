@@ -75,6 +75,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Final
 
 import structlog
@@ -98,11 +99,13 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRun as AgentRunRow
 from meho_backplane.db.models import AgentRunStatus, AgentRunTrigger
 from meho_backplane.operations import agent_run as run_lifecycle
+from meho_backplane.operations import identity_budget
 from meho_backplane.operations._audit import (
     AgentRunAuditMeta,
     agent_run_audit_meta_var,
     agent_session_id_var,
 )
+from meho_backplane.operations.identity_budget import TokenUsage
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -234,6 +237,23 @@ def _split_model_id(model_id: str) -> tuple[str, str]:
     if not sep:
         return _DEFAULT_PROVIDER, model_id
     return provider, model
+
+
+def _full_model_id(provider: str | None, model: str | None) -> str | None:
+    """Rebuild the provider-prefixed model id from a split ``(provider, model)``.
+
+    The inverse of :func:`_split_model_id`. The
+    :class:`~meho_backplane.db.models.AgentRun` row stores the two
+    pieces separately (``provider``, ``model``); the
+    :data:`~meho_backplane.operations.identity_budget.MODEL_PRICING`
+    table keys on the rejoined ``provider:model`` form that
+    :attr:`Settings.agent_default_model` emits. ``None`` either side
+    surfaces as ``None`` so the cost lookup falls through to the
+    *"unknown model -> Decimal(0)"* branch.
+    """
+    if provider is None or model is None:
+        return None
+    return f"{provider}:{model}"
 
 
 class AgentInvoker:
@@ -381,6 +401,7 @@ class AgentInvoker:
         *,
         output: dict[str, object] | None,
         error: str | None,
+        usage: TokenUsage | None = None,
     ) -> None:
         """Record a run's terminal state on its durable row, committed.
 
@@ -390,6 +411,29 @@ class AgentInvoker:
         operator cancelled it mid-flight) is left untouched —
         :class:`~meho_backplane.operations.agent_run.IllegalTransitionError`
         is swallowed because the cancel already wrote the terminal state.
+
+        When *usage* is supplied (the success path), the function also:
+
+        1. Rebuilds the provider-prefixed model id from the row's
+           ``provider`` + ``model`` columns (the inverse of
+           :func:`_split_model_id`) so the
+           :data:`~meho_backplane.operations.identity_budget.MODEL_PRICING`
+           lookup hits.
+        2. Computes the run's USD cost via
+           :func:`~meho_backplane.operations.identity_budget.compute_cost`.
+        3. Stamps that cost on ``agent_run.cost`` through the lifecycle
+           ``succeed_run`` helper (which already accepts the parameter
+           the v0.2 stub-out reserved for this slice).
+        4. Applies one increment per active budget bucket (daily +
+           weekly + monthly) for the principal via
+           :func:`~meho_backplane.operations.identity_budget.apply_consumption`.
+
+        The two writes (``succeed_run`` and ``apply_consumption``) share
+        the same :class:`AsyncSession` and the same commit, so the budget
+        increments are atomic with the run's terminal transition: either
+        both land or neither does. A failure path (``error is not None``)
+        skips consumption entirely -- a failed run has no cost stamp by
+        the v0.2 contract.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -400,7 +444,19 @@ class AgentInvoker:
                 if error is not None:
                     await run_lifecycle.fail_run(session, row, error=error)
                 else:
-                    await run_lifecycle.succeed_run(session, row, output=output or {})
+                    cost: Decimal | None = None
+                    if usage is not None:
+                        model_id = _full_model_id(row.provider, row.model)
+                        cost = identity_budget.compute_cost(usage, model_id)
+                    await run_lifecycle.succeed_run(session, row, output=output or {}, cost=cost)
+                    if usage is not None and cost is not None:
+                        await identity_budget.apply_consumption(
+                            session,
+                            tenant_id=row.tenant_id,
+                            principal_sub=row.identity_sub,
+                            tokens=usage.total_tokens,
+                            cost=cost,
+                        )
             except run_lifecycle.IllegalTransitionError:
                 await session.rollback()
                 return
@@ -459,7 +515,18 @@ class AgentInvoker:
                 _log.warning("agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc))
                 await self._finalize_run(run_id, output=None, error=str(exc))
                 return
-            await self._finalize_run(run_id, output=_project_output(result.output), error=None)
+            usage = TokenUsage(
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cache_read_tokens=result.cache_read_tokens,
+                cache_write_tokens=result.cache_write_tokens,
+            )
+            await self._finalize_run(
+                run_id,
+                output=_project_output(result.output),
+                error=None,
+                usage=usage,
+            )
         finally:
             agent_run_audit_meta_var.reset(meta_token)
             agent_session_id_var.reset(session_token)

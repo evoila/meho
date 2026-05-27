@@ -239,6 +239,7 @@ __all__ = [
     "AuditLog",
     "Base",
     "BroadcastOverride",
+    "BudgetWindowKind",
     "Document",
     "EndpointDescriptor",
     "EventOutbox",
@@ -248,6 +249,7 @@ __all__ = [
     "GraphHistoryChangeKind",
     "GraphNode",
     "GraphNodeHistory",
+    "IdentityBudget",
     "OperationGroup",
     "Target",
     "Tenant",
@@ -4013,5 +4015,240 @@ class EventOutbox(Base):
             "event_id",
             postgresql_using="btree",
             postgresql_where=sa.text("processed_at IS NULL"),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# G11.5-T5 — per-identity token budget model (C3-a)
+# ---------------------------------------------------------------------------
+
+
+class BudgetWindowKind(StrEnum):
+    """Closed vocabulary of budget-window granularities.
+
+    Each :class:`IdentityBudget` row is keyed in part on a
+    :class:`BudgetWindowKind` — the budget answers "what's the cap for
+    this principal *per day / per week / per month*". The runtime
+    increments one row per active window-kind on every successful run
+    (one daily bucket, one weekly bucket, one monthly bucket).
+
+    The vocabulary is intentionally closed (three values). A fourth
+    granularity would require both a code change and an Alembic
+    migration (the
+    :class:`~meho_backplane.db.models.IdentityBudget.window_kind`
+    column carries a DB-level CHECK constraint backed by this enum),
+    which is the cheapest way to prevent drift between the DB row, the
+    consumption service, and the enforcement gate (G11.5-C3-b, #1080).
+
+    Members:
+
+    * :attr:`DAILY` — buckets start at 00:00 UTC and last 24 hours.
+    * :attr:`WEEKLY` — ISO-week buckets, starting Monday 00:00 UTC.
+    * :attr:`MONTHLY` — calendar-month buckets, starting the 1st at
+      00:00 UTC.
+    """
+
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+
+
+class IdentityBudget(Base):
+    """One per-(tenant, principal, window-kind, window-start) budget bucket.
+
+    Initiative #806 (G11.5 Portability + cost), Task #1079 (G11.5-T5 /
+    C3-a). The table is the data substrate for per-identity LLM token /
+    cost / request budgets attached to *any* MEHO principal (human,
+    service account, or agent — see :class:`AgentPrincipal` for the
+    agent-only registry). Each row carries:
+
+    * **Limits** (``token_limit`` / ``cost_limit`` / ``request_limit``)
+      — nullable; ``NULL`` means *"no cap on this dimension"*. Limits
+      are set by an operator / seed once and are static within a
+      window bucket; rotating to the next bucket carries over the
+      limits via a service-side helper, not a DB constraint.
+    * **Consumption** (``tokens_consumed`` / ``cost_consumed`` /
+      ``requests_consumed``) — NOT NULL with default 0; incremented by
+      the runtime's
+      :func:`~meho_backplane.operations.identity_budget.apply_consumption`
+      after every successful agent run. ``cost_consumed`` is
+      :class:`~decimal.Decimal` to keep arithmetic precision tight on
+      the money-shaped quantity; ``tokens_consumed`` is
+      :class:`~decimal.Decimal` rather than ``int`` because some
+      providers emit per-window aggregates that exceed 64-bit
+      ``Integer`` range when the prompt cache is hot (cache reads
+      count as a separate token stream).
+
+    The row is **keyed** by
+    ``(tenant_id, principal_sub, window_kind, window_start)`` —
+    enforced both at the DB layer (``uq_identity_budget_window``) and
+    by every upsert in the consumption service. A duplicate would feed
+    nondeterministic increments (*"which bucket do we charge?"*).
+
+    Schema decisions
+    ----------------
+
+    * ``id`` — UUID primary key. PG ``gen_random_uuid()`` server
+      default via the migration; SQLite via ORM
+      ``default=uuid.uuid4``. The unique key is the
+      ``(tenant_id, principal_sub, window_kind, window_start)`` tuple
+      — the ``id`` exists only to give the row a stable handle for
+      cross-table references (none in v0.2).
+
+    * ``tenant_id`` — UUID NOT NULL, ``REFERENCES tenant(id)``. Brand-
+      new table, no chassis-era rows — same FK discipline as
+      :class:`AgentPermission` (0022).
+
+    * ``principal_sub`` — Text NOT NULL. The JWT ``sub`` claim of the
+      principal whose budget this is. Same soft-FK discipline as
+      :attr:`AgentPermission.principal_sub`: the principal can be a
+      human (no row in any principal table), a service account, or an
+      agent, and the JWT ``sub`` is the stable Keycloak-issued
+      identifier across all three.
+
+    * ``window_kind`` — Text NOT NULL with a portable
+      ``CHECK window_kind IN ('daily', 'weekly', 'monthly')``
+      constraint enforcing the closed :class:`BudgetWindowKind`
+      vocabulary. The enum and the constraint move in lock-step; a
+      drift guard in :mod:`tests.test_db_identity_budget` asserts
+      equality.
+
+    * ``window_start`` / ``window_end`` — ``timestamptz`` NOT NULL.
+      Inclusive lower / exclusive upper bound of the bucket. The
+      consumption service truncates *"now"* to the window-kind
+      boundary (00:00 UTC for daily / Monday 00:00 UTC for weekly /
+      1st of the month at 00:00 UTC for monthly) at upsert time, so
+      every row's pair is canonical and reproducible from
+      ``(window_kind, window_start)`` alone. ``window_end`` is
+      persisted so an audit / dashboard reader does not have to
+      re-derive the boundary.
+
+    * ``token_limit`` — ``Numeric(20, 0)`` nullable. NULL = no cap.
+      Wider than ``Integer`` for the same hot-prompt-cache reason
+      ``tokens_consumed`` is widened.
+
+    * ``cost_limit`` — ``Numeric(14, 6)`` nullable. NULL = no cap.
+      Eight integer digits hold "ten million USD per window"; six
+      fractional digits keep micro-cent precision for cache-read
+      rates.
+
+    * ``request_limit`` — ``Integer`` nullable. NULL = no cap. The
+      request count per principal per window is comfortably bounded
+      by a 32-bit signed range (≤2.1B), so a plain :class:`Integer`
+      suffices.
+
+    * ``tokens_consumed`` — ``Numeric(20, 0)`` NOT NULL DEFAULT 0.
+      Same precision rationale as ``token_limit``.
+
+    * ``cost_consumed`` — ``Numeric(14, 6)`` NOT NULL DEFAULT 0.
+      Same precision rationale as ``cost_limit``.
+
+    * ``requests_consumed`` — ``Integer`` NOT NULL DEFAULT 0.
+
+    * ``created_at`` / ``updated_at`` — ``timestamptz`` NOT NULL. PG
+      server defaults ``now()``; ORM ``default=lambda:
+      datetime.now(UTC)`` for SQLite.
+
+    Indexes / constraints
+    ---------------------
+
+    * ``uq_identity_budget_window`` — unique on
+      ``(tenant_id, principal_sub, window_kind, window_start)``.
+      Drives the upsert path and prevents duplicate buckets.
+    * ``ck_identity_budget_window_kind`` — CHECK on ``window_kind``.
+    * ``identity_budget_tenant_principal_idx`` — b-tree on
+      ``(tenant_id, principal_sub)``. Drives the post-run consumption
+      walk (find the active buckets for this principal in this
+      tenant) and the dashboard / enforcement read.
+    """
+
+    __tablename__ = "identity_budget"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK to tenant.id -- brand-new table, no chassis-era rows.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Soft reference -- principal can be human / service / agent.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # Closed CHECK-backed vocabulary (BudgetWindowKind).
+    window_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # Inclusive lower bound of the bucket; truncated to window boundary.
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    # Exclusive upper bound; persisted for audit reads.
+    window_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    # Limits: nullable = "no cap on this dimension".
+    token_limit: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 0),
+        nullable=True,
+        default=None,
+    )
+    cost_limit: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 6),
+        nullable=True,
+        default=None,
+    )
+    request_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        default=None,
+    )
+    # Consumption: NOT NULL DEFAULT 0; incremented by apply_consumption.
+    tokens_consumed: Mapped[Decimal] = mapped_column(
+        Numeric(20, 0),
+        nullable=False,
+        default=lambda: Decimal(0),
+    )
+    cost_consumed: Mapped[Decimal] = mapped_column(
+        Numeric(14, 6),
+        nullable=False,
+        default=lambda: Decimal(0),
+    )
+    requests_consumed: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "tenant_id",
+            "principal_sub",
+            "window_kind",
+            "window_start",
+            name="uq_identity_budget_window",
+        ),
+        sa.CheckConstraint(
+            "window_kind IN ('daily', 'weekly', 'monthly')",
+            name="ck_identity_budget_window_kind",
+        ),
+        Index(
+            "identity_budget_tenant_principal_idx",
+            "tenant_id",
+            "principal_sub",
+            postgresql_using="btree",
         ),
     )

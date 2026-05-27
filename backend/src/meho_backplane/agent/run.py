@@ -225,11 +225,24 @@ class AgentRunResult:
     ``tool_call_count`` are lifted from the framework's usage accounting so
     the T6 run record and cost attribution (G11.5) have the turn + tool
     totals without re-deriving them from the message log.
+
+    Token totals (``input_tokens`` / ``output_tokens`` /
+    ``cache_read_tokens`` / ``cache_write_tokens``) are also lifted
+    from the framework's usage so the G11.5-T5 per-identity budget
+    bucketing (#1079) has the per-stream amounts the
+    :func:`~meho_backplane.operations.identity_budget.compute_cost`
+    pricing table charges against. Default to 0 so a deterministic
+    test model that does not stamp usage (e.g. a function model that
+    short-circuits the loop) still produces a valid result.
     """
 
     output: Any
     request_count: int
     tool_call_count: int
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 class AgentRunEventKind(StrEnum):
@@ -716,6 +729,10 @@ class PydanticAgentRun:
             output=run_result.output,
             request_count=usage.requests,
             tool_call_count=usage.tool_calls,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
         )
         _log.info(
             "agent_run_succeeded",
@@ -723,6 +740,8 @@ class PydanticAgentRun:
             agent=definition.name,
             request_count=result.request_count,
             tool_call_count=result.tool_call_count,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
             operator_sub=operator.sub,
         )
         return result

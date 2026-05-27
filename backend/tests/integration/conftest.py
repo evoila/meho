@@ -396,7 +396,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
             text(
                 "TRUNCATE TABLE approval_request, agent_permission, "
                 "agent_principal, scheduled_trigger, event_outbox, "
-                "agent_run, audit_log, "
+                "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",
@@ -460,7 +460,7 @@ async def pg_engine_empty_tenant(
             text(
                 "TRUNCATE TABLE approval_request, agent_permission, "
                 "agent_principal, scheduled_trigger, event_outbox, "
-                "agent_run, audit_log, "
+                "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",

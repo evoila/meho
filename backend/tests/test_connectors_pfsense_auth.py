@@ -156,9 +156,12 @@ def test_package_import_registers_v2_entry_only() -> None:
 
     v2 = all_connectors_v2()
     assert v2[("pfsense", "2.7", "pfsense-ssh")] is PfSenseConnector
-    # pfsense has no v1 chassis history; the v1 ``register_connector``
-    # write is intentionally absent. No ``("pfsense", "", "")`` entry.
-    assert ("pfsense", "", "") not in v2
+    # G0.15-T6 (#1215) wildcard fanout -- the sibling ``("pfsense", "",
+    # "")`` registration keeps a fresh target with ``version=None``
+    # resolvable to ``PfSenseConnector``. The wildcard lands via
+    # :func:`register_connector_v2` directly, not the v1 dual-write
+    # surface, so pfsense still has no v1 chassis history.
+    assert v2[("pfsense", "", "")] is PfSenseConnector
 
 
 def test_pfsense_connector_registered_under_v2_triple() -> None:

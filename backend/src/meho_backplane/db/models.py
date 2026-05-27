@@ -801,6 +801,21 @@ class Target(Base):
         default=list,
     )
     product: Mapped[str] = mapped_column(Text, nullable=False)
+    # Operator-asserted product version, e.g. ``"9.0"``, ``"1.x"``.
+    # Nullable so a fresh target without out-of-band version knowledge
+    # can still be created and probed; once the probe succeeds the
+    # authoritative ``fingerprint.version`` takes precedence at resolver
+    # time (see
+    # :func:`~meho_backplane.connectors.resolver._resolve_target_version`).
+    # G0.15-T6 (#1215) ships this column to break the chicken-and-egg
+    # the v0.7.0 dogfood surfaced (RDC #753, signal 6): every typed
+    # connector except K8s required ``fingerprint.version`` to resolve,
+    # but the probe needed the resolver to find a connector first. The
+    # column is the operator-driven entry point; the wildcard
+    # registrations fanned out to every typed connector in the same
+    # PR are the always-resolvable fallback. Added by migration
+    # ``0032``.
+    version: Mapped[str | None] = mapped_column(Text, nullable=True)
     host: Mapped[str] = mapped_column(Text, nullable=False)
     port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fqdn: Mapped[str | None] = mapped_column(Text, nullable=True)

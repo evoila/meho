@@ -12216,6 +12216,11 @@
             "type": "string",
             "title": "Product"
           },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Version"
+          },
           "host": {
             "type": "string",
             "title": "Host"
@@ -12287,6 +12292,7 @@
           "name",
           "aliases",
           "product",
+          "version",
           "host",
           "port",
           "fqdn",
@@ -12301,7 +12307,7 @@
           "updated_at"
         ],
         "title": "Target",
-        "description": "Full read shape \u2014 returned by GET /targets/{name} and the resolver.\n\nMaps 1:1 to the ``targets`` table columns. Frozen so callers\ncan safely stash instances in request state or structured logs\nwithout fear of mutation.\n\n``aliases`` uses ``tuple[str, ...]`` and ``extras`` uses\n``Mapping[str, Any]`` so frozen instances cannot be mutated in-place\nvia list.append / dict.__setitem__ \u2014 matching the immutability contract\nthe docstring documents.\n\n``fingerprint`` mirrors the persisted\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` shape\n(JSON-safe dict from ``model_dump(mode='json')``) or ``None`` until\nthe first successful probe. ``preferred_impl_id`` is the operator's\noptional override for the G0.6 connector-impl resolver."
+        "description": "Full read shape \u2014 returned by GET /targets/{name} and the resolver.\n\nMaps 1:1 to the ``targets`` table columns. Frozen so callers\ncan safely stash instances in request state or structured logs\nwithout fear of mutation.\n\n``aliases`` uses ``tuple[str, ...]`` and ``extras`` uses\n``Mapping[str, Any]`` so frozen instances cannot be mutated in-place\nvia list.append / dict.__setitem__ \u2014 matching the immutability contract\nthe docstring documents.\n\n``fingerprint`` mirrors the persisted\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` shape\n(JSON-safe dict from ``model_dump(mode='json')``) or ``None`` until\nthe first successful probe. ``preferred_impl_id`` is the operator's\noptional override for the G0.6 connector-impl resolver.\n\n``version`` is the operator-asserted product version (e.g.\n``\"9.0\"``, ``\"1.x\"``) shipped by G0.15-T6 (#1215). It is **operator-\neditable** via :class:`TargetCreate` / :class:`TargetUpdate` so a\nfresh target can carry a version *before* the first probe, breaking\nthe chicken-and-egg the v0.7.0 dogfood surfaced (RDC #753, signal\n6): every typed connector except K8s required ``fingerprint.version``\nto resolve, but the probe needed the resolver to find a connector\nfirst. The G0.15-T6 fix adds operator-asserted ``version`` as a\nsecond source the resolver consults, with ``fingerprint.version``\n(probed reality) taking precedence when both are present. The K8s\npattern (sibling wildcard registration at\n``connectors/kubernetes/__init__.py``) is fanned out across every\ntyped connector in the same PR so an unfingerprinted target with\n``version=None`` *also* resolves through the wildcard."
       },
       "TargetCreate": {
         "properties": {
@@ -12341,6 +12347,12 @@
               "vmware"
             ],
             "description": "Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss."
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 100,
+            "nullable": true,
+            "title": "Version"
           },
           "host": {
             "type": "string",
@@ -12399,7 +12411,7 @@
           "host"
         ],
         "title": "TargetCreate",
-        "description": "POST /api/v1/targets body.\n\n``name`` and ``product`` are immutable after creation; to rename a\ntarget, delete + re-create. ``auth_model`` defaults to\n``shared_service_account`` matching the DB column default.\n\n``fingerprint`` is **not** accepted \u2014 it is server-managed and only\nwritten by the probe handler from the connector's response. Sending\n``fingerprint`` in the create body raises 422 via ``extra='forbid'``\nso clients cannot seed the G0.6 resolver's tie-break input with\nfabricated values. ``preferred_impl_id`` is accepted as an optional\noperator override."
+        "description": "POST /api/v1/targets body.\n\n``name`` and ``product`` are immutable after creation; to rename a\ntarget, delete + re-create. ``auth_model`` defaults to\n``shared_service_account`` matching the DB column default.\n\n``fingerprint`` is **not** accepted \u2014 it is server-managed and only\nwritten by the probe handler from the connector's response. Sending\n``fingerprint`` in the create body raises 422 via ``extra='forbid'``\nso clients cannot seed the G0.6 resolver's tie-break input with\nfabricated values. ``preferred_impl_id`` is accepted as an optional\noperator override.\n\n``version`` is accepted as an optional operator-asserted product\nversion (G0.15-T6 #1215). Operators who know the version up-front\n(e.g. ``\"9.0\"`` for a vCenter Hetzner-DC target the consumer just\ndeployed) can pass it at create time so the very first probe\ndispatches against the versioned connector without round-tripping\nthrough PATCH. Fresh targets still default to ``None`` and resolve\nvia the sibling wildcard registration applied to every typed\nconnector in the same PR (K8s pattern fanned out)."
       },
       "TargetSummary": {
         "properties": {
@@ -12456,6 +12468,12 @@
             "nullable": true,
             "title": "Product"
           },
+          "version": {
+            "type": "string",
+            "maxLength": 100,
+            "nullable": true,
+            "title": "Version"
+          },
           "host": {
             "type": "string",
             "maxLength": 512,
@@ -12509,7 +12527,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "TargetUpdate",
-        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` is absent \u2014 rename = delete + create.\n\n``product`` is patchable as of G0.14-T4 (#1145). The original\nG0.3 contract treated ``product`` as immutable after creation\non the theory that the operator should delete + re-create on a\ntypo, but the v0.6.0 dogfood pass (signal 6) showed the\ncombination of \"no DELETE route\" + \"no PATCH on product\" left a\nmisregistered target permanently broken \u2014 name and alias slots\noccupied, ``secret_ref`` pointing at a stranded Vault path. T4\ncloses the gap by adding DELETE *and* allowing PATCH on\n``product``. The route handler validates the new value against\nthe set of registered connector products and rejects unknown\nvalues with a structured 422 mirroring the ``/probe`` 501\nshape \u2014 so a typo at PATCH time produces the same actionable\ndiagnostic as the typo would at probe time, instead of\nsilently breaking the working target.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable."
+        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` is absent \u2014 rename = delete + create.\n\n``product`` is patchable as of G0.14-T4 (#1145). The original\nG0.3 contract treated ``product`` as immutable after creation\non the theory that the operator should delete + re-create on a\ntypo, but the v0.6.0 dogfood pass (signal 6) showed the\ncombination of \"no DELETE route\" + \"no PATCH on product\" left a\nmisregistered target permanently broken \u2014 name and alias slots\noccupied, ``secret_ref`` pointing at a stranded Vault path. T4\ncloses the gap by adding DELETE *and* allowing PATCH on\n``product``. The route handler validates the new value against\nthe set of registered connector products and rejects unknown\nvalues with a structured 422 mirroring the ``/probe`` 501\nshape \u2014 so a typo at PATCH time produces the same actionable\ndiagnostic as the typo would at probe time, instead of\nsilently breaking the working target.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable.\n\n``version`` is patchable as of G0.15-T6 (#1215) \u2014 same fix-class as\nG0.14-T4 #1145's PATCH-on-``product``. An operator who probes the\ntarget manually (or has out-of-band knowledge of the product\nversion) can set it to flip the resolver from the wildcard fallback\nto the versioned connector. Clearing it (``{\"version\": null}``) is\nlegal and returns the target to the wildcard-fallback shape \u2014 the\ncolumn is nullable so this is not a constraint violation."
       },
       "TargetsDiscoverResult": {
         "properties": {

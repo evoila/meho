@@ -183,11 +183,12 @@ def test_package_import_registers_v2_entry_only() -> None:
 
     v2 = all_connectors_v2()
     assert v2[("holodeck", "9.0", "holodeck-ssh")] is HolodeckConnector
-    # Holodeck has no v1 chassis history (see ``__init__.py`` docstring);
-    # the v1 ``register_connector`` write is intentionally absent.
-    # ``register_connector`` would also dual-write a ``(product, "",
-    # "")`` v2 entry; that key must not be present.
-    assert ("holodeck", "", "") not in v2
+    # G0.15-T6 (#1215) wildcard fanout -- a fresh target with
+    # ``version=None`` resolves to ``HolodeckConnector`` through the
+    # wildcard. The wildcard lands via :func:`register_connector_v2`
+    # directly (not the v1 dual-write surface) so holodeck still has
+    # no v1 chassis history.
+    assert v2[("holodeck", "", "")] is HolodeckConnector
 
 
 def test_about_canary_op_remains_at_index_zero() -> None:

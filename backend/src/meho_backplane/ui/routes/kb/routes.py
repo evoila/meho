@@ -685,6 +685,7 @@ def build_kb_router() -> APIRouter:
             path="/ui",
         )
         return response
+
     # -----------------------------------------------------------------
     # T2 upload routes (#871) — tenant_admin required
     # (GET /ui/kb/upload is registered above, before /ui/kb/{slug})
@@ -873,4 +874,5 @@ def build_kb_router() -> APIRouter:
             )
 
         return rows
+
     return router

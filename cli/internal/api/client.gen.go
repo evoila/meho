@@ -926,6 +926,17 @@ type BodyKbSearchUiKbSearchPost struct {
 	Q *string `json:"q,omitempty"`
 }
 
+// BodyKbUploadBulkUiKbUploadBulkPost defines model for Body_kb_upload_bulk_ui_kb_upload_bulk_post.
+type BodyKbUploadBulkUiKbUploadBulkPost struct {
+	File []string `json:"file"`
+}
+
+// BodyKbUploadSingleUiKbUploadPost defines model for Body_kb_upload_single_ui_kb_upload_post.
+type BodyKbUploadSingleUiKbUploadPost struct {
+	File string  `json:"file"`
+	Slug *string `json:"slug,omitempty"`
+}
+
 // BodyUiConnectorsCreateSubmitUiConnectorsCreatePost defines model for Body_ui_connectors_create_submit_ui_connectors_create_post.
 type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
 	Aliases   *string `json:"aliases"`
@@ -4581,6 +4592,12 @@ type KbEditorSaveUiKbNewPostFormdataRequestBody = BodyKbEditorSaveUiKbNewPost
 // KbSearchUiKbSearchPostFormdataRequestBody defines body for KbSearchUiKbSearchPost for application/x-www-form-urlencoded ContentType.
 type KbSearchUiKbSearchPostFormdataRequestBody = BodyKbSearchUiKbSearchPost
 
+// KbUploadSingleUiKbUploadPostMultipartRequestBody defines body for KbUploadSingleUiKbUploadPost for multipart/form-data ContentType.
+type KbUploadSingleUiKbUploadPostMultipartRequestBody = BodyKbUploadSingleUiKbUploadPost
+
+// KbUploadBulkUiKbUploadBulkPostMultipartRequestBody defines body for KbUploadBulkUiKbUploadBulkPost for multipart/form-data ContentType.
+type KbUploadBulkUiKbUploadBulkPostMultipartRequestBody = BodyKbUploadBulkUiKbUploadBulkPost
+
 // UiMemoryBulkUiMemoryBulkPostFormdataRequestBody defines body for UiMemoryBulkUiMemoryBulkPost for application/x-www-form-urlencoded ContentType.
 type UiMemoryBulkUiMemoryBulkPostFormdataRequestBody = BodyUiMemoryBulkUiMemoryBulkPost
 
@@ -5293,6 +5310,15 @@ type ClientInterface interface {
 	KbSearchUiKbSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	KbSearchUiKbSearchPostWithFormdataBody(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbUploadPageUiKbUploadGet request
+	KbUploadPageUiKbUploadGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbUploadSingleUiKbUploadPostWithBody request with any body
+	KbUploadSingleUiKbUploadPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbUploadBulkUiKbUploadBulkPostWithBody request with any body
+	KbUploadBulkUiKbUploadBulkPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// KbEntryDetailUiKbSlugGet request
 	KbEntryDetailUiKbSlugGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -7226,6 +7252,42 @@ func (c *Client) KbSearchUiKbSearchPostWithBody(ctx context.Context, contentType
 
 func (c *Client) KbSearchUiKbSearchPostWithFormdataBody(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewKbSearchUiKbSearchPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbUploadPageUiKbUploadGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbUploadPageUiKbUploadGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbUploadSingleUiKbUploadPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbUploadSingleUiKbUploadPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbUploadBulkUiKbUploadBulkPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbUploadBulkUiKbUploadBulkPostRequestWithBody(c.Server, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -14791,6 +14853,91 @@ func NewKbSearchUiKbSearchPostRequestWithBody(server string, contentType string,
 	return req, nil
 }
 
+// NewKbUploadPageUiKbUploadGetRequest generates requests for KbUploadPageUiKbUploadGet
+func NewKbUploadPageUiKbUploadGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/upload")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewKbUploadSingleUiKbUploadPostRequestWithBody generates requests for KbUploadSingleUiKbUploadPost with any type of body
+func NewKbUploadSingleUiKbUploadPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/upload")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKbUploadBulkUiKbUploadBulkPostRequestWithBody generates requests for KbUploadBulkUiKbUploadBulkPost with any type of body
+func NewKbUploadBulkUiKbUploadBulkPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/upload/bulk")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewKbEntryDetailUiKbSlugGetRequest generates requests for KbEntryDetailUiKbSlugGet
 func NewKbEntryDetailUiKbSlugGetRequest(server string, slug string) (*http.Request, error) {
 	var err error
@@ -16215,6 +16362,15 @@ type ClientWithResponsesInterface interface {
 	KbSearchUiKbSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error)
 
 	KbSearchUiKbSearchPostWithFormdataBodyWithResponse(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error)
+
+	// KbUploadPageUiKbUploadGetWithResponse request
+	KbUploadPageUiKbUploadGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*KbUploadPageUiKbUploadGetResponse, error)
+
+	// KbUploadSingleUiKbUploadPostWithBodyWithResponse request with any body
+	KbUploadSingleUiKbUploadPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbUploadSingleUiKbUploadPostResponse, error)
+
+	// KbUploadBulkUiKbUploadBulkPostWithBodyWithResponse request with any body
+	KbUploadBulkUiKbUploadBulkPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbUploadBulkUiKbUploadBulkPostResponse, error)
 
 	// KbEntryDetailUiKbSlugGetWithResponse request
 	KbEntryDetailUiKbSlugGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*KbEntryDetailUiKbSlugGetResponse, error)
@@ -18917,6 +19073,71 @@ func (r KbSearchUiKbSearchPostResponse) StatusCode() int {
 	return 0
 }
 
+type KbUploadPageUiKbUploadGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r KbUploadPageUiKbUploadGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbUploadPageUiKbUploadGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbUploadSingleUiKbUploadPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbUploadSingleUiKbUploadPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbUploadSingleUiKbUploadPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbUploadBulkUiKbUploadBulkPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbUploadBulkUiKbUploadBulkPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbUploadBulkUiKbUploadBulkPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type KbEntryDetailUiKbSlugGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -20651,6 +20872,33 @@ func (c *ClientWithResponses) KbSearchUiKbSearchPostWithFormdataBodyWithResponse
 		return nil, err
 	}
 	return ParseKbSearchUiKbSearchPostResponse(rsp)
+}
+
+// KbUploadPageUiKbUploadGetWithResponse request returning *KbUploadPageUiKbUploadGetResponse
+func (c *ClientWithResponses) KbUploadPageUiKbUploadGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*KbUploadPageUiKbUploadGetResponse, error) {
+	rsp, err := c.KbUploadPageUiKbUploadGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbUploadPageUiKbUploadGetResponse(rsp)
+}
+
+// KbUploadSingleUiKbUploadPostWithBodyWithResponse request with arbitrary body returning *KbUploadSingleUiKbUploadPostResponse
+func (c *ClientWithResponses) KbUploadSingleUiKbUploadPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbUploadSingleUiKbUploadPostResponse, error) {
+	rsp, err := c.KbUploadSingleUiKbUploadPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbUploadSingleUiKbUploadPostResponse(rsp)
+}
+
+// KbUploadBulkUiKbUploadBulkPostWithBodyWithResponse request with arbitrary body returning *KbUploadBulkUiKbUploadBulkPostResponse
+func (c *ClientWithResponses) KbUploadBulkUiKbUploadBulkPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbUploadBulkUiKbUploadBulkPostResponse, error) {
+	rsp, err := c.KbUploadBulkUiKbUploadBulkPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbUploadBulkUiKbUploadBulkPostResponse(rsp)
 }
 
 // KbEntryDetailUiKbSlugGetWithResponse request returning *KbEntryDetailUiKbSlugGetResponse
@@ -24383,6 +24631,74 @@ func ParseKbSearchUiKbSearchPostResponse(rsp *http.Response) (*KbSearchUiKbSearc
 	}
 
 	response := &KbSearchUiKbSearchPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbUploadPageUiKbUploadGetResponse parses an HTTP response from a KbUploadPageUiKbUploadGetWithResponse call
+func ParseKbUploadPageUiKbUploadGetResponse(rsp *http.Response) (*KbUploadPageUiKbUploadGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbUploadPageUiKbUploadGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseKbUploadSingleUiKbUploadPostResponse parses an HTTP response from a KbUploadSingleUiKbUploadPostWithResponse call
+func ParseKbUploadSingleUiKbUploadPostResponse(rsp *http.Response) (*KbUploadSingleUiKbUploadPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbUploadSingleUiKbUploadPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbUploadBulkUiKbUploadBulkPostResponse parses an HTTP response from a KbUploadBulkUiKbUploadBulkPostWithResponse call
+func ParseKbUploadBulkUiKbUploadBulkPostResponse(rsp *http.Response) (*KbUploadBulkUiKbUploadBulkPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbUploadBulkUiKbUploadBulkPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

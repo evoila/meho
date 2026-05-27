@@ -121,3 +121,10 @@ register_connector_v2(
 # Queue the typed-op registrar onto the lifespan-driven list. T1 ships
 # a no-op; T3 will fill in the body once the catalog entry lands.
 register_typed_op_registrar(register_github_typed_operations)
+
+# Side-effect import: the composites subpackage's ``__init__`` queues
+# its own registrar onto the lifespan list (T4 #1224 ships the first L1
+# composite ``gh.composite.pr_status_summary``). Import-after-typed-
+# registrar ordering matches the vmware-rest precedent so the lifespan
+# runs the typed registrar before the composite registrar.
+import meho_backplane.connectors.github.composites  # noqa: E402,F401  -- side-effect

@@ -19,6 +19,65 @@ highest-blast-radius write ops land in T5 (#1225).
 
 Source: `backend/src/meho_backplane/connectors/github/`.
 
+### Layer-1 composites (T4 #1224)
+
+The `composites/` subpackage hosts hand-coded L1 composites that wrap
+multiple L2 sub-ops into one governed call. T4 ships the first one,
+`gh.composite.pr_status_summary`, mirroring the layout precedent at
+`backend/src/meho_backplane/connectors/vmware_rest/composites/`:
+
+- **`composites/_register.py`** — `_COMPOSITES` tuple and the
+  `register_github_composite_operations` async registrar. T4 ships
+  exactly one row; future T7+ Tasks add `release_health`,
+  `board_snapshot`, etc., on the same pattern.
+- **`composites/_read.py`** — module-level `async def` handlers. The
+  T4 handler `pr_status_summary_composite` dispatches three L2 sub-ops:
+  the PR call sequentially (drives the head SHA used in the next step),
+  then the check-runs and reviews calls in parallel via
+  `asyncio.gather`. Partial-failure tolerance is part of the contract
+  — a failure on either secondary surfaces as `null` for that field
+  plus `checks_status="unknown"` / `review_status="unknown"`, never
+  bailing mid-flight. The PR sub-call itself is non-optional.
+- **`composites/schemas.py`** — JSON-Schema 2020-12 parameter and
+  response contracts. `additionalProperties=False` on params so operator
+  typos surface as clear validation errors; response schemas describe
+  the seven-key envelope and the two pre-computed status enums.
+- **`composites/_preflight.py`** — per-process cache of which composites
+  have already validated that every declared L2 sub-op is registered in
+  `endpoint_descriptor`. Same lazy-resolve design as the vmware-rest
+  precedent (G0.14-T10 #1183): if any sub-op is missing, the helper
+  raises `CompositeL2DependencyMissing` with the missing op-ids plus
+  the catalog command `meho connector ingest --catalog gh/v3`. The
+  dispatcher catches it and surfaces it as a structured
+  `composite_l2_missing` error per `docs/codebase/error-message-shape.md`.
+- **`composites/__init__.py`** — side-effect import that queues
+  `register_github_composite_operations` onto the lifespan registrar
+  list. The parent `github/__init__.py` imports this subpackage so the
+  registrar lands during `_eager_import_connectors`.
+
+Both summarisers — `_summarize_checks` and `_summarize_reviews` — are
+intentionally conservative: an unexpected payload shape collapses to
+`"unknown"` rather than guessing, and `_summarize_reviews` honours
+GitHub's "latest review per reviewer" rule (a single
+`CHANGES_REQUESTED` vetoes the PR; a `DISMISSED` entry pops the
+reviewer's prior verdict).
+
+The composite is registered with `safety_level="safe"` (the
+register-time equivalent of the operator-visible "read" label per the
+issue body) and `requires_approval=False`, overriding
+`register_composite_operation`'s `dangerous` / `True` defaults the same
+way the vmware-rest read composites do.
+
+**Known T4 dependency on the parser fix.** The catalog ingest (T3) is
+xfail-strict against the live spec because the G0.7 OpenAPI parser does
+not inline `#/components/responses/*` refs (GitHub uses these
+extensively). The composite registration is *not* blocked — the unit
+tests run unconditionally — but the live L1+L2 dispatch acceptance test
+at `backend/tests/integration/test_github_composite_dispatch.py` is
+xfail-strict pending a sibling parser-scope follow-up. Once that lands,
+both the T3 ingest test and the T4 dispatch test flip from xfail to
+xpass, and CI prompts the maintainer to remove the marks.
+
 ## Key types
 
 - **`GitHubRestConnector`** (`connector.py`) — `HttpConnector` subclass

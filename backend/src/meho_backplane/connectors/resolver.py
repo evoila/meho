@@ -12,7 +12,7 @@ shipped v1 entry point).
 Resolution input
 ================
 
-The resolver reads two attributes from ``target``:
+The resolver reads three attributes from ``target``:
 
 * ``target.product`` — product slug (matches ``Connector.product``).
 * ``target.fingerprint`` → ``version`` — version string from the most
@@ -21,7 +21,15 @@ The resolver reads two attributes from ``target``:
   ``FingerprintResult.model_dump(mode="json")``); duck-typed test
   targets may instead expose an object with ``.version``. The resolver
   reads both shapes. Optional — when unknown, the resolver falls back
-  to v1-style entries (entries registered with ``version=""``).
+  to ``target.version`` (operator-asserted), then to v1-style entries
+  (entries registered with ``version=""``).
+* ``target.version`` — operator-asserted product version (G0.15-T6
+  #1215). Editable via
+  :class:`~meho_backplane.targets.schemas.TargetCreate` /
+  :class:`~meho_backplane.targets.schemas.TargetUpdate` so a fresh
+  target can carry an explicit version before the first probe.
+  Consulted only when ``fingerprint.version`` is absent; the probed
+  value is always the authoritative source when present.
 
 A third, optional attribute participates in the tie-break:
 
@@ -38,20 +46,25 @@ Tie-break ladder
 When two or more connectors advertise support for a target's
 ``(product, version)``:
 
-1. **Versioned beats wildcard.** Some products have a v1 *wildcard*
-   registry entry alongside a v2 *versioned* entry — the K8s connector
-   is the shipped case (Kubernetes registers both
+1. **Versioned beats wildcard.** Some products have a *wildcard*
+   registry entry alongside a *versioned* entry. The K8s connector
+   was the original case (Kubernetes registers both
    ``("k8s", "", "")`` from :func:`register_connector` and
    ``("k8s", "1.x", "k8s")`` from :func:`register_connector_v2` so
    ``get_connector("k8s")`` keeps working for the ``/probe`` route
-   while ``connector_id="k8s-1.x"`` resolves through v2). When the
-   v1 wildcard and ≥1 v2 versioned entries share a candidate slot,
-   the wildcard is *demoted* (removed from the candidate list) before
-   the rest of the ladder runs. The wildcard is conceptually "matches
-   any version" and shouldn't compete with a connector that names a
-   specific version triple. The rule is generalized to any future
-   connector that double-registers under the same shape (a v2 entry
-   with empty ``version`` and ``impl_id`` slots), not just K8s.
+   while ``connector_id="k8s-1.x"`` resolves through v2); G0.15-T6
+   (#1215) fans the pattern out across every typed connector by
+   adding a ``(product, "", "")`` sibling registration so a fresh
+   target with no fingerprint and no operator-asserted version still
+   resolves. The wildcard candidate matches its product regardless of
+   the class's ``supported_version_range`` attribute -- the empty
+   ``(version, impl_id)`` slot in the registry key *is* the wildcard
+   signal (see :func:`_filter_candidates`). When the wildcard and ≥1
+   versioned entries share a candidate slot, the wildcard is
+   *demoted* (removed from the candidate list) before the rest of
+   the ladder runs. The wildcard is conceptually "matches any
+   version" and shouldn't compete with a connector that names a
+   specific version triple.
 
 2. **Most-specific-version-match wins.** A connector with
    ``supported_version_range=">=9.0,<10.0"`` (span = 1.0 minor versions)
@@ -382,27 +395,51 @@ def _run_tie_break_ladder(
 
 
 def _resolve_target_version(target: Any) -> str | None:
-    """Pull the target's fingerprinted version, tolerating absence.
+    """Pull the target's product version from fingerprint or operator hint.
 
-    ``target.fingerprint`` is a JSON **dict** in production: the probe
-    route persists ``FingerprintResult.model_dump(mode="json")`` to the
-    ``Target.fingerprint`` column, so the ORM hands the resolver a
-    ``Mapping``, not an object. Tests (and the module docstring's
-    duck-typed contract) may instead supply an object exposing
-    ``.version``. Read both shapes — dict via key access, object via
-    attribute access — so a real probed target resolves the same way a
-    duck-typed test target does. Reading only the attribute form (the
-    prior behaviour) made every versioned connector unresolvable for
-    every real target, since ``getattr(dict, "version", None)`` is
-    always ``None``.
+    Two sources, in priority order:
+
+    1. ``target.fingerprint.version`` -- the *probed* version. The probe
+       route persists ``FingerprintResult.model_dump(mode="json")`` to
+       the ``Target.fingerprint`` column, so the ORM hands the resolver
+       a ``Mapping``, not an object. Tests (and the module docstring's
+       duck-typed contract) may instead supply an object exposing
+       ``.version``. Read both shapes -- dict via key access, object
+       via attribute access -- so a real probed target resolves the
+       same way a duck-typed test target does. Reading only the
+       attribute form (the prior behaviour) made every versioned
+       connector unresolvable for every real target, since
+       ``getattr(dict, "version", None)`` is always ``None``.
+    2. ``target.version`` -- the *operator-asserted* version (G0.15-T6
+       #1215). Falls back here when the fingerprint is absent or
+       carries no ``version`` key. The column is operator-editable via
+       :class:`~meho_backplane.targets.schemas.TargetCreate` /
+       :class:`~meho_backplane.targets.schemas.TargetUpdate` so a fresh
+       target can carry an explicit version *before* the first probe,
+       breaking the chicken-and-egg the v0.7.0 dogfood surfaced (RDC
+       #753, signal 6): every typed connector except K8s required
+       ``fingerprint.version`` to resolve, but the probe needed the
+       resolver to find a connector first. The wildcard registrations
+       fanned out to every typed connector in the same PR are the
+       second leg of the fix -- they keep an unfingerprinted target
+       with ``version=None`` resolvable even when the operator does
+       not know the version up-front.
+
+    Probed version wins over operator-asserted version when both are
+    set: the probe is the *reality check*, the operator hint is the
+    *bootstrap*. Once the probe runs, its diagnosis supersedes whatever
+    string the operator typed.
     """
     fp = getattr(target, "fingerprint", None)
-    if fp is None:
-        return None
-    version = fp.get("version") if isinstance(fp, Mapping) else getattr(fp, "version", None)
-    if not isinstance(version, str) or not version:
-        return None
-    return version
+    if fp is not None:
+        fp_version = fp.get("version") if isinstance(fp, Mapping) else getattr(fp, "version", None)
+        if isinstance(fp_version, str) and fp_version:
+            return fp_version
+    # G0.15-T6 fallback: operator-asserted version on the Target row.
+    asserted = getattr(target, "version", None)
+    if isinstance(asserted, str) and asserted:
+        return asserted
+    return None
 
 
 def _filter_candidates(product: str, target_version: str | None) -> list[_Candidate]:
@@ -420,6 +457,33 @@ def _filter_candidates(product: str, target_version: str | None) -> list[_Candid
     for key, cls in all_connectors_v2().items():
         entry_product, entry_version, entry_impl_id = key
         if entry_product != product:
+            continue
+
+        # G0.15-T6 (#1215). A v1-shape wildcard entry --
+        # ``(product, "", "")`` -- always matches its product, regardless
+        # of the connector class's ``supported_version_range`` attribute
+        # and regardless of whether the target carries a version. The
+        # registry-key shape is the authoritative wildcard signal here,
+        # not the class attribute: the same class can register a
+        # versioned entry alongside a wildcard entry (the K8s precedent
+        # and the typed-connector fanout this Task ships), and the
+        # wildcard's job is to keep ``no_connector`` from firing on a
+        # fresh / unversioned target while the versioned entry still
+        # carries the SpecifierSet filter for accurate matching once a
+        # version is known. The resolver's
+        # ``versioned_over_wildcard`` tie-break (step 1 in
+        # :func:`_run_tie_break_ladder`) ensures the versioned candidate
+        # wins whenever both are present.
+        if entry_version == "" and entry_impl_id == "":
+            out.append(
+                _Candidate(
+                    product=entry_product,
+                    version=entry_version,
+                    impl_id=entry_impl_id,
+                    cls=cls,
+                    specificity_score=(_SPECIFICITY_UNBOUNDED, 0.0),
+                )
+            )
             continue
 
         spec_str = cls.supported_version_range

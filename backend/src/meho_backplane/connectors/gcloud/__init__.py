@@ -47,6 +47,19 @@ register_connector_v2(
     cls=GcloudConnector,
 )
 
+# G0.15-T6 (#1215) wildcard fallback -- the K8s sibling pattern fanned
+# out so a target with ``version=None`` (fresh, unfingerprinted, no
+# operator-asserted version yet) resolves to this connector through
+# the resolver's ``versioned_over_wildcard`` step rather than 501-ing
+# with ``no_connector``. The versioned entry above always wins when
+# both are present (resolver tie-break step 1).
+register_connector_v2(
+    product="gcloud",
+    version="",
+    impl_id="",
+    cls=GcloudConnector,
+)
+
 # Queue the typed-op upsert onto the lifespan-driven registrar list.
 # run_typed_op_registrars() (called during app lifespan startup) will
 # invoke this after all connector modules have been eager-imported, so

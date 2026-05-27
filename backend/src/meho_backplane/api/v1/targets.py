@@ -262,6 +262,7 @@ def _to_full(t: TargetORM) -> Target:
         name=t.name,
         aliases=tuple(t.aliases),
         product=t.product,
+        version=t.version,
         host=t.host,
         port=t.port,
         fqdn=t.fqdn,
@@ -302,6 +303,62 @@ def _registered_products() -> set[str]:
     PRs.
     """
     return {product for (product, _version, _impl_id) in all_connectors_v2() if product}
+
+
+def _registered_impl_ids() -> set[str]:
+    """Return the set of impl_ids advertised by registered connector classes.
+
+    G0.15-T6 (#1215). The v0.7.0 dogfood (RDC #753, signal 6) caught a
+    UX foot-gun where PATCH accepted any string for ``preferred_impl_id``
+    and the resolver silently ignored unknown values (the override is
+    consulted only as step 3 of the tie-break ladder, and zero matches
+    means the override never fires). The operator believed they had
+    pinned an implementation but every dispatch continued resolving via
+    the tie-break ladder's earlier steps. This validator runs at
+    create / update time and rejects an unknown impl_id with a
+    structured 422 so the operator gets the same actionable diagnostic
+    at write time that the resolver would give if it surfaced the
+    silent-ignore.
+
+    Read from the v2 registry snapshot (which subsumes v1 entries as
+    ``(product, "", "")``); the empty-string placeholder is excluded
+    because a bare ``""`` impl_id has no addressable meaning at the
+    PATCH surface (an operator setting ``preferred_impl_id=""`` is
+    equivalent to clearing the override, and we model that via
+    ``None``, not the empty string). Returned as a fresh ``set`` so
+    callers can mutate / sort without affecting the underlying
+    registry.
+    """
+    return {impl_id for (_product, _version, impl_id) in all_connectors_v2() if impl_id}
+
+
+def _build_unknown_preferred_impl_detail(
+    preferred_impl_id: str,
+    valid_impl_ids: list[str],
+) -> dict[str, object]:
+    """Build the structured 422 detail for an unknown ``preferred_impl_id``.
+
+    Mirrors :func:`_build_unknown_product_detail` and the convention in
+    ``docs/codebase/error-message-shape.md`` -- a snake_case ``kind``
+    discriminator, the offending value, a machine-actionable list of
+    valid alternatives, and a human-readable ``message`` carrying the
+    remediation step. The 422 status (vs 404) matches the rest of the
+    targets surface: a body field carried a value the server cannot
+    honour, so the request was unprocessable.
+    """
+    return {
+        "kind": "unknown_preferred_impl_id",
+        "preferred_impl_id": preferred_impl_id,
+        "valid_impl_ids": valid_impl_ids,
+        "message": (
+            f"preferred_impl_id={preferred_impl_id!r} is not registered; "
+            f"pick one of {valid_impl_ids!r} or register a connector for "
+            f"it before retrying. The resolver silently ignores unknown "
+            f"impl_id overrides; this 422 surfaces the foot-gun at write "
+            f"time. See docs/codebase/error-message-shape.md for the "
+            f"convention."
+        ),
+    }
 
 
 @router.get("", response_model=list[TargetSummary])
@@ -563,6 +620,24 @@ async def create_target(
             status_code=422,
             detail=_build_unknown_product_detail(body.product, valid_products),
         )
+    # G0.15-T6 (#1215). Validate ``preferred_impl_id`` against the
+    # registered impl set so the resolver-silently-ignores-unknown-id
+    # foot-gun surfaces at write time. ``None`` is the absent / cleared
+    # state and is always valid; a non-``None`` value must match an
+    # impl_id registered in the v2 connector registry. ``valid_impl_ids``
+    # is empty when the registry is empty (test isolation / pre-lifespan
+    # state); we skip validation in that case for parity with the
+    # ``product`` validator above.
+    valid_impl_ids = sorted(_registered_impl_ids())
+    if (
+        body.preferred_impl_id is not None
+        and valid_impl_ids
+        and body.preferred_impl_id not in valid_impl_ids
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_build_unknown_preferred_impl_detail(body.preferred_impl_id, valid_impl_ids),
+        )
     now = datetime.now(UTC)
     t = TargetORM(
         id=uuid.uuid4(),
@@ -665,6 +740,19 @@ async def update_target(
                         f"the convention."
                     ),
                 },
+            )
+    # G0.15-T6 (#1215). Same impl_id rejection as on POST. ``None`` is
+    # the explicit-clear state and is always valid (operator wants to
+    # remove the override); a non-``None`` value must match a
+    # registered impl_id. Skip when the registry is empty (test
+    # isolation / pre-lifespan).
+    new_preferred = updates.get("preferred_impl_id")
+    if new_preferred is not None:
+        valid_impl_ids = sorted(_registered_impl_ids())
+        if valid_impl_ids and new_preferred not in valid_impl_ids:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=_build_unknown_preferred_impl_detail(new_preferred, valid_impl_ids),
             )
     for k, v in updates.items():
         setattr(t, k, v)

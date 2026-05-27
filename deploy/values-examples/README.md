@@ -261,8 +261,10 @@ the file is empty / wrong).
 > the MCP-client surface (`/mcp` over RFC 9728 + OAuth 2.1 + PKCE).
 > The 2026-05-21 RDC dogfood walked the realm from scratch and paid
 > ~2.5 hours hitting four sequential walls — none of them documented
-> in one place at the time. This section is the consolidated 5-step
-> recipe + 4-wall symptom→cause→fix matrix that closes that gap.
+> in one place at the time; a follow-up 2026-05-22 dogfood added a
+> fifth (W7, `offline_access` for Claude Code's MCP refresh-token
+> request). This section is the consolidated 5-step recipe +
+> five-wall symptom→cause→fix matrix that closes that gap.
 > Companion to [`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md)
 > (MCP-client-side configuration) and
 > [`docs/acceptance/install.md`](../../docs/acceptance/install.md)
@@ -420,9 +422,16 @@ client-shape contrast with `meho-cli`:
 | Valid redirect URIs | `https://claude.ai/api/mcp/auth_callback`, `http://localhost:*` | Covers the Claude.ai Custom Connector and any localhost MCP Inspector. |
 | Web origins | `+` (or a tight allow-list) | CORS for the browser flow. |
 | PKCE challenge method | `S256` | Spec-required for public-client PKCE. |
+| **Optional client scopes** | **`offline_access`** | Claude Code's MCP client **always** requests `offline_access` in its scope parameter to obtain a refresh token; if the scope isn't assigned on the client, Keycloak rejects the authorization request with `invalid_scope` (Wall #7). Assign as **optional** rather than default — only flows that ask for a refresh token (browser MCP clients) should mint one. The CLI device-code client deliberately doesn't get this scope (RFC 8628 device-code clients re-run the device dance instead of holding a long-lived refresh token; a stolen device-code refresh token has worse blast-radius than a fresh dance prompt). |
 
 The 5 protocol mappers + 4 default client scopes from Steps 3–4
-apply identically. The recipe at
+apply identically. The MCP client additionally carries
+`offline_access` as an **optional** client scope so Claude Code's
+auth-code + PKCE flow — which always lists `offline_access` in its
+scope parameter — can mint a refresh token; without it Keycloak
+returns `invalid_scope` (Wall #7). The CLI device-code client does
+**not** get `offline_access`: it re-runs the device dance instead of
+holding a refresh token. The recipe at
 [`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md)
 documents the per-client configuration step for each MCP client.
 
@@ -500,11 +509,14 @@ curl -sf https://meho.evba.lab/.well-known/oauth-protected-resource | jq .
 # }
 ```
 
-### Four-wall symptom → cause → fix matrix
+### Five-wall symptom → cause → fix matrix
 
-The deployer's first-login walk hits these four walls in sequence;
-each surfaces with a different symptom but the cause-and-fix chain
-is bounded. Walls are numbered for the dogfood-report cross-reference.
+The deployer's first-login walk hits these walls in sequence; each
+surfaces with a different symptom but the cause-and-fix chain is
+bounded. W1–W4 came out of the 2026-05-21 RDC dogfood; **W7** was
+added 2026-05-22 when the same operator's MCP client (Claude Code)
+hit `invalid_scope` after the W1–W4 fixes shipped. Walls are
+numbered for cross-reference with the originating dogfood reports.
 
 | Wall | Symptom | Cause | Fix |
 | --- | --- | --- | --- |
@@ -512,6 +524,7 @@ is bounded. Walls are numbered for the dogfood-report cross-reference.
 | **W2** | Token issuance succeeds; every backend call 401s with a structured `detail` code (post-[#797](https://github.com/evoila/meho/issues/797) + [#1131](https://github.com/evoila/meho/issues/1131): `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` / `malformed_jws` if the `Authorization` header carries a non-JWT value at all). | The public client mints tokens with a different claim shape than `meho-backplane` validates against — missing the `audience-meho-backplane` mapper (wrong `aud`), the `meho-mcp-audience` mapper (no MCP audience), the `tenant-id` mapper, or the `tenant-role` mapper. A `malformed_jws` instead means the `Authorization` header is not a JWT (typo, copy/paste truncation, or a probe like `Bearer not-a-real-jwt`). | Clone all 5 mappers from the `meho-backplane` client onto the public client per Step 3. After the fix, decode the issued token (`jwt.io` or `kcadm.sh evaluate-protocol-mappers`) and confirm `aud` is an array containing both `meho-backplane` and `<backplane-url>/mcp`, plus `tenant_id`, `tenant_role`, `groups` are present. For `malformed_jws`: paste the bearer into `jwt.io` — if it doesn't decode, the header was sent with the wrong value, not the issued token. |
 | **W3** | Token issuance succeeds; every backend call 401s with `{"detail":"invalid_token"}` even after Wall #2 is closed; decoded token has `aud`, `tenant_id`, `tenant_role`, `groups` but **no `sub` claim**. | The `basic` client scope wasn't assigned. Keycloak 25 moved `sub` into the Subject (sub) protocol mapper inside the `basic` scope; clients created via the admin REST API don't auto-inherit realm default-default scopes the way the admin-console UI populates them. RFC 9068 §2.2.1 makes `sub` REQUIRED on JWT access tokens, so rejection is spec-correct — the diagnostic is the opaque part. | Add `basic`, `roles`, `web-origins`, `acr` to the public client's **default** client scopes per Step 4. Re-issue (logout and re-login; existing tokens are stale) and confirm `sub` is now present. After [#797](https://github.com/evoila/meho/issues/797) lands the symptom is `{"detail":"missing_sub"}` instead of the opaque form. |
 | **W4** | `meho login` fails with `meho: token exchange failed: context deadline exceeded`, often before the human has a chance to approve the verification URL. | Not the device-code TTL (which is already 10 minutes per `cli/internal/auth/devicecode.go:355`'s `PollTimeout = 10 * time.Minute` — longer than Keycloak's default 600 s `expires_in`). The real cause is an **ambient parent deadline** on `cmd.Context()` (CI step timeout, `claude` bash-tool timeout, IDE-task wrapper) that truncates the approval wait far below the device-code lifetime. | (Until [#798](https://github.com/evoila/meho/issues/798) lands) run `meho login` in a real interactive terminal without a short wrapper deadline; or raise the wrapper timeout to ≥ `expires_in` + headroom. After #798 lands the message distinguishes "parent deadline fired" from "device code expired" and the device-flow approval wait detaches from a too-short parent context. |
+| **W7** | Browser-flow MCP client (Claude Code, MCP Inspector) authorization request 400s with `{"error":"invalid_scope","error_description":"Invalid scopes: openid profile email offline_access"}` (or just `offline_access` in the failed-scopes list). Token endpoint never reached; the user never sees a Keycloak login page. | The MCP client requested `offline_access` to obtain a refresh token (Claude Code **always** includes it; OIDC Core §11 makes it the spec-defined signal for a refresh token), but the `meho-mcp-client` public client doesn't have `offline_access` in either its default or optional client-scope list. Keycloak rejects unknown / unassigned scopes per OAuth 2.0 [RFC 6749 §5.2](https://www.rfc-editor.org/rfc/rfc6749#section-5.2). The realm-built-in `offline_access` scope exists; it just isn't attached to the public MCP client. | Assign the realm's built-in `offline_access` client scope to `meho-mcp-client` as an **optional** scope (not default — only flows that ask for a refresh token should mint one). In the Keycloak admin console: `meho-mcp-client` → Client scopes → Add client scope → pick `offline_access` → **Optional**. `meho admin keycloak bootstrap-clients` does this automatically from v0.6.0 ([#912](https://github.com/evoila/meho/issues/912)). The CLI device-code client (`meho-cli`) deliberately is **not** given `offline_access` — device-code clients re-run the device dance rather than hold a long-lived refresh token; a stolen device-code refresh token has worse blast-radius than re-prompting the operator. |
 
 ### Out of scope for this recipe
 
@@ -523,10 +536,12 @@ is bounded. Walls are numbered for the dogfood-report cross-reference.
   authoritative deployer doc for the chart values + the auth-onramp
   recipe.
 - **Automation of the recipe.** [#791](https://github.com/evoila/meho/issues/791)
-  (G0.9.1-T11) ships `meho admin keycloak bootstrap-cli-client` — an
+  (G0.9.1-T11) ships `meho admin keycloak bootstrap-clients` — an
   idempotent verb that creates the two public clients + 5 mappers +
-  4 default scopes from one invocation. The recipe above is the
-  manual path until that automation lands.
+  4 default scopes from one invocation, plus (from v0.6.0 via
+  [#912](https://github.com/evoila/meho/issues/912)) the
+  `offline_access` optional scope on the MCP client (W7). The recipe
+  above is the manual path; the helper is the supported automation.
 - **Confidential `meho-backplane` client.** Out of scope — it's
   created at realm-install time alongside the Keycloak realm itself
   and isn't touched by this recipe. Rotating its client secret is

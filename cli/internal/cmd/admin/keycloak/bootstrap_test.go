@@ -37,14 +37,15 @@ type fakeKeycloak struct {
 	// determinism).
 	nextID int
 
-	clients       map[string]*clientRep          // keyed by UUID
-	mappers       map[string][]protocolMapperRep // keyed by client UUID
-	defaultScopes map[string][]string            // client UUID -> scope ID list
-	realmScopes   []scopeRep                     // realm-level client-scopes
-	groups        map[string]*groupRep           // keyed by UUID
-	users         map[string]*userRep            // keyed by UUID
-	userGroups    map[string][]string            // user UUID -> group UUIDs
-	passwords     map[string]string              // user UUID -> last reset password
+	clients        map[string]*clientRep          // keyed by UUID
+	mappers        map[string][]protocolMapperRep // keyed by client UUID
+	defaultScopes  map[string][]string            // client UUID -> scope ID list
+	optionalScopes map[string][]string            // client UUID -> scope ID list
+	realmScopes    []scopeRep                     // realm-level client-scopes
+	groups         map[string]*groupRep           // keyed by UUID
+	users          map[string]*userRep            // keyed by UUID
+	userGroups     map[string][]string            // user UUID -> group UUIDs
+	passwords      map[string]string              // user UUID -> last reset password
 
 	// Counts requests per (method, path-template) so tests can assert
 	// idempotency: a re-run must not increment "POST /clients".
@@ -53,15 +54,21 @@ type fakeKeycloak struct {
 
 func newFakeKeycloak() *fakeKeycloak {
 	return &fakeKeycloak{
-		clients:       map[string]*clientRep{},
-		mappers:       map[string][]protocolMapperRep{},
-		defaultScopes: map[string][]string{},
+		clients:        map[string]*clientRep{},
+		mappers:        map[string][]protocolMapperRep{},
+		defaultScopes:  map[string][]string{},
+		optionalScopes: map[string][]string{},
 		realmScopes: []scopeRep{
 			{ID: "scope-basic", Name: "basic"},
 			{ID: "scope-roles", Name: "roles"},
 			{ID: "scope-web-origins", Name: "web-origins"},
 			{ID: "scope-acr", Name: "acr"},
 			{ID: "scope-profile", Name: "profile"},
+			// Realm-built-in: Keycloak provisions `offline_access` at
+			// realm-create time. The MCP bootstrap depends on its
+			// presence to attach as an optional scope (RDC Wall W7 /
+			// #912).
+			{ID: "scope-offline-access", Name: "offline_access"},
 		},
 		groups:     map[string]*groupRep{},
 		users:      map[string]*userRep{},
@@ -247,6 +254,35 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 				}
 			}
 			f.defaultScopes[uuid] = append(f.defaultScopes[uuid], sid)
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(sub, "/optional-client-scopes") &&
+			r.Method == http.MethodGet:
+			f.calls["GET /clients/{uuid}/optional-client-scopes"]++
+			uuid := strings.TrimSuffix(
+				strings.TrimPrefix(sub, "clients/"),
+				"/optional-client-scopes")
+			var attached []scopeRep
+			for _, sid := range f.optionalScopes[uuid] {
+				for _, rs := range f.realmScopes {
+					if rs.ID == sid {
+						attached = append(attached, rs)
+					}
+				}
+			}
+			writeJSON(w, http.StatusOK, attached)
+		case strings.Contains(sub, "/optional-client-scopes/") &&
+			r.Method == http.MethodPut:
+			f.calls["PUT /clients/{uuid}/optional-client-scopes/{sid}"]++
+			parts := strings.Split(sub, "/")
+			uuid := parts[1]
+			sid := parts[len(parts)-1]
+			for _, already := range f.optionalScopes[uuid] {
+				if already == sid {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			}
+			f.optionalScopes[uuid] = append(f.optionalScopes[uuid], sid)
 			w.WriteHeader(http.StatusNoContent)
 		case sub == "groups" && r.Method == http.MethodGet:
 			f.calls["GET /groups"]++
@@ -777,5 +813,101 @@ func TestBootstrap_MCPClientHasStandardFlowAndPKCE(t *testing.T) {
 	}
 	if len(mcpClient.RedirectURIs) == 0 {
 		t.Errorf("MCP client must have at least one redirect URI")
+	}
+}
+
+// TestBootstrap_MCPClientHasOfflineAccessOptionalScope is the
+// regression contract for RDC Wall W7 (#912): Claude Code's MCP
+// client always requests `offline_access` for a refresh token, so the
+// MCP browser-flow client must carry that scope as an optional client
+// scope. The CLI device-code client is deliberately NOT given it —
+// device-code clients re-run the device dance instead of holding a
+// long-lived refresh token. The test pins both halves of that
+// asymmetry plus the idempotency invariant.
+func TestBootstrap_MCPClientHasOfflineAccessOptionalScope(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// Locate the two clients by clientId.
+	var cliUUID, mcpUUID string
+	for uuid, c := range fake.clients {
+		switch c.ClientID {
+		case "meho-cli":
+			cliUUID = uuid
+		case "meho-mcp-client":
+			mcpUUID = uuid
+		}
+	}
+	if cliUUID == "" {
+		t.Fatalf("meho-cli client not found")
+	}
+	if mcpUUID == "" {
+		t.Fatalf("meho-mcp-client not found")
+	}
+
+	// MCP client: offline_access is attached as an OPTIONAL scope.
+	mcpOpt := fake.optionalScopes[mcpUUID]
+	foundOnMCP := false
+	for _, sid := range mcpOpt {
+		if sid == "scope-offline-access" {
+			foundOnMCP = true
+			break
+		}
+	}
+	if !foundOnMCP {
+		t.Errorf("meho-mcp-client missing optional scope offline_access; "+
+			"got optionalScopes=%v", mcpOpt)
+	}
+
+	// MCP client: offline_access is NOT also a default scope (that
+	// would mint a refresh token into every flow regardless of
+	// whether the client requested it).
+	for _, sid := range fake.defaultScopes[mcpUUID] {
+		if sid == "scope-offline-access" {
+			t.Errorf("meho-mcp-client has offline_access as DEFAULT — " +
+				"must be optional only (else every browser-flow login " +
+				"mints a refresh token even when offline_access isn't " +
+				"requested)")
+		}
+	}
+
+	// CLI device-code client: offline_access is NOT attached at all
+	// (neither default nor optional). Device-code clients re-run the
+	// device dance; a refresh token is more attack surface than
+	// re-prompting the operator.
+	for _, sid := range fake.optionalScopes[cliUUID] {
+		if sid == "scope-offline-access" {
+			t.Errorf("meho-cli has offline_access as optional — must " +
+				"not have it (RFC 8628 device-code flow doesn't need a " +
+				"refresh token; a stolen refresh token is worse than " +
+				"re-running the device dance)")
+		}
+	}
+	for _, sid := range fake.defaultScopes[cliUUID] {
+		if sid == "scope-offline-access" {
+			t.Errorf("meho-cli has offline_access as default — must not")
+		}
+	}
+
+	// Idempotency contract: re-running the bootstrap against the same
+	// realm must not re-PUT the optional scope (the production code
+	// pre-checks via listClientOptionalScopes; PUTting again would be
+	// harmless against real Keycloak but indicates a regression in
+	// the skip-if-already-present path).
+	putsAfterFirst := fake.calls["PUT /clients/{uuid}/optional-client-scopes/{sid}"]
+	if putsAfterFirst != 1 {
+		t.Errorf("first run PUT'd optional scope %d times; want 1",
+			putsAfterFirst)
+	}
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	putsAfterSecond := fake.calls["PUT /clients/{uuid}/optional-client-scopes/{sid}"]
+	if putsAfterSecond != putsAfterFirst {
+		t.Errorf("re-run PUT'd optional scope again: first=%d second=%d "+
+			"(reconcileOptionalScopes idempotency regressed)",
+			putsAfterFirst, putsAfterSecond)
 	}
 }

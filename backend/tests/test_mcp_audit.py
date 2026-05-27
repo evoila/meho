@@ -831,3 +831,87 @@ async def test_call_operation_tool_definition_carries_tool_call_op_class() -> No
     assert entry is not None
     defn, _handler = entry
     assert defn.op_class == "tool_call"
+
+
+# ---------------------------------------------------------------------------
+# G0.15-T4 (#1213): end-to-end roundtrip — server issues Mcp-Session-Id on
+# initialize, client echoes it on tools/call, audit row lands the UUID.
+#
+# The positive-path acceptance test for the issuance+capture+write chain
+# the v0.7.0 release-body's G0.14-T6 #1147 callout promised. The unit
+# tests in :mod:`tests.test_mcp_server` cover the issuance half in
+# isolation; this test exercises the full end-to-end contract any
+# spec-conforming MCP client would drive (server assigns id on
+# initialize → client echoes on every later POST → row carries it).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_initialize_issued_session_id_round_trips_to_audit_row(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """End-to-end: server-issued session id propagates onto ``audit_log.agent_session_id``.
+
+    The chain under test:
+
+    1. Client POSTs ``initialize`` to ``/mcp`` (no inbound session header).
+    2. Server stamps an ``Mcp-Session-Id`` response header per MCP
+       2025-06-18 §"Session Management" rule 1.
+    3. Client echoes that id on a subsequent ``tools/call`` per rule 2.
+    4. Server's :func:`~meho_backplane.mcp.server._bind_mcp_session_id`
+       captures the inbound header into the structlog contextvar.
+    5. :func:`~meho_backplane.mcp.audit.write_mcp_audit_row` reads the
+       contextvar and writes ``audit_log.agent_session_id``.
+
+    Before G0.15-T4 #1213, step 2 didn't happen — the client had no
+    server-assigned id to echo back, so steps 4 and 5 saw an empty
+    inbound header and the column landed NULL despite ``meho_status``
+    advertising ``mcp_session_id_capture: "always"``. This test
+    regression-locks the full chain so the next consumer-side dogfood
+    cycle doesn't relive `claude-rdc-hetzner-dc#753` finding 2.
+    """
+    from uuid import UUID
+
+    client, _op = client_with_operator
+
+    # 1+2. Initialize handshake — server issues the session id.
+    init = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0.0.1"},
+            },
+        },
+    )
+    assert init.status_code == 200
+    issued_header = init.headers.get("mcp-session-id")
+    assert issued_header, (
+        "initialize must issue an Mcp-Session-Id response header per MCP "
+        "2025-06-18 §Session Management rule 1 — G0.15-T4 #1213 contract"
+    )
+    session_uuid = UUID(issued_header)
+
+    # 3+4+5. Subsequent tools/call echoes the issued id — captured into
+    # the contextvar by ``_bind_mcp_session_id``, written onto the row
+    # by ``write_mcp_audit_row``.
+    call = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "meho.status", "arguments": {}},
+        },
+        headers={"Mcp-Session-Id": issued_header},
+    )
+    assert call.status_code == 200
+
+    rows = await _audit_rows()
+    mcp_rows = [r for r in rows if r.method == "MCP"]
+    assert len(mcp_rows) == 1
+    assert mcp_rows[0].agent_session_id == session_uuid

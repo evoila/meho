@@ -171,10 +171,18 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 - [ ] Deploy to `rke2-infra`.
 - [ ] Run smoke; confirm **smoke-green** (same pattern as
   v0.2.0 / v0.3.0 / v0.3.1).
-- [ ] Audit replay (G8.2) auto-lights-up when MCP clients send
-  `Mcp-Session-Id` — no env var required after G0.14-T6 #1147.
-  Older clients that don't send the header continue to work; audit
-  rows just won't carry `agent_session_id`. To confirm the deploy is
+- [ ] Audit replay (G8.2) auto-lights-up: the backplane **issues** an
+  `Mcp-Session-Id` response header on every `initialize` per MCP
+  2025-06-18 §"Session Management" rule 1 (G0.15-T4 #1213), and
+  spec-conforming MCP clients (Claude Code, MCP Inspector, Cline)
+  echo it on every subsequent POST (rule 2). The capture path then
+  lands the id in `audit_log.agent_session_id`. No env var required
+  after G0.14-T6 #1147 — capture is unconditional and issuance is
+  unconditional. Pre-G0.15-T4 deploys (≤ v0.7.0) captured the header
+  but never issued one, so audit rows from MCP clients that wait for
+  a server-assigned id (the spec-compliant default) landed
+  `agent_session_id: null` regardless of the `capture_mode: "always"`
+  advertisement; v0.7.1+ closes this gap. To confirm the deploy is
   in the expected capture mode (`always` by default; `enforced` when
   `MCP_REQUIRE_SESSION_ID=true`), inspect
   `GET /api/v1/health`'s `mcp_session_id_capture` field.
@@ -237,6 +245,13 @@ Walk the four gates in the order an operator hits them:
   exposes the current state — `"enforced"` pre-T6,
   `"always"` post-T6. Operators tracking the audit-replay readiness
   signal off `/ready` get a stable contract across the T6 transition.
+  G0.15-T4 (#1213) added the **issuance** half — the server now
+  emits `Mcp-Session-Id` on `initialize` per MCP 2025-06-18
+  §"Session Management" rule 1, so clients have something to echo
+  back on the capture side. Without issuance (≤ v0.7.0), spec-
+  conforming MCP clients never sent the header and every row landed
+  with `agent_session_id: null` despite `capture_mode` advertising
+  `"always"`; v0.7.1+ closes the inert-promise regression.
 
 - [ ] **Approval queue** (agent-grant approval surface;
   `POST /api/v1/agents/grants` and the agent grant lifecycle). No

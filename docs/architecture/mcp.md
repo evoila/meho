@@ -30,15 +30,27 @@ The locked decision (#7 in [v0.2-decisions.md](../planning/v0.2-decisions.md)) w
 
 **Streamable HTTP**, not stdio. MEHO is a hosted server, not a local subprocess. The `/mcp` route accepts JSON-RPC 2.0 POST requests with a single envelope per body (batch arrays are unsupported — MCP Streamable HTTP transport mandates single envelopes).
 
-### Session id capture (audit correlation)
+### Session id issuance + capture (audit correlation)
 
-Per the spec's *Session Management* section, a server MAY assign a session id at `initialize` that the client echoes in the `Mcp-Session-Id` header on later requests. MEHO runs **no** stateful session store in v0.2 — it captures the header purely for **audit correlation** so per-session replay (`meho audit replay <session-id>`, G8.2) can reconstruct one agent's full operation trace. On every `POST /mcp`, [`_bind_mcp_session_id`](../../backend/src/meho_backplane/mcp/server.py) binds an `mcp_session_id` structlog contextvar (G8.2-T2 #1010):
+Per the spec's *Session Management* section, a server MAY assign a session id at `initialize` by returning it in an `Mcp-Session-Id` **response header** on the `InitializeResult`; the client MUST then include the header on every subsequent HTTP POST to the MCP endpoint. The handshake is strictly **server-driven** — clients do not invent session ids, they only relay what the server gave them. MEHO runs **no** stateful session store in v0.2 — the id exists purely for **audit correlation** so per-session replay (`meho audit replay <session-id>`, G8.2) can reconstruct one agent's full operation trace.
+
+**Issuance side (G0.15-T4 #1213).** On a successful `initialize` reply, [`_maybe_issue_initialize_session_id`](../../backend/src/meho_backplane/mcp/server.py) stamps a fresh `uuid4()` onto the response's `Mcp-Session-Id` header (and binds the same id into a structlog `mcp_session_id` contextvar so any post-issue log line carries the same correlation key). The issuance is gated on:
+
+- Method is `initialize` and it's a *request*, not a notification.
+- The dispatched response is HTTP 2xx **and** the JSON-RPC envelope has no `error` member — a failed initialize must not seed a session id.
+- The client did not already send an `Mcp-Session-Id` header inbound (a resume / replay attempt where the client carries an id is accepted lenient; MEHO does not overwrite the client's correlation key).
+
+Before G0.15-T4 #1213, MEHO captured the header end of the chain but never issued one. The visible symptom (`claude-rdc-hetzner-dc#753` finding 2) was every Claude Code MCP audit row landing with `agent_session_id: null` despite [`meho_status`](../../backend/src/meho_backplane/api/v1/health.py) / [`/ready.features.audit_replay.capture_mode`](../../backend/src/meho_backplane/api/v1/health.py) advertising `"always"` — both surfaces correctly reported the **capture** config; nothing populated the column because no client had a server-assigned session id to send back.
+
+**Capture side.** On every `POST /mcp`, [`_bind_mcp_session_id`](../../backend/src/meho_backplane/mcp/server.py) binds an `mcp_session_id` structlog contextvar (G8.2-T2 #1010):
 
 - Header present and a parseable UUID → bind it.
-- Header present but malformed (non-UUID) → treated as absent (a malformed *client* header never 500s the call; a non-UUID can't go in a `uuid` column).
-- Header absent/empty → fresh `uuid4()` for the single-call duration, so the audit row still carries a stable, non-NULL session id (the spec permits servers to not require sessions).
+- Header present but malformed (non-UUID) → treated as absent (a malformed *client* header never 500s the call; a non-UUID can't go in a `uuid` column). The audit row's `agent_session_id` lands as NULL.
+- Header absent/empty → contextvar stays unbound. The audit row's `agent_session_id` lands as NULL; the G8.2 replay route's session walk treats NULLs as "not part of any session," which is correct for a stateless-client call.
 
-`MCP_REQUIRE_SESSION_ID=true` ([`Settings.mcp_require_session_id`](../../backend/src/meho_backplane/settings.py), default `false`) turns a missing/empty header into a JSON-RPC `-32600` Invalid Request **before** dispatch — no audit row is written for the rejected call. A present-but-malformed header is not a rejection in require-mode (the client did send an id); it falls back to a fresh `uuid4()` as in the default mode.
+[`write_mcp_audit_row`](../../backend/src/meho_backplane/mcp/audit.py) reads the contextvar via [`_resolve_uuid_contextvar`](../../backend/src/meho_backplane/mcp/audit.py) and writes `audit_log.agent_session_id`. The structlog contextvar propagates down the async call chain inside one request, so the write picks up the binding without threading the value through every handler signature.
+
+`MCP_REQUIRE_SESSION_ID=true` ([`Settings.mcp_require_session_id`](../../backend/src/meho_backplane/settings.py), default `false`) turns a missing/empty header into a JSON-RPC `-32600` Invalid Request **before** dispatch — no audit row is written for the rejected call. A present-but-malformed header is not a rejection in require-mode (the client did send an id, just an unparseable one); the audit row lands NULL and a structured `mcp_malformed_session_id` warning surfaces the misbehaving client without breaking client retry logic.
 
 Response shapes per the spec's *Sending Messages to the Server* section:
 
@@ -142,7 +154,7 @@ The per-operation writer is [`mcp/audit.py::write_mcp_audit_row`](../../backend/
 ```text
 operator_sub     ← from JWT (validated by /mcp auth chain)
 tenant_id        ← operator.tenant_id
-agent_session_id ← Mcp-Session-Id header (or fresh uuid4); NULL on chassis HTTP rows (G8.2-T2)
+agent_session_id ← Mcp-Session-Id header (issued by server on initialize per G0.15-T4 #1213, echoed by client); NULL when the client didn't echo one back, and on chassis HTTP rows (G8.2-T2)
 parent_audit_id  ← parent_audit_id contextvar (forward-compat; unbound in v0.2)
 request_id       ← from RequestContextMiddleware (still runs)
 method           ← "MCP"

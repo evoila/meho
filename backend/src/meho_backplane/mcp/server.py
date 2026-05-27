@@ -575,6 +575,19 @@ def mcp_session_id_capture_mode() -> str:
     enforcement** — whether a missing header is a 400 reject. It does
     not gate capture.
 
+    Crucially, the capture chain is only useful **when clients actually
+    send the header**. Per the MCP 2025-06-18 Streamable HTTP transport
+    §"Session Management" the client only emits ``Mcp-Session-Id`` on
+    subsequent requests when the server assigned one in an
+    ``Mcp-Session-Id`` **response header** on the ``InitializeResult``
+    (spec rule 2: *"If an ``Mcp-Session-Id`` is returned by the server
+    during initialization, clients … **MUST** include it"*). G0.15-T4
+    (#1213) closes the regression where MEHO captured the header end
+    of the chain but never issued one — leaving every Claude Code MCP
+    audit row's ``agent_session_id`` as NULL despite this helper
+    reporting ``"always"``. See :func:`_issue_mcp_session_id` for the
+    issuance side.
+
     Operators can introspect the current mode via
     :func:`~meho_backplane.api.v1.health.authenticated_health` (Task
     G0.14-T6 #1147) so the deploy-time observability story for the
@@ -589,6 +602,96 @@ def mcp_session_id_capture_mode() -> str:
     G8.2 replay route filters NULLs out of session walks naturally).
     """
     return "enforced" if get_settings().mcp_require_session_id else "always"
+
+
+#: Lowercase HTTP header name for the MCP session id, used on both the
+#: inbound request (read by :func:`_bind_mcp_session_id`) and the
+#: outbound ``initialize`` response (set by :func:`_issue_mcp_session_id`).
+#: Defining it once keeps the wire spelling consistent and grep-able.
+_MCP_SESSION_HEADER: Final[str] = "mcp-session-id"
+
+
+def _issue_mcp_session_id(response: Response) -> uuid.UUID:
+    """Stamp a fresh ``Mcp-Session-Id`` response header on an ``initialize`` reply.
+
+    Per MCP 2025-06-18 Streamable HTTP §"Session Management" rule 1, a
+    server **MAY** assign a session id at initialization by returning
+    it in an ``Mcp-Session-Id`` response header on the
+    ``InitializeResult``; rule 2 then requires the client to echo that
+    id on every subsequent HTTP POST to the MCP endpoint. The handshake
+    is therefore strictly **server-driven** — clients do not invent
+    session ids, they only relay one the server gave them.
+
+    G0.15-T4 (#1213) closed the regression where MEHO's chain captured
+    the inbound header into the structlog contextvar (and from there
+    into ``audit_log.agent_session_id``) but never **issued** one to
+    begin with. The visible symptom on `claude-rdc-hetzner-dc#753`
+    finding 2 was eight Claude Code MCP rows with
+    ``agent_session_id: null`` despite ``meho_status`` /
+    ``/ready.features.audit_replay`` advertising ``capture_mode:
+    "always"`` — both surfaces correctly reported the **capture**
+    config; nothing populated the column because no client had a
+    server-assigned session id to send back.
+
+    The issued value is a fresh :func:`uuid.uuid4` rendered as the
+    canonical UUID string (the same shape :func:`_bind_mcp_session_id`
+    parses on subsequent requests, so the round-trip lands cleanly on
+    ``audit_log.agent_session_id``). MEHO holds **no stateful session
+    store** in v0.2 — the id exists purely for audit correlation, so
+    no registry-side allocation is needed: the server assigns + emits +
+    forgets, and the audit-log linkage is the only persistence. The
+    spec's optional terminate-via-DELETE flow (rule 5) and the
+    404-on-stale-id rejection (rule 3) are therefore both out of
+    scope; MEHO accepts any well-formed UUID the client returns,
+    which is also the lenient posture the v0.2 capture path already
+    documents.
+
+    Returns the issued :class:`uuid.UUID` so the caller can mirror it
+    into the structlog contextvar — useful for structlog log lines
+    emitted from inside the ``initialize`` handler (the handler itself
+    writes no audit row, but its log entries get the same
+    correlation key the subsequent ``tools/call`` audit rows will
+    carry).
+    """
+    issued = uuid.uuid4()
+    response.headers[_MCP_SESSION_HEADER] = str(issued)
+    return issued
+
+
+def _response_is_jsonrpc_error(response: Response) -> bool:
+    """Return ``True`` when *response* carries a JSON-RPC ``error`` envelope.
+
+    JSON-RPC-level errors (parse / invalid-request / method-not-found /
+    invalid-params / internal) ride on HTTP 200 by design — the failure
+    is encoded inside the body's ``error`` member, not on the HTTP
+    status. :func:`mcp_dispatch`'s post-dispatch session-id-issuance
+    gate (G0.15-T4 #1213) therefore can't filter on
+    ``response.status_code`` alone: a JSON-RPC failure of ``initialize``
+    (e.g. an invalid ``protocolVersion`` body) returns HTTP 200 with
+    ``error.code``, and the spec wants no session pinned to that
+    degenerate exchange.
+
+    The implementation peeks at the rendered body bytes. ``JSONResponse``
+    fixes ``response.body`` at construction time (Starlette renders the
+    content into bytes in ``JSONResponse.__init__``), so this read is
+    safe pre-stream. A non-``JSONResponse`` shape (the spec-driven HTTP
+    202 notifications path returns a bare :class:`Response`) carries
+    no JSON-RPC envelope and is treated as "not an error" — the caller
+    further gates on ``is_notification`` anyway.
+
+    Defensive: any decode failure (truncated body, unexpected encoding)
+    is treated as "looks like an error" so the issuance side stays
+    fail-closed — a malformed body is not a valid initialize result and
+    must not seed a session id either.
+    """
+    body = getattr(response, "body", None)
+    if not body:
+        return False
+    try:
+        envelope = json.loads(body)
+    except (ValueError, TypeError):
+        return True
+    return isinstance(envelope, dict) and "error" in envelope
 
 
 def _bind_mcp_session_id(
@@ -855,4 +958,56 @@ async def mcp_dispatch(
     # are spec-defined as notification-only, so the server treats it
     # as such regardless of the envelope's id field.
     is_notification = "id" not in payload or jrpc.method.startswith("notifications/")
-    return await _dispatch_to_handler(jrpc, is_notification, operator)
+    response = await _dispatch_to_handler(jrpc, is_notification, operator)
+    _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
+    return response
+
+
+def _maybe_issue_initialize_session_id(
+    request: Request,
+    method: str,
+    is_notification: bool,
+    response: Response,
+) -> None:
+    """Stamp an ``Mcp-Session-Id`` response header on a successful initialize.
+
+    G0.15-T4 (#1213): closes the regression on the v0.7.0 release-body's
+    G0.14-T6 #1147 promise — the capture chain (header → contextvar →
+    ``audit_log.agent_session_id``) already worked; what was missing is
+    the **issuance** half, since MCP 2025-06-18 Streamable HTTP
+    §"Session Management" rule 2 says clients only emit the header when
+    the server first sent one. Gates:
+
+    * Method is ``initialize`` and it's a *request*, not a notification
+      — the spec scopes session assignment to the handshake exchange.
+    * Response is HTTP 2xx **and** the JSON-RPC envelope has no
+      ``error`` member — a failed initialize (transport-level reject or
+      JSON-RPC ``error``) must not leak a session id, since the spec
+      wants the id pinned to a real session, not a degenerate one.
+    * The client did not already send an ``Mcp-Session-Id`` header
+      inbound — a resume / replay attempt where the client carries an
+      id is accepted lenient (MEHO holds no session-state to validate
+      against in v0.2), and we do not overwrite the client's
+      correlation key on the response.
+
+    On the success path the issued id is also bound into structlog
+    contextvars so any post-issue log line in the same async task
+    (e.g. the ``request_completed`` log from
+    :class:`~meho_backplane.middleware.RequestContextMiddleware`)
+    carries the same correlation key the client will echo on the next
+    request. The initialize call itself writes no audit row (chassis
+    ``AuditMiddleware`` skips ``/mcp`` and the MCP-side audit path only
+    fires for ``tools/call`` / ``resources/read``), so this binding is
+    purely log-side. See :func:`_issue_mcp_session_id` for the
+    issuance contract.
+    """
+    if method != "initialize" or is_notification:
+        return
+    if not (200 <= response.status_code < 300):
+        return
+    if _response_is_jsonrpc_error(response):
+        return
+    if request.headers.get(_MCP_SESSION_HEADER) not in (None, ""):
+        return
+    issued = _issue_mcp_session_id(response)
+    structlog.contextvars.bind_contextvars(mcp_session_id=str(issued))

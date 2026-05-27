@@ -244,6 +244,21 @@ connector-related release-notes line.
   follow-up reconciles them; the resolver remains exercised via
   direct programmatic construction in v0.7.x. (#1076)
 
+### Fixed
+
+- MCP server now issues an `Mcp-Session-Id` response header on every
+  successful `initialize` per MCP 2025-06-18 Streamable HTTP §"Session
+  Management" rule 1, closing the v0.7.0 release-body's G0.14-T6 #1147
+  audit-replay promise that was inert end-to-end. The capture chain
+  (header → contextvar → `audit_log.agent_session_id`) already worked;
+  what was missing was the issuance half, since spec-conforming MCP
+  clients (Claude Code, MCP Inspector) only emit the header when the
+  server first sent one. Result: every MCP audit row now carries
+  `agent_session_id`, lighting up the G8.2 audit-replay
+  `query_audit shape=tree agent_session_id=<id>` flow that the v0.7.0
+  rolling dogfood (`claude-rdc-hetzner-dc#753` finding 2) found inert
+  on the rke2-infra deploy. (G0.15-T4 #1213)
+
 ## [0.7.0] - 2026-05-27
 
 **MVP6 — agent runtime floor (P1 + P2 + P3) + safety (C1 sanitization)

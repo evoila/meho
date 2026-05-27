@@ -186,6 +186,171 @@ def test_initialize_without_protocol_version_returns_invalid_params(
 
 
 # ---------------------------------------------------------------------------
+# G0.15-T4 (#1213): server-side Mcp-Session-Id issuance on initialize
+#
+# MCP 2025-06-18 §"Session Management" rule 1: the server MAY assign a
+# session id at initialization by returning it in an ``Mcp-Session-Id``
+# response header on the ``InitializeResult``. Rule 2: if the server
+# did so, clients MUST include the header on every subsequent request.
+# The capture-and-write chain
+# (:func:`~meho_backplane.mcp.server._bind_mcp_session_id` →
+# :func:`~meho_backplane.mcp.audit._resolve_uuid_contextvar` →
+# ``audit_log.agent_session_id``) was already in place; the regression
+# the v0.7.0 release-body's G0.14-T6 #1147 callout promised was inert
+# because MEHO never issued an id — clients (Claude Code by default,
+# per `claude-rdc-hetzner-dc#753` finding 2) therefore had nothing to
+# echo back, so every MCP audit row landed with ``agent_session_id:
+# null`` regardless of the ``capture_mode: "always"`` advertisement.
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_issues_mcp_session_id_response_header(
+    client: TestClient,
+) -> None:
+    """AC: a successful ``initialize`` returns an ``Mcp-Session-Id`` response header.
+
+    Per MCP 2025-06-18 §"Session Management" rule 1 the server is the
+    only side that may assign session ids; clients (rule 2) only echo
+    what the server gave them. G0.15-T4 #1213 makes MEHO stamp the
+    header so the capture chain has something to capture.
+    """
+    response = _post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0.0.1"},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    header = response.headers.get("mcp-session-id")
+    assert header, "initialize must emit an Mcp-Session-Id response header"
+    # Canonical UUID string — the same shape ``_bind_mcp_session_id``
+    # parses on subsequent requests and ``_resolve_uuid_contextvar``
+    # writes to ``audit_log.agent_session_id``.
+    UUID(header)
+
+
+def test_initialize_session_ids_are_unique_per_handshake(
+    client: TestClient,
+) -> None:
+    """Two initialize calls → two distinct session ids.
+
+    The issuance helper is a fresh :func:`uuid.uuid4` per call. A
+    deterministic / shared id would have it collide across concurrent
+    Claude Code sessions and merge their audit-replay walks (G8.2)
+    into one false-positive bundle.
+    """
+    envelope = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "0.0.1"},
+        },
+    }
+    first = _post_mcp(client, envelope).headers.get("mcp-session-id")
+    second = _post_mcp(client, envelope).headers.get("mcp-session-id")
+
+    assert first and second
+    assert first != second
+
+
+def test_initialize_does_not_overwrite_client_supplied_session_id(
+    client: TestClient,
+) -> None:
+    """A resume / replay attempt that carries an inbound ``Mcp-Session-Id``
+    is not overwritten by the server's issuance side.
+
+    Rationale: MEHO holds no session-state to validate against (v0.2
+    has no session registry), so the lenient posture is to accept the
+    client-supplied id (it's already on the contextvar via the
+    earlier ``_bind_mcp_session_id``) and not overwrite it on the
+    response. This preserves the client's correlation key across a
+    re-initialize handshake on the same logical session.
+    """
+    client_session = "11111111-2222-3333-4444-555555555555"
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0.0.1"},
+            },
+        },
+        headers={"Mcp-Session-Id": client_session},
+    )
+
+    assert response.status_code == 200
+    # Server didn't overwrite — either it echoed nothing back (no
+    # outbound header) or it preserved the inbound one. We accept
+    # both shapes here because the absence of an outbound header is
+    # spec-conformant (rule 1 is MAY, not MUST), and is the cheaper
+    # path; what matters is that the server did not invent a new
+    # one in defiance of the client's already-supplied correlation
+    # key.
+    outbound = response.headers.get("mcp-session-id")
+    assert outbound is None or outbound == client_session
+
+
+def test_initialize_jsonrpc_error_does_not_issue_session_id(
+    client: TestClient,
+) -> None:
+    """A failed ``initialize`` (missing ``protocolVersion``) must not leak a session id.
+
+    The spec wants the id pinned to a real session; a degenerate
+    handshake (JSON-RPC ``error`` envelope) has no real session to
+    pin to.
+    """
+    response = _post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"capabilities": {}},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body
+    assert response.headers.get("mcp-session-id") is None
+
+
+def test_non_initialize_methods_do_not_issue_session_id(
+    client: TestClient,
+) -> None:
+    """``tools/list`` / ``ping`` / etc. must not stamp a fresh session id.
+
+    Only ``initialize`` is the handshake the spec permits the server
+    to use for assignment. A later RPC has no contract to renegotiate
+    a session mid-flight; if the client already has an id it sends
+    it inbound (and we capture it), and if it doesn't, the audit row
+    stays NULL.
+    """
+    response = _post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("mcp-session-id") is None
+
+
+# ---------------------------------------------------------------------------
 # notifications/initialized
 # ---------------------------------------------------------------------------
 

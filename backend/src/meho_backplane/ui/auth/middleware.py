@@ -85,6 +85,7 @@ from fastapi import Depends, HTTPException, Request, status
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import load_session
 
@@ -299,16 +300,61 @@ class UISessionMiddleware:
         if isinstance(scope_state, dict):
             scope_state["ui_session"] = session_context
 
+        # G0.15-T7 (#1216): bind audit contextvars per-request happens
+        # later, inside :func:`require_ui_session` (the FastAPI
+        # dependency) -- not here. The inner
+        # :class:`~meho_backplane.middleware.RequestContextMiddleware`
+        # calls :func:`structlog.contextvars.clear_contextvars` at
+        # request entry, which would wipe any binding made here before
+        # the audit middleware sees it. The dependency runs after the
+        # chassis middlewares but before the route handler, which is
+        # the load-bearing time window: the audit middleware reads the
+        # contextvars on the *response* side, after the handler returns
+        # but before forwarding the buffered response.
+
         await self.app(scope, receive, send)
 
 
-def require_ui_session(request: Request) -> UISessionContext:
+async def require_ui_session(request: Request) -> UISessionContext:
     """FastAPI dependency: surface the loaded :class:`UISessionContext`.
 
     Route handlers under ``/ui/*`` (T5 #866) declare
     ``Depends(require_ui_session)`` instead of reaching into
     ``request.state`` directly. The middleware enforces the redirect
     on missing sessions; this dependency is the guarded read.
+
+    Audit binding (G0.15-T7 #1216)
+    ------------------------------
+
+    For HTTP GET / HEAD requests the dependency binds the audit
+    contextvars the chassis :class:`~meho_backplane.audit.AuditMiddleware`
+    consumes -- ``operator_sub``, ``tenant_id``, ``audit_op_id``,
+    ``audit_op_class``. This is the per-request choke-point for the
+    BFF audit-thread: every ``/ui/<surface>`` GET handler declares
+    this dependency (directly or transitively via
+    :func:`require_ui_admin`), so binding here guarantees the audit
+    middleware writes one row per page view.
+
+    The binding cannot live in :class:`UISessionMiddleware` because
+    the inner :class:`~meho_backplane.middleware.RequestContextMiddleware`
+    calls :func:`structlog.contextvars.clear_contextvars` at request
+    entry -- any binding made in the outer middleware would be wiped
+    before the audit middleware reads it. The dependency runs after
+    the chassis middlewares but before the route handler, which is
+    the load-bearing time window: the audit middleware reads the
+    contextvars on the response side, after the handler returns but
+    before forwarding the buffered response.
+
+    POST / PATCH / DELETE requests on ``/ui/*`` skip the ``ui_view``
+    binding -- those go through service-layer functions (``create_target``,
+    ``update_target``, ``forget_memory``, etc.) that audit under
+    their own ``op_id`` / ``op_class`` discipline. Binding the
+    ``ui_view`` op_class here would produce a duplicate audit row
+    per write. ``operator_sub`` and ``tenant_id`` are still bound on
+    non-GET requests so a write-path route that bypasses the
+    service-layer audit writer still produces a row attributed to
+    the operator (under the default ``http.<method>:<path>`` op_id),
+    rather than disappearing silently.
 
     Returns
     -------
@@ -338,7 +384,25 @@ def require_ui_session(request: Request) -> UISessionContext:
     # ``scope["state"]["ui_session"]``; the ``cast`` narrows the
     # ``getattr`` return so the dependency's typed return survives
     # the dynamic attribute access.
-    return cast(UISessionContext, context)
+    session_context = cast(UISessionContext, context)
+
+    # G0.15-T7 (#1216): bind audit contextvars for the chassis
+    # AuditMiddleware. GET / HEAD get the full ``ui_view`` op_id +
+    # op_class binding; other methods get only operator + tenant
+    # identity (the route's service-layer write owns the op_id).
+    method = request.method.upper() if isinstance(request.method, str) else ""
+    if method in {"GET", "HEAD"}:
+        bind_ui_view_audit(
+            operator_sub=session_context.operator_sub,
+            tenant_id=str(session_context.tenant_id),
+            path=request.url.path,
+        )
+    else:
+        structlog.contextvars.bind_contextvars(
+            operator_sub=session_context.operator_sub,
+            tenant_id=str(session_context.tenant_id),
+        )
+    return session_context
 
 
 async def require_ui_admin(

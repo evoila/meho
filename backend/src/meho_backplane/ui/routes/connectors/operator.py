@@ -168,7 +168,7 @@ async def resolve_role_probe(
     JWT round-trip can't complete (transient JWKS outage, etc.).
     """
     if session_ctx is None:
-        session_ctx = require_ui_session(request)
+        session_ctx = await require_ui_session(request)
     try:
         operator = await _lift_operator(session_ctx)
     except Exception as exc:
@@ -194,7 +194,7 @@ async def resolve_operator_or_403(
     rest of the page state.
     """
     if session_ctx is None:
-        session_ctx = require_ui_session(request)
+        session_ctx = await require_ui_session(request)
     operator = await _lift_operator(session_ctx)
     if operator.tenant_role != TenantRole.TENANT_ADMIN:
         raise HTTPException(

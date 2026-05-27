@@ -475,6 +475,153 @@ async def test_probe_invokes_connector(client: TestClient) -> None:
     assert body["probe_method"] == "sys-health"
 
 
+@pytest.mark.asyncio
+async def test_probe_fingerprint_exception_returns_structured_500(
+    client: TestClient,
+) -> None:
+    """Connector ``fingerprint`` raises → structured 500, not bare 500.
+
+    G0.15-T1 (#1210) acceptance criterion. Replays sub-signal A from
+    ``claude-rdc-hetzner-dc#753``: ``POST /api/v1/targets/<resolvable
+    target>/probe`` against a target whose connector resolves cleanly
+    but whose ``fingerprint(target)`` raises (credential load fails,
+    target unreachable, k8s API timing, etc.) used to surface as
+    FastAPI's bare ``text/plain`` ``Internal Server Error``. The fix
+    catches the exception around ``connector.fingerprint(...)`` and
+    raises a ``HTTPException(500)`` carrying the T11 three-clause
+    envelope: ``error`` code, the failing ``connector_id`` +
+    ``target_name``, the underlying ``exception_class`` /
+    ``exception_message``, and a ``docs`` reference back to the
+    convention.
+
+    The shape mirrors the dispatcher's ``connector_error`` envelope so
+    probe + dispatch agree on what a connector failure looks like —
+    the symmetry G0.14-T1 #1142 promised for the unresolvable case,
+    now extended to the resolvable-but-failing case.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _FailingConnector(Connector):
+        product = "k8s-fail"
+        version = "1.x"
+        impl_id = "k8s"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise RuntimeError("kubeconfig credential load failed: secret/meho/k8s not found")
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector_v2(
+        product="k8s-fail",
+        version="1.x",
+        impl_id="k8s",
+        cls=_FailingConnector,
+    )
+
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="rke2-infra-k8s",
+        product="k8s-fail",
+        host="10.10.0.1",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets/rke2-infra-k8s/probe",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 500
+    # JSON content-type pins that the bare-500 fall-through to FastAPI's
+    # ``text/plain`` default handler is closed — the structured envelope
+    # is what an operator sees.
+    assert response.headers["content-type"].startswith("application/json")
+    detail = response.json()["detail"]
+    # T11 convention compliance — stable ``error`` code, the failing
+    # connector named, the target named, the exception class +
+    # capped message, and a doc reference. Each assertion pins one
+    # clause of the convention.
+    assert detail["error"] == "fingerprint_failed"
+    assert detail["connector_id"] == "k8s-1.x"
+    assert detail["target_name"] == "rke2-infra-k8s"
+    assert detail["exception_class"] == "RuntimeError"
+    assert "kubeconfig credential load failed" in detail["exception_message"]
+    assert detail["docs"] == "docs/codebase/error-message-shape.md"
+
+
+@pytest.mark.asyncio
+async def test_probe_fingerprint_exception_caps_message_length(
+    client: TestClient,
+) -> None:
+    """A 1KB+ exception message is truncated in the 500 detail.
+
+    Pins the leak-cap discipline: a misbehaving connector that stuffs a
+    credential into a stringified exception cannot leak it through the
+    operator-facing response body unbounded. The full message still
+    lands in the structured log (via ``_log.exception``) where the
+    operator with cluster access can read it; the response detail
+    carries the capped form (256 chars + truncation sentinel) the
+    same way ``_errors._EXC_MESSAGE_CAP`` caps the dispatcher's
+    ``connector_error`` envelope.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    huge_message = "X" * 1024
+
+    class _NoisyConnector(Connector):
+        product = "k8s-noisy"
+        version = "1.x"
+        impl_id = "k8s"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise RuntimeError(huge_message)
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector_v2(
+        product="k8s-noisy",
+        version="1.x",
+        impl_id="k8s",
+        cls=_NoisyConnector,
+    )
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="noisy-k8s",
+        product="k8s-noisy",
+        host="10.10.0.2",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets/noisy-k8s/probe",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["exception_message"].endswith("...<truncated>")
+    # 256 chars of payload + the truncation sentinel. Pins the cap
+    # constant rather than the literal length so an intentional bump
+    # in the constant updates one place.
+    from meho_backplane.api.v1.targets import _PROBE_EXC_MESSAGE_CAP
+
+    assert len(detail["exception_message"]) == _PROBE_EXC_MESSAGE_CAP + len("...<truncated>")
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/targets — create
 # ---------------------------------------------------------------------------

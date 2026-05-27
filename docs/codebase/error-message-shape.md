@@ -232,6 +232,7 @@ specifically referenced).
 |---|---|---|---|
 | `/ui/auth/login` 503 (no client credentials) | `ui_oauth_not_configured: UI_KEYCLOAK_CLIENT_ID / UI_KEYCLOAK_CLIENT_SECRET are unset. Render the confidential client credentials from Vault per docs/cross-repo/keycloak-web-client.md before serving /ui/auth/*.` | compliant (gold-standard) | — |
 | `POST /api/v1/targets/{name}/probe` 501 (no connector for product) | `no connector registered for product='kubernetes'` | compliant (gold-standard) | — |
+| `POST /api/v1/targets/{name}/probe` 500 (resolved connector's `fingerprint` raises) | structured `detail` with `error='fingerprint_failed'`, `connector_id`, `target_name`, `exception_class`, capped `exception_message`, `docs` (route handler in `api/v1/targets.py`; cap at `_PROBE_EXC_MESSAGE_CAP=256`) | compliant (structured) — landed in T1 #1210, mirrors the dispatcher's `_execute_and_audit` `connector_error` envelope at the route boundary. Closes the bare-500 hole G0.14-T1 #1142 left on the resolvable-target fingerprint path (sub-signal A of `claude-rdc-hetzner-dc#753`). Full exception stacktrace lands in the structured log via `_log.exception('probe_fingerprint_failed', ...)`; only the capped message reaches the response body | — |
 | `POST /api/v1/connectors/ingest` 422 (spec_label_mismatch) | structured `detail` with `kind`, `requested_version`, `spec_info_versions[]`, `message` (`build_version_mismatch_detail` in `error_envelopes.py`) | compliant (gold-standard, structured) | — |
 | `POST /api/v1/connectors/ingest` 422 (uncovered_version_label, **REST**) | `detail=str(exc)` — the `UncoveredVersionLabel.__str__` text only; no structured `kind` / `product` / `version` / `registered_classes[]` payload (see `api/v1/connectors_ingest.py:302-305`) | partial — message is human-readable but REST does not emit the structured envelope the MCP path does. The shared `build_uncovered_version_label_detail` builder exists in `error_envelopes.py`; REST is not yet wired to it | follow-up (no ticket yet) — call `build_uncovered_version_label_detail(exc)` in the REST route for parity with `VersionMismatchError` (sibling row), the existing G0.9.1-T5 #777 shared-builder pattern |
 | `connector_admin.ingest_connector` MCP tool 422 (uncovered_version_label, **MCP**) | JSON-RPC `-32602` with structured `data` containing `product`, `version`, `impl_id`, `registered_classes[]`, `message` (`build_uncovered_version_label_detail` at `mcp/tools/connector_admin.py:235-239`) | compliant (structured) | — |
@@ -310,8 +311,10 @@ set).
   `/ui/auth/login`) + `backend/src/meho_backplane/ui/auth/flow.py`
   (`MISSING_CLIENT_SECRET_DETAIL` constant).
 - `backend/src/meho_backplane/api/v1/targets.py` (`/probe` 501
-  message; `POST /api/v1/targets` `unknown_product` 422 via
-  `_build_unknown_product_detail`, T3 #1144).
+  message; `/probe` 500 structured `fingerprint_failed` envelope via
+  the route's `try/except Exception` wrap around
+  `connector.fingerprint(...)`, T1 #1210; `POST /api/v1/targets`
+  `unknown_product` 422 via `_build_unknown_product_detail`, T3 #1144).
 - `backend/src/meho_backplane/connectors/registry.py` —
   `registered_product_tokens()`, the canonical source-of-truth for
   the `TargetCreate.product` enum and the validators in

@@ -77,12 +77,16 @@ Resolver outcomes map to HTTP status as follows:
   them).
 
 Neither error branch touches the DB row; any previously-cached
-fingerprint survives. A connector that raises propagates the exception
-(the outer ``session.begin()`` in
-:func:`~meho_backplane.db.engine.get_session` rolls back), again
-leaving the row untouched. The column therefore always reflects the
-*last successful* probe. The target must exist for the probe to fire —
-a non-existent target returns 404 via ``resolve_target``.
+fingerprint survives. A connector that raises is caught at the route
+boundary and converted to a structured **500** with the
+``fingerprint_failed`` envelope (G0.15-T1 #1210); the outer
+``session.begin()`` in :func:`~meho_backplane.db.engine.get_session`
+still rolls back on the structured raise (nothing has been flushed —
+the ``t.fingerprint`` / ``t.updated_at`` writes only happen on the
+success path), again leaving the row untouched. The column therefore
+always reflects the *last successful* probe. The target must exist
+for the probe to fire — a non-existent target returns 404 via
+``resolve_target``.
 
 DELETE + product PATCH (G0.14-T4 #1145)
 ----------------------------------------
@@ -172,6 +176,68 @@ _DISCOVER_OP_ID = "targets.discover"
 #: queries (G8) can filter on ``audit_op_id LIKE 'targets.%'``
 #: without a special case.
 _DELETE_OP_ID: Final[str] = "targets.delete"
+
+#: Cap on the exception-message length recorded in the
+#: ``fingerprint_failed`` 500 detail (G0.15-T1 #1210). Mirrors
+#: :data:`meho_backplane.operations._errors._EXC_MESSAGE_CAP` — a
+#: misbehaving connector could embed a credential into a stringified
+#: exception; 256 chars is enough for an operator to recognise the
+#: failure shape while capping the leak surface.
+_PROBE_EXC_MESSAGE_CAP: Final[int] = 256
+
+
+def _connector_id_for(cls: type[Connector]) -> str:
+    """Build the canonical ``connector_id`` string for a resolved connector.
+
+    Matches the dispatcher's ``connector_id`` form (e.g. ``"k8s-1.x"``,
+    ``"vmware-rest-9.0"``) — used in the ``fingerprint_failed`` 500
+    envelope (G0.15-T1 #1210) and the structured log line so operator-
+    facing diagnostics name the *specific* impl that failed, not just
+    the product slug. Falls back to the bare product token when
+    ``impl_id`` is empty (the v1-style unversioned shape preserved by
+    the registry — see :class:`~meho_backplane.connectors.base.Connector`).
+    """
+    base = cls.impl_id or cls.product
+    if cls.version:
+        return f"{base}-{cls.version}"
+    return base
+
+
+def _build_fingerprint_failed_detail(
+    *,
+    exc: BaseException,
+    cls: type[Connector],
+    target_name: str,
+) -> dict[str, str]:
+    """Build the T11-compliant ``fingerprint_failed`` 500 detail.
+
+    G0.15-T1 (#1210). Mirrors the dispatcher's ``_execute_and_audit``
+    ``connector_error`` envelope (`operations._errors.result_connector_error`)
+    at the route boundary so the probe surface and the dispatch surface
+    agree on what a connector failure looks like. The detail follows
+    the convention codified in ``docs/codebase/error-message-shape.md``
+    (T11 #1141): a stable ``error`` code, the failing ``connector_id``
+    + ``target_name``, the underlying ``exception_class`` /
+    ``exception_message`` (the latter capped to keep credential-stuffed
+    exception strings from leaking unbounded into the response body),
+    and a ``docs`` back-reference for the operator.
+
+    Pure builder — no I/O, no logging. The caller logs the full
+    exception via :meth:`structlog.stdlib.BoundLogger.exception` so
+    the stacktrace lands in the structured log; only the capped
+    message lands in the response.
+    """
+    message = str(exc)
+    if len(message) > _PROBE_EXC_MESSAGE_CAP:
+        message = message[:_PROBE_EXC_MESSAGE_CAP] + "...<truncated>"
+    return {
+        "error": "fingerprint_failed",
+        "connector_id": _connector_id_for(cls),
+        "target_name": target_name,
+        "exception_class": type(exc).__name__,
+        "exception_message": message,
+        "docs": "docs/codebase/error-message-shape.md",
+    }
 
 
 class SkippedConnector(BaseModel):
@@ -515,35 +581,32 @@ async def probe_target(
     The probe verb returns the connector's
     :class:`~meho_backplane.connectors.schemas.FingerprintResult` and
     persists it to ``targets.fingerprint`` so the G0.6 resolver (#388)
-    can pick an implementation without re-probing the live target. Per
-    the 2026-05-14 amendment to Initiative #224 the probe verb is the
-    *only* writer to the column — :class:`TargetCreate` and
-    :class:`TargetUpdate` reject the field with 422.
-
+    can pick an implementation without re-probing the live target.
     Connector selection uses
     :func:`~meho_backplane.connectors.resolver.resolve_connector_or_label`
-    so this route and the dispatcher's connector-resolution step
-    consult the same v2 registry through the same tie-break ladder
-    (G0.14-T1 #1142). Returns:
+    so this route and the dispatcher consult the same v2 registry
+    through the same tie-break ladder (G0.14-T1 #1142). Returns:
 
-    * **501** when the resolver reports ``no_connector`` (no registered
-      impl matches the target's ``(product, version)``). ``detail``
+    * **501** when the resolver reports ``no_connector``. ``detail``
       carries the resolver's exception message naming the target's
       product slug + the absence of a matching candidate.
-    * **409** when the resolver reports ``ambiguous_connector`` (two
-      or more impls tied through the full ladder). ``detail`` carries
-      the resolver's exception message naming the candidate set and
-      the remediation step — set ``target.preferred_impl_id`` to one
-      of them. 409 mirrors REST's "the request can't be processed due
-      to current resource state" semantics: the operator has to
-      disambiguate the target before this verb can resolve a single
-      connector.
+    * **409** when the resolver reports ``ambiguous_connector``.
+      ``detail`` carries the resolver's exception message naming the
+      candidate set and the remediation step (set
+      ``target.preferred_impl_id`` to one of them).
+    * **500** with the structured ``fingerprint_failed`` envelope from
+      :func:`_build_fingerprint_failed_detail` when the resolved
+      connector's :meth:`fingerprint` raises (G0.15-T1 #1210; mirrors
+      the dispatcher's ``connector_error`` envelope at the route
+      boundary so probe + dispatch agree on the shape of a connector
+      failure — sub-signal A of ``claude-rdc-hetzner-dc#753``).
 
-    Neither error branch writes to the DB row; the previously-cached
-    fingerprint (if any) survives. A connector that raises propagates
-    the exception (rolling back the outer transaction); the row again
-    stays untouched. The column therefore always reflects the *last
-    successful* probe.
+    No error branch writes to the DB row; the previously-cached
+    fingerprint survives. The outer ``async with session.begin()``
+    rolls back on every structured raise (nothing has been flushed by
+    that point), so the column always reflects the *last successful*
+    probe. The target must exist for the probe to fire — a
+    non-existent target returns 404 via ``resolve_target``.
     """
     t = await resolve_target(session, operator.tenant_id, name)
     cls, label, exception_message = resolve_connector_or_label(t)
@@ -563,7 +626,27 @@ async def probe_target(
         )
     # label is None ⇒ cls is set (contract of resolve_connector_or_label).
     assert cls is not None
-    fp = await cls().fingerprint(t)
+    try:
+        fp = await cls().fingerprint(t)
+    except Exception as exc:
+        # G0.15-T1 #1210: a connector that raises mid-fingerprint used
+        # to bubble past the route and surface as FastAPI's bare 500
+        # with a ``text/plain`` body. Catch + convert to a structured
+        # 500 via :func:`_build_fingerprint_failed_detail` (the
+        # builder mirrors the dispatcher's ``connector_error``
+        # envelope). Full stacktrace lands in the structured log via
+        # :meth:`_log.exception`; only the capped exception message
+        # reaches the response body.
+        detail = _build_fingerprint_failed_detail(exc=exc, cls=cls, target_name=t.name)
+        _log.exception(
+            "probe_fingerprint_failed",
+            target_id=str(t.id),
+            target_name=t.name,
+            tenant_id=str(operator.tenant_id),
+            connector_id=detail["connector_id"],
+            exception_class=detail["exception_class"],
+        )
+        raise HTTPException(status_code=500, detail=detail) from exc
     # ``model_dump(mode='json')`` produces a JSONB-safe dict (datetime
     # → ISO string, enum → value, UUID → str). Plain ``model_dump()``
     # would leak Python-native types into the JSON column, breaking

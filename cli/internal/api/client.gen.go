@@ -2661,10 +2661,13 @@ type RetrievalHit struct {
 // running with the defaults (Signal #2 from the 2026-05-20 RDC
 // dogfood). Same posture as every public v1 request schema.
 type RetrieveRequest struct {
-	Kind   *string `json:"kind"`
-	Limit  *int    `json:"limit,omitempty"`
-	Query  string  `json:"query"`
-	Source *string `json:"source"`
+	Kind  *string `json:"kind"`
+	Limit *int    `json:"limit,omitempty"`
+
+	// MetadataFilters Optional flat {key: scalar} dict. Translated to Postgres `documents.metadata @> :jsonb` containment in both candidate SQL statements alongside `source` / `kind`. Missing keys exclude rows (PG `@>` semantics); multi-key dicts behave as an intersection. Values must be JSON scalars (str / int / float / bool / None) -- nested objects or arrays raise 422. Keys are surfaced in the audit payload (sorted, no values) so an analyst can attribute scoping without storing tenant-shaped filter values. At most 20 keys.
+	MetadataFilters *map[string]interface{} `json:"metadata_filters"`
+	Query           string                  `json:"query"`
+	Source          *string                 `json:"source"`
 }
 
 // RetrieveResponse Successful response shape for “/api/v1/retrieve“.

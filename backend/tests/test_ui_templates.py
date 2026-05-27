@@ -37,7 +37,7 @@ from meho_backplane.ui.templating import get_jinja_env
 # their target URL if needed; the chassis owns the canonical list.
 _EXPECTED_SURFACE_HREFS = (
     "/ui/broadcast",
-    "/ui/knowledge",
+    "/ui/kb",
     "/ui/topology",
     "/ui/connectors",
     "/ui/memory",

@@ -909,6 +909,23 @@ type BaselineMetricsOverride struct {
 	PrecisionAt5 float32 `json:"precision_at_5"`
 }
 
+// BodyKbEditorPreviewUiKbEditorPreviewPost defines model for Body_kb_editor_preview_ui_kb_editor_preview_post.
+type BodyKbEditorPreviewUiKbEditorPreviewPost struct {
+	Body *string `json:"body,omitempty"`
+}
+
+// BodyKbEditorSaveUiKbNewPost defines model for Body_kb_editor_save_ui_kb_new_post.
+type BodyKbEditorSaveUiKbNewPost struct {
+	Body string  `json:"body"`
+	Slug string  `json:"slug"`
+	Tags *string `json:"tags,omitempty"`
+}
+
+// BodyKbSearchUiKbSearchPost defines model for Body_kb_search_ui_kb_search_post.
+type BodyKbSearchUiKbSearchPost struct {
+	Q *string `json:"q,omitempty"`
+}
+
 // BodyUiConnectorsCreateSubmitUiConnectorsCreatePost defines model for Body_ui_connectors_create_submit_ui_connectors_create_post.
 type BodyUiConnectorsCreateSubmitUiConnectorsCreatePost struct {
 	Aliases   *string `json:"aliases"`
@@ -4373,6 +4390,18 @@ type UiConnectorsListUiConnectorsGetParams struct {
 	Product *string                                            `form:"product,omitempty" json:"product,omitempty"`
 }
 
+// KbIndexUiKbGetParams defines parameters for KbIndexUiKbGet.
+type KbIndexUiKbGetParams struct {
+	Q      *string `form:"q,omitempty" json:"q,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int    `form:"offset,omitempty" json:"offset,omitempty"`
+}
+
+// KbEntryPreviewUiKbSlugPreviewGetParams defines parameters for KbEntryPreviewUiKbSlugPreviewGet.
+type KbEntryPreviewUiKbSlugPreviewGetParams struct {
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+}
+
 // UiMemoryListUiMemoryGetParams defines parameters for UiMemoryListUiMemoryGet.
 type UiMemoryListUiMemoryGetParams struct {
 	Scope *string `form:"scope,omitempty" json:"scope,omitempty"`
@@ -4517,6 +4546,15 @@ type UiConnectorsEditModalUiConnectorsNameEditGetJSONRequestBody = UISessionCont
 
 // UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody defines body for UiConnectorsReprobeUiConnectorsNameProbePost for application/json ContentType.
 type UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody = UISessionContext
+
+// KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody defines body for KbEditorPreviewUiKbEditorPreviewPost for application/x-www-form-urlencoded ContentType.
+type KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody = BodyKbEditorPreviewUiKbEditorPreviewPost
+
+// KbEditorSaveUiKbNewPostFormdataRequestBody defines body for KbEditorSaveUiKbNewPost for application/x-www-form-urlencoded ContentType.
+type KbEditorSaveUiKbNewPostFormdataRequestBody = BodyKbEditorSaveUiKbNewPost
+
+// KbSearchUiKbSearchPostFormdataRequestBody defines body for KbSearchUiKbSearchPost for application/x-www-form-urlencoded ContentType.
+type KbSearchUiKbSearchPostFormdataRequestBody = BodyKbSearchUiKbSearchPost
 
 // UiMemoryBulkUiMemoryBulkPostFormdataRequestBody defines body for UiMemoryBulkUiMemoryBulkPost for application/x-www-form-urlencoded ContentType.
 type UiMemoryBulkUiMemoryBulkPostFormdataRequestBody = BodyUiMemoryBulkUiMemoryBulkPost
@@ -5213,8 +5251,29 @@ type ClientInterface interface {
 
 	UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiStubKnowledgeUiKnowledgeGet request
-	UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// KbIndexUiKbGet request
+	KbIndexUiKbGet(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbEditorPreviewUiKbEditorPreviewPostWithBody request with any body
+	KbEditorPreviewUiKbEditorPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KbEditorPreviewUiKbEditorPreviewPostWithFormdataBody(ctx context.Context, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbEditorSaveUiKbNewPostWithBody request with any body
+	KbEditorSaveUiKbNewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KbEditorSaveUiKbNewPostWithFormdataBody(ctx context.Context, body KbEditorSaveUiKbNewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbSearchUiKbSearchPostWithBody request with any body
+	KbSearchUiKbSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	KbSearchUiKbSearchPostWithFormdataBody(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbEntryDetailUiKbSlugGet request
+	KbEntryDetailUiKbSlugGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// KbEntryPreviewUiKbSlugPreviewGet request
+	KbEntryPreviewUiKbSlugPreviewGet(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiMemoryListUiMemoryGet request
 	UiMemoryListUiMemoryGet(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -7068,8 +7127,104 @@ func (c *Client) UiConnectorsReprobeUiConnectorsNameProbePost(ctx context.Contex
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiStubKnowledgeUiKnowledgeGetRequest(c.Server)
+func (c *Client) KbIndexUiKbGet(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbIndexUiKbGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEditorPreviewUiKbEditorPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEditorPreviewUiKbEditorPreviewPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEditorPreviewUiKbEditorPreviewPostWithFormdataBody(ctx context.Context, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEditorPreviewUiKbEditorPreviewPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEditorSaveUiKbNewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEditorSaveUiKbNewPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEditorSaveUiKbNewPostWithFormdataBody(ctx context.Context, body KbEditorSaveUiKbNewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEditorSaveUiKbNewPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbSearchUiKbSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbSearchUiKbSearchPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbSearchUiKbSearchPostWithFormdataBody(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbSearchUiKbSearchPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEntryDetailUiKbSlugGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEntryDetailUiKbSlugGetRequest(c.Server, slug)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) KbEntryPreviewUiKbSlugPreviewGet(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewKbEntryPreviewUiKbSlugPreviewGetRequest(c.Server, slug, params)
 	if err != nil {
 		return nil, err
 	}
@@ -14410,8 +14565,8 @@ func NewUiConnectorsReprobeUiConnectorsNameProbePostRequestWithBody(server strin
 	return req, nil
 }
 
-// NewUiStubKnowledgeUiKnowledgeGetRequest generates requests for UiStubKnowledgeUiKnowledgeGet
-func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, error) {
+// NewKbIndexUiKbGetRequest generates requests for KbIndexUiKbGet
+func NewKbIndexUiKbGetRequest(server string, params *KbIndexUiKbGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -14419,7 +14574,7 @@ func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, erro
 		return nil, err
 	}
 
-	operationPath := fmt.Sprintf("/ui/knowledge")
+	operationPath := fmt.Sprintf("/ui/kb")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -14427,6 +14582,270 @@ func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, erro
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewKbEditorPreviewUiKbEditorPreviewPostRequestWithFormdataBody calls the generic KbEditorPreviewUiKbEditorPreviewPost builder with application/x-www-form-urlencoded body
+func NewKbEditorPreviewUiKbEditorPreviewPostRequestWithFormdataBody(server string, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewKbEditorPreviewUiKbEditorPreviewPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewKbEditorPreviewUiKbEditorPreviewPostRequestWithBody generates requests for KbEditorPreviewUiKbEditorPreviewPost with any type of body
+func NewKbEditorPreviewUiKbEditorPreviewPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/editor-preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKbEditorSaveUiKbNewPostRequestWithFormdataBody calls the generic KbEditorSaveUiKbNewPost builder with application/x-www-form-urlencoded body
+func NewKbEditorSaveUiKbNewPostRequestWithFormdataBody(server string, body KbEditorSaveUiKbNewPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewKbEditorSaveUiKbNewPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewKbEditorSaveUiKbNewPostRequestWithBody generates requests for KbEditorSaveUiKbNewPost with any type of body
+func NewKbEditorSaveUiKbNewPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/new")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKbSearchUiKbSearchPostRequestWithFormdataBody calls the generic KbSearchUiKbSearchPost builder with application/x-www-form-urlencoded body
+func NewKbSearchUiKbSearchPostRequestWithFormdataBody(server string, body KbSearchUiKbSearchPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewKbSearchUiKbSearchPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewKbSearchUiKbSearchPostRequestWithBody generates requests for KbSearchUiKbSearchPost with any type of body
+func NewKbSearchUiKbSearchPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/search")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewKbEntryDetailUiKbSlugGetRequest generates requests for KbEntryDetailUiKbSlugGet
+func NewKbEntryDetailUiKbSlugGetRequest(server string, slug string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewKbEntryPreviewUiKbSlugPreviewGetRequest generates requests for KbEntryPreviewUiKbSlugPreviewGet
+func NewKbEntryPreviewUiKbSlugPreviewGetRequest(server string, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/kb/%s/preview", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -15754,8 +16173,29 @@ type ClientWithResponsesInterface interface {
 
 	UiConnectorsReprobeUiConnectorsNameProbePostWithResponse(ctx context.Context, name string, body UiConnectorsReprobeUiConnectorsNameProbePostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsReprobeUiConnectorsNameProbePostResponse, error)
 
-	// UiStubKnowledgeUiKnowledgeGetWithResponse request
-	UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error)
+	// KbIndexUiKbGetWithResponse request
+	KbIndexUiKbGetWithResponse(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*KbIndexUiKbGetResponse, error)
+
+	// KbEditorPreviewUiKbEditorPreviewPostWithBodyWithResponse request with any body
+	KbEditorPreviewUiKbEditorPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error)
+
+	KbEditorPreviewUiKbEditorPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error)
+
+	// KbEditorSaveUiKbNewPostWithBodyWithResponse request with any body
+	KbEditorSaveUiKbNewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbEditorSaveUiKbNewPostResponse, error)
+
+	KbEditorSaveUiKbNewPostWithFormdataBodyWithResponse(ctx context.Context, body KbEditorSaveUiKbNewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbEditorSaveUiKbNewPostResponse, error)
+
+	// KbSearchUiKbSearchPostWithBodyWithResponse request with any body
+	KbSearchUiKbSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error)
+
+	KbSearchUiKbSearchPostWithFormdataBodyWithResponse(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error)
+
+	// KbEntryDetailUiKbSlugGetWithResponse request
+	KbEntryDetailUiKbSlugGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*KbEntryDetailUiKbSlugGetResponse, error)
+
+	// KbEntryPreviewUiKbSlugPreviewGetWithResponse request
+	KbEntryPreviewUiKbSlugPreviewGetWithResponse(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*KbEntryPreviewUiKbSlugPreviewGetResponse, error)
 
 	// UiMemoryListUiMemoryGetWithResponse request
 	UiMemoryListUiMemoryGetWithResponse(ctx context.Context, params *UiMemoryListUiMemoryGetParams, reqEditors ...RequestEditorFn) (*UiMemoryListUiMemoryGetResponse, error)
@@ -18364,13 +18804,14 @@ func (r UiConnectorsReprobeUiConnectorsNameProbePostResponse) StatusCode() int {
 	return 0
 }
 
-type UiStubKnowledgeUiKnowledgeGetResponse struct {
+type KbIndexUiKbGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
-func (r UiStubKnowledgeUiKnowledgeGetResponse) Status() string {
+func (r KbIndexUiKbGetResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -18378,7 +18819,117 @@ func (r UiStubKnowledgeUiKnowledgeGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r UiStubKnowledgeUiKnowledgeGetResponse) StatusCode() int {
+func (r KbIndexUiKbGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbEditorPreviewUiKbEditorPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbEditorPreviewUiKbEditorPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbEditorPreviewUiKbEditorPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbEditorSaveUiKbNewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbEditorSaveUiKbNewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbEditorSaveUiKbNewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbSearchUiKbSearchPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbSearchUiKbSearchPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbSearchUiKbSearchPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbEntryDetailUiKbSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbEntryDetailUiKbSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbEntryDetailUiKbSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type KbEntryPreviewUiKbSlugPreviewGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r KbEntryPreviewUiKbSlugPreviewGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r KbEntryPreviewUiKbSlugPreviewGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -20017,13 +20568,82 @@ func (c *ClientWithResponses) UiConnectorsReprobeUiConnectorsNameProbePostWithRe
 	return ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp)
 }
 
-// UiStubKnowledgeUiKnowledgeGetWithResponse request returning *UiStubKnowledgeUiKnowledgeGetResponse
-func (c *ClientWithResponses) UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error) {
-	rsp, err := c.UiStubKnowledgeUiKnowledgeGet(ctx, reqEditors...)
+// KbIndexUiKbGetWithResponse request returning *KbIndexUiKbGetResponse
+func (c *ClientWithResponses) KbIndexUiKbGetWithResponse(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*KbIndexUiKbGetResponse, error) {
+	rsp, err := c.KbIndexUiKbGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp)
+	return ParseKbIndexUiKbGetResponse(rsp)
+}
+
+// KbEditorPreviewUiKbEditorPreviewPostWithBodyWithResponse request with arbitrary body returning *KbEditorPreviewUiKbEditorPreviewPostResponse
+func (c *ClientWithResponses) KbEditorPreviewUiKbEditorPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error) {
+	rsp, err := c.KbEditorPreviewUiKbEditorPreviewPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEditorPreviewUiKbEditorPreviewPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) KbEditorPreviewUiKbEditorPreviewPostWithFormdataBodyWithResponse(ctx context.Context, body KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error) {
+	rsp, err := c.KbEditorPreviewUiKbEditorPreviewPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEditorPreviewUiKbEditorPreviewPostResponse(rsp)
+}
+
+// KbEditorSaveUiKbNewPostWithBodyWithResponse request with arbitrary body returning *KbEditorSaveUiKbNewPostResponse
+func (c *ClientWithResponses) KbEditorSaveUiKbNewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbEditorSaveUiKbNewPostResponse, error) {
+	rsp, err := c.KbEditorSaveUiKbNewPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEditorSaveUiKbNewPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) KbEditorSaveUiKbNewPostWithFormdataBodyWithResponse(ctx context.Context, body KbEditorSaveUiKbNewPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbEditorSaveUiKbNewPostResponse, error) {
+	rsp, err := c.KbEditorSaveUiKbNewPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEditorSaveUiKbNewPostResponse(rsp)
+}
+
+// KbSearchUiKbSearchPostWithBodyWithResponse request with arbitrary body returning *KbSearchUiKbSearchPostResponse
+func (c *ClientWithResponses) KbSearchUiKbSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error) {
+	rsp, err := c.KbSearchUiKbSearchPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbSearchUiKbSearchPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) KbSearchUiKbSearchPostWithFormdataBodyWithResponse(ctx context.Context, body KbSearchUiKbSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*KbSearchUiKbSearchPostResponse, error) {
+	rsp, err := c.KbSearchUiKbSearchPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbSearchUiKbSearchPostResponse(rsp)
+}
+
+// KbEntryDetailUiKbSlugGetWithResponse request returning *KbEntryDetailUiKbSlugGetResponse
+func (c *ClientWithResponses) KbEntryDetailUiKbSlugGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*KbEntryDetailUiKbSlugGetResponse, error) {
+	rsp, err := c.KbEntryDetailUiKbSlugGet(ctx, slug, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEntryDetailUiKbSlugGetResponse(rsp)
+}
+
+// KbEntryPreviewUiKbSlugPreviewGetWithResponse request returning *KbEntryPreviewUiKbSlugPreviewGetResponse
+func (c *ClientWithResponses) KbEntryPreviewUiKbSlugPreviewGetWithResponse(ctx context.Context, slug string, params *KbEntryPreviewUiKbSlugPreviewGetParams, reqEditors ...RequestEditorFn) (*KbEntryPreviewUiKbSlugPreviewGetResponse, error) {
+	rsp, err := c.KbEntryPreviewUiKbSlugPreviewGet(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKbEntryPreviewUiKbSlugPreviewGetResponse(rsp)
 }
 
 // UiMemoryListUiMemoryGetWithResponse request returning *UiMemoryListUiMemoryGetResponse
@@ -23651,17 +24271,157 @@ func ParseUiConnectorsReprobeUiConnectorsNameProbePostResponse(rsp *http.Respons
 	return response, nil
 }
 
-// ParseUiStubKnowledgeUiKnowledgeGetResponse parses an HTTP response from a UiStubKnowledgeUiKnowledgeGetWithResponse call
-func ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp *http.Response) (*UiStubKnowledgeUiKnowledgeGetResponse, error) {
+// ParseKbIndexUiKbGetResponse parses an HTTP response from a KbIndexUiKbGetWithResponse call
+func ParseKbIndexUiKbGetResponse(rsp *http.Response) (*KbIndexUiKbGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiStubKnowledgeUiKnowledgeGetResponse{
+	response := &KbIndexUiKbGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbEditorPreviewUiKbEditorPreviewPostResponse parses an HTTP response from a KbEditorPreviewUiKbEditorPreviewPostWithResponse call
+func ParseKbEditorPreviewUiKbEditorPreviewPostResponse(rsp *http.Response) (*KbEditorPreviewUiKbEditorPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbEditorPreviewUiKbEditorPreviewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbEditorSaveUiKbNewPostResponse parses an HTTP response from a KbEditorSaveUiKbNewPostWithResponse call
+func ParseKbEditorSaveUiKbNewPostResponse(rsp *http.Response) (*KbEditorSaveUiKbNewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbEditorSaveUiKbNewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbSearchUiKbSearchPostResponse parses an HTTP response from a KbSearchUiKbSearchPostWithResponse call
+func ParseKbSearchUiKbSearchPostResponse(rsp *http.Response) (*KbSearchUiKbSearchPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbSearchUiKbSearchPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbEntryDetailUiKbSlugGetResponse parses an HTTP response from a KbEntryDetailUiKbSlugGetWithResponse call
+func ParseKbEntryDetailUiKbSlugGetResponse(rsp *http.Response) (*KbEntryDetailUiKbSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbEntryDetailUiKbSlugGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseKbEntryPreviewUiKbSlugPreviewGetResponse parses an HTTP response from a KbEntryPreviewUiKbSlugPreviewGetWithResponse call
+func ParseKbEntryPreviewUiKbSlugPreviewGetResponse(rsp *http.Response) (*KbEntryPreviewUiKbSlugPreviewGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &KbEntryPreviewUiKbSlugPreviewGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

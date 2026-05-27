@@ -7520,13 +7520,50 @@
         }
       }
     },
-    "/ui/knowledge": {
+    "/ui/kb": {
       "get": {
         "tags": [
-          "ui-stubs"
+          "ui-kb"
         ],
-        "summary": "Ui Stub Knowledge",
-        "operationId": "ui_stub_knowledge_ui_knowledge_get",
+        "summary": "Kb Index",
+        "description": "Render the KB main page or HTMX results fragment.\n\nEmpty *q* \u2192 paginated entry list.\nNon-empty *q* \u2192 hybrid BM25+cosine search results.\n``HX-Request: true`` \u2192 return only the ``_results.html`` fragment.",
+        "operationId": "kb_index_ui_kb_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 500,
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -7534,6 +7571,236 @@
               "text/html": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/search": {
+      "post": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Search",
+        "description": "HTMX keyup-debounced search partial.\n\nReturns the ``kb/_results.html`` fragment swapped into\n``#kb-results`` via ``hx-target``. The ``q`` field comes from\nthe search form body; empty/blank \u2192 paginated list view (same\nbehaviour as ``GET /ui/kb`` with empty query).",
+        "operationId": "kb_search_ui_kb_search_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_kb_search_ui_kb_search_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/{slug}": {
+      "get": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Entry Detail",
+        "description": "Render the KB entry detail page with server-side Markdown.\n\nFetches the entry via :meth:`KbService.get_entry`, renders the\nbody via :func:`render_markdown` (markdown-it-py GFM + pygments\ncode highlight), and passes the rendered HTML + pygments CSS to\nthe ``kb/detail.html`` template.\n\nCross-tenant or missing slugs \u2192 404 (not 403, matching the\n``/api/v1/kb/{slug}`` surface posture).",
+        "operationId": "kb_entry_detail_ui_kb__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/{slug}/preview": {
+      "get": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Entry Preview",
+        "description": "HTMX hover-preview partial.\n\nReturns the ``kb/_preview.html`` fragment with the matched snippet\nannotated with query-term highlight markup (server-side ``<mark>``\nspans). Called by ``hx-trigger=\"mouseenter delay:200ms\"`` on result\ncards; the ``q`` param carries the active search query so terms can\nbe highlighted in the preview.\n\nCross-tenant or missing slugs \u2192 404.",
+        "operationId": "kb_entry_preview_ui_kb__slug__preview_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/editor-preview": {
+      "post": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Editor Preview",
+        "description": "HTMX editor live-preview partial.\n\nAccepts the current editor ``body`` as a form field, renders it\nvia :func:`render_markdown` (the same renderer as the entry-detail\nview), and returns the ``kb/_editor_preview.html`` fragment. Called\nby the CodeMirror editor's debounced HTMX POST (``hx-trigger=\"input\nchanged delay:500ms\"``). Any authenticated operator (not just\n``tenant_admin``) can call this endpoint \u2014 it is a pure read-only\nMarkdown transform, not a write.\n\nTenant identity is present (from ``session``) but not needed here;\nthe preview is stateless (no DB read) and cross-tenant safe because\nthe body comes from the operator's own input, not a stored document.",
+        "operationId": "kb_editor_preview_ui_kb_editor_preview_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_kb_editor_preview_ui_kb_editor_preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/kb/new": {
+      "post": {
+        "tags": [
+          "ui-kb"
+        ],
+        "summary": "Kb Editor Save",
+        "description": "Save a new KB entry from the editor modal.\n\nRequires ``tenant_admin`` role \u2014 enforced by re-verifying the\nsession's access token through\n:func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`. Plain\n``operator`` role receives 403. The CSRF middleware gate runs\nbefore this handler (``POST /ui/*`` passes through\n:class:`~meho_backplane.ui.csrf.CSRFMiddleware`).\n\nOn success, returns ``HX-Redirect`` to the new entry's detail\npage so HTMX swaps the page without a full navigation. On\nvalidation failure (invalid slug, empty body) re-renders the\neditor modal with an inline error message.\n\nTag parsing: the ``tags`` field is a comma-separated string\n(``\"tag-a, tag-b\"``); individual values are stripped of\nwhitespace and empty strings are dropped. Tags are stored as\n``metadata[\"tags\"]`` on the entry.",
+        "operationId": "kb_editor_save_ui_kb_new_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_kb_editor_save_ui_kb_new_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -8657,6 +8924,56 @@
         ],
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
+      },
+      "Body_kb_editor_preview_ui_kb_editor_preview_post": {
+        "properties": {
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_kb_editor_preview_ui_kb_editor_preview_post"
+      },
+      "Body_kb_editor_save_ui_kb_new_post": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Slug"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body"
+          },
+          "tags": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Tags",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "body"
+        ],
+        "title": "Body_kb_editor_save_ui_kb_new_post"
+      },
+      "Body_kb_search_ui_kb_search_post": {
+        "properties": {
+          "q": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Q",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_kb_search_ui_kb_search_post"
       },
       "Body_ui_connectors_create_submit_ui_connectors_create_post": {
         "properties": {

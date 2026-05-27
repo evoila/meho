@@ -82,9 +82,11 @@ from urllib.parse import quote
 
 import structlog
 from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy import select
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import Tenant
 from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import load_session
@@ -127,11 +129,23 @@ class UISessionContext:
     ``raw_jwt`` / ``tenant_role`` are intentionally absent because
     the session-cookie path does not load them today (the encrypted
     row carries only the access token, not the decoded claims).
+
+    ``tenant_slug`` / ``tenant_name`` are populated by the middleware
+    from a same-request lookup against the ``tenant`` table (keyed on
+    :attr:`tenant_id`). The fields are surfaced into every UI template
+    by the chassis context processor so the page header's tenant chip
+    renders the operator-readable name without each route having to
+    re-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the
+    tenant row was deleted between session-creation and the request
+    (an ops anomaly; the operator still authenticates fine, the chip
+    just falls back to the tenant UUID).
     """
 
     session_id: uuid.UUID
     operator_sub: str
     tenant_id: uuid.UUID
+    tenant_slug: str | None = None
+    tenant_name: str | None = None
 
 
 def _select_path(scope: Scope) -> str:
@@ -253,13 +267,43 @@ class UISessionMiddleware:
                 cookie_id = None
             if cookie_id is not None:
                 sessionmaker = get_sessionmaker()
+                # One transaction loads the session row AND the tenant
+                # row -- the tenant lookup is a PK probe on a tiny
+                # write-mostly table, so paying it inside the
+                # already-running ``load_session`` transaction is
+                # microseconds and keeps the page header from needing a
+                # separate DB round-trip per request (G0.15-T9 #1217).
                 async with sessionmaker() as session, session.begin():
                     decrypted = await load_session(session, cookie_id)
+                    if decrypted is not None:
+                        tenant_row = (
+                            await session.execute(
+                                select(Tenant.slug, Tenant.name).where(
+                                    Tenant.id == decrypted.tenant_id,
+                                ),
+                            )
+                        ).one_or_none()
                 if decrypted is not None:
+                    tenant_slug = tenant_row[0] if tenant_row is not None else None
+                    tenant_name = tenant_row[1] if tenant_row is not None else None
+                    if tenant_row is None:
+                        # Session row references a tenant_id with no
+                        # tenant row -- the tenant was deleted out from
+                        # under the operator's session. Surface the
+                        # anomaly so on-call sees the broken FK while
+                        # still letting the operator's request proceed
+                        # (the page header falls back to the UUID).
+                        log.warning(
+                            "ui_session_tenant_row_missing",
+                            session_id=str(decrypted.id),
+                            tenant_id=str(decrypted.tenant_id),
+                        )
                     session_context = UISessionContext(
                         session_id=decrypted.id,
                         operator_sub=decrypted.operator_sub,
                         tenant_id=decrypted.tenant_id,
+                        tenant_slug=tenant_slug,
+                        tenant_name=tenant_name,
                     )
 
         if session_context is None:

@@ -29,6 +29,15 @@
     and stubs don't, so default to ``""`` here so the ``StrictUndefined``
     env does not raise when a route omits it. -#}
 {% set active_surface = active_surface | default("") %}
+{#- ``session_tenant`` is injected by the
+    :func:`_ui_session_context_processor` chassis context processor on
+    every UI template render -- it carries the active BFF session's
+    tenant ``id`` / ``slug`` / ``name``, or ``None`` on the unauthenticated
+    auth surfaces (G0.15-T9 #1217). Default to ``None`` so a template
+    rendered outside the FastAPI request flow (the chassis smoke test
+    renders ``base.html`` directly against the bare env) does not trip
+    ``StrictUndefined``. -#}
+{% set session_tenant = session_tenant | default(none) %}
 <!doctype html>
 <html lang="en" data-theme="corporate" class="h-full">
   <head>
@@ -108,18 +117,30 @@
             </span>
           </div>
           <div class="flex-none gap-2">
-            {# Tenant selector placeholder. T4 #865 wires the live
-               selector against the operator's accessible tenants;
-               the chassis renders a disabled stub. #}
-            <div class="form-control hidden md:block">
-              <select
-                class="select select-bordered select-sm"
-                disabled
-                aria-label="Active tenant"
-              >
-                <option>tenant: (sign in to choose)</option>
-              </select>
-            </div>
+            {# Tenant chip. G0.15-T9 #1217 -- the operator's tenant is
+               auto-selected from the JWT's ``tenant_id`` claim at
+               session-create time; the BFF session middleware lifts
+               that tenant's slug + name into ``session_tenant`` via
+               the chassis context processor on every render. The chip
+               renders the human-readable name (slug fallback when the
+               name is empty, UUID fallback when the tenant row was
+               deleted out from under the session). Cross-tenant
+               switching is a future Initiative; today the operator
+               always acts on exactly one tenant, so the chip is a
+               read-only label, not a selector. The auth surfaces
+               themselves (``/ui/auth/login`` etc.) render before a
+               session exists -- ``session_tenant`` is then ``None``
+               and the chip is hidden. #}
+            {% if session_tenant is not none %}
+              <div class="form-control hidden md:block" aria-label="Active tenant">
+                <span class="badge badge-outline">
+                  tenant:&nbsp;
+                  <code class="font-mono">
+                    {{- session_tenant.name or session_tenant.slug or session_tenant.id -}}
+                  </code>
+                </span>
+              </div>
+            {% endif %}
             {# User menu. Alpine-driven open/close with click-outside
                dismissal. Real menu items land in T4 #865. #}
             <div class="relative" x-on:click.outside="userMenuOpen = false">

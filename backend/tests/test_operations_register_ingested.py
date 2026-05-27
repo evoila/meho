@@ -846,17 +846,48 @@ def test_check_version_covered_raises_when_label_outside_range() -> None:
     assert "_FakeRangedConnector" in detail
 
 
-def test_check_version_covered_logs_orphan_when_no_class_registered() -> None:
-    """No class for ``(product, impl_id)`` → log ``connector_ingest_orphaned_class``; no raise."""
+def test_check_version_covered_logs_orphan_when_no_class_registered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No class for ``(product, impl_id)`` → log ``connector_ingest_orphaned_class``; no raise.
+
+    Capture surface (#1254): the test does NOT use
+    :func:`structlog.testing.capture_logs` — under pytest-xdist with
+    other tests on the same worker mutating
+    :func:`structlog.configure` (lifespan boot, observability fixtures),
+    ``capture_logs`` has been observed to miss the event even when the
+    event was emitted to fd-level stdout (CI iter-1 of T7 #1241/PR
+    #1248, xdist ``gw4``). The flake is in the global
+    processor-list-swap pattern ``capture_logs`` uses, not in the
+    subject code.
+
+    Instead we bind a private :class:`structlog.testing.LogCapture`
+    onto a freshly-wrapped logger and monkeypatch the subject
+    module's module-level ``_log`` for the test's duration. This is
+    process-local, contextvar-free, and immune to any concurrent
+    :func:`structlog.configure` call. The original ``_log`` is
+    restored automatically by ``monkeypatch`` on test teardown.
+    """
     # Registry is empty (autouse fixture cleared it).
-    with structlog.testing.capture_logs() as captured:
-        check_version_covered_by_registered_class(
-            product="brand-new-vendor",
-            version="1.0",
-            impl_id="brand-new-impl",
-        )
+    from meho_backplane.operations.ingest import connector_registration
+
+    capture = structlog.testing.LogCapture()
+    private_log = structlog.wrap_logger(
+        structlog.PrintLogger(),
+        processors=[capture],
+    )
+    monkeypatch.setattr(connector_registration, "_log", private_log)
+
+    check_version_covered_by_registered_class(
+        product="brand-new-vendor",
+        version="1.0",
+        impl_id="brand-new-impl",
+    )
+
     events = [
-        entry for entry in captured if entry.get("event") == "connector_ingest_orphaned_class"
+        entry
+        for entry in capture.entries
+        if entry.get("event") == "connector_ingest_orphaned_class"
     ]
     assert len(events) == 1
     assert events[0]["product"] == "brand-new-vendor"

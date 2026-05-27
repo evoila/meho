@@ -233,6 +233,15 @@ Register:
 meho targets import targets.yaml
 ```
 
+> **Next:** once the target row is registered and the credential
+> verifies via Check 2 below, [`github-connector.md`](./github-connector.md)
+> picks up from "credential side complete" and walks the end-to-end
+> first-day on-ramp (target probe → catalog ingest → group enable →
+> write-op annotation → composite smoke-test). This credential
+> recipe and the connector runbook are designed to be read in
+> sequence; combined first-day time is ≤45 minutes (T2 ≤30 min;
+> T6 ≤15 min on top).
+
 ### Step 6 — Rotate the private key when needed
 
 The GitHub App private key can be rotated at any time without

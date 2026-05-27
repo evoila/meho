@@ -130,9 +130,12 @@ async def _search_knowledge_handler(
     re-check.
 
     The ``filters`` argument is forwarded verbatim — :class:`KbService`
-    consumes the ``"kind"`` key and ignores anything else; other keys
-    are absorbed as v0.2.next extension points without changing the
-    wire contract.
+    consumes the ``"kind"`` key and forwards every other key to the
+    substrate's ``metadata_filters`` containment predicate
+    (``documents.metadata @>`` translation, G4.4-T1 / #1177). Pass
+    e.g. ``{"kind": "kb-entry", "source_kind": "evoila-distilled"}``
+    to scope hits to the curated slice; missing keys exclude rows
+    (PG ``@>`` semantics), multi-key dicts behave as an intersection.
     """
     query: str = arguments["query"]
     filters = arguments.get("filters")
@@ -215,8 +218,12 @@ register_mcp_tool(
             "200 chars with an ellipsis), call `resources/read` on "
             "`meho://kb/{slug}` with the hit's `slug` value. "
             'Pass `filters={"kind": "kb-entry"}` to narrow within '
-            "the kb namespace; other filter keys are reserved for future "
-            "metadata-field filters and currently ignored. "
+            "the kb namespace; non-`kind` keys translate to "
+            "Postgres `documents.metadata @>` containment "
+            'against the row\'s metadata JSONB (e.g. `{"source_kind": '
+            '"evoila-distilled"}` returns only curated entries, '
+            "excluding vendor sidecars). Values must be JSON scalars; "
+            "missing keys exclude rows (containment semantics). "
             "Limit defaults to 10; cap is 50 (substrate-enforced)."
         ),
         inputSchema={
@@ -233,10 +240,12 @@ register_mcp_tool(
                 "filters": {
                     "type": ["object", "null"],
                     "description": (
-                        "Optional filter dict. Accepts 'kind' "
-                        "(string, defaults to no kind filter); other "
-                        "keys are reserved for future metadata-field "
-                        "filters and ignored in v0.2."
+                        "Optional filter dict. The 'kind' key narrows "
+                        "by document kind; non-'kind' keys translate to "
+                        "Postgres `documents.metadata @>` containment "
+                        "(missing keys exclude the row, multi-key "
+                        "intersects). Values must be JSON scalars "
+                        "(string / number / boolean / null)."
                     ),
                     "properties": {
                         "kind": {"type": "string", "minLength": 1},

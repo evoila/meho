@@ -11776,6 +11776,14 @@
             "minimum": 1.0,
             "title": "Limit",
             "default": 10
+          },
+          "metadata_filters": {
+            "additionalProperties": true,
+            "type": "object",
+            "maxProperties": 20,
+            "nullable": true,
+            "title": "Metadata Filters",
+            "description": "Optional flat {key: scalar} dict. Translated to Postgres `documents.metadata @> :jsonb` containment in both candidate SQL statements alongside `source` / `kind`. Missing keys exclude rows (PG `@>` semantics); multi-key dicts behave as an intersection. Values must be JSON scalars (str / int / float / bool / None) -- nested objects or arrays raise 422. Keys are surfaced in the audit payload (sorted, no values) so an analyst can attribute scoping without storing tenant-shaped filter values. At most 20 keys."
           }
         },
         "additionalProperties": false,

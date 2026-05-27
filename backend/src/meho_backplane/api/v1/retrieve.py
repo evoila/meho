@@ -34,14 +34,18 @@ Audit privacy contract
 ----------------------
 
 The audit_log row's ``payload`` carries ``{query_hash, source,
-kind, hit_count}`` -- **not the raw query**. Per the v0.2 sensitivity
-defaults (decision #3 in ``docs/planning/v0.2-decisions.md``),
-retrieval queries can leak operator intent. Storing the SHA-256 hex
-digest + count gives auditability ("operator A made 5 retrieval
-calls, hit-counts 12 / 7 / 0 / 0 / 3") without storing what they
-searched. For deeper investigation, G8's audit-query API can
-correlate the timestamp with broadcast feeds; the raw query is
-deliberately ephemeral.
+kind, metadata_filters_keys, hit_count}`` -- **not the raw query
+or filter values**. Retrieval queries can leak operator intent,
+and ``metadata_filters`` values may carry tenant-shaped identifiers
+(operator subs, target names, customer ids depending on how the
+consumer wrote its keys). Storing the SHA-256 hex digest of the
+query, a sorted list of filter keys (no values), and the result
+count gives auditability ("operator A made 5 retrieval calls,
+filtered on [source_kind, product] twice, hit-counts 12 / 7 / 0 /
+0 / 3") without leaking either what they searched for or the
+specific filter values they scoped to. For deeper investigation,
+G8's audit-query API can correlate the timestamp with broadcast
+feeds; the raw query and filter values are deliberately ephemeral.
 
 The route binds the four ``audit_*`` contextvars BEFORE calling
 :func:`retrieve` so a handler exception still produces an audit row
@@ -76,10 +80,11 @@ from __future__ import annotations
 
 import hashlib
 import time
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
@@ -97,6 +102,17 @@ router = APIRouter(prefix="/api/v1", tags=["retrieval"])
 #: ruff's B008 rule, matching the convention
 #: :mod:`meho_backplane.api.v1.rbac_test` established.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
+
+
+#: Cap on the number of keys in ``metadata_filters``. 20 is a
+#: generous upper bound on realistic operator-shaped scoping queries
+#: (``source_kind`` / ``product`` / ``sidecar_kind`` / ``user_sub`` /
+#: ``target_name`` cover the consumer + memory recall cases at 5 keys
+#: total; the headroom absorbs unforeseen consumers). Bound here
+#: rather than in the substrate because the substrate is happy to
+#: accept arbitrary dict sizes -- this is a per-request denial-of-
+#: service guard, not a correctness invariant.
+_METADATA_FILTERS_MAX_KEYS: int = 20
 
 
 class RetrieveRequest(BaseModel):
@@ -124,6 +140,62 @@ class RetrieveRequest(BaseModel):
     source: str | None = Field(default=None, max_length=64)
     kind: str | None = Field(default=None, max_length=64)
     limit: int = Field(default=10, ge=1, le=50)
+    metadata_filters: dict[str, Any] | None = Field(
+        default=None,
+        max_length=_METADATA_FILTERS_MAX_KEYS,
+        description=(
+            "Optional flat {key: scalar} dict. Translated to "
+            "Postgres `documents.metadata @> :jsonb` containment in "
+            "both candidate SQL statements alongside `source` / "
+            "`kind`. Missing keys exclude rows (PG `@>` semantics); "
+            "multi-key dicts behave as an intersection. Values must "
+            "be JSON scalars (str / int / float / bool / None) -- "
+            "nested objects or arrays raise 422. Keys are surfaced "
+            "in the audit payload (sorted, no values) so an analyst "
+            "can attribute scoping without storing tenant-shaped "
+            f"filter values. At most {_METADATA_FILTERS_MAX_KEYS} keys."
+        ),
+    )
+
+    @field_validator("metadata_filters")
+    @classmethod
+    def _values_must_be_json_scalars(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Reject nested objects / arrays in ``metadata_filters`` values.
+
+        The substrate translates ``metadata_filters`` to a PG ``@>``
+        containment predicate. Containment supports arbitrary JSONB
+        shapes on both sides, but the v0.2.next contract pins the
+        shape to ``{key: scalar}`` -- a flat dict whose values are
+        JSON scalars (``str`` / ``int`` / ``float`` / ``bool`` /
+        ``None``). Nested objects and arrays open two cans the
+        substrate does not want to inherit:
+
+        * **DSL creep.** Allowing arrays would invite "match-any-of"
+          semantics (consumer ticket would file it within weeks),
+          but ``@>`` of an array is "element-wise contained subset",
+          which is not the OR semantics the consumer would expect.
+          Better to reject than ship a confusing match shape.
+        * **Index-utility erosion.** The default ``jsonb_ops`` GIN
+          index on ``documents.metadata`` (migration ``0032``)
+          backs containment on flat scalar pairs cleanly; nested
+          paths can fall back to seq-scan depending on the planner's
+          estimate of selectivity. Pinning the shape keeps the
+          index meaningful.
+
+        Refile a separate task only if a consumer surfaces a
+        measured need for richer containment shapes. The substrate
+        accepts arbitrary string keys -- the taxonomy is a
+        consumer-side convention.
+        """
+        if value is None:
+            return None
+        for key, val in value.items():
+            if not isinstance(val, (str, int, float, bool, type(None))):
+                raise ValueError(
+                    f"metadata_filters[{key!r}] must be a JSON scalar "
+                    f"(str/int/float/bool/None); got {type(val).__name__}"
+                )
+        return value
 
 
 class RetrieveResponse(BaseModel):
@@ -178,15 +250,23 @@ async def retrieve_endpoint(
     start = time.monotonic()
 
     query_hash = _compute_query_hash(body.query)
+    # Surface the *keys* (sorted, no values) of `metadata_filters` to
+    # the audit payload. Values may carry tenant-shaped identifiers
+    # (operator subs, target names, customer ids) -- key-only matches
+    # the same privacy posture `query_hash` enforces for the query.
+    # `None` when no filter dict was sent so the audit-payload
+    # resolver drops the key entirely (it strips `None` values).
+    metadata_filters_keys = sorted(body.metadata_filters.keys()) if body.metadata_filters else None
     log = structlog.get_logger()
     # Pre-bind everything the audit middleware can lift into
     # `audit_log.payload`. `hit_count` is bound after retrieval; the
-    # other three are known up-front so a handler exception still
-    # produces an audit row with the query identity preserved.
+    # others are known up-front so a handler exception still produces
+    # an audit row with the query identity preserved.
     structlog.contextvars.bind_contextvars(
         audit_query_hash=query_hash,
         audit_source=body.source,
         audit_kind=body.kind,
+        audit_metadata_filters_keys=metadata_filters_keys,
     )
 
     hits = await retrieve(
@@ -195,6 +275,7 @@ async def retrieve_endpoint(
         source=body.source,
         kind=body.kind,
         limit=body.limit,
+        metadata_filters=body.metadata_filters,
     )
 
     structlog.contextvars.bind_contextvars(audit_hit_count=len(hits))
@@ -205,6 +286,7 @@ async def retrieve_endpoint(
         tenant_id=str(operator.tenant_id),
         source=body.source,
         kind=body.kind,
+        metadata_filters_keys=metadata_filters_keys,
         hit_count=len(hits),
         duration_ms=duration_ms,
     )

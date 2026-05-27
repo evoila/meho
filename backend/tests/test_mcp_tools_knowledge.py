@@ -335,6 +335,142 @@ async def test_tools_call_search_knowledge_forwards_filters_and_limit(
     [TenantRole.OPERATOR],
     indirect=True,
 )
+@pytest.mark.asyncio
+async def test_tools_call_search_knowledge_forwards_metadata_filters(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """Non-``kind`` filter keys reach :func:`retrieve` as ``metadata_filters``.
+
+    G4.4-T1 / #1177 lights up the substrate's containment predicate;
+    the MCP handler's "currently ignored" disclaimer goes away.
+    Pass ``filters={"kind": "kb-entry", "source_kind":
+    "evoila-distilled"}`` and assert the substrate receives the
+    ``metadata_filters={"source_kind": "evoila-distilled"}`` shape
+    (kind stripped out of the metadata-side dict — it has its own
+    parameter on the substrate API).
+    """
+    client, _op = client_with_operator
+    captured: dict[str, object] = {}
+
+    async def fake_retrieve(**kwargs: object) -> list[RetrievalHit]:
+        captured.update(kwargs)
+        return []
+
+    with patch("meho_backplane.kb.service.retrieve", side_effect=fake_retrieve):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_knowledge",
+                    "arguments": {
+                        "query": "vsphere",
+                        "filters": {
+                            "kind": "kb-entry",
+                            "source_kind": "evoila-distilled",
+                            "product": "vcenter",
+                        },
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert captured["kind"] == "kb-entry"
+    # `kind` is consumed by the dedicated substrate parameter; only
+    # non-`kind` keys flow to `metadata_filters` so the substrate
+    # doesn't double-apply the kind predicate via JSONB containment.
+    assert captured["metadata_filters"] == {
+        "source_kind": "evoila-distilled",
+        "product": "vcenter",
+    }
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_tools_call_search_knowledge_kind_only_filters_omit_metadata_filters(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A ``filters={"kind": "..."}`` dict produces ``metadata_filters=None``.
+
+    Empty-residual normalisation: when the only key the handler
+    sees is ``kind``, the leftover dict is empty and the substrate
+    must receive ``None`` (skip the containment predicate entirely)
+    rather than ``{}`` (which would emit ``@> '{}'::jsonb`` — a no-op
+    that costs DB parse time). Pin the boundary here.
+    """
+    client, _op = client_with_operator
+    captured: dict[str, object] = {}
+
+    async def fake_retrieve(**kwargs: object) -> list[RetrievalHit]:
+        captured.update(kwargs)
+        return []
+
+    with patch("meho_backplane.kb.service.retrieve", side_effect=fake_retrieve):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_knowledge",
+                    "arguments": {
+                        "query": "anything",
+                        "filters": {"kind": "kb-entry"},
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert captured["metadata_filters"] is None
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_search_knowledge_tool_description_drops_currently_ignored_disclaimer(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The tool description no longer claims non-``kind`` keys are ignored.
+
+    G4.4-T1 closes the v0.2 disclaimer. The description and the
+    ``filters`` inputSchema description must both reflect the new
+    contract: non-``kind`` keys translate to ``documents.metadata @>``
+    containment.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {},
+        },
+    )
+    assert response.status_code == 200
+    tools = response.json()["result"]["tools"]
+    search = next(t for t in tools if t["name"] == "search_knowledge")
+    assert "currently ignored" not in search["description"]
+    assert "currently ignored" not in search["inputSchema"]["properties"]["filters"]["description"]
+    # The description must also mention the new behaviour so an agent
+    # using the tool can discover it without reading the source.
+    assert "containment" in search["description"] or "metadata" in search["description"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
 def test_tools_call_search_knowledge_rejects_missing_query(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:

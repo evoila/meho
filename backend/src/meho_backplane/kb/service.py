@@ -453,7 +453,7 @@ class KbService:
         tenant_id: uuid.UUID,
         query: str,
         *,
-        filters: dict[str, str] | None = None,
+        filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> list[KbEntrySearchHit]:
         """Hybrid BM25 + cosine retrieval scoped to *tenant_id*'s kb corpus.
@@ -476,20 +476,33 @@ class KbService:
             ``plainto_tsquery`` for BM25 and the embedding service
             for cosine.
         filters
-            Optional :class:`dict` accepting at most one key:
-            ``"kind"`` to narrow within the kb namespace (e.g.
-            ``kind="kb-entry"`` to exclude future ``kb-index``
-            rows). Other keys are ignored in v0.2; v0.2.next may
-            grow metadata-field filters.
+            Optional :class:`dict`. The ``"kind"`` key narrows within
+            the kb namespace (e.g. ``kind="kb-entry"`` to exclude
+            future ``kb-index`` rows); every other key is forwarded
+            to the substrate as a ``metadata_filters`` containment
+            predicate against ``documents.metadata`` (G4.4-T1 /
+            #1177). Pass e.g. ``{"kind": "kb-entry", "source_kind":
+            "evoila-distilled"}`` to scope hits to the curated
+            slice. Values must be JSON scalars -- the substrate's
+            ``@>`` containment is shape-flat-only by contract.
         limit
             Maximum hits to return. Default 10; capped at 50 by the
             substrate (and the API surface).
         """
         kind_filter: str | None = None
+        metadata_filters: dict[str, Any] | None = None
         if filters is not None:
             kind = filters.get("kind")
             if isinstance(kind, str):
                 kind_filter = kind
+            # Everything other than ``kind`` flows to the substrate's
+            # ``metadata_filters`` -- the v0.2 "currently ignored"
+            # disclaimer in the MCP tool description goes away once
+            # this path lights up the substrate primitive (G4.4-T1 /
+            # #1177). An empty residual dict normalises to ``None``
+            # so the substrate skips the predicate.
+            residual = {k: v for k, v in filters.items() if k != "kind"}
+            metadata_filters = residual or None
 
         hits = await retrieve(
             tenant_id=tenant_id,
@@ -497,6 +510,7 @@ class KbService:
             source=KB_SOURCE,
             kind=kind_filter,
             limit=limit,
+            metadata_filters=metadata_filters,
         )
         return [
             KbEntrySearchHit(

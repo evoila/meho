@@ -307,7 +307,32 @@ class AgentInvoker:
         free-text answer in v0.2 (recorded as ``{"text": ...}``). The
         toolset spec passes through verbatim — the T3 resolver intersects it
         with the operator's permissions at run time.
+
+        ``tier`` is deliberately *not* threaded from ``entry.model_tier``
+        in G11.5-T1 (#1075): the persisted
+        :class:`~meho_backplane.agents.schemas.AgentModelTier`
+        vocabulary (``standard`` / ``fast`` / ``deep``) and the resolver's
+        :class:`~meho_backplane.agent.models.AgentTier` vocabulary
+        (``triage`` / ``investigate`` / ``summarize``) are orthogonal:
+        the first is a cost/capability ladder, the second is a workflow
+        role. A naive equate-by-position mapping would be semantically
+        wrong, and the API-surface
+        :class:`~meho_backplane.agents.schemas.AgentDefinitionCreate.model_tier`
+        is a public contract a rename would break. The reconciliation
+        (single enum / explicit mapping table + Alembic retag of stored
+        values) is queued behind the concrete-backend tasks
+        (#1076 / #1077 / #1078), which exercise the resolver via direct
+        programmatic construction in v0.2; once a concrete non-Anthropic
+        backend ships the persisted vocabulary needs to grow, and that
+        is the right moment to unify. Until then, every persisted
+        definition resolves through :data:`ModelFactory` (the legacy
+        single-tenant path) and the resolver branch in
+        :meth:`~meho_backplane.agent.run.PydanticAgentRun._resolve_model`
+        is reachable only via direct programmatic construction.
         """
+        # TODO(G11.5-T2 — follow up to #1075): map entry.model_tier ->
+        # definition.tier once AgentModelTier (standard/fast/deep) and
+        # AgentTier (triage/investigate/summarize) are reconciled.
         return AgentDefinition(
             name=entry.name,
             system_prompt=entry.system_prompt,

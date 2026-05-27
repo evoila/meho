@@ -59,9 +59,25 @@ tool results, repeated turns). Pydantic AI drives its loop through a
 :class:`~pydantic_ai.models.Model`, so the seam mirrors the *pattern* of
 ``LlmClientFactory`` — an injected, fail-closed factory — rather than the
 one-shot method. :func:`default_model_factory` builds an Anthropic model
-from settings (the G11 initiative ships against Anthropic; multi-provider
-routing is G11.5). Tests inject a deterministic
-:class:`~pydantic_ai.models.function.FunctionModel` instead.
+from settings (the G11 initiative shipped against Anthropic; G11.5-T1
+generalises this to a per-tenant resolver). Tests inject a deterministic
+:class:`~pydantic_ai.models.function.FunctionModel` via the
+``model_factory=`` constructor argument instead.
+
+Per-tenant resolver (G11.5-T1)
+==============================
+
+The zero-arg :data:`ModelFactory` shape was right for T1 (one deploy → one
+provider) but loses the two pieces multi-provider routing needs: *which
+tenant* is running, and *which tier* the definition asks for. The
+:class:`~meho_backplane.agent.models.ModelResolver` Protocol takes both
+and returns the concrete :class:`~pydantic_ai.models.Model`. When a
+:class:`PydanticAgentRun` is built with a resolver, definitions naming an
+:class:`~meho_backplane.agent.models.AgentTier` route through it; the
+legacy zero-arg :data:`ModelFactory` path is preserved for tests and for
+definitions with ``tier is None`` (the pre-G11.5 default-tenant case).
+See :mod:`meho_backplane.agent.models` for the resolver shape + capability
+flags. Concrete non-Anthropic backends are #1076 / #1077 / #1078.
 """
 
 from __future__ import annotations
@@ -85,6 +101,11 @@ from meho_backplane.agent.invoke import (
     ChildRunFinalizer,
     ChildRunRecorder,
     make_invoke_agent_tool,
+)
+from meho_backplane.agent.models import (
+    AgentTier,
+    ModelResolver,
+    ResolverError,
 )
 from meho_backplane.agent.toolset import resolve_agent_tools
 from meho_backplane.auth.operator import Operator
@@ -182,6 +203,16 @@ class AgentDefinition(BaseModel):
     #: shape. Persisted definitions (T2 #809) materialise their stored
     #: ``toolset`` JSON into this field.
     toolset: dict[str, Any] | None = None
+    #: Optional logical tier name (G11.5-T1). When set *and* the runtime
+    #: carries a :class:`~meho_backplane.agent.models.ModelResolver`, the
+    #: resolver materialises the :class:`~pydantic_ai.models.Model` from
+    #: ``(operator.tenant_id, tier)``; the zero-arg :data:`ModelFactory`
+    #: is bypassed. When ``None`` (the legacy shape — every definition
+    #: written before G11.5), the runtime falls back to its
+    #: :data:`ModelFactory` so existing tests + the default single-tenant
+    #: path are unaffected. Concrete backends behind each tier are
+    #: tenant-policy decisions — see :mod:`meho_backplane.agent.models`.
+    tier: AgentTier | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,9 +541,28 @@ class PydanticAgentRun:
     loop as an :class:`asyncio.Task`. State lives on the returned
     :class:`AgentRunHandle`; the implementation itself is stateless beyond
     the factory, so a single instance is safe to share across runs.
+
+    G11.5-T1 added an optional :attr:`model_resolver`. When set, a definition
+    that names an :class:`~meho_backplane.agent.models.AgentTier` routes
+    through the resolver instead of :attr:`model_factory` — the per-tenant
+    backend (Anthropic / Bedrock / on-prem vLLM / VCF PAIF) is picked from
+    the tenant's policy. A definition with ``tier is None`` (or a runtime
+    built without a resolver, e.g. tests) keeps the legacy zero-arg
+    factory path.
     """
 
     model_factory: ModelFactory = field(default=default_model_factory)
+    #: Optional per-tenant tier→Model resolver (G11.5-T1). When set, a
+    #: :class:`AgentDefinition` that names a :class:`AgentTier` builds its
+    #: :class:`~pydantic_ai.models.Model` via the resolver
+    #: (``resolver.resolve(operator, definition.tier)``) — honouring the
+    #: tenant's policy + egress constraint + per-backend capability flags.
+    #: ``None`` (the default) means the legacy single-tenant
+    #: :attr:`model_factory` path is taken for every run, regardless of
+    #: ``definition.tier`` — useful for tests and for deploys that haven't
+    #: configured multi-provider routing yet. See
+    #: :mod:`meho_backplane.agent.models` for the resolver shape.
+    model_resolver: ModelResolver | None = None
     #: Optional child-agent resolver (G11.1-T5 #812). When set, every built
     #: agent additionally carries the ``invoke_agent`` meta-tool, so a running
     #: agent can invoke another definition in its tenant as a depth-capped,
@@ -554,8 +604,14 @@ class PydanticAgentRun:
         definition. The tool is bound to :meth:`run_child` as its
         :class:`~meho_backplane.agent.invoke.ChildRunner`, so the child loop
         runs with the parent's shared usage budget.
+
+        Model selection (G11.5-T1): when both :attr:`model_resolver` is wired
+        *and* ``definition.tier`` is set, the model comes from the resolver
+        — picked from the tenant's policy + egress constraint + capability
+        flags. Otherwise the legacy :attr:`model_factory` is called (the
+        zero-arg path tests rely on and the pre-G11.5 default).
         """
-        model = self.model_factory()
+        model = self._resolve_model(definition, operator)
         invoke_tool = self._maybe_build_invoke_tool()
         if definition.toolset is not None:
             tools = resolve_agent_tools(definition.toolset, operator)
@@ -578,6 +634,37 @@ class PydanticAgentRun:
         )
         _register_default_meta_tools(agent)
         return agent
+
+    def _resolve_model(
+        self,
+        definition: AgentDefinition,
+        operator: Operator,
+    ) -> Model:
+        """Pick the :class:`~pydantic_ai.models.Model` for one run.
+
+        Resolution order (G11.5-T1):
+
+        1. If :attr:`model_resolver` is set and ``definition.tier`` is set,
+           call ``resolver.resolve(operator, definition.tier)`` — the
+           per-tenant, capability-checked, egress-aware path. Any
+           :class:`~meho_backplane.agent.models.ResolverError` (a missing
+           backend, a no-egress violation, a capability mismatch) is
+           wrapped in :class:`AgentRunError` so callers catch one
+           exception type regardless of which mismatch fired.
+        2. Otherwise the legacy zero-arg :attr:`model_factory` — the path
+           every existing test relies on and the recovery shape for
+           single-tenant deploys that haven't yet onboarded a resolver.
+        """
+        if self.model_resolver is not None and definition.tier is not None:
+            try:
+                return self.model_resolver.resolve(operator, definition.tier)
+            except ResolverError as exc:
+                raise AgentRunError(
+                    f"could not resolve a model for tier "
+                    f"'{definition.tier.value}' under tenant "
+                    f"'{operator.tenant_id}': {exc}",
+                ) from exc
+        return self.model_factory()
 
     def _maybe_build_invoke_tool(self) -> Tool[Operator] | None:
         """Build the ``invoke_agent`` tool when composition is wired, else ``None``.
@@ -796,14 +883,20 @@ class PydanticAgentRun:
         A tripped turn budget surfaces as a :attr:`AgentRunEventKind.ERROR`
         event (then the generator ends) rather than a raised exception, so
         an SSE consumer always sees a terminal frame regardless of how the
-        loop ended. Tool returns are read from the run's message history
-        after the call-tools node completes — the plain (non-streaming)
-        node-graph path the deterministic test model supports.
+        loop ended. Same envelope covers a resolver failure (no backend
+        registered, no-egress tenant routed to SaaS, capability mismatch)
+        from :meth:`_build_agent`: it surfaces as a terminal ``ERROR`` event
+        rather than an exception escaping the generator, so the SSE consumer
+        always sees a terminal frame regardless of how the agent
+        construction or the loop went wrong. Tool returns are read from
+        the run's message history after the call-tools node completes —
+        the plain (non-streaming) node-graph path the deterministic test
+        model supports.
         """
-        agent = self._build_agent(definition, operator)
-        limits = UsageLimits(request_limit=definition.request_limit)
         emitted_tool_returns = 0
         try:
+            agent = self._build_agent(definition, operator)
+            limits = UsageLimits(request_limit=definition.request_limit)
             async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
                 async for node in run:
                     events, emitted_tool_returns = _node_events(node, run, emitted_tool_returns)

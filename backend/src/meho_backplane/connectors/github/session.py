@@ -478,31 +478,68 @@ async def exchange_jwt_for_installation_token(
                 status_code=resp.status_code,
             )
 
-        payload = resp.json()
-        token_value = payload.get("token") if isinstance(payload, dict) else None
-        if not isinstance(token_value, str) or not token_value:
-            keys_or_type = (
-                sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__
-            )
-            raise GitHubInstallationTokenMintError(
-                f"github_installation_token_mint_failed: response from "
-                f"POST {api_base_url}{path} is missing a 'token' field "
-                f"(received keys: {keys_or_type}). This is a GitHub API "
-                f"contract violation — file an issue and re-mint manually."
-            )
-        upstream_expires_at = payload.get("expires_at")
-        upstream_expires_str: str | None = (
-            upstream_expires_at if isinstance(upstream_expires_at, str) else None
-        )
-        now_monotonic = now if now is not None else time.monotonic()
-        return InstallationToken(
-            token=token_value,
-            expires_at_monotonic=now_monotonic + INSTALLATION_TOKEN_CACHE_SECONDS,
-            upstream_expires_at=upstream_expires_str,
+        return _build_installation_token_from_response(
+            resp=resp,
+            api_base_url=api_base_url,
+            path=path,
+            now=now,
         )
     finally:
         if owns_client:
             await http_client.aclose()
+
+
+def _build_installation_token_from_response(
+    *,
+    resp: httpx.Response,
+    api_base_url: str,
+    path: str,
+    now: float | None,
+) -> InstallationToken:
+    """Parse a 2xx ``access_tokens`` response into an :class:`InstallationToken`.
+
+    Extracted from :func:`exchange_jwt_for_installation_token` so the
+    request / error-envelope / parse split stays under the
+    code-quality function-size threshold. Surfaces all parse-time
+    failures (non-JSON body, missing ``token`` field) through the
+    documented ``github_installation_token_mint_failed`` T11 envelope.
+    """
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        # A non-JSON 2xx body is a GitHub contract violation (an
+        # upstream proxy returning HTML, a partial response, etc.).
+        # Surface it through the same ``github_installation_token_mint_failed``
+        # T11 envelope rather than letting ``ValueError`` escape — the
+        # caller's failure handling is shape-stable on this code.
+        body_excerpt = _excerpt(resp.text)
+        raise GitHubInstallationTokenMintError(
+            f"github_installation_token_mint_failed: "
+            f"POST {api_base_url}{path} returned a non-JSON 2xx body. "
+            f"Body excerpt: {body_excerpt!r}. Upstream contract violation.",
+            status_code=resp.status_code,
+        ) from exc
+    token_value = payload.get("token") if isinstance(payload, dict) else None
+    if not isinstance(token_value, str) or not token_value:
+        keys_or_type = (
+            sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__
+        )
+        raise GitHubInstallationTokenMintError(
+            f"github_installation_token_mint_failed: response from "
+            f"POST {api_base_url}{path} is missing a 'token' field "
+            f"(received keys: {keys_or_type}). This is a GitHub API "
+            f"contract violation — file an issue and re-mint manually."
+        )
+    upstream_expires_at = payload.get("expires_at")
+    upstream_expires_str: str | None = (
+        upstream_expires_at if isinstance(upstream_expires_at, str) else None
+    )
+    now_monotonic = now if now is not None else time.monotonic()
+    return InstallationToken(
+        token=token_value,
+        expires_at_monotonic=now_monotonic + INSTALLATION_TOKEN_CACHE_SECONDS,
+        upstream_expires_at=upstream_expires_str,
+    )
 
 
 def _raise_for_rate_limit(resp: httpx.Response) -> None:

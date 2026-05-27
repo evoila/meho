@@ -521,6 +521,10 @@ def _extract_repo_path(host: str) -> str | None:
     # Strip any ``api.github.com`` / ``api.github.com/repos`` prefix; the
     # tail is ``owner/repo`` (or longer for nested URLs we ignore).
     parts = host.split("/", maxsplit=3)
+    if len(parts) == 2:
+        # Bare ``owner/repo`` — the operator-friendly form the v0.x
+        # onboarding doc uses (no FQDN prefix).
+        return f"{parts[0]}/{parts[1]}"
     # parts[0] is the host portion (api.github.com); the rest is path.
     if len(parts) < 3:
         return None

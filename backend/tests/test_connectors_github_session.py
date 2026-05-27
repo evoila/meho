@@ -240,3 +240,29 @@ async def test_exchange_jwt_raises_mint_failed_when_token_missing_from_response(
             installation_id="42",
         )
     assert "missing a 'token' field" in str(excinfo.value)
+
+
+@respx.mock
+async def test_exchange_jwt_raises_mint_failed_on_non_json_2xx_body() -> None:
+    """Non-JSON 2xx body → :class:`GitHubInstallationTokenMintError`.
+
+    No raw ``ValueError`` escapes — the failure must travel through the
+    documented T11 envelope shape.
+    """
+    respx.post(
+        f"{DEFAULT_GITHUB_API_URL}/app/installations/42/access_tokens",
+    ).mock(
+        return_value=httpx.Response(
+            201,
+            text="<html><body>upstream proxy returned HTML</body></html>",
+        )
+    )
+    with pytest.raises(GitHubInstallationTokenMintError) as excinfo:
+        await exchange_jwt_for_installation_token(
+            jwt_token="signed.jwt.value",
+            installation_id="42",
+        )
+    assert "non-JSON 2xx body" in str(excinfo.value)
+    assert excinfo.value.status_code == 201
+    # The original ``ValueError`` is preserved as the chained cause.
+    assert isinstance(excinfo.value.__cause__, ValueError)

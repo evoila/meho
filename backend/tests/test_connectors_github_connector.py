@@ -174,7 +174,7 @@ async def test_second_fingerprint_does_not_remint_within_cache_window(
             201,
             json={
                 "token": "ghs_installtoken_redacted",
-                "expires_at": "2026-05-27T13:00:00Z",
+                "expires_at": "2099-01-01T00:00:00Z",
                 "permissions": {"contents": "read"},
             },
         )
@@ -306,7 +306,7 @@ async def test_fingerprint_with_repo_coordinates_uses_repos_endpoint(
         f"{DEFAULT_GITHUB_API_URL}/app/installations/42/access_tokens",
     ).mock(
         return_value=httpx.Response(
-            201, json={"token": "ghs_x", "expires_at": "2026-05-27T13:00:00Z"}
+            201, json={"token": "ghs_x", "expires_at": "2099-01-01T00:00:00Z"}
         )
     )
     repo_route = respx.get(
@@ -335,6 +335,46 @@ async def test_fingerprint_with_repo_coordinates_uses_repos_endpoint(
     assert fp.extras["owner_login"] == "evoila"
     assert fp.extras["owner_type"] == "Organization"
     assert fp.extras["default_branch"] == "main"
+
+
+@respx.mock
+async def test_fingerprint_with_bare_owner_repo_uses_repos_endpoint(
+    connector_with_app_loader: GitHubRestConnector,
+) -> None:
+    """``host="evoila/meho"`` (operator-friendly bare form) also hits ``GET /repos/evoila/meho``.
+
+    The docstring on :func:`_extract_repo_path` documents three accepted
+    shapes — ``api.github.com/repos/owner/repo``,
+    ``api.github.com/owner/repo``, and bare ``owner/repo``. This test
+    pins the bare form, which is what the v0.x onboarding doc tells
+    operators to configure on ``target.host``.
+    """
+    respx.post(
+        f"{DEFAULT_GITHUB_API_URL}/app/installations/42/access_tokens",
+    ).mock(
+        return_value=httpx.Response(
+            201, json={"token": "ghs_x", "expires_at": "2099-01-01T00:00:00Z"}
+        )
+    )
+    repo_route = respx.get(
+        f"{DEFAULT_GITHUB_API_URL}/repos/evoila/meho",
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 1234567,
+                "full_name": "evoila/meho",
+                "private": False,
+                "default_branch": "main",
+                "owner": {"login": "evoila", "type": "Organization"},
+            },
+        )
+    )
+    target = _FakeTarget(name="github-evoila-meho", host="evoila/meho")
+    fp = await connector_with_app_loader.fingerprint(target)
+    assert fp.reachable is True
+    assert repo_route.called
+    assert fp.extras["repo_full_name"] == "evoila/meho"
 
 
 # ---------------------------------------------------------------------------

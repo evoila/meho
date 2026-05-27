@@ -486,12 +486,120 @@ missing key). The recovery shape `default_anthropic_policy()` +
 behaviour — every tier under the default tenant policy routes to
 Anthropic.
 
-Bedrock (#1076), OpenAI-compatible / vLLM / Ollama (#1077), and VCF
-Private AI Foundation (#1078) land their own `BackendBuilder`
-registrations. They are deliberately not eagerly imported here — the
-`pydantic-ai-slim[bedrock]` / `[openai]` extras are not installed in
-this slice, and an eager import would break the module on a deployment
-without the extra.
+Bedrock (#1076), OpenAI-compatible / vLLM / Ollama (#1077 — landed), and
+VCF Private AI Foundation (#1078) land their own `BackendBuilder`
+registrations. They are deliberately not eagerly imported in `models.py`'s
+default policy helpers — the `pydantic-ai-slim[bedrock]` extra is not
+installed in this slice, and an eager import would break the module on a
+deployment without the extra. The `[openai]` extra **is** pinned now
+(see #1077 below) but its builder still imports lazily inside the
+closure so an Anthropic-only deploy never loads the `openai` wheel.
+
+## OpenAI-compatible backend (G11.5-T3 #1077)
+
+The OpenAI-compatible backend covers three deployment shapes the
+Initiative #806 §C4 calls out: **OpenAI SaaS** (`api.openai.com`),
+**vLLM** on-prem (a Python inference server exposing the OpenAI Chat
+Completions wire format under `/v1`), and **Ollama** local (the same
+wire format with a few documented quirks). All three share the
+transport — pydantic_ai's `OpenAIChatModel` + `OpenAIProvider` — and
+differ on which sub-features the underlying engine actually
+implements, surfaced through `OpenAIModelProfile` flags.
+
+### Three knobs, one shape
+
+The vendor-specific quirks are wired through three pre-built profile
+factories in `meho_backplane.agent.models`:
+
+| Vendor | `openai_supports_strict_tool_definition` | `openai_chat_supports_multiple_system_messages` |
+|---|---|---|
+| `OpenAICompatVendor.OPENAI` | `True` (default) | `True` (default) |
+| `OpenAICompatVendor.VLLM` | **`False`** — engine ignores the strict flag (vLLM tool-calling docs) | `True` |
+| `OpenAICompatVendor.OLLAMA` | **`False`** — `openai` compat layer ignores the strict flag | **`False`** — Ollama collapses multiple `role=system` turns |
+
+The `json_schema_transformer` knob the issue body names stays at the
+framework's `None` default for all three vendors — none of them
+requires a per-call schema rewrite at the time of this slice.
+
+`BackendCapabilities` for the OpenAI-compat surface:
+
+- `supports_tools=True` — every vendor honours the tool-use loop.
+- `supports_streaming=True` — same.
+- `supports_prompt_cache=False` — none of the three exposes the
+  Anthropic-style `cache_control` knob. OpenAI's automatic input
+  caching is opaque to the client; vLLM/Ollama have no equivalent.
+  The cost-attribution layer (#1079) reads this flag to decide
+  whether to model a per-message cache discount.
+- `tool_format="openai"` — the wire format every OpenAI-compat
+  surface speaks.
+
+### Two builder shapes
+
+```python
+# Per-backend, fully parameterised — the multi-endpoint case
+builder = openai_compat_backend_builder(
+    vendor=OpenAICompatVendor.VLLM,
+    model_id="meta-llama/Llama-3.1-8B-Instruct",
+    base_url="http://vllm.internal:8000/v1",
+    api_key=vault_secret,
+)
+backends = {
+    "vllm-on-prem": (builder, openai_compat_capabilities, False),  # is_saas_egress=False
+    ...
+}
+
+# Settings-driven default — the single-knob single-tenant case
+model = default_openai_backend_builder()
+```
+
+The explicit `openai_compat_backend_builder(...)` is the multi-tenant
+shape: each on-prem endpoint gets its own backend id, its own
+`base_url`, its own `api_key`. The settings-driven
+`default_openai_backend_builder()` is the convenience path — it reads
+`openai_api_key` / `openai_base_url` / `openai_default_model` from
+`Settings` and picks a vendor profile from the base URL host hint
+(URL contains `ollama` → Ollama profile, `vllm` → vLLM, else
+OpenAI). Both builders are **lazy**: pydantic_ai's `openai` provider
+imports inside the closure, so a deploy that registers an OpenAI-compat
+backend but never resolves to it never loads the `openai` wheel.
+
+### `base_url` configuration model
+
+The OpenAI-compat builder takes its endpoint and credential from one
+of two sources, in order of authority:
+
+1. **Per-tenant secret + per-backend builder.** A
+   `openai_compat_backend_builder(base_url=..., api_key=...)` call
+   constructs a closure that captures the values verbatim; the
+   resolver registers it under a tenant-specific backend id and the
+   tenant's `TenantModelPolicy.tiers` map points at that id. This is
+   how a real multi-tenant deploy wires per-tenant on-prem endpoints
+   — each tenant's `base_url` comes from its row in the tenants table
+   (or from Vault, when the credential is per-tenant), the
+   `api_key` from a Vault-issued per-tenant token. The builder never
+   reaches into `Settings`.
+2. **Settings-driven default.** `default_openai_backend_builder()`
+   reads `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_DEFAULT_MODEL`
+   from process environment (the same Helm-secret / external-secrets
+   / sealed-secret pipeline that wires `ANTHROPIC_API_KEY` today).
+   Empty `OPENAI_API_KEY` is fail-closed: the builder raises
+   `AgentRunError` rather than starting a loop with no credentials.
+   Use this only when the whole deploy talks to one OpenAI-compat
+   endpoint — the moment you need per-tenant routing, switch to
+   builder #1.
+
+### Egress + the `is_saas_egress` flag
+
+The resolver's egress check (`allow_egress=False` refuses any backend
+flagged `is_saas_egress=True`) is honoured uniformly across backend
+kinds: OpenAI SaaS at `api.openai.com` is `is_saas_egress=True`, an
+on-prem vLLM / Ollama / VCF PAIF endpoint is `is_saas_egress=False`.
+A no-egress tenant policy can route every tier through an
+OpenAI-compat backend without tripping `EgressViolationError`, as
+long as each registered backend's egress flag matches the endpoint's
+actual posture. The flag is set at registration time, not derived
+from the URL — operators are responsible for declaring the truth
+about the endpoint they are pointing at.
 
 ### Failure mode unification
 

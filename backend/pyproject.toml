@@ -33,7 +33,18 @@ dependencies = [
     "pyarrow>=21.0.0",
     "msgspec>=0.20.0",
     "tabulate>=0.9.0",
-    "pydantic-ai-slim[anthropic,openai]>=1.102.0",
+    # ``[anthropic]`` brings the Anthropic SDK + the
+    # :class:`pydantic_ai.models.anthropic.AnthropicModel` provider; the
+    # G11.1 default tier path runs through it (see G11.1-T1 #808 +
+    # G11.5-T1 #1075). ``[bedrock]`` (G11.5-T2 #1076) adds boto3 +
+    # :class:`pydantic_ai.models.bedrock.BedrockConverseModel` so a
+    # tenant policy that routes a tier to AWS Bedrock can build the
+    # backend. ``[openai]`` (G11.5-T3 #1204) adds the OpenAI SDK +
+    # :class:`pydantic_ai.models.openai.OpenAIChatModel` so the same
+    # resolver shape can route to OpenAI SaaS / vLLM / Ollama via
+    # ``OpenAIProvider(base_url=...)``. All three extras live on the
+    # same pin so the version sweep stays monotonic.
+    "pydantic-ai-slim[anthropic,bedrock,openai]>=1.102.0",
     "croniter>=6.2.2",
     "markdown-it-py[linkify]>=3.0",
     "pygments>=2.18",

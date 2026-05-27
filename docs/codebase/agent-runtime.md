@@ -402,12 +402,20 @@ correlated by `approval_request_id`.
 
 ## Dependencies
 
-- **`pydantic-ai-slim[anthropic]`** (pinned in `backend/pyproject.toml`) —
-  the loop framework + the Anthropic provider. Confined to
-  `meho_backplane.agent.run`.
-- **`anthropic`** — the Anthropic SDK, pulled in transitively and used only
-  inside `default_model_factory` (lazy-imported, so processes that never run
-  an agent against Anthropic do not load it).
+- **`pydantic-ai-slim[anthropic,bedrock]`** (pinned in
+  `backend/pyproject.toml`) — the loop framework + the Anthropic
+  provider (`[anthropic]`) + the Bedrock Converse provider (`[bedrock]`,
+  G11.5-T2 #1076; pulls in `boto3`). Both providers are confined to
+  `meho_backplane.agent.run` (legacy `default_model_factory`) and
+  `meho_backplane.agent.models` (the per-tenant builders).
+- **`anthropic`** — the Anthropic SDK, pulled in transitively from
+  `[anthropic]` and used only inside `default_model_factory` /
+  `anthropic_backend_builder` (lazy-imported, so processes that never
+  run an agent against Anthropic do not load it).
+- **`boto3` / `botocore`** — pulled in transitively from `[bedrock]`,
+  used only inside `bedrock_backend_builder` (lazy-imported on the same
+  pattern; the public Bedrock endpoint is `bedrock-runtime.<region>.
+  amazonaws.com`).
 - **`meho_backplane.operations.meta_tools`** — `call_operation`,
   `list_operation_groups`, `search_operations`: the existing dispatch entry
   points the loop's tools call.
@@ -417,12 +425,17 @@ correlated by `approval_request_id`.
 - **`meho_backplane.auth.operator.Operator` / `TenantRole`** — the principal
   injected as the framework dependency, and the role gated against the
   meta-tool floors.
-- **`meho_backplane.settings`** — `anthropic_api_key` (fail-closed: empty
-  means the model factory raises) and `agent_default_model` (the pinned
-  model id, never a `-latest` tag). G11.5-T1 keeps both settings — the
-  Anthropic backend builder (in `agent/models.py`) reads them — so a
-  multi-provider deploy that routes some tiers to Anthropic still works
-  with the same env-var surface.
+- **`meho_backplane.settings`** — `anthropic_api_key` (fail-closed:
+  empty means the Anthropic builder raises) and `agent_default_model`
+  (the pinned Anthropic model id, never a `-latest` tag). G11.5-T2
+  added `bedrock_region` (empty = boto3 region chain; explicit pin
+  otherwise) and `bedrock_default_model` (the pinned full Bedrock
+  model id, geo-prefixed and `-v1:0`-suffixed) for the Bedrock
+  builder; AWS credentials follow boto3's standard chain (env vars
+  / IRSA role / instance profile / shared profile) and are *not*
+  surfaced as backplane settings of their own. A multi-provider deploy
+  that routes some tiers to Anthropic and others to Bedrock works with
+  the union of both env-var surfaces.
 
 ## Why the model factory, not the `LlmClient` seam
 
@@ -477,23 +490,58 @@ For every `resolve(operator, tier)` call the resolver checks, in order:
    tier raises `CapabilityMismatchError`. Future capability-aware tiers
    (a no-tools "free-text summary" tier) reuse the same shape.
 
-### What ships in T1 vs C4-b/c/d
+### What ships in T1 + T2 vs C4-c/d
 
-T1 ships the resolver + capability flags + the **Anthropic backend
-builder** (lifted from the old `default_model_factory`, fail-closed on
-missing key). The recovery shape `default_anthropic_policy()` +
-`default_anthropic_backends()` reproduces the pre-resolver single-tenant
-behaviour — every tier under the default tenant policy routes to
-Anthropic.
+T1 (#1075) shipped the resolver + capability flags + the **Anthropic
+backend builder** (lifted from the old `default_model_factory`, fail-
+closed on missing key). The recovery shape `default_anthropic_policy()`
++ `default_anthropic_backends()` reproduces the pre-resolver single-
+tenant behaviour — every tier under the default tenant policy routes
+to Anthropic.
 
-Bedrock (#1076), OpenAI-compatible / vLLM / Ollama (#1077 — landed), and
-VCF Private AI Foundation (#1078) land their own `BackendBuilder`
-registrations. They are deliberately not eagerly imported in `models.py`'s
-default policy helpers — the `pydantic-ai-slim[bedrock]` extra is not
-installed in this slice, and an eager import would break the module on a
-deployment without the extra. The `[openai]` extra **is** pinned now
-(see #1077 below) but its builder still imports lazily inside the
-closure so an Anthropic-only deploy never loads the `openai` wheel.
+T2 (#1076) added the **AWS Bedrock Converse backend builder** alongside:
+`bedrock_backend_builder()` constructs a
+`pydantic_ai.models.bedrock.BedrockConverseModel` against a
+`BedrockProvider` (boto3 region + credential chain). The shipped
+registration `default_bedrock_backends()` exposes the builder under the
+id `"bedrock-anthropic"` with `is_saas_egress=True` — public Bedrock
+endpoints traverse the public internet, so an air-gapped tenant
+brokering Bedrock over AWS PrivateLink / VPC endpoints layers a second
+registration under a different id (`"bedrock-anthropic-privatelink"`,
+say) with `is_saas_egress=False`. The `[bedrock]` extra (boto3) lives
+on the same pydantic-ai-slim pin as `[anthropic]`, so every wheel
+already ships both; the lazy function-local imports in each builder
+keep an unused backend's dependencies out of the import graph.
+
+**The Bedrock caveat that drives `tool_format="converse"`.** Pydantic
+AI's Bedrock path is the **Converse API** (boto3), *not* the
+`anthropic[bedrock]` adapter. The two look like "Claude over AWS" from
+a tenant-facing distance, but route tool calls through different wire
+shapes (Bedrock `toolSpec` vs. Anthropic-native XML), so the capability
+flag records the difference. A future tool-format adapter (initiative
+#806 §C4) branches on the `tool_format` string rather than inferring
+from the underlying model family — Claude over Anthropic-direct and
+Claude over Bedrock are different format domains.
+
+**Per-model prompt-caching on Bedrock.** The default Bedrock
+registration sets `supports_prompt_cache=True` because it targets the
+Anthropic-on-Bedrock family, which the
+`pydantic_ai.providers.bedrock.BedrockModelProfile`
+`bedrock_supports_prompt_caching` allow-list covers. A deploy that
+registers a *non*-Anthropic Bedrock model (Amazon Nova, Mistral,
+Cohere) registers it under a separate backend id with a copy of
+`bedrock_capabilities` flipping `supports_prompt_cache=False` — the
+resolver and the cost-attribution path (#1079) read the per-
+registration flag, not the model id.
+
+OpenAI-compatible / vLLM / Ollama (#1077 — landed) and VCF Private AI
+Foundation (#1078) land their own `BackendBuilder` registrations on
+the same pattern. They are deliberately not eagerly imported in
+`models.py`'s default policy helpers — an eager import would break the
+module on a deployment without the corresponding extra. The `[openai]`
+extra **is** pinned now (see #1077 below) but its builder still imports
+lazily inside the closure so an Anthropic-only deploy never loads the
+`openai` wheel.
 
 ## OpenAI-compatible backend (G11.5-T3 #1077)
 
@@ -618,15 +666,23 @@ resolver mismatch fired. The original `ResolverError` is preserved as
   factory fails closed without a key, and (T3) a toolset-driven definition
   registers the resolved tools, a meta-tool omitted from the spec is absent
   from the model's surface, and a `read_only` identity gets an empty surface.
-- `backend/tests/test_agent_model_resolver.py` (G11.5-T1) — unit tests for
-  the per-tenant tier→Model resolver: a tenant policy picks the configured
-  backend per tier; a no-egress tenant refuses a SaaS backend; a no-tools
-  backend is refused; the default-tenant policy routes every tier to
-  Anthropic; the Anthropic builder fails closed without a key; an unknown
-  backend id raises `BackendNotConfiguredError`; the `PydanticAgentRun`
-  seam routes through the resolver when both a resolver and a `tier` are
-  set, falls back to the factory otherwise, and wraps `ResolverError`s in
-  `AgentRunError`.
+- `backend/tests/test_agent_model_resolver.py` (G11.5-T1 + T2) — unit
+  tests for the per-tenant tier→Model resolver: a tenant policy picks
+  the configured backend per tier; a no-egress tenant refuses a SaaS
+  backend; a no-tools backend is refused; the default-tenant policy
+  routes every tier to Anthropic; the Anthropic builder fails closed
+  without a key; an unknown backend id raises
+  `BackendNotConfiguredError`; the `PydanticAgentRun` seam routes
+  through the resolver when both a resolver and a `tier` are set,
+  falls back to the factory otherwise, and wraps `ResolverError`s in
+  `AgentRunError`. G11.5-T2 adds: Bedrock capability flags declare
+  `tool_format="converse"`; `default_bedrock_backends()` registers the
+  `bedrock-anthropic` id and builds a `BedrockConverseModel`; the
+  Bedrock builder fails closed when boto3 cannot resolve a region; an
+  air-gapped tenant refuses the default (SaaS) Bedrock registration
+  but routes through a PrivateLink-flagged sibling registration
+  cleanly; a tenant policy can split tiers across Anthropic + Bedrock
+  by layering both default registrations.
 - `backend/tests/test_agent_toolset.py` — unit tests for the resolver /
   adapter directly (no model run): the spec ∩ identity-perms intersection
   (including the read_only-floor exclusion), operator threading, tool input

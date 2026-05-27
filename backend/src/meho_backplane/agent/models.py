@@ -44,20 +44,29 @@ carries both a ``model_factory`` and a ``model_resolver``, the resolver
 wins for definitions that name a tier; the factory remains the path for
 definitions with ``tier is None`` (tests, the legacy default-tenant run).
 
-What ships here vs. C4-b/c/d
-============================
+What ships here vs. C4-c/d
+==========================
 
-This task ships the **resolver shape + capability flags + the Anthropic
-backend builder** (so the existing Anthropic path keeps working through
-the resolver). Concrete builders for AWS Bedrock, OpenAI-compatible
-(vLLM / Ollama), and VCF Private AI Foundation are filed under #1076,
-#1077, and #1078 respectively; they slot in as additional
-:class:`BackendBuilder` registrations.
+G11.5-T1 (#1075) shipped the **resolver shape + capability flags + the
+Anthropic backend builder**. G11.5-T2 (#1076) added the **AWS Bedrock
+Converse backend builder** alongside it (``[bedrock]`` extra: boto3 +
+:class:`pydantic_ai.models.bedrock.BedrockConverseModel`). Concrete
+builders for OpenAI-compatible (vLLM / Ollama) and VCF Private AI
+Foundation are filed under #1077 and #1078; they slot in as additional
+:class:`BackendBuilder` registrations following the same pattern.
 
-The Anthropic builder is **deliberately the only built-in** here: the
-``pydantic-ai-slim[bedrock]`` / ``[openai]`` extras are not installed
-yet (they land with their respective tasks), and an eager import would
-break the agent module on a deployment that doesn't ship them.
+The Bedrock backend deliberately speaks the **Converse API** (boto3) —
+not the ``anthropic[bedrock]`` adapter. The two paths look similar
+("Claude over AWS") but route through different tool schemas: Anthropic
+direct API uses Anthropic-native tool-call XML; Bedrock uses the
+Converse API's ``toolSpec`` shape. The capability flag
+``tool_format="converse"`` records the difference so a future format-
+adapter seam can branch on it.
+
+Imports for each backend are **function-local** so a deployment whose
+policy never references that backend never loads the provider extra
+(e.g. an Anthropic-only deploy never imports boto3; an air-gapped
+Bedrock-only deploy never imports the Anthropic SDK).
 """
 
 from __future__ import annotations
@@ -90,7 +99,12 @@ __all__ = [
     "TierMapping",
     "anthropic_backend_builder",
     "anthropic_capabilities",
+    "bedrock_backend_builder",
+    "bedrock_capabilities",
     "build_resolver",
+    "default_anthropic_backends",
+    "default_anthropic_policy",
+    "default_bedrock_backends",
     "default_openai_backend_builder",
     "ollama_chat_profile",
     "openai_chat_profile",
@@ -184,6 +198,33 @@ anthropic_capabilities: Final[BackendCapabilities] = BackendCapabilities(
     supports_streaming=True,
     supports_prompt_cache=True,
     tool_format="anthropic",
+)
+
+
+#: Capability flags for ``pydantic_ai.models.bedrock.BedrockConverseModel``
+#: registered against an **Anthropic-family** model id (Claude 3.5+,
+#: Claude 4.x — the consumer-facing tiers consumer-doc §C4 names).
+#: Tools and intra-turn streaming work for every model the Converse API
+#: serves; prompt caching is **per-model** on Bedrock (the
+#: :class:`~pydantic_ai.providers.bedrock.BedrockModelProfile`
+#: ``bedrock_supports_prompt_caching`` flag tracks the per-id allow-list
+#: AWS publishes), and the Anthropic-on-Bedrock family is in the
+#: caching-supported set. A deploy that registers a *non*-Anthropic
+#: Bedrock model (Nova, Mistral, Cohere) should register it under a
+#: separate backend id with a copy of these capabilities that flips
+#: ``supports_prompt_cache=False`` to match the per-model profile.
+#:
+#: Tool format is ``"converse"`` — Bedrock's Converse API ``toolSpec``
+#: shape, **not** the Anthropic-native XML tool-call format. The two
+#: look similar from a tenant-facing distance (both surface "Claude
+#: with tools") but route through different wire shapes, so a future
+#: tool-format adapter (initiative #806 §C4) must branch on this
+#: string rather than infer from the underlying model family.
+bedrock_capabilities: Final[BackendCapabilities] = BackendCapabilities(
+    supports_tools=True,
+    supports_streaming=True,
+    supports_prompt_cache=True,
+    tool_format="converse",
 )
 
 
@@ -497,14 +538,16 @@ def anthropic_backend_builder() -> Model:
 
 
 def default_anthropic_backends() -> dict[str, tuple[BackendBuilder, BackendCapabilities, bool]]:
-    """Return the built-in backends registry — just Anthropic in T1.
+    """Return the Anthropic-direct slice of the built-in backend registry.
 
-    Bedrock / OpenAI-compat / VCF PAIF builders land with their
-    respective tasks (#1076, #1077, #1078); registering them eagerly
-    here would fail-import on a deploy without those extras. The
-    registry is a plain dict, so a downstream task adds entries by
-    ``backends = {**default_anthropic_backends(), "bedrock-anthropic":
-    (build_bedrock, bedrock_caps, True), ...}`` at the call-site.
+    The Anthropic-only entry, kept as its own helper so a deploy that
+    routes every tier to Anthropic (the pre-G11.5 recovery shape) does
+    not need to know Bedrock exists. The companion
+    :func:`default_bedrock_backends` adds the Bedrock entry; a deploy
+    that wants both calls ``{**default_anthropic_backends(),
+    **default_bedrock_backends()}`` at the resolver-build site. OpenAI-
+    compat (#1077) and VCF PAIF (#1078) builders land their own helpers
+    on the same pattern.
 
     The Anthropic backend is flagged :attr:`is_saas_egress` ``=True``:
     routes content to ``api.anthropic.com``, the SaaS endpoint, so a
@@ -517,6 +560,98 @@ def default_anthropic_backends() -> dict[str, tuple[BackendBuilder, BackendCapab
             anthropic_backend_builder,
             anthropic_capabilities,
             True,  # is_saas_egress: api.anthropic.com is SaaS.
+        ),
+    }
+
+
+def bedrock_backend_builder() -> Model:
+    """Build an AWS Bedrock :class:`~pydantic_ai.models.Model` from settings.
+
+    Uses pydantic_ai's :class:`~pydantic_ai.models.bedrock.BedrockConverseModel`
+    + :class:`~pydantic_ai.providers.bedrock.BedrockProvider` — the
+    boto3-backed Converse API path. The Bedrock provider resolves AWS
+    credentials through boto3's standard chain (environment variables,
+    IAM-role / EC2 instance metadata, shared profile, …), so a deploy
+    typically provides only the region; the credentials come from the
+    pod's IRSA role on EKS, the EC2 instance profile elsewhere, or the
+    ``AWS_*`` env vars in dev.
+
+    Fail-closed: if :attr:`~meho_backplane.settings.Settings.bedrock_region`
+    is unset *and* boto3's own region resolution returns nothing (no
+    ``AWS_DEFAULT_REGION`` / ``AWS_REGION`` / shared-profile region), the
+    underlying provider raises ``NoRegionError`` mid-construction. The
+    builder wraps that in :class:`~meho_backplane.agent.run.AgentRunError`
+    so callers see one error type. Imports are function-local: a
+    deployment whose policy never routes to ``bedrock-anthropic`` never
+    loads boto3 (the ``[bedrock]`` extra is *installed* in every wheel
+    but *unused* on Anthropic-only deploys).
+
+    Why a single shared registration (rather than one per model id):
+    Bedrock model ids name the underlying foundation model, but the
+    *capability surface* (tools + streaming + Converse) is the same
+    across the Anthropic-on-Bedrock family. The pinned default
+    (:attr:`~meho_backplane.settings.Settings.bedrock_default_model`) is
+    the Claude id the tenant policy resolves to. A deploy that needs to
+    swap *between* Claude families per tier registers additional backend
+    ids alongside (``bedrock-anthropic-opus``, ``bedrock-amazon-nova``,
+    …) each with their own per-model capability flags (Nova does not
+    advertise prompt caching, for example) — the call-site dict layered
+    on top of :func:`default_bedrock_backends`.
+    """
+    from pydantic_ai.models.bedrock import BedrockConverseModel
+    from pydantic_ai.providers.bedrock import BedrockProvider
+
+    # Imported lazily so this module doesn't form an import cycle with
+    # the run module (``run.py`` imports this module's symbols).
+    from meho_backplane.agent.run import AgentRunError
+    from meho_backplane.settings import get_settings
+
+    settings = get_settings()
+    # ``bedrock_region`` empty (the default) defers to boto3's own
+    # region-resolution chain. The provider raises ``NoRegionError``
+    # if every source comes up empty — re-raised here as the seam's
+    # uniform error type so callers don't need to import botocore.
+    region = settings.bedrock_region or None
+    try:
+        provider = BedrockProvider(region_name=region)
+    except Exception as exc:  # botocore.exceptions.NoRegionError + auth errors
+        raise AgentRunError(
+            "could not construct AWS Bedrock provider for the agent runtime; "
+            "set BEDROCK_REGION (or one of AWS_DEFAULT_REGION / AWS_REGION) "
+            f"and ensure boto3 credentials resolve: {exc}",
+        ) from exc
+    return BedrockConverseModel(settings.bedrock_default_model, provider=provider)
+
+
+def default_bedrock_backends() -> dict[str, tuple[BackendBuilder, BackendCapabilities, bool]]:
+    """Return the Bedrock slice of the built-in backend registry.
+
+    Registers one Bedrock entry under the id ``"bedrock-anthropic"``:
+    pydantic_ai's :class:`~pydantic_ai.models.bedrock.BedrockConverseModel`
+    pointed at the pinned Anthropic-on-Bedrock model
+    (:attr:`~meho_backplane.settings.Settings.bedrock_default_model`).
+    The id is family-tagged rather than just ``"bedrock"`` so a deploy
+    that needs to route different tiers to different Bedrock families
+    (Anthropic / Nova / Mistral) registers additional ids
+    (``"bedrock-amazon-nova"``, …) alongside without re-keying the
+    existing one.
+
+    The default registration flags :attr:`is_saas_egress` ``=True``:
+    public Bedrock endpoints route data to ``bedrock-runtime.<region>.
+    amazonaws.com``, which crosses the tenant's deploy boundary on the
+    public internet. A tenant that brokers Bedrock over AWS PrivateLink
+    or VPC endpoints (so traffic stays on AWS-private networking and
+    never traverses the public internet) registers the *same* builder
+    under a different backend id with ``is_saas_egress=False`` — the
+    egress check reads the per-registration flag, not the backend's
+    name. The companion tests in
+    ``backend/tests/test_agent_model_resolver.py`` cover both postures.
+    """
+    return {
+        "bedrock-anthropic": (
+            bedrock_backend_builder,
+            bedrock_capabilities,
+            True,  # is_saas_egress: public Bedrock endpoint is SaaS.
         ),
     }
 

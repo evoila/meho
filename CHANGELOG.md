@@ -122,6 +122,37 @@ connector-related release-notes line.
   release body's "topology populators land in v0.7" honesty callout.
   (#1201)
 
+- **Agent runtime — AWS Bedrock Converse backend behind the per-tenant
+  resolver (G11.5-T2 #1076).** A tenant policy now routes a logical
+  agent tier (`triage` / `investigate` / `summarize`) to AWS Bedrock
+  via the existing `ModelResolver` (G11.5-T1 #1075). New
+  `bedrock_backend_builder()` constructs a
+  `pydantic_ai.models.bedrock.BedrockConverseModel` against a
+  `BedrockProvider`; AWS credentials follow boto3's standard chain
+  (env vars / IRSA / instance profile / shared profile). The shipped
+  `default_bedrock_backends()` registers it under the id
+  `bedrock-anthropic` with `is_saas_egress=True` (public Bedrock
+  endpoints traverse the public internet); an air-gapped tenant
+  brokering Bedrock over AWS PrivateLink registers a sibling
+  registration with `is_saas_egress=False`. Capability flags reflect
+  Bedrock's Converse API (`tool_format="converse"`, *not* Anthropic-
+  native — the two look like "Claude over AWS" from a distance but
+  route tool calls through different wire shapes). Prompt caching is
+  on for the default Anthropic-on-Bedrock family registration; a
+  non-Anthropic Bedrock backend (Nova / Mistral / Cohere) registers
+  under a separate id with `supports_prompt_cache=False`. The
+  `[bedrock]` extra (boto3) is now pinned alongside `[anthropic]` on
+  `pydantic-ai-slim`; both providers stay lazy-imported so an
+  Anthropic-only deploy never loads boto3 and an air-gapped Bedrock-
+  only deploy never loads the Anthropic SDK. New `BEDROCK_REGION` and
+  `BEDROCK_DEFAULT_MODEL` settings; AWS credentials remain owned by
+  the boto3 chain rather than surfaced as backplane settings. Persisted
+  `AgentDefinition.model_tier` (`standard` / `fast` / `deep`) still
+  does not wire to `definition.tier` — the persisted vocabulary and
+  the resolver's `AgentTier` vocabulary stay orthogonal until a
+  follow-up reconciles them; the resolver remains exercised via
+  direct programmatic construction in v0.7.x. (#1076)
+
 ## [0.7.0] - 2026-05-27
 
 **MVP6 — agent runtime floor (P1 + P2 + P3) + safety (C1 sanitization)

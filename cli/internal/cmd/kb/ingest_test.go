@@ -195,3 +195,39 @@ func TestPrintIngestSummaryDryRunBanner(t *testing.T) {
 		t.Errorf("expected dry-run banner; got %q", buf.String())
 	}
 }
+
+// TestRunIngestRejects200WithoutJSONPayload pins the JSON200
+// nil-guard (M4). A 200 with a missing or mistyped Content-Type
+// leaves resp.JSON200 nil; without the guard, printIngestSummary
+// silently no-ops on nil — phantom success. Route to
+// output.Unexpected (exit 4) instead.
+func TestRunIngestRejects200WithoutJSONPayload(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, _ *http.Request) {
+		// Deliberately omit Content-Type so the generated parser
+		// leaves JSON200 nil.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runIngest(cmd, ingestOptions{
+		Directory: "/srv/kb", BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected error on 200 without JSON payload")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without an ingestion result payload") {
+		t.Errorf("expected detail mentioning missing payload; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4; got %v", err)
+	}
+}

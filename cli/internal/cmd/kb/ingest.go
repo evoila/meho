@@ -116,6 +116,20 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 	if resp.StatusCode() != http.StatusOK {
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
+	// Guard against 200 + missing-content-type leaving JSON200 nil
+	// (printIngestSummary nil-guards, so the operator would see an
+	// empty stdout with exit 0 — phantom success). Mirrors the
+	// convention in `cli/internal/cmd/status.go:142`.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without an ingestion result payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
 	}

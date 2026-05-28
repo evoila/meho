@@ -134,7 +134,25 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 	if resp.StatusCode() != http.StatusCreated {
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
+	// Generated `ParseCreateKbApiV1KbPostResponse` only populates
+	// JSON201 when the response has Content-Type containing json AND
+	// status 201 (`cli/internal/api/client.gen.go`). A backplane /
+	// proxy that returns 201 with a missing or mistyped content-type
+	// leaves JSON201 nil; without this guard the verb would emit
+	// `null` in `--json` mode and silently no-op in summary mode
+	// (printAddSummary nil-guards). Mirrors the convention in
+	// `cli/internal/cmd/status.go:142`.
 	entry := resp.JSON201
+	if entry == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 201 without a kb entry payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}

@@ -189,3 +189,38 @@ func TestPrintEntryBodyNilSafe(t *testing.T) {
 		t.Errorf("nil entry should write nothing; got %q", buf.String())
 	}
 }
+
+// TestRunShowRejects200WithoutJSONPayload pins the JSON200 nil-guard
+// (M3). A 200 with a missing or mistyped Content-Type leaves
+// resp.JSON200 nil; without the guard, printEntryBody would
+// silently no-op and the operator would see empty stdout with exit
+// 0 — phantom success. The verb must route to output.Unexpected
+// (exit 4).
+func TestRunShowRejects200WithoutJSONPayload(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb/", func(w http.ResponseWriter, _ *http.Request) {
+		// Deliberately omit Content-Type so the generated parser
+		// leaves JSON200 nil.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runShow(cmd, showOptions{Slug: "x", BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error on 200 without JSON payload")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without a kb entry body") {
+		t.Errorf("expected detail mentioning missing body; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4; got %v", err)
+	}
+}

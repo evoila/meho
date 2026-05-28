@@ -271,6 +271,41 @@ func TestSnippetOfLongBody(t *testing.T) {
 	}
 }
 
+// TestRunSearchRejects200WithoutJSONPayload pins the JSON200
+// nil-guard (M5). A 200 with a missing or mistyped Content-Type
+// leaves resp.JSON200 nil; without the guard, printSearchTable
+// prints "no kb hits for this query" — actively misleading
+// (conflated with a genuinely-empty result set). Route to
+// output.Unexpected (exit 4) instead.
+func TestRunSearchRejects200WithoutJSONPayload(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
+		// Deliberately omit Content-Type so the generated parser
+		// leaves JSON200 nil.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runSearch(cmd, searchOptions{Query: "x", BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error on 200 without JSON payload")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without a retrieve response payload") {
+		t.Errorf("expected detail mentioning missing payload; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4; got %v", err)
+	}
+}
+
 // TestPrintSearchTableHandlesNilScores — *float32 fields must
 // render without panic when nil (one signal missed the hit). The
 // generated RetrievalHit type uses *float32 (matching the

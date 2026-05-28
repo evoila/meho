@@ -259,6 +259,47 @@ func TestRunAddReadsBodyFromStdin(t *testing.T) {
 	}
 }
 
+// TestRunAddRejects201WithoutJSONPayload pins the JSON201 nil-guard
+// (M2). The generated `ParseCreateKbApiV1KbPostResponse` only
+// populates JSON201 when the response carries Content-Type with
+// `json` AND status 201; a backplane / proxy that returns 201 with
+// a missing or mistyped content-type leaves JSON201 nil. Without
+// the guard, `--json` would emit `null` and the summary mode would
+// silently no-op (printAddSummary nil-guards) — phantom success.
+// The verb must instead route to output.Unexpected (exit 4).
+func TestRunAddRejects201WithoutJSONPayload(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		// Deliberately omit Content-Type so the generated parser
+		// leaves JSON201 nil. Body content is irrelevant for the
+		// guard's behaviour.
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("not-json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runAdd(cmd, addOptions{
+		Slug: "x", BodyArg: "y", BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected error on 201 without JSON payload")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "HTTP 201 without a kb entry payload") {
+		t.Errorf("expected detail mentioning missing payload; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4; got %v", err)
+	}
+}
+
 // TestAddCmdHelpMentionsBodyAndMetadata — the cobra help text must
 // surface --body and --metadata so operators discover the inputs.
 func TestAddCmdHelpMentionsBodyAndMetadata(t *testing.T) {

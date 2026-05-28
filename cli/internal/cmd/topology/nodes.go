@@ -6,24 +6,9 @@ package topology
 import (
 	"fmt"
 	"io"
-)
 
-// Node mirrors the backend TopologyNode Pydantic model
-// (backend/src/meho_backplane/topology/schemas.py). `Properties` is a
-// free-form JSON object the connector populated; the CLI renders it
-// only in --json mode (the table view stays scannable). `ViaEdgeKind`
-// is the graph_edge.kind of the edge used to reach this node, or nil
-// for the query root (depth 0, reached by no edge). Hand-written for
-// the same generated-client-decoupling reason the other verb trees
-// document.
-type Node struct {
-	ID          string         `json:"id"`
-	Kind        string         `json:"kind"`
-	Name        string         `json:"name"`
-	Properties  map[string]any `json:"properties"`
-	Depth       int            `json:"depth"`
-	ViaEdgeKind *string        `json:"via_edge_kind"`
-}
+	"github.com/evoila/meho/cli/internal/api"
+)
 
 // printNodeClosure renders a dependents/dependencies closure as a
 // depth-ordered table. Columns: DEPTH, KIND, NAME, VIA (the edge kind
@@ -34,7 +19,11 @@ type Node struct {
 // backend's one-element-vs-empty contract makes, and the surface
 // where a cross-tenant query reads as "not found" rather than leaking
 // another tenant's node.
-func printNodeClosure(w io.Writer, root string, nodes []Node) {
+//
+// Consumes the generated `api.TopologyNode` type directly per
+// G0.12-T15 #1273 — the previously-duplicated local `Node` struct was
+// removed in the same change.
+func printNodeClosure(w io.Writer, root string, nodes []api.TopologyNode) {
 	if len(nodes) == 0 {
 		fmt.Fprintf(w, "no node named %q in this tenant (or no matching closure)\n", root)
 		return

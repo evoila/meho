@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // --- parseBulkImportDoc ----------------------------------------------------
@@ -139,12 +141,12 @@ func TestFormatInvalidBulkEnvelopeReturnsEmptyForGenericBody(t *testing.T) {
 // --- printBulkImportSummary ------------------------------------------------
 
 func TestPrintBulkImportSummaryDryRun(t *testing.T) {
-	resp := &bulkImportResponse{
+	resp := &api.UnderscoreBulkImportResponse{
 		DryRun:    true,
 		Created:   1,
 		Updated:   0,
 		Conflicts: 1,
-		Rows: []bulkImportResponseRow{
+		Rows: []api.UnderscoreBulkImportRowResponse{
 			{Index: 0, Action: "create", Kind: "depends-on",
 				FromKind: "service", FromName: "svc-A",
 				ToKind: "service", ToName: "db-1"},
@@ -169,7 +171,7 @@ func TestPrintBulkImportSummaryDryRun(t *testing.T) {
 }
 
 func TestPrintBulkImportSummaryApply(t *testing.T) {
-	resp := &bulkImportResponse{Created: 3, Updated: 0, Conflicts: 0, Rows: []bulkImportResponseRow{}}
+	resp := &api.UnderscoreBulkImportResponse{Created: 3, Updated: 0, Conflicts: 0, Rows: []api.UnderscoreBulkImportRowResponse{}}
 	var buf bytes.Buffer
 	printBulkImportSummary(&buf, resp)
 	out := buf.String()
@@ -194,7 +196,7 @@ func TestRunBulkImportPostsBatchAndRendersSummary(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	var receivedBody bulkImportRequest
+	var receivedBody api.UnderscoreBulkImportRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/topology/edges/bulk" {
 			http.Error(w, "wrong path", http.StatusNotFound)
@@ -210,10 +212,10 @@ func TestRunBulkImportPostsBatchAndRendersSummary(t *testing.T) {
 			return
 		}
 		edgeID := "11111111-2222-3333-4444-555555555555"
-		resp := bulkImportResponse{
+		resp := api.UnderscoreBulkImportResponse{
 			DryRun: false, Created: 1, Updated: 0, Conflicts: 0,
-			Rows: []bulkImportResponseRow{{
-				Index: 0, Action: "create", EdgeID: &edgeID,
+			Rows: []api.UnderscoreBulkImportRowResponse{{
+				Index: 0, Action: "create", EdgeId: &edgeID,
 				FromName: "sa-a", FromKind: "principal",
 				ToName: "vr-a", ToKind: "vault-role",
 				Kind: "authenticates-via",
@@ -238,8 +240,10 @@ func TestRunBulkImportPostsBatchAndRendersSummary(t *testing.T) {
 	if len(receivedBody.Edges) != 1 || receivedBody.Edges[0].From.Name != "sa-a" {
 		t.Errorf("wrong body posted: %+v", receivedBody)
 	}
-	if receivedBody.DryRun {
-		t.Errorf("dry-run should default to false")
+	// dry_run should default to false / absent on the wire — the
+	// CLI omits it from the body unless --dry-run is set.
+	if receivedBody.DryRun != nil && *receivedBody.DryRun {
+		t.Errorf("dry-run should default to false; got %v", *receivedBody.DryRun)
 	}
 	if !strings.Contains(stdout.String(), "Bulk-import applied: 1 to create") {
 		t.Errorf("missing summary in stdout: %q", stdout.String())
@@ -257,27 +261,28 @@ func TestRunBulkImportDryRunForwardsFlag(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	var receivedBody bulkImportRequest
+	var receivedBody api.UnderscoreBulkImportRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(raw, &receivedBody)
-		resp := bulkImportResponse{DryRun: true, Created: 1}
+		resp := api.UnderscoreBulkImportResponse{DryRun: true, Created: 1}
 		body, _ := json.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
 
 	seedXDGAndToken(t, srv.URL)
-	cmd, _, _ := newRunCmd(t)
+	cmd, _, stderr := newRunCmd(t)
 	if err := runBulkImport(cmd, bulkImportOptions{
 		File:              file,
 		DryRun:            true,
 		BackplaneOverride: srv.URL,
 	}); err != nil {
-		t.Fatalf("runBulkImport: %v", err)
+		t.Fatalf("runBulkImport: %v; stderr=%s", err, stderr.String())
 	}
-	if !receivedBody.DryRun {
+	if receivedBody.DryRun == nil || !*receivedBody.DryRun {
 		t.Errorf("dry_run not forwarded; got body %+v", receivedBody)
 	}
 }

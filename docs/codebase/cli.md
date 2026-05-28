@@ -1133,30 +1133,47 @@ discipline `meho targets list --limit` applies.
 ### Reserved flags (every verb)
 
 - `--json` — emit the raw envelope to stdout instead of the human
-  render. Stable schemas: `refresh` → `RefreshResult`;
-  `dependents`/`dependencies` → `[]Node`; `path` →
-  `Path` or literal `null` (the unreachable answer, emitted
-  verbatim so jq consumers see one contract); `annotate` →
-  `TopologyEdge` (the 201 response shape); `unannotate` →
+  render. Stable schemas (all are now the generated typed shapes
+  per G0.12-T15 #1273): `refresh` → `api.RefreshResult`;
+  `dependents`/`dependencies` → `[]api.TopologyNode`; `path` →
+  `api.TopologyPath` or literal `null` (the unreachable answer,
+  emitted verbatim so jq consumers see one contract); `annotate` →
+  `api.TopologyEdge` (the 201 response shape); `unannotate` →
   `{"deleted": "<edge_id>"}` on success; `list-edges` →
-  `[]TopologyEdge`.
+  `[]api.TopologyEdge`.
 - `--backplane <url>` — override the backplane URL (defaults to the
   URL `meho login` recorded).
 
 ### HTTP shape + exit codes
 
-Same in-package `resolveBackplane` / `doAuthedRequest` /
-`renderRequestError` trio every sibling verb tree carries (the
-shared-helper-vs-import-cycle reason `kb.go` documents — Initiative
-#363 names a `cli/internal/api_client/topology.go`, but the codebase
-convention supersedes that path; the intent is satisfied in-package).
-`renderHTTPError` adds the topology-specific 409 `ambiguous_node`
-classifier (names the colliding kinds + the `--node-kind` remedy) and
-reuses the resolver's structured 404 near-miss formatter for
-`refresh`. Exit codes: `0` ok (including empty closure / no drift /
-no path — all operationally meaningful, never 404), `2` auth_expired,
-`3` unreachable, `4` unexpected_response (404 / 409 / malformed),
-`5` insufficient_role (403; backend names the required role).
+G0.12-T15 #1273 migrated the verb tree off the hand-rolled
+`doAuthedRequest` + duplicated-struct pattern to the generated
+`api.ClientWithResponses` typed surface. Every verb's request helper
+now goes through the package-local `newAuthedClient` (which installs
+the 1 MiB transport-layer response-body cap via a `capRoundTripper`
+HTTP-client wrapper — the T12 #1270 inline-cap pattern, kept local
+to this verb tree until the cap settles into
+`api.AuthedClientOptions`) and the generic `retryOn401[R]` helper
+(one-shot bearer refresh on 401, transparent to the caller). The
+response is the generated `*WithResponse` envelope; the verb branches
+on `resp.StatusCode()`, forwards 4xx/5xx bodies to
+`renderHTTPStatus`, and consumes `resp.JSON200` / `resp.JSON201`
+directly.
+
+`renderHTTPStatus` carries the topology-specific 409
+`ambiguous_node` classifier (names the colliding kinds + the
+`--node-kind` remedy) and reuses the resolver's structured 404
+near-miss formatter for `refresh`. The 409 auto-row-deletion 409 on
+`unannotate` is intercepted by `renderUnannotateDeleteError` so the
+operator sees the server's `detail.message` verbatim (the
+annotate-over-auto remediation guidance) rather than a raw HTTP
+dump.
+
+Exit codes: `0` ok (including empty closure / no drift / no path —
+all operationally meaningful, never 404), `2` auth_expired, `3`
+unreachable, `4` unexpected_response (404 / 409 / malformed body /
+cap-fired transport), `5` insufficient_role (403; backend names the
+required role).
 
 ## Server-driven discovery (`internal/discovery/`)
 

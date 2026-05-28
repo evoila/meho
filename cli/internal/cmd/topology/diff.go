@@ -5,15 +5,14 @@ package topology
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -109,9 +108,18 @@ func runDiff(cmd *cobra.Command, opts diffOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := getDiff(cmd.Context(), backplaneURL, opts)
+	result, statusCode, body, err := getDiff(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if statusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
+	}
+	if result == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a diff payload", backplaneURL)),
+			opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
@@ -120,74 +128,69 @@ func runDiff(cmd *cobra.Command, opts diffOptions) error {
 	return nil
 }
 
-// buildDiffPath assembles the GET path + query string for a diff call.
-// ts1 / ts2 are both resolved client-side from duration shorthand to
-// absolute ISO-8601 to match the REST router's absolute-only contract
-// (mirrors the timeline verb).
-func buildDiffPath(opts diffOptions, now time.Time) (string, error) {
-	q := url.Values{}
-	ts1ISO, err := resolveDurationOrISO(opts.TS1, now)
+// buildDiffParams assembles the generated query-param shape for a
+// diff call. ts1 / ts2 are required and resolved client-side from
+// duration shorthand to absolute time.Time (mirrors the timeline
+// contract). The optional --kind / --changed-only filters land as
+// pointer fields only when set.
+func buildDiffParams(opts diffOptions, now time.Time) (*api.DiffRouteApiV1TopologyDiffGetParams, error) {
+	params := &api.DiffRouteApiV1TopologyDiffGetParams{}
+	ts1, err := resolveDurationOrISO(opts.TS1, now)
 	if err != nil {
-		return "", fmt.Errorf("ts1 %q: %w", opts.TS1, err)
+		return nil, fmt.Errorf("ts1 %q: %w", opts.TS1, err)
 	}
-	q.Set("ts1", ts1ISO)
-	ts2ISO, err := resolveDurationOrISO(opts.TS2, now)
+	params.Ts1 = ts1
+	ts2, err := resolveDurationOrISO(opts.TS2, now)
 	if err != nil {
-		return "", fmt.Errorf("ts2 %q: %w", opts.TS2, err)
+		return nil, fmt.Errorf("ts2 %q: %w", opts.TS2, err)
 	}
-	q.Set("ts2", ts2ISO)
+	params.Ts2 = ts2
 	if opts.Kind != "" {
-		q.Set("kind", opts.Kind)
+		k := opts.Kind
+		params.Kind = &k
 	}
 	if opts.ChangedOnly {
-		q.Set("changed_only", strconv.FormatBool(true))
+		co := true
+		params.ChangedOnly = &co
 	}
-	return "/api/v1/topology/diff?" + q.Encode(), nil
+	return params, nil
 }
 
-func getDiff(ctx context.Context, backplaneURL string, opts diffOptions) (*DiffResult, error) {
-	path, err := buildDiffPath(opts, time.Now().UTC())
+func getDiff(
+	ctx context.Context,
+	backplaneURL string,
+	opts diffOptions,
+) (*api.TopologyDiffResult, int, []byte, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", path, nil)
+	params, err := buildDiffParams(opts, time.Now().UTC())
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	var out DiffResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode diff response: %w", err)
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.DiffRouteApiV1TopologyDiffGetResponse, error) {
+			return authed.DiffRouteApiV1TopologyDiffGetWithResponse(ctx, params)
+		},
+		func(r *api.DiffRouteApiV1TopologyDiffGetResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
+		return nil, 0, nil, err
 	}
-	return &out, nil
-}
-
-// DiffEntry mirrors the backend `TopologyDiffEntry` Pydantic model
-// (`backend/src/meho_backplane/topology/schemas.py`). Hand-written for
-// the same reason `TimelineEntry` is: keep the topology package
-// decoupled from oapi-codegen churn.
-type DiffEntry struct {
-	ChangeKind string  `json:"change_kind"`
-	Source     string  `json:"source"`
-	ResourceID *string `json:"resource_id"`
-	Kind       string  `json:"kind"`
-	Name       *string `json:"name"`
-	Summary    string  `json:"summary"`
-}
-
-// DiffResult mirrors the backend `TopologyDiffResult`. `TruncationHint`
-// keeps the JSON key as `null` (no `omitempty`) so a re-marshal
-// preserves the Pydantic wire shape.
-type DiffResult struct {
-	Entries        []DiffEntry `json:"entries"`
-	Truncated      bool        `json:"truncated"`
-	TruncationHint *string     `json:"truncation_hint"`
+	return resp.JSON200, resp.StatusCode(), resp.Body, nil
 }
 
 // printDiffSummary renders the diff result as a structured summary:
 // counts by (source, change_kind) plus a truncation banner when the
 // server cap fired. The JSON path carries the same data with per-entry
 // detail for callers who want the full list.
-func printDiffSummary(w io.Writer, r *DiffResult) {
+//
+// `e.Source` and `e.ChangeKind` are typed enum aliases in the
+// generated client (`TopologyDiffEntrySource`, `TopologyDiffEntryChangeKind`);
+// the map-key shape converts back to the underlying string so the
+// per-quadrant lookup line below stays scannable.
+func printDiffSummary(w io.Writer, r *api.TopologyDiffResult) {
 	if r == nil {
 		fmt.Fprintln(w, "no diff result")
 		return
@@ -205,7 +208,7 @@ func printDiffSummary(w io.Writer, r *DiffResult) {
 	type key struct{ source, kind string }
 	counts := map[key]int{}
 	for _, e := range r.Entries {
-		counts[key{e.Source, e.ChangeKind}]++
+		counts[key{string(e.Source), string(e.ChangeKind)}]++
 	}
 	render := func(src string) {
 		created := counts[key{src, "created"}]

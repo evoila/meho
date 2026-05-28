@@ -5,15 +5,16 @@ package topology
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 	"strconv"
 	"time"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -37,7 +38,7 @@ import (
 // keyset compare and never duplicates or skips a returned row.
 //
 // Exit codes (shared with the sibling topology verbs via
-// renderRequestError / renderHTTPError):
+// renderRequestError / renderHTTPStatus):
 //   - 0   query returned cleanly (incl. zero-row result).
 //   - 2   auth_expired
 //   - 3   unreachable
@@ -137,9 +138,18 @@ func runTimeline(cmd *cobra.Command, opts timelineOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := getTimeline(cmd.Context(), backplaneURL, opts)
+	result, statusCode, body, err := getTimeline(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if statusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
+	}
+	if result == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a timeline payload", backplaneURL)),
+			opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
@@ -148,93 +158,77 @@ func runTimeline(cmd *cobra.Command, opts timelineOptions) error {
 	return nil
 }
 
-// buildTimelinePath assembles the GET path + query string for a
-// timeline call. Optional filters land as query params only when set
-// so the server applies its defaults for the rest. Duration shorthand
-// (e.g. "24h") is resolved client-side to an absolute ISO-8601 to
-// match the REST router's absolute-only contract — the audit-query
-// router parses shorthand server-side but the topology timeline route
-// (a fresh G9.3 surface) keeps shorthand on the CLI to minimise the
-// backend's parsing surface (one parser, in one place: the CLI). The
-// raw input falls through as-is if it doesn't parse as shorthand —
-// the operator may already have pasted an ISO-8601.
-func buildTimelinePath(opts timelineOptions, now time.Time) (string, error) {
-	q := url.Values{}
+// buildTimelineParams assembles the generated query-param shape for a
+// timeline call. Optional filters land as pointer fields only when
+// set so the server applies its defaults for the rest. Duration
+// shorthand (e.g. "24h") is resolved client-side to an absolute
+// time.Time the typed param then carries — keeps the shorthand vocab
+// out of the backend's parser surface (one parser, in one place: the
+// CLI).
+func buildTimelineParams(opts timelineOptions, now time.Time) (*api.TimelineRouteApiV1TopologyTimelineGetParams, error) {
+	params := &api.TimelineRouteApiV1TopologyTimelineGetParams{}
 	if opts.Target != "" {
-		q.Set("target", opts.Target)
+		t := opts.Target
+		params.Target = &t
 	}
 	if opts.Since != "" {
-		iso, err := resolveDurationOrISO(opts.Since, now)
+		ts, err := resolveDurationOrISO(opts.Since, now)
 		if err != nil {
-			return "", fmt.Errorf("--since %q: %w", opts.Since, err)
+			return nil, fmt.Errorf("--since %q: %w", opts.Since, err)
 		}
-		q.Set("since", iso)
+		params.Since = &ts
 	}
 	if opts.Until != "" {
-		iso, err := resolveDurationOrISO(opts.Until, now)
+		ts, err := resolveDurationOrISO(opts.Until, now)
 		if err != nil {
-			return "", fmt.Errorf("--until %q: %w", opts.Until, err)
+			return nil, fmt.Errorf("--until %q: %w", opts.Until, err)
 		}
-		q.Set("until", iso)
+		params.Until = &ts
 	}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		l := opts.Limit
+		params.Limit = &l
 	}
 	if opts.Cursor != "" {
-		q.Set("cursor", opts.Cursor)
+		c := opts.Cursor
+		params.Cursor = &c
 	}
-	path := "/api/v1/topology/timeline"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path, nil
+	return params, nil
 }
 
-func getTimeline(ctx context.Context, backplaneURL string, opts timelineOptions) (*TimelineResult, error) {
-	path, err := buildTimelinePath(opts, time.Now().UTC())
+func getTimeline(
+	ctx context.Context,
+	backplaneURL string,
+	opts timelineOptions,
+) (*api.TopologyTimelineResult, int, []byte, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", path, nil)
+	params, err := buildTimelineParams(opts, time.Now().UTC())
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	var out TimelineResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode timeline response: %w", err)
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.TimelineRouteApiV1TopologyTimelineGetResponse, error) {
+			return authed.TimelineRouteApiV1TopologyTimelineGetWithResponse(ctx, params)
+		},
+		func(r *api.TimelineRouteApiV1TopologyTimelineGetResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
+		return nil, 0, nil, err
 	}
-	return &out, nil
-}
-
-// TimelineEntry mirrors the backend `TopologyTimelineEntry` Pydantic
-// model (`backend/src/meho_backplane/topology/schemas.py`). Fields are
-// hand-written rather than oapi-codegen-generated for the same reason
-// the audit `Entry` shape is — the topology package stays decoupled
-// from oapi churn, matching the sibling-package convention.
-type TimelineEntry struct {
-	ValidFrom  string  `json:"valid_from"`
-	HistoryID  int64   `json:"history_id"`
-	Source     string  `json:"source"`
-	ChangeKind string  `json:"change_kind"`
-	ResourceID *string `json:"resource_id"`
-	Summary    string  `json:"summary"`
-	AuditID    *string `json:"audit_id"`
-}
-
-// TimelineResult mirrors the backend `TopologyTimelineResult`.
-// `NextCursor` keeps the JSON key as `null` (no `omitempty`) so a
-// re-marshal preserves the Pydantic wire shape — the audit
-// QueryResult does the same.
-type TimelineResult struct {
-	Rows       []TimelineEntry `json:"rows"`
-	NextCursor *string         `json:"next_cursor"`
+	return resp.JSON200, resp.StatusCode(), resp.Body, nil
 }
 
 // printTimelineTable renders the timeline page as a compact,
 // scannable table. Columns: VALID_FROM, SRC, CHANGE, SUMMARY,
 // AUDIT_ID. When `next_cursor` is set, a final NEXT line tells the
 // operator how to paste-paginate.
-func printTimelineTable(w io.Writer, r *TimelineResult) {
+//
+// `row.ValidFrom` is `time.Time` in the generated client; the table
+// renders the RFC3339 form (matching the pre-migration string column).
+func printTimelineTable(w io.Writer, r *api.TopologyTimelineResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintln(w, "no graph changes in the requested window")
 		return
@@ -243,11 +237,11 @@ func printTimelineTable(w io.Writer, r *TimelineResult) {
 		"VALID_FROM", "SRC", "CHANGE", "SUMMARY", "AUDIT_ID")
 	for _, row := range r.Rows {
 		fmt.Fprintf(w, "%-22s %-5s %-8s %-38s %s\n",
-			truncate(row.ValidFrom, 22),
+			truncate(row.ValidFrom.UTC().Format(time.RFC3339), 22),
 			row.Source,
 			truncate(row.ChangeKind, 8),
 			truncate(row.Summary, 38),
-			truncate(strDeref(row.AuditID), 36),
+			truncate(uuidPtrToString(row.AuditId), 36),
 		)
 	}
 	if r.NextCursor != nil && *r.NextCursor != "" {
@@ -255,18 +249,19 @@ func printTimelineTable(w io.Writer, r *TimelineResult) {
 	}
 }
 
-// strDeref returns *s or empty string when s is nil. Mirrors the
-// audit-package helper of the same name; duplicated to avoid the
-// import-cycle the cmd/audit → cmd/topology → cmd path would create.
-func strDeref(s *string) string {
-	if s == nil {
+// uuidPtrToString returns the canonical 8-4-4-4-12 form of a UUID
+// pointer or the empty string when nil. Replaces the pre-migration
+// strDeref helper (which worked on `*string`) for the generated
+// client's `*openapi_types.UUID` audit / resource id fields.
+func uuidPtrToString(u *openapi_types.UUID) string {
+	if u == nil {
 		return ""
 	}
-	return *s
+	return u.String()
 }
 
 // resolveDurationOrISO converts an operator-typed --since/--until
-// value into an absolute RFC3339 timestamp. Accepts:
+// value into an absolute time.Time. Accepts:
 //
 //   - duration shorthand: <N><unit> where unit ∈ {s,m,h,d,w}. Result
 //     is `now - duration`.
@@ -279,41 +274,40 @@ func strDeref(s *string) string {
 // surfaces accept the same vocabulary. Audit forensics often wants
 // sub-minute resolution (`30s`) and multi-week windows (`2w`), so
 // the timeline parser ships the wider grammar.
-func resolveDurationOrISO(raw string, now time.Time) (string, error) {
-	if iso, ok := tryParseDuration(raw, now); ok {
-		return iso, nil
+func resolveDurationOrISO(raw string, now time.Time) (time.Time, error) {
+	if ts, ok := tryParseDuration(raw, now); ok {
+		return ts, nil
 	}
 	parsed, err := time.Parse(time.RFC3339, raw)
 	if err == nil {
-		return parsed.UTC().Format(time.RFC3339), nil
+		return parsed.UTC(), nil
 	}
 	// One more shape: bare ISO-8601 date (no time component). Promote
-	// to RFC3339 midnight UTC so the server's `valid_from >= :since`
-	// compare lands somewhere meaningful for an operator typing a
-	// date.
+	// to midnight UTC so the server's `valid_from >= :since` compare
+	// lands somewhere meaningful for an operator typing a date.
 	parsed, err = time.Parse("2006-01-02", raw)
 	if err == nil {
-		return parsed.UTC().Format(time.RFC3339), nil
+		return parsed.UTC(), nil
 	}
-	return "", fmt.Errorf(
+	return time.Time{}, fmt.Errorf(
 		"not a duration shorthand (e.g. 24h) or ISO-8601 timestamp",
 	)
 }
 
 // tryParseDuration recognises <N><unit> shorthand. unit ∈ {s,m,h,d,w};
 // N is an unsigned integer ≤ 9999.
-func tryParseDuration(raw string, now time.Time) (string, bool) {
+func tryParseDuration(raw string, now time.Time) (time.Time, bool) {
 	if len(raw) < 2 {
-		return "", false
+		return time.Time{}, false
 	}
 	unit := raw[len(raw)-1]
 	digits := raw[:len(raw)-1]
 	if len(digits) == 0 || len(digits) > 4 {
-		return "", false
+		return time.Time{}, false
 	}
 	n, err := strconv.Atoi(digits)
 	if err != nil || n < 0 {
-		return "", false
+		return time.Time{}, false
 	}
 	var dur time.Duration
 	switch unit {
@@ -328,7 +322,7 @@ func tryParseDuration(raw string, now time.Time) (string, bool) {
 	case 'w':
 		dur = time.Duration(n) * 7 * 24 * time.Hour
 	default:
-		return "", false
+		return time.Time{}, false
 	}
-	return now.Add(-dur).UTC().Format(time.RFC3339), true
+	return now.Add(-dur).UTC(), true
 }

@@ -5,46 +5,16 @@ package topology
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// Edge mirrors the backend TopologyEdge Pydantic model
-// (backend/src/meho_backplane/topology/schemas.py). The wire shape uses
-// `from` / `to` keys (`serialization_alias` on the Python side); the
-// Go struct names the fields `From` / `To` and uses the same JSON tag
-// so the response decodes cleanly. `Properties` is a free-form bag the
-// service writes (conflict markers, supersede UUIDs, operator notes);
-// rendered only in --json mode to keep the table view scannable.
-// Hand-written rather than aliased to a generated client type for the
-// same generated-client-decoupling reason the other verb trees document.
-type Edge struct {
-	ID         string         `json:"id"`
-	From       EdgeEndpoint   `json:"from"`
-	To         EdgeEndpoint   `json:"to"`
-	Kind       string         `json:"kind"`
-	Source     string         `json:"source"`
-	Properties map[string]any `json:"properties"`
-	LastSeen   *string        `json:"last_seen"`
-}
-
-// EdgeEndpoint mirrors backend TopologyEdgeEndpoint. Carries the three
-// fields a human-readable edge summary needs: the node id, the kind,
-// and the name. The full node properties bag is not included — an
-// edge listing is a survey of relationships, not a node dump.
-type EdgeEndpoint struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	Name string `json:"name"`
-}
 
 // newListEdgesCmd returns the `meho topology list-edges` command.
 //
@@ -157,9 +127,21 @@ func runListEdges(cmd *cobra.Command, opts listEdgesOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	edges, err := getEdges(cmd.Context(), backplaneURL, opts)
+	edges, statusCode, body, err := getEdges(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if statusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
+	}
+	if edges == nil {
+		// 200 OK with a missing payload — fail loud rather than
+		// silently rendering "no edges matched". Mirrors the kb /
+		// memory iter-2 nil-guard pattern.
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a list-edges payload", backplaneURL)),
+			opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), edges)
@@ -168,53 +150,76 @@ func runListEdges(cmd *cobra.Command, opts listEdgesOptions) error {
 	return nil
 }
 
-// buildListEdgesPath assembles the GET path + query string. Every
-// filter is omitted from the wire when unset so the server applies
-// its defaults (no kind / source filter, limit=200, offset=0). The
-// `--source` flag maps directly to the `?source=` query param (the
-// `graph_edge.source` column literal — `auto` or `curated`); the
-// route's regex pattern enforces the same closed pair. Exposed for
-// unit tests.
-func buildListEdgesPath(opts listEdgesOptions) string {
-	q := url.Values{}
+// buildListEdgesParams maps the CLI flags onto the generated query-
+// param shape. Every filter is omitted from the wire when unset so
+// the server applies its defaults (no kind / source filter,
+// limit=200, offset=0). The `--source` flag maps directly to the
+// `?source=` query param (the `graph_edge.source` column literal —
+// `auto` or `curated`); the route's regex pattern enforces the same
+// closed pair.
+//
+// `Kind` rides as the typed `*GraphEdgeKind` enum because the
+// generator narrowed the wire pattern to the closed vocabulary; we
+// reuse the operator-typed string verbatim — invalid kinds round-
+// trip to a 422 with the per-row message rather than failing
+// client-side, matching the pre-migration contract where the CLI
+// didn't second-guess the substrate's vocabulary check.
+func buildListEdgesParams(opts listEdgesOptions) *api.ListEdgesRouteApiV1TopologyEdgesGetParams {
+	params := &api.ListEdgesRouteApiV1TopologyEdgesGetParams{}
 	if opts.Kind != "" {
-		q.Set("kind", opts.Kind)
+		k := api.GraphEdgeKind(opts.Kind)
+		params.Kind = &k
 	}
 	if opts.Source != "" {
-		q.Set("source", opts.Source)
+		s := opts.Source
+		params.Source = &s
 	}
 	if opts.From != "" {
-		q.Set("from", opts.From)
+		f := opts.From
+		params.From = &f
 	}
 	if opts.To != "" {
-		q.Set("to", opts.To)
+		t := opts.To
+		params.To = &t
 	}
 	if opts.Conflicts {
-		q.Set("conflicts", "true")
+		c := true
+		params.Conflicts = &c
 	}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		l := opts.Limit
+		params.Limit = &l
 	}
 	if opts.Offset > 0 {
-		q.Set("offset", strconv.Itoa(opts.Offset))
+		o := opts.Offset
+		params.Offset = &o
 	}
-	path := "/api/v1/topology/edges"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func getEdges(ctx context.Context, backplaneURL string, opts listEdgesOptions) ([]Edge, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListEdgesPath(opts), nil)
+func getEdges(
+	ctx context.Context,
+	backplaneURL string,
+	opts listEdgesOptions,
+) ([]api.TopologyEdge, int, []byte, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	var out []Edge
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode list-edges response: %w", err)
+	params := buildListEdgesParams(opts)
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ListEdgesRouteApiV1TopologyEdgesGetResponse, error) {
+			return authed.ListEdgesRouteApiV1TopologyEdgesGetWithResponse(ctx, params)
+		},
+		func(r *api.ListEdgesRouteApiV1TopologyEdgesGetResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
+		return nil, 0, nil, err
 	}
-	return out, nil
+	if resp.JSON200 != nil {
+		return *resp.JSON200, resp.StatusCode(), resp.Body, nil
+	}
+	return nil, resp.StatusCode(), resp.Body, nil
 }
 
 // printEdgeListing renders edges as an aligned table. Columns: KIND,
@@ -223,7 +228,11 @@ func getEdges(ctx context.Context, backplaneURL string, opts listEdgesOptions) (
 // emits the full envelope including ids for piping into `unannotate
 // <edge-id>`. Empty listing → an explanatory line so an operator can
 // tell "tenant has no curated edges yet" from "filter matched nothing".
-func printEdgeListing(w io.Writer, edges []Edge) {
+//
+// `e.LastSeen` is a `*time.Time` in the generated client; the table
+// renders the RFC3339 form to preserve operator-readable timestamps
+// for audit correlation.
+func printEdgeListing(w io.Writer, edges []api.TopologyEdge) {
 	if len(edges) == 0 {
 		fmt.Fprintln(w, "no edges matched")
 		return
@@ -232,8 +241,8 @@ func printEdgeListing(w io.Writer, edges []Edge) {
 		"KIND", "SOURCE", "FROM", "TO", "LAST_SEEN")
 	for _, e := range edges {
 		lastSeen := "-"
-		if e.LastSeen != nil && *e.LastSeen != "" {
-			lastSeen = *e.LastSeen
+		if e.LastSeen != nil && !e.LastSeen.IsZero() {
+			lastSeen = e.LastSeen.UTC().Format("2006-01-02T15:04:05Z")
 		}
 		from := fmt.Sprintf("%s/%s", e.From.Kind, e.From.Name)
 		to := fmt.Sprintf("%s/%s", e.To.Kind, e.To.Name)

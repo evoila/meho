@@ -45,6 +45,8 @@
 //     row aborts the entire batch (no partial apply). Re-running
 //     the same file is a per-row no-op. Role: tenant_admin.
 //
+// G9.3 timeline / diff / history verbs round out the topology surface.
+//
 // The fifth G9.1-T6 verb, `meho targets discover <product>`, lives
 // under `cli/internal/cmd/targets/discover.go` because it sits under
 // the canonical `/api/v1/targets` prefix next to the other target-
@@ -57,18 +59,20 @@
 // `meho login` wrote — same pattern as `meho audit`, `meho targets`,
 // and `meho kb`.
 //
-// The implementation deliberately follows the in-package HTTP helper
-// pattern the sibling verb trees use (one resolveBackplane /
-// doAuthedRequest / renderRequestError trio per package) rather than
-// a shared `cli/internal/api_client` package. The reason is the
-// import-cycle one the `kb` and `targets` packages already document:
-// each verb tree is registered onto the root command, so a shared
-// helper imported from cmd/* and from any per-tree package would
-// close the cycle. Duplicating the small, stable helpers is the
-// convention every sibling package follows. (Initiative #363 names a
-// `cli/internal/api_client/topology.go`; the codebase convention
-// supersedes that path — the intent, "a Go client for the T5
-// routes," is satisfied in-package.)
+// G0.12-T15 #1273 migrated this package off the sibling-verb pattern
+// of hand-rolled HTTP + hand-typed copies of the backend pydantic
+// models. Every verb here drives the generated
+// `api.ClientWithResponses` surface directly: `api.NewAuthedClient`
+// wires the bearer + lazy 401-refresh editor onto the embedded
+// `ClientWithResponses`, and the verbs call the typed `*WithResponse`
+// methods (`PathApiV1TopologyPathGetWithResponse` etc.). Consumer-side
+// struct drift — the #1069 root cause Initiative #1118 targets —
+// can't recur because we now consume `api.TopologyNode`,
+// `api.TopologyEdge`, `api.TopologyPath`, `api.TopologyHistoryResult`,
+// `api.TopologyTimelineResult`, `api.TopologyDiffResult`, and
+// `api.RefreshResult` directly. Opts into the T10 #1268
+// transport-layer response-body cap (1 MiB) so the generated parsers
+// can't be pinned by an unbounded backplane response.
 //
 // Per [CLAUDE.md](../../CLAUDE.md) postulate 5 these verbs are
 // operator-facing ergonomics; the agent surface for the same data is
@@ -76,7 +80,6 @@
 package topology
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -133,33 +136,169 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// renderRequestError translates an error from one of the per-verb
-// request helpers into the right output.StructuredError category.
-// Same classification ladder as targets/targets.go but with the
-// topology-specific 4xx envelopes:
+// errMissingAccessToken is the sentinel newAuthedClient returns
+// when the stored token row exists but its access_token field is
+// empty. Routed to auth_expired (exit 2) with a `meho login` hint
+// rather than the generic transport-error path. Mirrors the kb /
+// memory siblings.
+var errMissingAccessToken = errors.New("meho: stored token has no access_token")
+
+// responseBodyCap bounds the bytes the topology verb tree's transport
+// will read off any backplane response body. 1 MiB matches the
+// per-call ceiling the substrate enforces server-side on the listing /
+// diff / history routes (timeline cursor pages, history rows capped at
+// 5000, diff entries at 1000) — generous headroom for a JSON payload
+// whose contract caps the row count well below the byte cap. Without
+// the cap, an adversarial or runaway backplane response could OOM the
+// CLI because the generated `Parse*Response` helpers call
+// `io.ReadAll(rsp.Body)` on an unbounded body before constructing the
+// typed envelope. The cap is installed at the transport layer via
+// `capRoundTripper` below so it applies uniformly to every typed verb
+// on the same `AuthedClient`. The sibling G0.12-T9 #1267 / G0.12-T10
+// #1268 / G0.12-T12 #1270 verb trees all install the same wrapper
+// locally rather than reach into `cli/internal/api/client.go` — the
+// shared `ResponseBodyLimit` option in that file is destined to
+// supersede every per-tree copy in a follow-on refactor; until then,
+// the inline wrapper keeps this migration's blast radius inside the
+// topology verb tree.
+const responseBodyCap int64 = 1 << 20
+
+// capRoundTripper wraps an http.RoundTripper so every response body
+// is re-bound to an http.MaxBytesReader before the typed-client
+// parsers (oapi-codegen's generated `Parse*Response` helpers, which
+// `io.ReadAll(rsp.Body)` to populate `*Response.Body []byte`) get a
+// chance to drain it. A read at or past `limit` surfaces as
+// `*http.MaxBytesError`, which `renderRequestError` maps to
+// `output.Unexpected` (exit 4 — `unexpected_response`) rather than
+// `output.Unreachable` (exit 3 — `network_unreachable`).
 //
-//   - 401 → auth_expired with a `meho login <url>` hint.
-//   - 403 (RBAC denial) → insufficient_role; the backend's 403 detail
-//     string names the required role (operator).
-//   - 404 → unexpected_response. `refresh` resolves the target via
-//     resolve_target, so its 404 carries the structured
-//     `{"error":"no_target","query":...,"matches":[...]}` envelope
-//     (near-misses surfaced); the read verbs never 404 (a missing
-//     node is an empty list / null path, 200), so a 404 there is a
-//     routing surprise surfaced verbatim.
-//   - 409 with detail.error == "ambiguous_node" → unexpected, listing
-//     the colliding kinds so the operator can re-issue with
-//     --node-kind (the anchor `kind` pin; --kind is the edge filter
-//     and does not clear this 409).
-//   - Any other 4xx/5xx → unexpected with the raw body.
-//   - Pure transport errors (timeouts, DNS, connection refused) →
-//     unreachable.
+// The `*http.MaxBytesError` shape was added in Go 1.19 and is the
+// canonical signal for "transport refused to read past N bytes."
+// The wrapper applies the cap server-wide on the underlying
+// transport so every typed verb on the same AuthedClient inherits
+// it uniformly.
+type capRoundTripper struct {
+	base  http.RoundTripper
+	limit int64
+}
+
+func (c *capRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := c.base.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	if resp.Body != nil && c.limit > 0 {
+		// http.MaxBytesReader returns an io.ReadCloser whose Close
+		// closes the underlying body, so the existing close
+		// discipline on the caller (oapi-codegen's `defer
+		// rsp.Body.Close()` inside every `*WithResponse` method)
+		// still drains the original body cleanly.
+		resp.Body = http.MaxBytesReader(nil, resp.Body, c.limit)
+	}
+	return resp, nil
+}
+
+// cappedHTTPClient returns an http.Client whose Transport caps every
+// response body at responseBodyCap. The clone keeps Timeout / Jar /
+// CheckRedirect intact and only swaps the Transport for the capped
+// wrapper so callers don't mutate http.DefaultClient (which is
+// process-global). Passing the returned client to
+// `api.AuthedClientOptions.HTTPClient` threads the cap through both
+// the bearer-injecting editor and the oauth2 refresh exchange.
+func cappedHTTPClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	clone := *base
+	transport := clone.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	clone.Transport = &capRoundTripper{base: transport, limit: responseBodyCap}
+	return &clone
+}
+
+// newAuthedClient builds an api.AuthedClient for the supplied
+// backplane URL with the 1 MiB response-body cap installed at the
+// transport layer, and verifies a non-empty bearer is loaded.
+// Centralised so every verb's typed-call path goes through the same
+// "stored-token-loaded + non-empty bearer" gate; the caller forwards
+// any returned error to renderRequestError for category mapping.
+// Mirrors the sibling verb-tree migrations (G0.12-T9 #1267 kb,
+// G0.12-T10 #1268 memory, G0.12-T12 #1270 retrieval).
+func newAuthedClient(ctx context.Context, backplaneURL string) (*api.AuthedClient, error) {
+	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{
+		HTTPClient: cappedHTTPClient(nil),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if authed.AccessToken() == "" {
+		return nil, errMissingAccessToken
+	}
+	return authed, nil
+}
+
+// retryOn401 invokes call once, and if the typed response carries a
+// 401, runs a one-shot bearer refresh and re-issues call. Same
+// shape `kb` adopted in G0.12-T9 #1267 and `memory` re-used in
+// G0.12-T10 #1268 so every topology verb runs the same
+// transparent-retry contract.
+//
+// statusOf reads the StatusCode off the typed response envelope (the
+// generated *Response types expose StatusCode() through their
+// embedded *http.Response). A nil response counts as "no retry" —
+// the transport already failed and the caller surfaces err directly.
+func retryOn401[R any](
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*R, error),
+	statusOf func(*R) int,
+) (*R, error) {
+	resp, err := call(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || statusOf(resp) != http.StatusUnauthorized {
+		return resp, nil
+	}
+	if rerr := authed.Refresh(ctx); rerr != nil {
+		return resp, rerr
+	}
+	return call(ctx)
+}
+
+// renderRequestError translates a transport-layer request error
+// into the right output.StructuredError category. Maps the topology
+// REST surface's pre-response failures: missing bearer, no-refresh-
+// token, token-not-found, body-cap / parse failures bubbling out of
+// the generated `*WithResponse` parsers, plus the generic transport-
+// down case. Non-2xx status codes carried in a typed response
+// envelope are classified by renderHTTPStatus instead.
+//
+// Parse / cap failures route to `output.Unexpected` (exit 4 —
+// `unexpected_response`) rather than `output.Unreachable` (exit 3 —
+// `network_unreachable`). A 1 MiB body cap firing or a JSON decode
+// rejecting a malformed payload is a contract / shape failure on
+// the server side, not a transport-down failure on the operator's
+// side; surfacing it as "unreachable" would send operators chasing
+// a network ghost. The cap is installed by `newAuthedClient` via
+// `api.AuthedClientOptions.ResponseBodyLimit` (responseBodyCap).
 func renderRequestError(
 	cmd *cobra.Command,
 	backplaneURL string,
 	err error,
 	jsonOut bool,
 ) error {
+	if errors.Is(err, errMissingAccessToken) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.AuthExpired(fmt.Sprintf(
+				"stored credentials for %s are incomplete; run `meho login %s`",
+				backplaneURL, backplaneURL,
+			)),
+			jsonOut,
+		)
+	}
 	if api.IsTokenNotFound(err) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -178,9 +317,23 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
-		return renderHTTPError(cmd, backplaneURL, he, jsonOut)
+	// Transport-layer body-cap firing (*http.MaxBytesReader returned
+	// from capRoundTripper) and JSON shape failures bubbling out of
+	// the generated parsers are server-side contract failures, not
+	// transport-down failures — surface them as unexpected_response
+	// (exit 4) with the backplane URL so the operator sees the
+	// origin without chasing a network ghost.
+	var maxBytesErr *http.MaxBytesError
+	var syntaxErr *json.SyntaxError
+	var unmarshalErr *json.UnmarshalTypeError
+	if errors.As(err, &maxBytesErr) ||
+		errors.As(err, &syntaxErr) ||
+		errors.As(err, &unmarshalErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: %v", backplaneURL, err)),
+			jsonOut,
+		)
 	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
@@ -188,15 +341,36 @@ func renderRequestError(
 	)
 }
 
-// renderHTTPError classifies a non-2xx response into the right
-// StructuredError category.
-func renderHTTPError(
+// renderHTTPStatus classifies a non-2xx response carried in the
+// typed envelope into the right StructuredError category. Same
+// classification ladder as the pre-migration `renderHTTPError` switch
+// but acts on the (statusCode, body) pair lifted off the generated
+// `*Response.HTTPResponse` + `Body` fields rather than a sentinel
+// `httpError` value:
+//
+//   - 401 → auth_expired with a `meho login <url>` hint.
+//   - 403 (RBAC denial) → insufficient_role; the backend's 403 detail
+//     string names the required role (operator).
+//   - 404 → unexpected_response. `refresh` resolves the target via
+//     resolve_target, so its 404 carries the structured
+//     `{"error":"no_target","query":...,"matches":[...]}` envelope
+//     (near-misses surfaced); the read verbs never 404 (a missing
+//     node is an empty list / null path, 200), so a 404 there is a
+//     routing surprise surfaced verbatim.
+//   - 409 with detail.error == "ambiguous_node" → unexpected, listing
+//     the colliding kinds so the operator can re-issue with
+//     --node-kind (the anchor `kind` pin; --kind is the edge filter
+//     and does not clear this 409).
+//   - Any other 4xx/5xx → unexpected with the raw body.
+func renderHTTPStatus(
 	cmd *cobra.Command,
 	backplaneURL string,
-	he *httpError,
+	statusCode int,
+	body []byte,
 	jsonOut bool,
 ) error {
-	switch he.StatusCode {
+	bodyStr := strings.TrimSpace(string(body))
+	switch statusCode {
 	case http.StatusUnauthorized:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -210,7 +384,7 @@ func renderHTTPError(
 		// ({"detail": "<string>"}). require_role writes the required
 		// role into the detail string; pass it through verbatim.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(decodeDetailString(he.Body)),
+			output.InsufficientRole(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotFound:
@@ -221,7 +395,7 @@ func renderHTTPError(
 		// cross-tenant boundary surface for refresh: a target in
 		// another tenant resolves to no_target, identical to a typo.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(formatNotFound(he.Body)),
+			output.Unexpected(formatNotFound(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusConflict:
@@ -231,13 +405,13 @@ func renderHTTPError(
 		// (the anchor `kind` pin — not --kind, which is the edge
 		// filter `kind_filter` and cannot clear the ambiguity).
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(formatAmbiguousNode(he.Body)),
+			output.Unexpected(formatAmbiguousNode(bodyStr)),
 			jsonOut,
 		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
 	}
@@ -328,101 +502,14 @@ func formatAmbiguousNode(body string) string {
 	return "ambiguous node: " + decodeDetailString(body)
 }
 
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection + one-shot 401-refresh-retry. Returns the
-// response body bytes (already drained) on a 2xx outcome, or an
-// *httpError when the backplane returned a non-2xx, or an error
-// categorised by api.IsTokenNotFound / api.IsNoRefreshToken / generic
-// transport so renderRequestError can pick the right category.
-//
-// Mirrors cli/internal/cmd/targets/targets.go::doAuthedRequest. Kept
-// independent of the targets package for the import-cycle reason
-// called out on resolveBackplane.
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
-	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		// One-shot refresh + retry, mirroring the targets sibling.
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// httpError carries a non-2xx response so per-verb runners can render
-// the right category. Not an output.StructuredError directly —
-// renderHTTPError decides exit-code class based on status.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// sendRequest is the bottom of the stack: build the http.Request,
-// stamp bearer + content headers, fire it. Split out so the
-// 401-refresh-retry path can reuse the same body bytes.
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
-}
-
 // pathEscape escapes a single path segment for use inside a backend
 // URL. url.PathEscape escapes path-segment-unsafe characters without
 // touching the unreserved set.
+//
+// Still useful for the small handful of CLI-side paths that the
+// G0.12-T15 migration kept hand-rolled (refresh's path-shape test
+// fixture, plus the test plumbing that pre-dates the typed-client
+// transport).
 func pathEscape(segment string) string {
 	return url.PathEscape(segment)
 }

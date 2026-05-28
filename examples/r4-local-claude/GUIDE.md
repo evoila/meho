@@ -297,17 +297,26 @@ flows from a realm role-mapper onto the agent principal's
 L617-642 — the same `tenant_role` claim a human operator's token
 carries).
 
-Two paths to mount that role on the principal:
+Mount the role via the **Keycloak admin UI**: Clients →
+`r4-alert-triage` → Service Account Roles → assign a realm role
+that the realm's `tenant-role` protocol mapper projects onto the
+`tenant_role` claim as `tenant_admin`.
 
-1. **Keycloak admin UI** — Clients → `r4-alert-triage` →
-   Service Account Roles → assign a realm role mapped to
-   `tenant_admin` via the realm's `tenant-role` protocol
-   mapper.
-2. **CLI bootstrap** — at install time, the same
-   [`meho admin keycloak bootstrap-clients`](../../cli/internal/cmd/admin/keycloak/keycloak.go)
-   verb that wires the human-operator clients can be re-pointed
-   at the agent client with `--tenant-role tenant_admin` (the
-   flag is documented in the verb's help).
+There is no CLI shortcut for this mount in v0.2.
+[`meho admin keycloak bootstrap-clients`](../../cli/internal/cmd/admin/keycloak/keycloak.go)
+provisions the **public** CLI / MCP clients and explicitly refuses
+confidential clients (per the verb's docstring and the
+`PublicClient: true` hardcoding in
+[`cli/internal/cmd/admin/keycloak/bootstrap.go`](../../cli/internal/cmd/admin/keycloak/bootstrap.go)
+L286-336); the agent client created by `meho agent-principal
+register` is the opposite shape (`publicClient=False,
+serviceAccountsEnabled=True` per
+[`backend/src/meho_backplane/auth/keycloak_admin.py`](../../backend/src/meho_backplane/auth/keycloak_admin.py)
+L266-280). Pointing the bootstrap verb at the agent client would
+either 409 on the public/confidential type mismatch or overwrite
+the confidential client with the public shape, breaking
+`client_credentials` issuance. Use the admin UI path until a
+dedicated `meho admin keycloak add-mapper` verb lands.
 
 > **Why `tenant_admin` is the right level here:** the agent's
 > only privileged action is writing tenant-shared memory on
@@ -322,26 +331,7 @@ Two paths to mount that role on the principal:
 > yet read it, and `add_to_memory` writes are gated by
 > `MemoryRbacResolver.can_write` alone.
 
-### Alternative — narrower scope at the cost of cross-operator visibility
-
-If granting `tenant_admin` to the cheap-tier is too privileged
-for your tenant, change the agent's `scope` from `"tenant"` to
-`"user-tenant"` in the system prompt **and** mount the agent
-principal under the operator's own `sub` (set `--owner-sub` on
-`meho agent-principal register`). Memory rows at `user-tenant`
-scope only need the writer to be `>= operator`, so no role
-escalation is needed.
-
-The catch: a `user-tenant` row is **visible only to the
-operator whose `sub` matches `user_sub`** (per
-[`MemoryRbacResolver.can_read`](../../backend/src/meho_backplane/memory/rbac.py)
-L154-168, which gates user-scoped reads on `operator.sub ==
-user_sub`). Every other operator on the tenant trying to
-`search_memory` for the handoff sees nothing. The shared-team-
-inbox property of R4 is lost. For a single-operator tenant
-that's a fine tradeoff; for a team it isn't.
-
-Verify the principal's effective role:
+Verify the principal's effective role after mounting the mapper:
 
 ```bash
 # Decode the client_credentials token the scheduler will use and

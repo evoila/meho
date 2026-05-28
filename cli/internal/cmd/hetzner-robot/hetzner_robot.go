@@ -35,13 +35,10 @@
 package hetznerrobot
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -50,6 +47,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -163,11 +161,11 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
+	var apiErr *dispatch.APIResponseError
+	if errors.As(err, &apiErr) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, apiErr.StatusCode, apiErr.Body)),
 			jsonOut,
 		)
 	}
@@ -175,83 +173,6 @@ func renderRequestError(
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,
 	)
-}
-
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
-	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-	const maxBody = int64(1 << 20)
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if int64(len(raw)) > maxBody {
-		return nil, fmt.Errorf("backplane response body exceeds %d bytes", maxBody)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
 }
 
 func loadParamsFlag(val string) (map[string]any, error) {
@@ -300,7 +221,7 @@ func printErrorTrailer(w io.Writer, r *CallResult) {
 	}
 	if len(r.Extras) > 0 && string(r.Extras) != "null" {
 		fmt.Fprintln(w, "extras:")
-		pretty, err := prettyJSON(r.Extras)
+		pretty, err := dispatch.PrettyJSON(r.Extras)
 		if err == nil {
 			fmt.Fprintln(w, pretty)
 		} else {
@@ -315,7 +236,7 @@ func fallbackResultRender(w io.Writer, r *CallResult) {
 	if len(r.Result) == 0 || string(r.Result) == "null" {
 		return
 	}
-	pretty, err := prettyJSON(r.Result)
+	pretty, err := dispatch.PrettyJSON(r.Result)
 	if err == nil {
 		fmt.Fprintln(w, pretty)
 		return

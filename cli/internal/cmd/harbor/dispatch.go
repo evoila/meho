@@ -23,9 +23,11 @@ type (
 // errOpError is the structured-failure sentinel (status error/denied).
 var errOpError = dispatch.ErrOpError
 
-// conn binds this package's pre-baked connector_id + authed transport
-// (doAuthedRequest) to the shared dispatch core.
-var conn = dispatch.Connector{ID: ConnectorID, Request: doAuthedRequest}
+// conn binds this package's pre-baked connector_id to the shared
+// dispatch core. The authed transport (lazy *api.AuthedClient over the
+// generated typed surface) lives inside dispatch.Connector after
+// G0.12-T16 #1274 promoted the per-vendor doAuthedRequest copies.
+var conn = dispatch.New(ConnectorID)
 
 // decodeHarborList decodes the result of a Harbor list op. Harbor
 // list endpoints return a bare JSON array (no "results" wrapper).

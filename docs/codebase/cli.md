@@ -201,8 +201,8 @@ cli/
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
     │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).
     │                          #   (the 5th G9.1-T6 verb, `meho targets discover`, lives in targets/discover.go.)
-    │       ├── vault.go          # NewRootCmd + shared HTTP/auth/render helpers + ConnectorID const.
-    │       ├── dispatch.go       # CallResult/callRequestBody + dispatchOp + renderCallResult + generic renderer.
+    │       ├── vault.go          # NewRootCmd + ConnectorID const + per-package renderRequestError (auth-ladder + *dispatch.APIResponseError); transport now lives in `cli/internal/dispatch` (G0.12-T16 #1274).
+    │       ├── dispatch.go       # Alias CallResult/callRequestBody to dispatch types + `var conn = dispatch.New(ConnectorID)` (transport owned by dispatch.Connector after G0.12-T16 #1274).
     │       ├── kv.go             # `meho vault kv read|list|put|versions|delete` (vault.kv.* ops, #545).
     │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
     │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
@@ -1087,13 +1087,21 @@ prints that verbatim with the handle hint intact, consistent with the
 ### HTTP shape + exit codes
 
 Identical to the `meho operation` surface (the verbs are pre-scoped
-wrappers over the same route): bearer injection + one-shot
-401-refresh-retry via `api.NewAuthedClient`, hand-written
-`CallResult` / `callRequestBody` structs mirroring the backend
-Pydantic models (duplicated per package to avoid the cmd/* import
-cycle cmd/root.go's graft would otherwise create). Exit codes: `0`
-status=ok, `1` status=error/denied (via the `errOpError` sentinel),
-`2` auth_expired, `3` unreachable, `4` unexpected_response.
+wrappers over the same route): the shared `cli/internal/dispatch`
+package owns the authed transport (lazy `*api.AuthedClient` over the
+generated typed `*WithResponse` helpers) including the one-shot
+401-refresh-retry; `CallResult` / `CallRequestBody` are exported
+from the dispatch package and aliased verbatim in each vendor's
+`dispatch.go` so the per-verb pretty-printers continue referencing the
+unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
+`vmware`, `harbor`, `nsx`, `hetzner-robot`, `holodeck`, `pfsense`,
+`gcloud`, `bind9`, `k8s`, `sddc-manager`, `vcf-automation`, `vcf-fleet`,
+`vcf-logs`, `vcf-operations`) share **one** transport implementation
+instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
+`httpError` trios. Exit codes: `0` status=ok, `1` status=error/denied
+(via the `errOpError` sentinel re-exported from
+`dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
+`4` unexpected_response.
 
 ## Topology verbs (`meho topology`, G9.1-T6 #454 + G9.2-T6 #599)
 

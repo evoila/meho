@@ -38,19 +38,15 @@
 package bind9
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -108,11 +104,15 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// renderRequestError translates an error from doAuthedRequest into
-// the right output.RenderError category. Same classification ladder
-// as the vmware sibling: token-not-found / no-refresh-token →
-// auth_expired with `meho login` hints; HTTP-error → unexpected;
-// everything else (transport) → unreachable.
+// renderRequestError translates an error from conn.Call into the
+// right output.RenderError category. Same classification ladder as
+// the vmware sibling: token-not-found / no-refresh-token →
+// auth_expired with `meho login` hints; non-2xx HTTP →
+// unexpected_response; everything else (transport) → unreachable.
+//
+// Matches *dispatch.APIResponseError instead of a local httpError
+// sentinel after G0.12-T16 #1274 promoted the authed transport into
+// the shared dispatch package.
 func renderRequestError(
 	cmd *cobra.Command,
 	backplaneURL string,
@@ -137,11 +137,11 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
+	var apiErr *dispatch.APIResponseError
+	if errors.As(err, &apiErr) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, apiErr.StatusCode, apiErr.Body)),
 			jsonOut,
 		)
 	}
@@ -149,96 +149,6 @@ func renderRequestError(
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,
 	)
-}
-
-// httpError carries a non-2xx response so renderRequestError can
-// pick the right StructuredError category. Same shape as the
-// vmware / vault siblings.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection + one-shot 401-refresh-retry. Mirrors the
-// vmware / vault siblings verbatim (duplicated to avoid an import
-// cycle — cmd/root.go grafts each onto the tree). Centralised
-// per-package so the per-verb runners stay small.
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
-	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	// 1 MiB cap matches the vmware sibling. bind9 `zone.read` on a
-	// production zone with thousands of records can be hundreds of
-	// KiB; the cap leaves headroom while bounding pathological
-	// payloads.
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// sendRequest builds + fires the HTTP request. Mirrors the vmware
-// sibling; split out so the 401-refresh-retry path can reuse the
-// same body bytes without re-marshalling.
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
 }
 
 // readLocalFile loads a local file path as UTF-8 bytes. Used by the

@@ -6,50 +6,24 @@ package holodeck
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
 
-	"github.com/evoila/meho/cli/internal/output"
+	"github.com/evoila/meho/cli/internal/dispatch"
 )
 
-// CallResult mirrors the backend OperationResult Pydantic model.
-// Same shape as cmd/pfsense/CallResult; duplicated here because
-// cmd/holodeck can't import cmd/pfsense without an import cycle
-// (cmd/root.go grafts both onto the tree).
-type CallResult struct {
-	Status     string          `json:"status"`
-	OpID       string          `json:"op_id"`
-	Result     json.RawMessage `json:"result"`
-	Error      *string         `json:"error"`
-	Extras     json.RawMessage `json:"extras,omitempty"`
-	DurationMs float64         `json:"duration_ms"`
-}
-
-// callRequestBody mirrors the backend CallOperationBody Pydantic
-// model. Target uses a map[string]any so the empty case serialises
-// as `null` rather than an empty struct.
-type callRequestBody struct {
-	ConnectorID string         `json:"connector_id"`
-	OpID        string         `json:"op_id"`
-	Target      map[string]any `json:"target"`
-	Params      map[string]any `json:"params,omitempty"`
-}
-
-// errOpError is the sentinel returned when the dispatcher reported a
-// structured-failure result (status == "error" or status == "denied").
-var errOpError = errors.New("operation status not ok")
-
-// dispatchOp POSTs an OperationCall to the backplane and returns the
-// decoded CallResult. The pre-baked connector_id ("holodeck-ssh-9.0")
-// is baked in; callers pass op_id, an optional target slug (empty
-// string → no target field on the wire), and an optional params map.
+// Aliases + binding to the shared dispatch core (cli/internal/dispatch).
+// The verb files in this package keep referring to the unqualified names;
+// the operation-call logic lives once in the dispatch package.
 //
-// Centralised here so every verb in the package shares one
-// dispatcher implementation. A grep for `dispatchOp` finds every
-// alias-verb dispatch in the holodeck package.
+// Pre-#1274 holodeck carried its own dispatchOp / renderCallResult /
+// printGenericResult trio because the shared dispatch.Connector hadn't
+// owned the authed transport yet — the local copies threaded the per-
+// dir doAuthedRequest into the request loop. G0.12-T16 #1274 promoted
+// the transport into dispatch.Connector itself; holodeck now folds onto
+// the shared pattern (matching bind9 / k8s / vault / etc.).
 //
 // NOTE: holodeck.k8s.exec passes the operator's `kubectl` command
 // verbatim in `params["command"]`. The CLI does not pre-parse or
@@ -58,41 +32,35 @@ var errOpError = errors.New("operation status not ok")
 // invocation containing `;` / `&&` / `|` / `$(...)` / backticks /
 // `>` / `<` / newline is refused with `result_connector_error` and
 // surfaces as a non-ok status on the CLI side.
+type (
+	// CallResult is the decoded OperationResult envelope.
+	CallResult = dispatch.CallResult
+	// callRequestBody is the on-the-wire OperationCall body (asserted by tests).
+	callRequestBody = dispatch.CallRequestBody
+)
+
+// errOpError is the structured-failure sentinel (status error/denied).
+var errOpError = dispatch.ErrOpError
+
+// conn binds this package's pre-baked connector_id to the shared
+// dispatch core. The authed transport (lazy *api.AuthedClient over the
+// generated typed surface) lives inside dispatch.Connector after
+// G0.12-T16 #1274 promoted the per-vendor doAuthedRequest copies.
+var conn = dispatch.New(ConnectorID)
+
+// dispatchOp is a thin wrapper around conn.Call kept so the per-verb
+// files (about.go / pod.go / service.go / ...) continue calling the
+// unqualified name they were authored against.
 func dispatchOp(
 	ctx context.Context,
 	backplaneURL, opID, targetSlug string,
 	params map[string]any,
 ) (*CallResult, error) {
-	body := callRequestBody{
-		ConnectorID: ConnectorID,
-		OpID:        opID,
-		Target:      nil,
-	}
-	if targetSlug != "" {
-		body.Target = map[string]any{"name": targetSlug}
-	}
-	if params != nil {
-		body.Params = params
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal call request: %w", err)
-	}
-	respBody, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/operations/call", raw)
-	if err != nil {
-		return nil, err
-	}
-	var out CallResult
-	if err := json.Unmarshal(respBody, &out); err != nil {
-		return nil, fmt.Errorf("decode call response: %w", err)
-	}
-	return &out, nil
+	return conn.Call(ctx, backplaneURL, opID, targetSlug, params)
 }
 
-// renderCallResult handles the unified post-dispatch path every verb
-// uses: validate status enum, render the envelope (JSON or human),
-// then translate "error" / "denied" into the errOpError sentinel so
-// main propagates the right non-zero exit.
+// renderCallResult is a thin wrapper around conn.Render for the same
+// reason as dispatchOp above.
 func renderCallResult(
 	cmd *cobra.Command,
 	opID string,
@@ -100,52 +68,11 @@ func renderCallResult(
 	jsonOut bool,
 	prettyPrinter func(w io.Writer, r *CallResult),
 ) error {
-	switch r.Status {
-	case "ok", "error", "denied":
-		// fall through.
-	default:
-		return output.RenderError(
-			cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf(
-				"backplane returned invalid OperationResult.status %q (expected one of: ok / error / denied)",
-				r.Status,
-			)),
-			jsonOut,
-		)
-	}
-	if jsonOut {
-		if err := output.PrintJSON(cmd.OutOrStdout(), r); err != nil {
-			return err
-		}
-	} else if prettyPrinter != nil {
-		prettyPrinter(cmd.OutOrStdout(), r)
-	} else {
-		printGenericResult(cmd.OutOrStdout(), opID, r)
-	}
-	if r.Status == "ok" {
-		return nil
-	}
-	return errOpError
+	return conn.Render(cmd, opID, r, jsonOut, prettyPrinter)
 }
 
-// printGenericResult renders a CallResult in a generic envelope shape.
-func printGenericResult(w io.Writer, opID string, r *CallResult) {
-	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
-	if r.Status == "ok" {
-		if len(r.Result) > 0 && string(r.Result) != "null" {
-			pretty, err := prettyJSON(r.Result)
-			if err == nil {
-				fmt.Fprintln(w, pretty)
-				return
-			}
-			fmt.Fprintln(w, string(r.Result))
-		}
-		return
-	}
-	printErrorTrailer(w, r)
-}
-
-// printErrorTrailer surfaces the dispatcher error / extras envelope.
+// printErrorTrailer surfaces the dispatcher error + extras envelope.
+// Used by the per-verb pretty-printers' non-ok branch.
 func printErrorTrailer(w io.Writer, r *CallResult) {
 	if r.Error != nil && *r.Error != "" {
 		fmt.Fprintf(w, "meho: connector error: %s\n", *r.Error)
@@ -154,7 +81,7 @@ func printErrorTrailer(w io.Writer, r *CallResult) {
 	}
 	if len(r.Extras) > 0 && string(r.Extras) != "null" {
 		fmt.Fprintln(w, "extras:")
-		pretty, err := prettyJSON(r.Extras)
+		pretty, err := dispatch.PrettyJSON(r.Extras)
 		if err == nil {
 			fmt.Fprintln(w, pretty)
 		} else {

@@ -565,9 +565,9 @@ func TestSearchSendsConnectorIDPreBaked(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := getSearch(context.Background(), srv.URL, "list environments", "", 10)
+	r, err := conn.Search(context.Background(), srv.URL, "list environments", "", 10)
 	if err != nil {
-		t.Fatalf("getSearch: %v", err)
+		t.Fatalf("Search: %v", err)
 	}
 	if len(r.Hits) != 1 || r.Hits[0].OpID != environmentListOpID {
 		t.Fatalf("unexpected search response: %+v", r)

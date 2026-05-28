@@ -53,13 +53,9 @@
 package holodeck
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"strings"
 
@@ -67,6 +63,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -227,11 +224,11 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
+	var apiErr *dispatch.APIResponseError
+	if errors.As(err, &apiErr) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, apiErr.StatusCode, apiErr.Body)),
 			jsonOut,
 		)
 	}
@@ -239,93 +236,6 @@ func renderRequestError(
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,
 	)
-}
-
-// httpError carries a non-2xx response so renderRequestError can
-// pick the right StructuredError category.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection + one-shot 401-refresh-retry. Mirrors the
-// pfsense / bind9 siblings verbatim (duplicated to avoid import
-// cycle — cmd/root.go grafts each onto the tree).
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
-	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	// 2 MiB cap — holodeck.config.show can return a large appliance
-	// config and holodeck.logs.tail can return up to 5000 lines per
-	// log file (with multi-file glob). The cap leaves headroom while
-	// bounding pathological payloads.
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// sendRequest builds + fires the HTTP request. Mirrors the pfsense
-// sibling.
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
 }
 
 // truncate cuts s to maxLen runes, appending an ellipsis when
@@ -344,26 +254,13 @@ func truncate(s string, maxLen int) string {
 	return string(runes[:maxLen-1]) + "…"
 }
 
-// prettyJSON pretty-prints a json.RawMessage with 2-space indent.
-func prettyJSON(raw json.RawMessage) (string, error) {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return "", err
-	}
-	out, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
-}
-
 // fallbackResultRender dumps the result envelope verbatim when the
 // typed per-verb decode fails.
 func fallbackResultRender(w io.Writer, r *CallResult) {
 	if len(r.Result) == 0 || string(r.Result) == "null" {
 		return
 	}
-	pretty, err := prettyJSON(r.Result)
+	pretty, err := dispatch.PrettyJSON(r.Result)
 	if err == nil {
 		fmt.Fprintln(w, pretty)
 		return

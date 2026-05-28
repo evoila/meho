@@ -19,10 +19,10 @@ v0.2" framing on the board.
 | **v0.3** | **MVP2** | k8s + Vault + bind9 + topology graph | **shipped — tag `v0.3.1` (2026-05-21)**; connectors at State 1, execution gated by [#944](https://github.com/evoila/meho/issues/944) — see overlay |
 | **v0.4** | **MVP3** | NSX + SDDC + Harbor + agent memory | **shipped — folded into `v0.5.0` (no own tag cut)**; connectors at State 1 |
 | **v0.5** | **MVP4** | VCF mgmt plane + broadcast *complete* (live SSE + historical query) | **shipped — tag `v0.5.1` (2026-05-22)**; connectors at State 1, execution gated by [#944](https://github.com/evoila/meho/issues/944) |
-| **v0.6** | **MVP5** | pfSense + gcloud + Hetzner Robot + tenant conventions | **◀ next to ship** — in flight ([G7 conventions #229](https://github.com/evoila/meho/issues/229) open) |
-| **v0.7** | **MVP6** | **Agent runtime — floor** (G11.1 runtime + G11.2 identity/RBAC/approval + G11.3 scheduler) | filed (17 tasks); unstaffed |
-| **v0.8** | **MVP7** | **Consolidated post-v0.7 release** — agent runtime hardening (G11.4–G11.6) + operator web UI (G10.0–G10.5) + topology time-travel (G9.3) + audit replay (G8.2) + Holodeck (G3.8) + github-rest connector (G3.11) + broadcast meta-tools (G6.4) + retrieval enhancements (G4.4) + v0.6/v0.7 dogfood hardening cycles (G0.13/G0.14/G0.15) | **◀ next to ship** — most inis closed or close-ready; tag once admin-closures land |
-| **v0.9** | **MVP8** | **Runbooks** (G12 — schema + template + run lifecycle + session priming + CLI) + CI/test/release hardening (G0.11) + CLI hygiene (G0.12) | planning — G12 inis filed, tasks unfiled; G0.11 8/12; G0.12 0/9 |
+| **v0.6** | **MVP5** | pfSense + gcloud + Hetzner Robot + tenant conventions | **shipped — tag `v0.6.0` (2026-05-26)** |
+| **v0.7** | **MVP6** | **Agent runtime — floor** (G11.1 runtime + G11.2 identity/RBAC/approval + G11.3 scheduler) | **shipped — tag `v0.7.0` (2026-05-27)** |
+| **v0.8** | **MVP7** | **Consolidated post-v0.7 release** — agent runtime hardening (G11.4–G11.6) + operator web UI (G10.0–G10.5) + topology time-travel (G9.3) + audit replay (G8.2) + Holodeck (G3.8) + github-rest connector (G3.11) + broadcast meta-tools (G6.4) + retrieval enhancements (G4.4) + v0.6/v0.7 dogfood hardening cycles (G0.13/G0.14/G0.15) | **shipped — tag `v0.8.0` (2026-05-28)** |
+| **v0.9** | **MVP8** | **Runbooks** (G12 — schema + template + run lifecycle + session priming + CLI) + CI/test/release hardening (G0.11) + CLI hygiene (G0.12) | **◀ next to ship** — planning; G12 inis filed (0 tasks each, need decomposition); G0.11 8/12; G0.12 0/9 |
 
 ---
 
@@ -418,8 +418,7 @@ v0.9 was the operator UI; v0.10 was audit replay; v0.11 was Holodeck. All four
 sets of work landed (or are landing) on `main` against the v0.7 tag without an
 intermediate cut. Rather than ship v0.8 → v0.9 → v0.10 → v0.11 in rapid
 succession for work that's already merged, v0.8 collapses everything into one
-deployable release. The next cuttable tag is `v0.8.0` and it contains all of
-the below.
+deployable release. **Tagged as `v0.8.0` on 2026-05-28.** Contents below.
 
 ### What ships
 
@@ -452,9 +451,9 @@ the below.
 
 | Initiative | # | State |
 |---|---|---|
-| [G11.4 Safety — sanitization + audit/replay](https://github.com/evoila/meho/issues/805) | #805 | close-ready (6/6) |
-| [G11.5 Portability + cost — providers + budgets](https://github.com/evoila/meho/issues/806) | #806 | close-ready (6/6) |
-| [G11.6 Reference patterns (R1–R4)](https://github.com/evoila/meho/issues/807) | #807 | in flight — most tasks landed (R1/R2/R3 merged); R4 PR [#1244](https://github.com/evoila/meho/pull/1244) in flight |
+| [G11.4 Safety — sanitization + audit/replay](https://github.com/evoila/meho/issues/805) | #805 | closed |
+| [G11.5 Portability + cost — providers + budgets](https://github.com/evoila/meho/issues/806) | #806 | closed |
+| [G11.6 Reference patterns (R1–R4)](https://github.com/evoila/meho/issues/807) | #807 | closed |
 | [G10.0 Frontend chassis](https://github.com/evoila/meho/issues/337) | #337 | closed |
 | [G10.1 Broadcast UI](https://github.com/evoila/meho/issues/338) | #338 | closed |
 | [G10.2 KB UI](https://github.com/evoila/meho/issues/339) | #339 | closed |
@@ -463,19 +462,19 @@ the below.
 | [G10.5 Topology UI](https://github.com/evoila/meho/issues/342) | #342 | closed |
 | [G9.3 Discovery history](https://github.com/evoila/meho/issues/365) | #365 | closed |
 | [G3.8 Holodeck typed-SSH](https://github.com/evoila/meho/issues/371) | #371 | closed |
-| [G8.2 Audit replay](https://github.com/evoila/meho/issues/377) | #377 | close-ready (8/8) |
-| [G6.4 Broadcast meta-tools](https://github.com/evoila/meho/issues/1090) | #1090 | close-ready (4/4) |
-| [G0.13 v0.6.0 dogfood hardening](https://github.com/evoila/meho/issues/1130) | #1130 | close-ready (7/7) |
-| [G0.14 v0.6.0 post-validate hardening](https://github.com/evoila/meho/issues/1139) | #1139 | close-ready (13/13) |
-| [G4.4 Retrieval enhancements](https://github.com/evoila/meho/issues/1178) | #1178 | close-ready (2/2) |
-| [G0.15 v0.7.0 closed-loop hardening](https://github.com/evoila/meho/issues/1209) | #1209 | close-ready (10/10) |
-| [G3.11 github-rest typed connector](https://github.com/evoila/meho/issues/1220) | #1220 | close-ready (11/11) |
+| [G8.2 Audit replay](https://github.com/evoila/meho/issues/377) | #377 | closed |
+| [G6.4 Broadcast meta-tools](https://github.com/evoila/meho/issues/1090) | #1090 | closed |
+| [G0.13 v0.6.0 dogfood hardening](https://github.com/evoila/meho/issues/1130) | #1130 | closed |
+| [G0.14 v0.6.0 post-validate hardening](https://github.com/evoila/meho/issues/1139) | #1139 | closed |
+| [G4.4 Retrieval enhancements](https://github.com/evoila/meho/issues/1178) | #1178 | closed |
+| [G0.15 v0.7.0 closed-loop hardening](https://github.com/evoila/meho/issues/1209) | #1209 | closed |
+| [G3.11 github-rest typed connector](https://github.com/evoila/meho/issues/1220) | #1220 | closed |
 
-### Done-when (v0.8 ships when …)
+### Done — v0.8.0 shipped 2026-05-28
 
-1. PR [#1244](https://github.com/evoila/meho/pull/1244) (G11.6-T4 R4 example) merges → G11.6 #807 reaches DoD → close.
-2. The remaining close-ready Initiatives get admin-closed.
-3. Tag `v0.8.0` per [RELEASING.md](../RELEASING.md).
+- [x] PR [#1244](https://github.com/evoila/meho/pull/1244) (G11.6-T4 R4 example) merged → G11.6 #807 reached DoD.
+- [x] Remaining close-ready Initiatives admin-closed in the release-cutting session.
+- [x] Tagged `v0.8.0` per [RELEASING.md](../RELEASING.md); GitHub Release notes carry the [0.8.0 CHANGELOG](../../CHANGELOG.md#080---2026-05-28) section.
 
 ---
 
@@ -577,9 +576,8 @@ Tier is fixed by operator value, not architectural dependency:
 
 | Version | Status | Notes |
 |---|---|---|
-| v0.2 → v0.7 | **shipped** | tags `v0.2.0` through `v0.7.0` cut |
-| v0.8 (◀ next) | **staffed** | G11.4/G11.5/G11.6 owned by `@damir-topic`; most other inis closed or close-ready; gated on PR [#1244](https://github.com/evoila/meho/pull/1244) + admin-closures |
-| v0.9 (planning) | **unstaffed** | G12.1–G12.5 (Runbooks) need owners + Phase-0 task decomposition; G0.11 in flight, G0.12 needs owner |
+| v0.2 → v0.8 | **shipped** | tags `v0.2.0` through `v0.8.0` cut |
+| v0.9 (◀ next) | **unstaffed** | G12.1–G12.5 (Runbooks) need owners + Phase-0 task decomposition; G0.11 in flight, G0.12 needs owner |
 
 **Owner assignment for v0.9 (Runbooks) is the immediate planning need.** G12
 has 5 filed Initiatives with zero child tasks — first job is decomposition,

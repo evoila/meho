@@ -472,8 +472,8 @@ async def load_github_credentials_from_vault(
 
     * All of ``app_id``, ``private_key``, ``installation_id`` populated
       → :class:`GitHubAppCredentials` (the App installation path).
-    * ``token`` populated (and no App fields) →
-      :class:`GitHubPATCredentials` (the PAT fallback path).
+    * ``token`` populated (when the full App field set is not
+      present) → :class:`GitHubPATCredentials` (the PAT fallback path).
     * Neither set populated → :class:`GitHubAmbiguousVaultPayloadError`
       with a remediation-bearing message naming the field shape we
       looked for and which fields were present (no values echoed).

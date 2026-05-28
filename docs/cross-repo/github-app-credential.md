@@ -128,15 +128,16 @@ account that will own the App):
    will only see the explicitly listed repos.
 4. **Install.** GitHub confirms with the App's installation page.
    The URL carries the **Installation ID** in the path
-   (`/settings/installations/<installation_id>`); the connector
-   discovers the installation automatically via
-   `GET /app/installations` so you do not need to record this number,
-   but it is useful to keep alongside the App ID for forensic
-   purposes.
+   (`/settings/installations/<installation_id>`) — **record this
+   integer**; you will write it into Vault in Step 4 alongside the
+   App ID and the private key. The connector's Vault-payload
+   discriminator (G0.16-T2 #1304) requires all three fields
+   (`app_id`, `private_key`, `installation_id`); a two-field payload
+   surfaces as `github_ambiguous_vault_payload` at first call.
 
-### Step 4 — Copy App ID + private key to Vault
+### Step 4 — Copy App ID, installation ID, and private key to Vault
 
-The credential pair lands under a Vault path the per-target Vault
+The credential triple lands under a Vault path the per-target Vault
 read policy grants the operator. The recommended layout (matches the
 existing per-target conventions and works with the credential-loader
 path the connector ships in T1):
@@ -146,12 +147,17 @@ path the connector ships in T1):
 #
 # The target row's `secret_ref` column points to this exact path
 # (KV-v2 path string, no `/data/` infix in the API form). The
-# connector reads two fields from the secret: `app_id` (the small
-# integer shown on the App settings page) and `private_key` (the
-# entire .pem file contents, including the BEGIN / END lines and
-# every newline).
+# connector reads three fields from the secret: `app_id` (the small
+# integer shown on the App settings page), `installation_id` (the
+# integer from the `/settings/installations/<id>` URL recorded in
+# Step 3), and `private_key` (the entire .pem file contents,
+# including the BEGIN / END lines and every newline). All three are
+# required — a two-field payload surfaces as
+# `github_ambiguous_vault_payload` at first call (see
+# [§ Failure modes](#failure-modes)).
 vault kv put secret/<tenant>/<target>/github-app \
   app_id='123456' \
+  installation_id='987654321' \
   private_key=@/path/to/meho-prod.2026-05-27.private-key.pem
 ```
 
@@ -170,10 +176,11 @@ Substitute the placeholders:
 Verify the secret landed without leaking the value:
 
 ```bash
-# Expected: app_id     <small-integer>
-#           private_key  <hash>
+# Expected: app_id           <small-integer>
+#           installation_id  <integer>
+#           private_key      <hash>
 vault kv get -format=json secret/<tenant>/<target>/github-app \
-  | jq '.data.data | {app_id, private_key_present: (.private_key | length > 0)}'
+  | jq '.data.data | {app_id, installation_id, private_key_present: (.private_key | length > 0)}'
 ```
 
 The `private_key | length > 0` check confirms the value is non-empty
@@ -329,11 +336,15 @@ lands the full catalogue.
 ## Vault custody
 
 The Vault path the connector reads is
-`secret/<tenant>/<target>/github-app`, KV-v2, two fields:
+`secret/<tenant>/<target>/github-app`, KV-v2, three fields (all
+required — the connector's Vault-payload discriminator picks the
+App branch only when **all three** App fields are present; see
+[`github-connector.md`](./github-connector.md) § "App-vs-PAT credential picker"):
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `app_id` | small integer (as string) | GitHub-assigned ID shown on the App settings page |
+| `installation_id` | integer (as string) | From the `/settings/installations/<id>` URL recorded in Step 3 — the specific install of this App on the target org / repos |
 | `private_key` | multi-line string | Entire `.pem` file contents — BEGIN line, body, END line, every newline preserved |
 
 The per-target Vault read precedent applies

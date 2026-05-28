@@ -4,7 +4,6 @@
 package retrieval
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -20,56 +18,6 @@ import (
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// EvalQueryResult mirrors the backend Pydantic shape one-for-one so
-// the JSON unmarshal is straight field-for-field. Kept hand-written
-// (rather than oapi-codegen-generated) because the Go regen pass
-// for the new endpoint runs in a follow-up PR — the shape is small
-// and locked by the matching backend test, so a minor schema drift
-// on either side surfaces in either the Go test or the backend test.
-type EvalQueryResult struct {
-	Query                  string   `json:"query"`
-	ExpectedHits           []string `json:"expected_hits"`
-	MehoHits               []string `json:"meho_hits"`
-	PrecisionAt5           float64  `json:"precision_at_5"`
-	ReciprocalRank         float64  `json:"reciprocal_rank"`
-	CoverageAt5            float64  `json:"coverage_at_5"`
-	BaselineHits           []string `json:"baseline_hits,omitempty"`
-	BaselinePrecisionAt5   *float64 `json:"baseline_precision_at_5,omitempty"`
-	BaselineReciprocalRank *float64 `json:"baseline_reciprocal_rank,omitempty"`
-	BaselineCoverageAt5    *float64 `json:"baseline_coverage_at_5,omitempty"`
-}
-
-// EvalSurfaceResult mirrors the backend SurfaceResult model.
-type EvalSurfaceResult struct {
-	Surface              string            `json:"surface"`
-	QueryCount           int               `json:"query_count"`
-	PrecisionAt5         float64           `json:"precision_at_5"`
-	MRR                  float64           `json:"mrr"`
-	Coverage             float64           `json:"coverage"`
-	Verdict              string            `json:"verdict"`
-	BaselineKind         *string           `json:"baseline_kind,omitempty"`
-	BaselinePrecisionAt5 *float64          `json:"baseline_precision_at_5,omitempty"`
-	BaselineMRR          *float64          `json:"baseline_mrr,omitempty"`
-	BaselineCoverage     *float64          `json:"baseline_coverage,omitempty"`
-	BaselineVerdict      *string           `json:"baseline_verdict,omitempty"`
-	Queries              []EvalQueryResult `json:"queries"`
-}
-
-// EvalResult mirrors the backend EvalResult model — the top-level
-// shape returned by POST /api/v1/retrieve/eval.
-type EvalResult struct {
-	RanAt          string              `json:"ran_at"`
-	Surfaces       []EvalSurfaceResult `json:"surfaces"`
-	OverallVerdict string              `json:"overall_verdict"`
-	Thresholds     json.RawMessage     `json:"thresholds"`
-}
-
-// evalRequest is the POST body shape; mirrors the backend EvalRequest.
-type evalRequest struct {
-	Surface  string `json:"surface"`
-	Baseline string `json:"baseline,omitempty"`
-}
 
 // newEvalCmd returns the `meho retrieval eval` subcommand.
 //
@@ -169,10 +117,29 @@ func runEval(cmd *cobra.Command, opts evalOptions) error {
 		)
 	}
 
-	result, err := postEval(cmd.Context(), backplaneURL, opts)
+	resp, err := postEval(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	// Guard against 200 + missing-content-type leaving JSON200 nil.
+	// printEvalTable's empty-surfaces branch silently emits the
+	// header without any rows — without this guard, a malformed 200
+	// would print a meaningless table and exit 0. Mirrors the
+	// convention in `cli/internal/cmd/status.go:142`.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without an eval result payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	result := resp.JSON200
 
 	if opts.SaveBaselinePath != "" {
 		if writeErr := writeBaseline(result, opts.SaveBaselinePath); writeErr != nil {
@@ -200,7 +167,7 @@ func runEval(cmd *cobra.Command, opts evalOptions) error {
 	}
 
 	// Exit semantics: red verdict OR baseline regression → 1.
-	if result.OverallVerdict == "red" || len(regressions) > 0 {
+	if result.OverallVerdict == api.EvalResultOverallVerdictRed || len(regressions) > 0 {
 		return errEvalGate
 	}
 	return nil
@@ -212,121 +179,50 @@ func runEval(cmd *cobra.Command, opts evalOptions) error {
 // command so we don't double-print the error string.
 var errEvalGate = errors.New("eval gate failed")
 
-// postEval calls POST /api/v1/retrieve/eval with the eval request body
-// and decodes the JSON response into an EvalResult. The function
-// transparently retries on 401 once after a token refresh — same
-// shape as api.AuthedClient.GetHealth.
-func postEval(ctx context.Context, backplaneURL string, opts evalOptions) (*EvalResult, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
+// evalRequestBody assembles the typed POST body for /api/v1/retrieve/eval.
+// The generated `api.EvalRequest` types `Surface` as `*EvalRequestSurface`
+// (omitempty) and `Baseline` as `*string` (no omitempty — the backend's
+// `extra="forbid"` schema treats absent + null identically). Both are
+// pointer-set only when the operator supplied a non-default value so the
+// wire stays minimal.
+func evalRequestBody(opts evalOptions) api.EvalRequest {
+	body := api.EvalRequest{}
+	if opts.Surface != "" {
+		surface := api.EvalRequestSurface(opts.Surface)
+		body.Surface = &surface
 	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
+	if opts.Baseline != "" {
+		baseline := opts.Baseline
+		body.Baseline = &baseline
 	}
-
-	body, err := json.Marshal(evalRequest{
-		Surface:  opts.Surface,
-		Baseline: opts.Baseline,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal eval request: %w", err)
-	}
-
-	resp, err := postEvalWithBearer(ctx, httpClient, backplaneURL, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		// One-shot refresh + retry, mirroring api.AuthedClient.GetHealth.
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = postEvalWithBearer(ctx, httpClient, backplaneURL, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-
-	var out EvalResult
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode eval response: %w", err)
-	}
-	return &out, nil
+	return body
 }
 
-// postEvalWithBearer issues the actual POST request with the
-// supplied bearer token. Split out so the 401-retry path can re-use
-// the body bytes without re-marshalling.
-func postEvalWithBearer(
+// postEval calls POST /api/v1/retrieve/eval with the eval request
+// body via the generated typed client. The 401-refresh-retry loop
+// runs through retryOn401.
+func postEval(
 	ctx context.Context,
-	client *http.Client,
-	backplaneURL, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(
-		ctx, http.MethodPost,
-		backplaneURL+"/api/v1/retrieve/eval",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("build eval request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	return client.Do(req)
-}
-
-// renderRequestError translates an error from postEval into the
-// right output.RenderError category (auth_expired vs unreachable
-// vs unexpected). Kept separate so the runEval body stays focused
-// on orchestration, not error classification.
-func renderRequestError(
-	cmd *cobra.Command,
 	backplaneURL string,
-	err error,
-	jsonOut bool,
-) error {
-	if api.IsTokenNotFound(err) {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.AuthExpired(fmt.Sprintf(
-				"no stored credentials for %s; run `meho login %s`",
-				backplaneURL, backplaneURL,
-			)),
-			jsonOut,
-		)
+	opts evalOptions,
+) (*api.EvalEndpointApiV1RetrieveEvalPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
 	}
-	if api.IsNoRefreshToken(err) {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.AuthExpired(fmt.Sprintf(
-				"stored token rejected and no refresh_token present; run `meho login %s`",
-				backplaneURL,
-			)),
-			jsonOut,
-		)
-	}
-	return output.RenderError(cmd.ErrOrStderr(),
-		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
-		jsonOut,
+	body := evalRequestBody(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.EvalEndpointApiV1RetrieveEvalPostResponse, error) {
+			return authed.EvalEndpointApiV1RetrieveEvalPostWithResponse(ctx, nil, body)
+		},
+		func(r *api.EvalEndpointApiV1RetrieveEvalPostResponse) int { return r.StatusCode() },
 	)
 }
 
 // writeBaseline serialises the EvalResult to a JSON file. Mirrors
 // the backend save_baseline shape — pretty-printed (indent=2) so
 // the file is human-readable when checked into git.
-func writeBaseline(result *EvalResult, path string) error {
+func writeBaseline(result *api.EvalResult, path string) error {
 	pretty, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return err
@@ -338,7 +234,7 @@ func writeBaseline(result *EvalResult, path string) error {
 // maybeCompareBaseline returns the regression list when compare is
 // requested, or empty when compare is not requested or there are no
 // regressions.
-func maybeCompareBaseline(today *EvalResult, path string) ([]string, error) {
+func maybeCompareBaseline(today *api.EvalResult, path string) ([]string, error) {
 	if path == "" {
 		return nil, nil
 	}
@@ -346,7 +242,7 @@ func maybeCompareBaseline(today *EvalResult, path string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read baseline %q: %w", path, err)
 	}
-	var baseline EvalResult
+	var baseline api.EvalResult
 	if err := json.Unmarshal(raw, &baseline); err != nil {
 		return nil, fmt.Errorf("parse baseline %q: %w", path, err)
 	}
@@ -357,7 +253,7 @@ func maybeCompareBaseline(today *EvalResult, path string) ([]string, error) {
 // (0.02 per metric). Kept here as a constant rather than a flag
 // because the v0.2 issue body locks the value; tuning it for a
 // specific PR is a v0.2.next concern.
-var defaultEpsilon = struct{ PrecisionAt5, MRR, Coverage float64 }{0.02, 0.02, 0.02}
+var defaultEpsilon = struct{ PrecisionAt5, MRR, Coverage float32 }{0.02, 0.02, 0.02}
 
 // diffEvalResults compares the per-surface metrics in *today* against
 // *baseline* and returns a slice of human-readable regression
@@ -365,10 +261,10 @@ var defaultEpsilon = struct{ PrecisionAt5, MRR, Coverage float64 }{0.02, 0.02, 0
 // regression = today < baseline - epsilon; surfaces only on one
 // side or with zero queries are skipped.
 func diffEvalResults(
-	today, baseline *EvalResult,
-	eps struct{ PrecisionAt5, MRR, Coverage float64 },
+	today, baseline *api.EvalResult,
+	eps struct{ PrecisionAt5, MRR, Coverage float32 },
 ) []string {
-	baseBySurface := make(map[string]EvalSurfaceResult, len(baseline.Surfaces))
+	baseBySurface := make(map[api.SurfaceResultSurface]api.SurfaceResult, len(baseline.Surfaces))
 	for _, s := range baseline.Surfaces {
 		baseBySurface[s.Surface] = s
 	}
@@ -384,16 +280,16 @@ func diffEvalResults(
 }
 
 func diffOneSurface(
-	t, b EvalSurfaceResult,
-	eps struct{ PrecisionAt5, MRR, Coverage float64 },
+	t, b api.SurfaceResult,
+	eps struct{ PrecisionAt5, MRR, Coverage float32 },
 ) []string {
 	out := []string{}
 	for _, pair := range []struct {
 		Name               string
-		TodayV, BaseV, Eps float64
+		TodayV, BaseV, Eps float32
 	}{
 		{"precision_at_5", t.PrecisionAt5, b.PrecisionAt5, eps.PrecisionAt5},
-		{"mrr", t.MRR, b.MRR, eps.MRR},
+		{"mrr", t.Mrr, b.Mrr, eps.MRR},
 		{"coverage", t.Coverage, b.Coverage, eps.Coverage},
 	} {
 		if pair.TodayV < pair.BaseV-pair.Eps {
@@ -410,13 +306,19 @@ func diffOneSurface(
 // printEvalTable renders the EvalResult as a human-readable table
 // to *w*. Compact two-line-per-surface format keeps the output
 // scannable; per-query breakdown is gated on --json.
-func printEvalTable(w io.Writer, r *EvalResult, regressions []string) {
-	fmt.Fprintf(w, "Eval (%s) — overall verdict: %s\n", r.RanAt, r.OverallVerdict)
+//
+// `RanAt` is a `time.Time` on the generated `api.EvalResult` so the
+// renderer formats it as RFC3339 to preserve the pre-migration
+// `YYYY-MM-DDTHH:MM:SS±HH:MM` shape operators correlate with
+// audit-log rows.
+func printEvalTable(w io.Writer, r *api.EvalResult, regressions []string) {
+	fmt.Fprintf(w, "Eval (%s) — overall verdict: %s\n",
+		r.RanAt.Format("2006-01-02T15:04:05Z07:00"), r.OverallVerdict)
 	fmt.Fprintf(w, "%-12s %-7s %10s %10s %10s %10s\n",
 		"surface", "verdict", "queries", "precision@5", "mrr", "coverage")
 	for _, s := range r.Surfaces {
 		fmt.Fprintf(w, "%-12s %-7s %10d %10.3f %10.3f %10.3f\n",
-			s.Surface, s.Verdict, s.QueryCount, s.PrecisionAt5, s.MRR, s.Coverage)
+			s.Surface, s.Verdict, s.QueryCount, s.PrecisionAt5, s.Mrr, s.Coverage)
 		// Guard all four baseline metric pointers: the backend
 		// SurfaceResult model declares each ``baseline_*`` field as
 		// independently nullable, so a partial-population shape (e.g.
@@ -427,14 +329,14 @@ func printEvalTable(w io.Writer, r *EvalResult, regressions []string) {
 		// CLI safe against future partial baselines.
 		if s.BaselineKind != nil &&
 			s.BaselinePrecisionAt5 != nil &&
-			s.BaselineMRR != nil &&
+			s.BaselineMrr != nil &&
 			s.BaselineCoverage != nil {
 			fmt.Fprintf(w, "%-12s %-7s %10s %10.3f %10.3f %10.3f\n",
 				"  baseline:"+*s.BaselineKind,
-				strDeref(s.BaselineVerdict),
+				strDerefVerdict(s.BaselineVerdict),
 				"-",
 				*s.BaselinePrecisionAt5,
-				*s.BaselineMRR,
+				*s.BaselineMrr,
 				*s.BaselineCoverage,
 			)
 		}
@@ -448,9 +350,14 @@ func printEvalTable(w io.Writer, r *EvalResult, regressions []string) {
 	}
 }
 
-func strDeref(s *string) string {
-	if s == nil {
+// strDerefVerdict is the typed-enum-aware dereference for the
+// SurfaceResult.BaselineVerdict field. The generated `*SurfaceResultBaselineVerdict`
+// type is a string enum; the helper returns the empty string for
+// a nil pointer so the table renders the column as blank rather
+// than panicking on a partial baseline population.
+func strDerefVerdict(v *api.SurfaceResultBaselineVerdict) string {
+	if v == nil {
 		return ""
 	}
-	return *s
+	return string(*v)
 }

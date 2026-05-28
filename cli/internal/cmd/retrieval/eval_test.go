@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/backplane"
 )
@@ -19,14 +21,14 @@ import (
 // surface returns an empty regression list (the CI gate's success
 // path).
 func TestDiffEvalResultsNoRegression(t *testing.T) {
-	today := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, MRR: 0.60, Coverage: 0.95},
+	today := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, Mrr: 0.60, Coverage: 0.95},
 		},
 	}
-	baseline := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, MRR: 0.60, Coverage: 0.95},
+	baseline := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, Mrr: 0.60, Coverage: 0.95},
 		},
 	}
 	got := diffEvalResults(today, baseline, defaultEpsilon)
@@ -38,14 +40,14 @@ func TestDiffEvalResultsNoRegression(t *testing.T) {
 // TestDiffEvalResultsDetectsPrecisionRegression — a precision drop
 // > epsilon shows up as a regression entry naming the metric.
 func TestDiffEvalResultsDetectsPrecisionRegression(t *testing.T) {
-	today := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.50, MRR: 0.60, Coverage: 0.95},
+	today := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.50, Mrr: 0.60, Coverage: 0.95},
 		},
 	}
-	baseline := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, MRR: 0.60, Coverage: 0.95},
+	baseline := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, Mrr: 0.60, Coverage: 0.95},
 		},
 	}
 	got := diffEvalResults(today, baseline, defaultEpsilon)
@@ -60,14 +62,14 @@ func TestDiffEvalResultsDetectsPrecisionRegression(t *testing.T) {
 // TestDiffEvalResultsWithinEpsilonNotFlagged — a tiny drop within
 // the epsilon noise floor does NOT trip the gate.
 func TestDiffEvalResultsWithinEpsilonNotFlagged(t *testing.T) {
-	today := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.84, MRR: 0.60, Coverage: 0.95},
+	today := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.84, Mrr: 0.60, Coverage: 0.95},
 		},
 	}
-	baseline := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, MRR: 0.60, Coverage: 0.95},
+	baseline := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, Mrr: 0.60, Coverage: 0.95},
 		},
 	}
 	got := diffEvalResults(today, baseline, defaultEpsilon)
@@ -79,14 +81,14 @@ func TestDiffEvalResultsWithinEpsilonNotFlagged(t *testing.T) {
 // TestDiffEvalResultsSkipsZeroQuerySurfaces — a surface with zero
 // queries on either side is not compared (mirrors backend semantics).
 func TestDiffEvalResultsSkipsZeroQuerySurfaces(t *testing.T) {
-	today := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 0, PrecisionAt5: 0.0, MRR: 0.0, Coverage: 0.0},
+	today := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 0, PrecisionAt5: 0.0, Mrr: 0.0, Coverage: 0.0},
 		},
 	}
-	baseline := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, MRR: 0.60, Coverage: 0.95},
+	baseline := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, Mrr: 0.60, Coverage: 0.95},
 		},
 	}
 	got := diffEvalResults(today, baseline, defaultEpsilon)
@@ -98,15 +100,15 @@ func TestDiffEvalResultsSkipsZeroQuerySurfaces(t *testing.T) {
 // TestDiffEvalResultsIgnoresSurfacesOnlyOnOneSide — adding a new
 // surface in today is not a regression on the existing surfaces.
 func TestDiffEvalResultsIgnoresSurfacesOnlyOnOneSide(t *testing.T) {
-	today := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, MRR: 0.60, Coverage: 0.95},
-			{Surface: "memory", QueryCount: 10, PrecisionAt5: 0.10, MRR: 0.05, Coverage: 0.20},
+	today := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, Mrr: 0.60, Coverage: 0.95},
+			{Surface: "memory", QueryCount: 10, PrecisionAt5: 0.10, Mrr: 0.05, Coverage: 0.20},
 		},
 	}
-	baseline := &EvalResult{
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, MRR: 0.60, Coverage: 0.95},
+	baseline := &api.EvalResult{
+		Surfaces: []api.SurfaceResult{
+			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, Mrr: 0.60, Coverage: 0.95},
 		},
 	}
 	got := diffEvalResults(today, baseline, defaultEpsilon)
@@ -119,11 +121,16 @@ func TestDiffEvalResultsIgnoresSurfacesOnlyOnOneSide(t *testing.T) {
 // yields the same struct (the persistence shape used by the CI
 // gate workflow).
 func TestWriteBaselineRoundTripPreservesShape(t *testing.T) {
-	original := &EvalResult{
-		RanAt:          "2026-05-14T18:00:00+00:00",
-		OverallVerdict: "green",
-		Surfaces: []EvalSurfaceResult{
-			{Surface: "kb", QueryCount: 10, PrecisionAt5: 0.85, MRR: 0.60, Coverage: 0.95, Verdict: "green"},
+	ranAt, _ := time.Parse(time.RFC3339, "2026-05-14T18:00:00Z")
+	original := &api.EvalResult{
+		RanAt:          ranAt,
+		OverallVerdict: api.EvalResultOverallVerdictGreen,
+		Surfaces: []api.SurfaceResult{
+			{
+				Surface: "kb", QueryCount: 10,
+				PrecisionAt5: 0.85, Mrr: 0.60, Coverage: 0.95,
+				Verdict: api.SurfaceResultVerdictGreen,
+			},
 		},
 	}
 	dir := t.TempDir()
@@ -138,11 +145,11 @@ func TestWriteBaselineRoundTripPreservesShape(t *testing.T) {
 	if !strings.HasSuffix(string(raw), "\n") {
 		t.Fatalf("baseline file should end with newline; got %q", string(raw)[len(raw)-2:])
 	}
-	var loaded EvalResult
+	var loaded api.EvalResult
 	if err := json.Unmarshal(raw, &loaded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if loaded.OverallVerdict != "green" {
+	if loaded.OverallVerdict != api.EvalResultOverallVerdictGreen {
 		t.Fatalf("verdict not preserved: %q", loaded.OverallVerdict)
 	}
 	if len(loaded.Surfaces) != 1 || loaded.Surfaces[0].Surface != "kb" {
@@ -153,7 +160,7 @@ func TestWriteBaselineRoundTripPreservesShape(t *testing.T) {
 // TestMaybeCompareBaselineEmptyPathSkipsRead — empty path → no
 // disk read, no error.
 func TestMaybeCompareBaselineEmptyPathSkipsRead(t *testing.T) {
-	today := &EvalResult{}
+	today := &api.EvalResult{}
 	got, err := maybeCompareBaseline(today, "")
 	if err != nil {
 		t.Fatalf("expected no error for empty path; got %v", err)
@@ -166,7 +173,7 @@ func TestMaybeCompareBaselineEmptyPathSkipsRead(t *testing.T) {
 // TestMaybeCompareBaselineMissingFileReturnsError — a non-empty
 // path that points at nothing surfaces a wrapped error.
 func TestMaybeCompareBaselineMissingFileReturnsError(t *testing.T) {
-	today := &EvalResult{}
+	today := &api.EvalResult{}
 	_, err := maybeCompareBaseline(today, "/no/such/baseline.json")
 	if err == nil {
 		t.Fatalf("expected error for missing baseline; got nil")
@@ -235,5 +242,46 @@ func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
 	se = backplane.ClassifyError(parseFailure)
 	if se == nil || se.Code != "unexpected_response" {
 		t.Fatalf("parse failure should classify as unexpected; got %+v", se)
+	}
+}
+
+// TestEvalRequestBodyOmitsEmptySurfaceAndBaseline — the wire shape
+// for a bare `meho retrieval eval` keeps Surface + Baseline at their
+// pointer-nil zero so the backend's defaults apply.
+func TestEvalRequestBodyOmitsEmptySurfaceAndBaseline(t *testing.T) {
+	body := evalRequestBody(evalOptions{Surface: "", Baseline: ""})
+	if body.Surface != nil {
+		t.Errorf("Surface should be nil for empty input; got %v", *body.Surface)
+	}
+	if body.Baseline != nil {
+		t.Errorf("Baseline should be nil for empty input; got %v", *body.Baseline)
+	}
+}
+
+// TestEvalRequestBodySendsSurface — operator-supplied --surface kb
+// shows up on the wire as the typed enum value.
+func TestEvalRequestBodySendsSurface(t *testing.T) {
+	body := evalRequestBody(evalOptions{Surface: "kb"})
+	if body.Surface == nil || *body.Surface != api.EvalRequestSurfaceKb {
+		t.Errorf("Surface should be kb; got %v", body.Surface)
+	}
+}
+
+// TestEvalRequestBodyMarshalsToWire — round-trips through the JSON
+// encoder to assert the wire keys line up with the backend's
+// extra="forbid" schema. A typo (`surfaces` instead of `surface`)
+// would fail 422 at the framework boundary.
+func TestEvalRequestBodyMarshalsToWire(t *testing.T) {
+	body := evalRequestBody(evalOptions{Surface: "kb", Baseline: "grep"})
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	wire := string(raw)
+	if !strings.Contains(wire, `"surface":"kb"`) {
+		t.Errorf("expected surface=kb on wire; got %s", wire)
+	}
+	if !strings.Contains(wire, `"baseline":"grep"`) {
+		t.Errorf("expected baseline=grep on wire; got %s", wire)
 	}
 }

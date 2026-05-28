@@ -9,7 +9,25 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
+
+// mustParseUUID parses a canonical UUID string into the
+// openapi-runtime UUID wrapper, failing the test loudly on malformed
+// input. Used by table-render tests that need to seed a non-nil
+// `TenantId` pointer field on the generated `api.RetireChecklistReport`.
+func mustParseUUID(t *testing.T, s string) openapi_types.UUID {
+	t.Helper()
+	var u openapi_types.UUID
+	if err := u.UnmarshalText([]byte(s)); err != nil {
+		t.Fatalf("parse UUID %q: %v", s, err)
+	}
+	return u
+}
 
 // TestSurfacesFromLabelsKnowledgeBucketsKb — a `knowledge` label
 // buckets to the kb surface per T7's runbook scheme.
@@ -106,27 +124,27 @@ func TestSurfacesFromLabelsIgnoresUnknownLabel(t *testing.T) {
 // includes the overall verdict, each surface verdict, and each
 // criterion line.
 func TestPrintRetireTableRendersOverallAndPerSurface(t *testing.T) {
-	tenant := "11111111-1111-1111-1111-111111111111"
-	report := &RetireChecklistReport{
-		RanAt:          "2026-05-14T12:00:00+00:00",
-		TenantID:       &tenant,
-		Since:          "2026-02-13T12:00:00+00:00",
-		Until:          "2026-05-14T12:00:00+00:00",
-		OverallVerdict: "READY TO RETIRE",
-		Surfaces: []RetireSurfaceChecklist{
+	tenantUUID := mustParseUUID(t, "11111111-1111-1111-1111-111111111111")
+	report := &api.RetireChecklistReport{
+		RanAt:          time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		TenantId:       &tenantUUID,
+		Since:          time.Date(2026, 2, 13, 12, 0, 0, 0, time.UTC),
+		Until:          time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		OverallVerdict: api.RetireChecklistReportOverallVerdictREADYTORETIRE,
+		Surfaces: []api.SurfaceChecklist{
 			{
-				Surface: "kb",
-				Verdict: "READY TO RETIRE",
-				Criteria: []RetireCriterionResult{
+				Surface: api.SurfaceChecklistSurface("kb"),
+				Verdict: api.SurfaceChecklistVerdictREADYTORETIRE,
+				Criteria: []api.CriterionResult{
 					{
-						Name:             "daily_use_duration",
-						Verdict:          "green",
+						Name:             api.DailyUseDuration,
+						Verdict:          api.CriterionResultVerdictGreen,
 						ObservedValue:    "40 days since first use",
 						ThresholdSummary: ">= 30 days",
 					},
 					{
-						Name:             "open_blockers",
-						Verdict:          "green",
+						Name:             api.OpenBlockers,
+						Verdict:          api.CriterionResultVerdictGreen,
 						ObservedValue:    "0 open",
 						ThresholdSummary: "== 0 open blockers",
 					},
@@ -146,7 +164,7 @@ func TestPrintRetireTableRendersOverallAndPerSurface(t *testing.T) {
 	if !strings.Contains(out, "daily_use_duration") {
 		t.Fatalf("missing criterion line: %s", out)
 	}
-	if !strings.Contains(out, "tenant: "+tenant) {
+	if !strings.Contains(out, "tenant: 11111111-1111-1111-1111-111111111111") {
 		t.Fatalf("missing tenant id: %s", out)
 	}
 }
@@ -155,17 +173,17 @@ func TestPrintRetireTableRendersOverallAndPerSurface(t *testing.T) {
 // parentheses; a nil tenant id is omitted entirely.
 func TestPrintRetireTableHandlesNotesAndNilTenant(t *testing.T) {
 	noteCriterion := "no baseline corpus configured for this surface in v0.2"
-	report := &RetireChecklistReport{
-		RanAt:          "2026-05-14T12:00:00+00:00",
-		OverallVerdict: "REVIEW MANUALLY",
-		Surfaces: []RetireSurfaceChecklist{
+	report := &api.RetireChecklistReport{
+		RanAt:          time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		OverallVerdict: api.RetireChecklistReportOverallVerdictREVIEWMANUALLY,
+		Surfaces: []api.SurfaceChecklist{
 			{
-				Surface: "memory",
-				Verdict: "REVIEW MANUALLY",
-				Criteria: []RetireCriterionResult{
+				Surface: api.SurfaceChecklistSurface("memory"),
+				Verdict: api.SurfaceChecklistVerdictREVIEWMANUALLY,
+				Criteria: []api.CriterionResult{
 					{
-						Name:             "meho_vs_baseline",
-						Verdict:          "yellow",
+						Name:             api.MehoVsBaseline,
+						Verdict:          api.CriterionResultVerdictYellow,
 						ObservedValue:    "baseline did not run",
 						ThresholdSummary: "every metric >= baseline",
 						Notes:            &noteCriterion,
@@ -185,36 +203,50 @@ func TestPrintRetireTableHandlesNotesAndNilTenant(t *testing.T) {
 	}
 }
 
-// TestRetireRequestMarshalOmitsBlockerCountsWhenNil — sending a nil
-// pointer drops the field entirely (Pydantic treats absence + null
-// the same way, but the wire stays compact).
-func TestRetireRequestMarshalOmitsBlockerCountsWhenNil(t *testing.T) {
-	req := retireRequest{Surface: "kb"}
-	got := mustMarshal(t, req)
-	if strings.Contains(got, "blocker_counts") {
-		t.Fatalf("blocker_counts should be omitted when nil: %s", got)
+// TestRetireRequestBodySendsNullBlockerCountsWhenNil — sending a nil
+// pointer serialises as JSON `null`. The generated
+// `api.RetireChecklistRequest.BlockerCounts` has no `omitempty` on
+// its struct tag (the FastAPI schema marks the field as nullable,
+// not optional), so the wire carries the explicit `null`. The
+// backend's `RetireChecklistRequest` pydantic model treats
+// `null` and absent identically for the `blocker_counts` field
+// (criterion 5 reports `REVIEW MANUALLY` in both cases per the
+// schema doc-string), so the wire change from the pre-migration
+// "absent" shape to the post-migration "null" shape is
+// behaviour-preserving on the server.
+func TestRetireRequestBodySendsNullBlockerCountsWhenNil(t *testing.T) {
+	body := retireRequestBody(retireOptions{Surface: "kb"}, nil, nil)
+	got := mustMarshal(t, body)
+	if !strings.Contains(got, `"blocker_counts":null`) {
+		t.Fatalf("blocker_counts should serialise as null when nil: %s", got)
 	}
 }
 
-// TestRetireRequestMarshalIncludesEmptyBlockerCountsMap — an empty
+// TestRetireRequestBodyIncludesEmptyBlockerCountsMap — an empty
 // map is serialised as `{}` and the backend treats it as "every
-// surface has zero blockers" (caller intent). Distinct from the nil
-// case above.
-func TestRetireRequestMarshalIncludesEmptyBlockerCountsMap(t *testing.T) {
+// surface has zero blockers" (caller intent). Distinct from the
+// null-pointer case above, which means "unknown" (yellow).
+//
+// The nil-vs-empty distinction is load-bearing for criterion 5:
+// passing `{}` means "the lookup ran and found zero open blockers
+// on every surface" (green); passing `null` means "the lookup
+// didn't run" (yellow / REVIEW MANUALLY). The generated
+// `*map[string]int` shape preserves both halves.
+func TestRetireRequestBodyIncludesEmptyBlockerCountsMap(t *testing.T) {
 	empty := map[string]int{}
-	req := retireRequest{Surface: "all", BlockerCounts: &empty}
-	got := mustMarshal(t, req)
+	body := retireRequestBody(retireOptions{Surface: "all"}, &empty, nil)
+	got := mustMarshal(t, body)
 	if !strings.Contains(got, `"blocker_counts":{}`) {
 		t.Fatalf("expected empty map serialised; got %s", got)
 	}
 }
 
-// TestRetireRequestMarshalIncludesSurfaceCounts — a non-empty map
+// TestRetireRequestBodyIncludesSurfaceCounts — a non-empty map
 // round-trips key/value pairs as expected.
-func TestRetireRequestMarshalIncludesSurfaceCounts(t *testing.T) {
+func TestRetireRequestBodyIncludesSurfaceCounts(t *testing.T) {
 	counts := map[string]int{"kb": 0, "memory": 2}
-	req := retireRequest{Surface: "all", BlockerCounts: &counts}
-	got := mustMarshal(t, req)
+	body := retireRequestBody(retireOptions{Surface: "all"}, &counts, nil)
+	got := mustMarshal(t, body)
 	if !strings.Contains(got, `"kb":0`) || !strings.Contains(got, `"memory":2`) {
 		t.Fatalf("surface counts not in payload: %s", got)
 	}
@@ -235,15 +267,16 @@ func TestLookupBlockerCountsFailsGracefullyWhenGHMissing(t *testing.T) {
 	}
 }
 
-// TestRetireRequestMarshalIncludesBaselineOverrides — a non-empty
+// TestRetireRequestBodyIncludesBaselineOverrides — a non-empty
 // override map round-trips into the wire body as the backend's
 // `RetireChecklistRequest.baseline_overrides` field expects.
-func TestRetireRequestMarshalIncludesBaselineOverrides(t *testing.T) {
-	overrides := map[string]baselineMetricsOverride{
-		"kb": {PrecisionAt5: 0.7, MRR: 0.5, Coverage: 0.85, Kind: "grep"},
+func TestRetireRequestBodyIncludesBaselineOverrides(t *testing.T) {
+	kind := "grep"
+	overrides := map[string]api.BaselineMetricsOverride{
+		"kb": {PrecisionAt5: 0.7, Mrr: 0.5, Coverage: 0.85, Kind: &kind},
 	}
-	req := retireRequest{Surface: "kb", BaselineOverrides: &overrides}
-	got := mustMarshal(t, req)
+	body := retireRequestBody(retireOptions{Surface: "kb"}, nil, &overrides)
+	got := mustMarshal(t, body)
 	if !strings.Contains(got, `"baseline_overrides"`) {
 		t.Fatalf("baseline_overrides should appear in payload: %s", got)
 	}
@@ -255,14 +288,17 @@ func TestRetireRequestMarshalIncludesBaselineOverrides(t *testing.T) {
 	}
 }
 
-// TestRetireRequestMarshalOmitsBaselineOverridesWhenNil — a nil
-// pointer drops the field (Pydantic treats absent and null
-// equivalently; wire stays compact).
-func TestRetireRequestMarshalOmitsBaselineOverridesWhenNil(t *testing.T) {
-	req := retireRequest{Surface: "kb"}
-	got := mustMarshal(t, req)
-	if strings.Contains(got, "baseline_overrides") {
-		t.Fatalf("baseline_overrides should be omitted when nil: %s", got)
+// TestRetireRequestBodySendsNullBaselineOverridesWhenNil — a nil
+// pointer serialises as JSON `null`. Pydantic treats absent and
+// null equivalently for the `baseline_overrides` field; criterion
+// 4 reports yellow (REVIEW MANUALLY) when the value is missing or
+// null. Behaviour-preserving wire change from the pre-migration
+// `omitempty` shape (which dropped the field entirely).
+func TestRetireRequestBodySendsNullBaselineOverridesWhenNil(t *testing.T) {
+	body := retireRequestBody(retireOptions{Surface: "kb"}, nil, nil)
+	got := mustMarshal(t, body)
+	if !strings.Contains(got, `"baseline_overrides":null`) {
+		t.Fatalf("baseline_overrides should serialise as null when nil: %s", got)
 	}
 }
 
@@ -271,23 +307,23 @@ func TestRetireRequestMarshalOmitsBaselineOverridesWhenNil(t *testing.T) {
 // baseline triple ready to ship as criterion 4 override.
 func TestLoadBaselineOverridesExtractsKbBaselineMetrics(t *testing.T) {
 	kind := "grep"
-	prec := 0.65
-	mrr := 0.45
-	cov := 0.80
-	result := &EvalResult{
-		RanAt:          "2026-05-14T12:00:00+00:00",
-		OverallVerdict: "yellow",
-		Surfaces: []EvalSurfaceResult{
+	prec := float32(0.65)
+	mrr := float32(0.45)
+	cov := float32(0.80)
+	result := &api.EvalResult{
+		RanAt:          time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		OverallVerdict: api.EvalResultOverallVerdictYellow,
+		Surfaces: []api.SurfaceResult{
 			{
-				Surface:              "kb",
+				Surface:              api.SurfaceResultSurface("kb"),
 				QueryCount:           10,
 				PrecisionAt5:         0.85,
-				MRR:                  0.60,
+				Mrr:                  0.60,
 				Coverage:             0.95,
-				Verdict:              "green",
+				Verdict:              api.SurfaceResultVerdictGreen,
 				BaselineKind:         &kind,
 				BaselinePrecisionAt5: &prec,
-				BaselineMRR:          &mrr,
+				BaselineMrr:          &mrr,
 				BaselineCoverage:     &cov,
 			},
 		},
@@ -306,11 +342,11 @@ func TestLoadBaselineOverridesExtractsKbBaselineMetrics(t *testing.T) {
 	if !ok {
 		t.Fatalf("kb override missing; got map=%v", got)
 	}
-	if kb.PrecisionAt5 != prec || kb.MRR != mrr || kb.Coverage != cov {
+	if kb.PrecisionAt5 != prec || kb.Mrr != mrr || kb.Coverage != cov {
 		t.Fatalf("kb override metrics not preserved: %+v", kb)
 	}
-	if kb.Kind != kind {
-		t.Fatalf("kb override kind not preserved: %q", kb.Kind)
+	if kb.Kind == nil || *kb.Kind != kind {
+		t.Fatalf("kb override kind not preserved: %v", kb.Kind)
 	}
 }
 
@@ -320,24 +356,24 @@ func TestLoadBaselineOverridesExtractsKbBaselineMetrics(t *testing.T) {
 // rather than silently flipping red on zero-metric data.
 func TestLoadBaselineOverridesSkipsSurfacesWithoutBaseline(t *testing.T) {
 	kind := "grep"
-	prec := 0.65
-	mrr := 0.45
-	cov := 0.80
-	result := &EvalResult{
-		RanAt:          "2026-05-14T12:00:00+00:00",
-		OverallVerdict: "yellow",
-		Surfaces: []EvalSurfaceResult{
+	prec := float32(0.65)
+	mrr := float32(0.45)
+	cov := float32(0.80)
+	result := &api.EvalResult{
+		RanAt:          time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		OverallVerdict: api.EvalResultOverallVerdictYellow,
+		Surfaces: []api.SurfaceResult{
 			{
-				Surface:              "kb",
+				Surface:              api.SurfaceResultSurface("kb"),
 				QueryCount:           10,
 				BaselineKind:         &kind,
 				BaselinePrecisionAt5: &prec,
-				BaselineMRR:          &mrr,
+				BaselineMrr:          &mrr,
 				BaselineCoverage:     &cov,
 			},
 			// memory + operations: no baseline (the v0.2 shape).
-			{Surface: "memory", QueryCount: 10},
-			{Surface: "operations", QueryCount: 10},
+			{Surface: api.SurfaceResultSurface("memory"), QueryCount: 10},
+			{Surface: api.SurfaceResultSurface("operations"), QueryCount: 10},
 		},
 	}
 	dir := t.TempDir()

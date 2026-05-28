@@ -182,14 +182,15 @@ cli/
     │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
     │   │   ├── operation_test.go # render + helper + sentinel tests.
     │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.
-    │   ├── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling.
-    │   │   ├── retrieval.go            # NewRootCmd.
-    │   │   ├── eval.go                 # `meho retrieval eval` (POST /api/v1/retrieve/eval).
-    │   │   ├── eval_test.go            # output-contract + URL-resolution tests.
-    │   │   ├── usage.go                # `meho retrieval usage` (GET /api/v1/retrieve/usage) — G4.3-T5b #464.
-    │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
-    │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
-    │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
+    │   ├── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling. G0.12-T12 #1270 moved every verb onto the generated `api.ClientWithResponses` (no consumer-side struct copies).
+    │   │   ├── retrieval.go            # NewRootCmd + newAuthedClient + retryOn401 + renderRequestError/renderHTTPStatus + 1 MiB capRoundTripper.
+    │   │   ├── retrieval_test.go       # renderer + 401-retry + oversized-response (M1) + nil-payload guard (M2-M6 pre-empt).
+    │   │   ├── eval.go                 # `meho retrieval eval` (POST /api/v1/retrieve/eval) via typed client.
+    │   │   ├── eval_test.go            # output-contract + URL-resolution + EvalRequest body shape tests.
+    │   │   ├── usage.go                # `meho retrieval usage` (GET /api/v1/retrieve/usage) — G4.3-T5b #464, typed client.
+    │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing + JSON200 nil-guard tests.
+    │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445, typed client. Keeps the hand-typed `ghIssueLabel` / `ghIssue` for the `gh issue list` subprocess output.
+    │   │   └── retire_checklist_test.go # surface-bucket + table-render + body-shape (null vs empty) tests.
     │   ├── migrate/           # G5.3 #608–#612 — `meho migrate …` laptop-local migration verb tree (Initiative #375). G0.12-T11 #1269 migrated to typed client.
     │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2.
     │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive. Dry-run envelope is `api.RememberBody` directly (post-T11 #1269; no consumer-side dryRunEnvelope shadow).

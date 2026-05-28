@@ -5,33 +5,17 @@ package targets
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// TargetSummary mirrors the backend TargetSummary Pydantic model
-// (backend/src/meho_backplane/targets/schemas.py L57-72). Hand-
-// written rather than aliased to the generated api.TargetSummary so
-// the targets package stays decoupled from the generated client's
-// type surface — the operation/retrieval packages take the same
-// stance for the same reason (generated types churn on every spec
-// re-snapshot).
-type TargetSummary struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Aliases []string `json:"aliases"`
-	Product string   `json:"product"`
-	Host    string   `json:"host"`
-}
 
 // newListCmd returns the `meho targets list` command.
 //
@@ -117,10 +101,14 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	summaries, err := getTargets(cmd.Context(), backplaneURL, opts)
+	resp, err := getTargets(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusOK || resp.JSON200 == nil {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	summaries := *resp.JSON200
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), summaries)
 	}
@@ -128,44 +116,51 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	return nil
 }
 
-// buildListPath assembles the GET /api/v1/targets query string from
-// the per-call options. Exposed for tests so the URL construction
-// stays unit-checkable without standing up an httptest.Server.
-func buildListPath(opts listOptions) string {
-	q := url.Values{}
+// buildListParams assembles the typed query-parameter struct from the
+// per-call options. Exposed for tests so the param wiring stays
+// unit-checkable without standing up an httptest.Server. The typed
+// client (`oapi-codegen`-generated) handles URL encoding internally,
+// so the previous `buildListPath` string-concat helper retired.
+func buildListParams(opts listOptions) *api.ListTargetsApiV1TargetsGetParams {
+	params := &api.ListTargetsApiV1TargetsGetParams{}
 	if opts.Product != "" {
-		q.Set("product", opts.Product)
+		p := opts.Product
+		params.Product = &p
 	}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		l := opts.Limit
+		params.Limit = &l
 	}
 	if opts.Cursor != "" {
-		q.Set("cursor", opts.Cursor)
+		c := opts.Cursor
+		params.Cursor = &c
 	}
-	path := "/api/v1/targets"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func getTargets(ctx context.Context, backplaneURL string, opts listOptions) ([]TargetSummary, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
+func getTargets(
+	ctx context.Context,
+	backplaneURL string,
+	opts listOptions,
+) (*api.ListTargetsApiV1TargetsGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out []TargetSummary
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode targets response: %w", err)
-	}
-	return out, nil
+	params := buildListParams(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ListTargetsApiV1TargetsGetResponse, error) {
+			return authed.ListTargetsApiV1TargetsGetWithResponse(ctx, params)
+		},
+		func(r *api.ListTargetsApiV1TargetsGetResponse) int { return r.StatusCode() },
+	)
 }
 
 // printTargetsTable renders the list as a compact, scannable table.
 // Columns: NAME, ALIASES, PRODUCT, HOST per the issue's acceptance
 // criterion 1. ID is omitted from the human view (operators rarely
 // need the UUID; --json surfaces it).
-func printTargetsTable(w io.Writer, summaries []TargetSummary) {
+func printTargetsTable(w io.Writer, summaries []api.TargetSummary) {
 	if len(summaries) == 0 {
 		fmt.Fprintln(w, "no targets registered in this tenant")
 		return

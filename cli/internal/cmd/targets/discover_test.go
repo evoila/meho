@@ -11,24 +11,30 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
-// TestBuildDiscoverPathRequiresProduct — product always rides the
-// query string; seed_target is omitted when unset.
-func TestBuildDiscoverPathRequiresProduct(t *testing.T) {
-	got := buildDiscoverPath(discoverOptions{Product: "vmware"})
-	if got != "/api/v1/targets/discover?product=vmware" {
-		t.Fatalf("default path: got %q", got)
+// TestBuildDiscoverParamsRequiresProduct — product always lands in
+// the typed params struct; seed_target is omitted (nil) when unset.
+func TestBuildDiscoverParamsRequiresProduct(t *testing.T) {
+	p := buildDiscoverParams(discoverOptions{Product: "vmware"})
+	if p.Product != "vmware" {
+		t.Fatalf("Product: got %q; want %q", p.Product, "vmware")
+	}
+	if p.SeedTarget != nil {
+		t.Errorf("unset SeedTarget should marshal as nil pointer; got %q", *p.SeedTarget)
 	}
 }
 
-// TestBuildDiscoverPathSetsSeed — --seed-target lands as seed_target.
-func TestBuildDiscoverPathSetsSeed(t *testing.T) {
-	got := buildDiscoverPath(discoverOptions{Product: "k8s", SeedTarget: "rke2-meho"})
-	for _, want := range []string{"product=k8s", "seed_target=rke2-meho"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("buildDiscoverPath missing %q in %q", want, got)
-		}
+// TestBuildDiscoverParamsSetsSeed — --seed-target lands as *SeedTarget.
+func TestBuildDiscoverParamsSetsSeed(t *testing.T) {
+	p := buildDiscoverParams(discoverOptions{Product: "k8s", SeedTarget: "rke2-meho"})
+	if p.Product != "k8s" {
+		t.Errorf("Product: got %q", p.Product)
+	}
+	if p.SeedTarget == nil || *p.SeedTarget != "rke2-meho" {
+		t.Errorf("SeedTarget: got %+v; want pointer to %q", p.SeedTarget, "rke2-meho")
 	}
 }
 
@@ -36,7 +42,7 @@ func TestBuildDiscoverPathSetsSeed(t *testing.T) {
 // no-candidates line (operationally meaningful) without a header.
 func TestPrintDiscoverTablesEmpty(t *testing.T) {
 	var buf bytes.Buffer
-	printDiscoverTables(&buf, &DiscoverResult{})
+	printDiscoverTables(&buf, &api.TargetsDiscoverResult{})
 	out := buf.String()
 	if !strings.Contains(out, "no candidate targets discovered") {
 		t.Errorf("empty render missing no-candidates hint; got %q", out)
@@ -50,11 +56,11 @@ func TestPrintDiscoverTablesEmpty(t *testing.T) {
 // table both render.
 func TestPrintDiscoverTablesRendersBoth(t *testing.T) {
 	port := 443
-	r := &DiscoverResult{
-		Discovered: []CandidateHint{
-			{Name: "esxi-2", Host: "esxi-2.lab", Port: &port, Confidence: "high"},
+	r := &api.TargetsDiscoverResult{
+		Discovered: []api.CandidateHint{
+			{Name: "esxi-2", Host: "esxi-2.lab", Port: &port, Confidence: api.CandidateHintConfidence("high")},
 		},
-		Skipped: []SkippedConnector{
+		Skipped: []api.SkippedConnector{
 			{Name: "vmware-pyvmomi-7.0", Reason: "no candidates"},
 		},
 	}
@@ -74,7 +80,8 @@ func TestPrintDiscoverTablesRendersBoth(t *testing.T) {
 
 // TestRunDiscoverHappyPath — `targets discover --product vmware`
 // lists candidate targets from the registered vmware connectors
-// (acceptance criterion 4).
+// (acceptance criterion 4). Asserts the typed `product` query param
+// round-trips on the wire.
 func TestRunDiscoverHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/targets/discover", func(w http.ResponseWriter, r *http.Request) {
@@ -86,11 +93,11 @@ func TestRunDiscoverHappyPath(t *testing.T) {
 		}
 		port := 443
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(DiscoverResult{
-			Discovered: []CandidateHint{
-				{Name: "esxi-2", Host: "esxi-2.lab", Port: &port, Confidence: "high"},
+		_ = json.NewEncoder(w).Encode(api.TargetsDiscoverResult{
+			Discovered: []api.CandidateHint{
+				{Name: "esxi-2", Host: "esxi-2.lab", Port: &port, Confidence: api.CandidateHintConfidence("high")},
 			},
-			Skipped: []SkippedConnector{},
+			Skipped: []api.SkippedConnector{},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -114,9 +121,11 @@ func TestRunDiscoverJSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/targets/discover", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(DiscoverResult{
-			Discovered: []CandidateHint{{Name: "c1", Host: "h1", Confidence: "low"}},
-			Skipped:    []SkippedConnector{},
+		_ = json.NewEncoder(w).Encode(api.TargetsDiscoverResult{
+			Discovered: []api.CandidateHint{
+				{Name: "c1", Host: "h1", Confidence: api.CandidateHintConfidence("low")},
+			},
+			Skipped: []api.SkippedConnector{},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -128,7 +137,7 @@ func TestRunDiscoverJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runDiscover --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded DiscoverResult
+	var decoded api.TargetsDiscoverResult
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}

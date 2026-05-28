@@ -8,48 +8,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// Target mirrors the backend Target Pydantic model
-// (backend/src/meho_backplane/targets/schemas.py L75-112). The
-// shape includes the G0.3-T1.5 additions:
-//
-//   - Fingerprint — cached FingerprintResult from the last successful
-//     probe. Server-managed; only the probe handler writes it.
-//   - PreferredImplId — operator override for the G0.6 resolver's
-//     tie-break ladder.
-//
-// Fingerprint is typed as map[string]any rather than the concrete
-// FingerprintResult struct so the CLI surfaces every key the backend
-// persists without needing a Go regen each time
-// FingerprintResult's optional field set grows; --json round-trips
-// the wire shape verbatim.
-type Target struct {
-	ID              string         `json:"id"`
-	TenantID        string         `json:"tenant_id"`
-	Name            string         `json:"name"`
-	Aliases         []string       `json:"aliases"`
-	Product         string         `json:"product"`
-	Host            string         `json:"host"`
-	Port            *int           `json:"port"`
-	Fqdn            *string        `json:"fqdn"`
-	SecretRef       *string        `json:"secret_ref"`
-	AuthModel       string         `json:"auth_model"`
-	VpnRequired     bool           `json:"vpn_required"`
-	Extras          map[string]any `json:"extras"`
-	Notes           *string        `json:"notes"`
-	Fingerprint     map[string]any `json:"fingerprint"`
-	PreferredImplID *string        `json:"preferred_impl_id"`
-	CreatedAt       string         `json:"created_at"`
-	UpdatedAt       string         `json:"updated_at"`
-}
 
 // newDescribeCmd returns the `meho targets describe` command.
 //
@@ -120,10 +88,14 @@ func runDescribe(cmd *cobra.Command, opts describeOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	t, err := getTarget(cmd.Context(), backplaneURL, opts.Query)
+	resp, err := getTarget(cmd.Context(), backplaneURL, opts.Query)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusOK || resp.JSON200 == nil {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	t := resp.JSON200
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), t)
 	}
@@ -131,26 +103,23 @@ func runDescribe(cmd *cobra.Command, opts describeOptions) error {
 	return nil
 }
 
-// buildDescribePath assembles the GET path. Exposed for unit tests
-// so the URL encoding of names with special characters stays
-// covered.
-func buildDescribePath(query string) string {
-	// PathEscape escapes path-segment-unsafe characters (spaces,
-	// slashes, ?, #). Operators routinely pick names with hyphens
-	// and dots; the unsafe set is rare but worth protecting.
-	return "/api/v1/targets/" + pathEscape(query)
-}
-
-func getTarget(ctx context.Context, backplaneURL, query string) (*Target, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildDescribePath(query), nil)
+func getTarget(
+	ctx context.Context,
+	backplaneURL, query string,
+) (*api.DescribeTargetApiV1TargetsNameGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Target
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode target response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.DescribeTargetApiV1TargetsNameGetResponse, error) {
+			// The typed client path-escapes `query` internally
+			// (matching url.PathEscape) before substituting into
+			// /api/v1/targets/{name}.
+			return authed.DescribeTargetApiV1TargetsNameGetWithResponse(ctx, query, nil)
+		},
+		func(r *api.DescribeTargetApiV1TargetsNameGetResponse) int { return r.StatusCode() },
+	)
 }
 
 // printTargetSummary renders the full Target as a stable, scannable
@@ -158,10 +127,10 @@ func getTarget(ctx context.Context, backplaneURL, query string) (*Target, error)
 // padded to a fixed width for vertical alignment. Fingerprint is
 // rendered as a compact one-liner with the high-signal fields; the
 // full structure is in --json.
-func printTargetSummary(w io.Writer, t *Target) {
+func printTargetSummary(w io.Writer, t *api.Target) {
 	fmt.Fprintf(w, "%-18s %s\n", "name:", t.Name)
-	fmt.Fprintf(w, "%-18s %s\n", "id:", t.ID)
-	fmt.Fprintf(w, "%-18s %s\n", "tenant_id:", t.TenantID)
+	fmt.Fprintf(w, "%-18s %s\n", "id:", t.Id.String())
+	fmt.Fprintf(w, "%-18s %s\n", "tenant_id:", t.TenantId.String())
 	if len(t.Aliases) > 0 {
 		fmt.Fprintf(w, "%-18s %s\n", "aliases:", strings.Join(t.Aliases, ", "))
 	} else {
@@ -175,13 +144,13 @@ func printTargetSummary(w io.Writer, t *Target) {
 	if t.Fqdn != nil && *t.Fqdn != "" {
 		fmt.Fprintf(w, "%-18s %s\n", "fqdn:", *t.Fqdn)
 	}
-	fmt.Fprintf(w, "%-18s %s\n", "auth_model:", t.AuthModel)
+	fmt.Fprintf(w, "%-18s %s\n", "auth_model:", string(t.AuthModel))
 	fmt.Fprintf(w, "%-18s %t\n", "vpn_required:", t.VpnRequired)
 	if t.SecretRef != nil && *t.SecretRef != "" {
 		fmt.Fprintf(w, "%-18s %s\n", "secret_ref:", *t.SecretRef)
 	}
-	if t.PreferredImplID != nil && *t.PreferredImplID != "" {
-		fmt.Fprintf(w, "%-18s %s\n", "preferred_impl_id:", *t.PreferredImplID)
+	if t.PreferredImplId != nil && *t.PreferredImplId != "" {
+		fmt.Fprintf(w, "%-18s %s\n", "preferred_impl_id:", *t.PreferredImplId)
 	} else {
 		fmt.Fprintf(w, "%-18s -\n", "preferred_impl_id:")
 	}
@@ -192,8 +161,11 @@ func printTargetSummary(w io.Writer, t *Target) {
 	if len(t.Extras) > 0 {
 		fmt.Fprintf(w, "%-18s %s\n", "extras:", formatExtras(t.Extras))
 	}
-	fmt.Fprintf(w, "%-18s %s\n", "created_at:", t.CreatedAt)
-	fmt.Fprintf(w, "%-18s %s\n", "updated_at:", t.UpdatedAt)
+	// Render timestamps in the same RFC3339Z shape the backend's
+	// model_dump(mode="json") emits, so --json output and the human
+	// view show byte-identical strings.
+	fmt.Fprintf(w, "%-18s %s\n", "created_at:", t.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+	fmt.Fprintf(w, "%-18s %s\n", "updated_at:", t.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 }
 
 // formatFingerprint renders the cached fingerprint as a one-line
@@ -201,16 +173,17 @@ func printTargetSummary(w io.Writer, t *Target) {
 // reachable=<bool>)" when set; "(none — never probed)" otherwise.
 // Full key set is in --json. Keep the high-signal fields visible
 // without overflowing the line width.
-func formatFingerprint(fp map[string]any) string {
-	if len(fp) == 0 {
+func formatFingerprint(fp *map[string]interface{}) string {
+	if fp == nil || len(*fp) == 0 {
 		return "(none — never probed)"
 	}
-	vendor, _ := fp["vendor"].(string)
-	product, _ := fp["product"].(string)
-	version, _ := fp["version"].(string)
-	probedAt, _ := fp["probed_at"].(string)
-	method, _ := fp["probe_method"].(string)
-	reachable, _ := fp["reachable"].(bool)
+	m := *fp
+	vendor, _ := m["vendor"].(string)
+	product, _ := m["product"].(string)
+	version, _ := m["version"].(string)
+	probedAt, _ := m["probed_at"].(string)
+	method, _ := m["probe_method"].(string)
+	reachable, _ := m["reachable"].(bool)
 	head := strings.TrimSpace(vendor + "/" + product)
 	if version != "" {
 		head = head + " " + version
@@ -222,7 +195,7 @@ func formatFingerprint(fp map[string]any) string {
 // formatExtras renders the extras map as a `key=value, key=value`
 // list with keys sorted for deterministic output (tests + diffs).
 // Non-scalar values land as their JSON representation.
-func formatExtras(extras map[string]any) string {
+func formatExtras(extras map[string]interface{}) string {
 	if len(extras) == 0 {
 		return "-"
 	}

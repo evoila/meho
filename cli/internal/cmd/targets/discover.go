@@ -5,58 +5,17 @@ package targets
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// CandidateHint mirrors the backend CandidateHint Pydantic model
-// (backend/src/meho_backplane/connectors/schemas.py L274). One
-// potentially-reachable target a connector inferred from a seed
-// (a vCenter exposing its managed ESXi hosts, a kubeconfig listing
-// peer cluster contexts, …). `Evidence` is the connector's debugging
-// payload — whatever made it think the candidate exists; `Confidence`
-// is its probe-vs-curation self-assessment. Hand-written rather than
-// aliased to a generated type for the same decoupling reason the
-// other target shapes (TargetSummary etc.) document.
-type CandidateHint struct {
-	Name       string         `json:"name"`
-	Host       string         `json:"host"`
-	Port       *int           `json:"port"`
-	Evidence   map[string]any `json:"evidence"`
-	Confidence string         `json:"confidence"`
-}
-
-// SkippedConnector mirrors the backend SkippedConnector Pydantic
-// model (backend/src/meho_backplane/api/v1/targets.py). One connector
-// that contributed nothing for the product — clean-but-empty
-// ("no candidates") or errored (exception class + message). One bad
-// connector never fails the sweep server-side; the CLI surfaces the
-// skip list so the operator sees why a candidate they expected is
-// missing.
-type SkippedConnector struct {
-	Name   string `json:"name"`
-	Reason string `json:"reason"`
-}
-
-// DiscoverResult mirrors the backend aggregate
-// (backend/src/meho_backplane/api/v1/targets.py): merged candidate
-// list across every connector registered for the product, plus the
-// connectors that contributed nothing. The verb never auto-creates
-// `targets` rows — the operator reviews `discovered` and runs
-// `meho targets create` (Initiative #363: auto-registration is
-// v0.2.next).
-type DiscoverResult struct {
-	Discovered []CandidateHint    `json:"discovered"`
-	Skipped    []SkippedConnector `json:"skipped"`
-}
 
 // newDiscoverCmd returns the `meho targets discover <product>` command.
 //
@@ -134,10 +93,14 @@ func runDiscover(cmd *cobra.Command, opts discoverOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := getDiscover(cmd.Context(), backplaneURL, opts)
+	resp, err := getDiscover(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusOK || resp.JSON200 == nil {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	result := resp.JSON200
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
 	}
@@ -145,30 +108,39 @@ func runDiscover(cmd *cobra.Command, opts discoverOptions) error {
 	return nil
 }
 
-// buildDiscoverPath assembles the GET /api/v1/targets/discover query
-// string. `product` is required (the cobra ExactArgs(1) guarantees a
-// value); `seed_target` is omitted when unset. The path-segment
-// `/discover` is matched as the dedicated route ahead of the
-// parametrised describe route server-side. Exposed for unit tests.
-func buildDiscoverPath(opts discoverOptions) string {
-	q := url.Values{}
-	q.Set("product", opts.Product)
-	if opts.SeedTarget != "" {
-		q.Set("seed_target", opts.SeedTarget)
+// buildDiscoverParams assembles the typed query-parameter struct for
+// GET /api/v1/targets/discover. `product` is required (the cobra
+// ExactArgs(1) guarantees a value); `seed_target` is omitted when
+// unset. The path-segment `/discover` is matched as the dedicated
+// route ahead of the parametrised describe route server-side.
+// Exposed for unit tests.
+func buildDiscoverParams(opts discoverOptions) *api.DiscoverTargetsApiV1TargetsDiscoverGetParams {
+	params := &api.DiscoverTargetsApiV1TargetsDiscoverGetParams{
+		Product: opts.Product,
 	}
-	return "/api/v1/targets/discover?" + q.Encode()
+	if opts.SeedTarget != "" {
+		s := opts.SeedTarget
+		params.SeedTarget = &s
+	}
+	return params
 }
 
-func getDiscover(ctx context.Context, backplaneURL string, opts discoverOptions) (*DiscoverResult, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildDiscoverPath(opts), nil)
+func getDiscover(
+	ctx context.Context,
+	backplaneURL string,
+	opts discoverOptions,
+) (*api.DiscoverTargetsApiV1TargetsDiscoverGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out DiscoverResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode discover response: %w", err)
-	}
-	return &out, nil
+	params := buildDiscoverParams(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.DiscoverTargetsApiV1TargetsDiscoverGetResponse, error) {
+			return authed.DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx, params)
+		},
+		func(r *api.DiscoverTargetsApiV1TargetsDiscoverGetResponse) int { return r.StatusCode() },
+	)
 }
 
 // printDiscoverTables renders the discovered candidates as a
@@ -177,7 +149,7 @@ func getDiscover(ctx context.Context, backplaneURL string, opts discoverOptions)
 // why an expected candidate is absent. Zero candidates renders the
 // no-candidates line (operationally meaningful — an empty lab) rather
 // than a bare header.
-func printDiscoverTables(w io.Writer, r *DiscoverResult) {
+func printDiscoverTables(w io.Writer, r *api.TargetsDiscoverResult) {
 	if len(r.Discovered) == 0 {
 		fmt.Fprintln(w, "no candidate targets discovered for this product")
 	} else {
@@ -191,7 +163,7 @@ func printDiscoverTables(w io.Writer, r *DiscoverResult) {
 				truncate(c.Name, 30),
 				truncate(c.Host, 30),
 				port,
-				truncate(c.Confidence, 10),
+				truncate(string(c.Confidence), 10),
 			)
 		}
 	}

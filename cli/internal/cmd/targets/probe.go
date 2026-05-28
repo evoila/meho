@@ -5,41 +5,18 @@ package targets
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// FingerprintResult mirrors the backend FingerprintResult Pydantic
-// model (backend/src/meho_backplane/connectors/schemas.py L96-118).
-// The shape matches the response of
-// POST /api/v1/targets/{name}/probe. Per the 2026-05-14 amendment to
-// Initiative #224 (G0.3-T1.5 / Task #477) the backend now returns
-// FingerprintResult (not ProbeResult) and persists it to
-// targets.fingerprint so the G0.6 resolver can read it without
-// re-probing.
-//
-// Optional fields (version / build / edition) are `*string` so the
-// CLI can distinguish "connector explicitly omitted the field" from
-// "connector reported an empty string".
-type FingerprintResult struct {
-	Vendor      string         `json:"vendor"`
-	Product     string         `json:"product"`
-	Version     *string        `json:"version"`
-	Build       *string        `json:"build"`
-	Edition     *string        `json:"edition"`
-	Reachable   bool           `json:"reachable"`
-	ProbedAt    string         `json:"probed_at"`
-	ProbeMethod string         `json:"probe_method"`
-	Extras      map[string]any `json:"extras,omitempty"`
-}
 
 // newProbeCmd returns the `meho targets probe` command.
 //
@@ -120,10 +97,14 @@ func runProbe(cmd *cobra.Command, opts probeOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	fp, err := postProbe(cmd.Context(), backplaneURL, opts.Query)
+	resp, err := postProbe(cmd.Context(), backplaneURL, opts.Query)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusOK || resp.JSON200 == nil {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	fp := resp.JSON200
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), fp)
 	}
@@ -131,26 +112,23 @@ func runProbe(cmd *cobra.Command, opts probeOptions) error {
 	return nil
 }
 
-// buildProbePath assembles the POST path. Exposed for unit tests so
-// the URL encoding of names with special characters stays covered.
-func buildProbePath(query string) string {
-	return "/api/v1/targets/" + pathEscape(query) + "/probe"
-}
-
-func postProbe(ctx context.Context, backplaneURL, query string) (*FingerprintResult, error) {
-	// Empty body — the route reads only the path-param name + the
-	// authed operator. Pass nil so doAuthedRequest skips the
-	// Content-Type/Content-Length stamp and lets the server route
-	// see an actual zero-length body.
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST", buildProbePath(query), nil)
+func postProbe(
+	ctx context.Context,
+	backplaneURL, query string,
+) (*api.ProbeTargetApiV1TargetsNameProbePostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out FingerprintResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode fingerprint response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ProbeTargetApiV1TargetsNameProbePostResponse, error) {
+			// Empty body — the route reads only the path-param name +
+			// the authed operator. The typed client path-escapes
+			// `query` before substituting into /api/v1/targets/{name}.
+			return authed.ProbeTargetApiV1TargetsNameProbePostWithResponse(ctx, query, nil)
+		},
+		func(r *api.ProbeTargetApiV1TargetsNameProbePostResponse) int { return r.StatusCode() },
+	)
 }
 
 // printFingerprint renders a FingerprintResult as a key-value
@@ -158,7 +136,7 @@ func postProbe(ctx context.Context, backplaneURL, query string) (*FingerprintRes
 // but with full multi-line breakdown — operators run `probe` for
 // the explicit "what did this connector report just now?" answer
 // and want every field visible.
-func printFingerprint(w io.Writer, fp *FingerprintResult) {
+func printFingerprint(w io.Writer, fp *api.FingerprintResult) {
 	fmt.Fprintf(w, "%-14s %s\n", "vendor:", fp.Vendor)
 	fmt.Fprintf(w, "%-14s %s\n", "product:", fp.Product)
 	if v := strDeref(fp.Version); v != "" {
@@ -171,17 +149,19 @@ func printFingerprint(w io.Writer, fp *FingerprintResult) {
 		fmt.Fprintf(w, "%-14s %s\n", "edition:", e)
 	}
 	fmt.Fprintf(w, "%-14s %t\n", "reachable:", fp.Reachable)
-	fmt.Fprintf(w, "%-14s %s\n", "probed_at:", fp.ProbedAt)
+	// Render in the same RFC3339Z shape the backend's
+	// model_dump(mode="json") emits.
+	fmt.Fprintf(w, "%-14s %s\n", "probed_at:", fp.ProbedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "%-14s %s\n", "probe_method:", fp.ProbeMethod)
-	if len(fp.Extras) > 0 {
-		fmt.Fprintf(w, "%-14s %s\n", "extras:", formatProbeExtras(fp.Extras))
+	if fp.Extras != nil && len(*fp.Extras) > 0 {
+		fmt.Fprintf(w, "%-14s %s\n", "extras:", formatProbeExtras(*fp.Extras))
 	}
 }
 
 // formatProbeExtras renders the extras map deterministically. Same
 // shape as describe.go::formatExtras; duplicated here to avoid an
 // implicit coupling between the two verbs' rendering rules.
-func formatProbeExtras(extras map[string]any) string {
+func formatProbeExtras(extras map[string]interface{}) string {
 	if len(extras) == 0 {
 		return "-"
 	}

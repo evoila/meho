@@ -1,0 +1,3 @@
+{
+  "instructions": "Triage the most recent broadcast events for this tenant. Use `meho.broadcast.recent` to fetch the last batch; for each event, decide interesting/not per your system prompt; write a handoff entry to memory at scope=\"tenant\" with slug=\"r4-handoff-<event_id>\" and tags=[\"r4-triage-handoff\"] ONLY for the interesting ones."
+}

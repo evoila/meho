@@ -1,0 +1,10 @@
+{
+  "kind": "cron",
+  "agent_definition_id": "00000000-0000-0000-0000-000000000000",
+  "cron_expr": "*/15 * * * *",
+  "timezone": "UTC",
+  "inputs": {
+    "instructions": "Triage the most recent broadcast events for this tenant. Use `meho.broadcast.recent` to fetch the last batch; for each event, decide interesting/not per your system prompt; write a handoff entry to memory at scope=\"tenant\" with slug=\"r4-handoff-<event_id>\" and tags=[\"r4-triage-handoff\"] ONLY for the interesting ones."
+  },
+  "in_flight_policy": "fail_into_audit"
+}

@@ -1,0 +1,26 @@
+{
+  "_comment_meho": "Drop this file into the root of the operator's local repo as `.mcp.json`. Claude Code picks it up on session start. Two variants are provided side-by-side: pick exactly one and delete the other. The operator's MEHO access token comes from `meho login`'s credentials store -- see GUIDE.md Step 3 for the token-extraction recipe.",
+
+  "mcpServers": {
+    "_variant_a_direct_http": {
+      "_comment": "VARIANT A -- direct HTTP. Works today only for MCP clients that expose a `client_id` field (Claude.ai Custom Connector, MCP Inspector, Cline, Continue) OR on Keycloak realms running CIMD with a CIMD-capable Claude Code build. Claude Code's HTTP-MCP without CIMD support cannot OAuth on a fresh realm (no `client_id` field in this shape -> RFC 7591 DCR -> Keycloak `Host not trusted` 403). See docs/cross-repo/mcp-client-setup.md for the diagnosis.",
+      "type": "http",
+      "url": "https://meho.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MEHO_MCP_TOKEN}"
+      }
+    },
+
+    "_variant_b_mcp_remote_shim": {
+      "_comment": "VARIANT B -- stdio shim via `mcp-remote`. Works on every Claude Code version that supports stdio servers (effectively all of them), regardless of the realm's CIMD posture. The operator obtains a token out-of-band by reading the access_token field from $XDG_CONFIG_HOME/meho/credentials.json (the file `meho login` writes when the OS keyring is unavailable) and exports it as MEHO_MCP_TOKEN; mcp-remote injects it as `Authorization: Bearer ...` on every call. GUIDE.md Step 3 carries the full extraction recipe.",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://meho.example.com/mcp",
+        "--header",
+        "Authorization: Bearer ${MEHO_MCP_TOKEN}"
+      ]
+    }
+  }
+}

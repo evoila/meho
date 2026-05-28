@@ -5,11 +5,12 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -88,7 +89,7 @@ func newEditCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&enabled, "enabled", false, "enable the definition")
 	cmd.Flags().BoolVar(&disabled, "disabled", false, "disable (park) the definition")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry JSON instead of the human summary")
+		"emit raw AgentDefinitionRead JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -126,11 +127,11 @@ func runEdit(cmd *cobra.Command, opts editOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("pass at most one of --enabled / --disabled"), opts.JSONOut)
 	}
-	body, err := buildEditBody(cmd, opts)
+	body, anySet, err := buildEditBody(cmd, opts)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
 	}
-	if len(body) == 0 {
+	if !anySet {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("edit requires at least one field flag to change"), opts.JSONOut)
 	}
@@ -139,81 +140,108 @@ func runEdit(cmd *cobra.Command, opts editOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	entry, err := patchEdit(cmd.Context(), backplaneURL, opts.Name, body)
+	resp, err := patchEdit(cmd.Context(), backplaneURL, opts.Name, body)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	entry := resp.JSON200
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "updated agent definition %q\n", entry.Name)
-	printEntrySummary(cmd.OutOrStdout(), entry)
+	printDefinitionSummary(cmd.OutOrStdout(), entry)
 	return nil
 }
 
 // buildEditBody assembles the PATCH request body from only the flags
-// the operator set. Returns the marshalled JSON (empty map -> caller
-// rejects the no-op edit). Exposed-adjacent: kept as a separate
-// function so the field-selection logic stays unit-testable.
-func buildEditBody(cmd *cobra.Command, opts editOptions) (map[string]any, error) {
-	body := map[string]any{}
+// the operator set. Returns the typed AgentDefinitionUpdate and a
+// boolean indicating whether any field was actually populated (so the
+// caller can reject a no-op edit before issuing the request). Kept
+// separate from runEdit so the field-selection logic stays
+// unit-testable without a live HTTP transport.
+//
+// The backend's PATCH semantics use Pydantic's exclude_unset, so an
+// `omitempty` pointer field left nil is "field omitted" and the
+// existing value is preserved. Toolset / OutputSchema in the
+// generated AgentDefinitionUpdate are NOT tagged `omitempty` (they
+// carry the wire `null` distinction the backend's v0.2 limitation
+// documents), so this helper leaves them nil when the operator
+// didn't pass the flag; they only become non-nil when --toolset /
+// --output-schema is actually set.
+func buildEditBody(cmd *cobra.Command, opts editOptions) (api.AgentDefinitionUpdate, bool, error) {
+	body := api.AgentDefinitionUpdate{}
+	anySet := false
 	if opts.identityRefSet {
-		body["identity_ref"] = opts.IdentityRef
+		identityRef := opts.IdentityRef
+		body.IdentityRef = &identityRef
+		anySet = true
 	}
 	if opts.modelTierSet {
 		if !validModelTiers[opts.ModelTier] {
-			return nil, fmt.Errorf("--model-tier must be one of: standard, fast, deep")
+			return api.AgentDefinitionUpdate{}, false, fmt.Errorf("--model-tier must be one of: standard, fast, deep")
 		}
-		body["model_tier"] = opts.ModelTier
+		tier := api.AgentModelTier(opts.ModelTier)
+		body.ModelTier = &tier
+		anySet = true
 	}
 	if opts.systemPromptSet {
-		body["system_prompt"] = opts.SystemPrompt
+		systemPrompt := opts.SystemPrompt
+		body.SystemPrompt = &systemPrompt
+		anySet = true
 	}
 	if opts.turnBudgetSet {
 		if opts.TurnBudget < 1 || opts.TurnBudget > 1000 {
-			return nil, fmt.Errorf("--turn-budget must be between 1 and 1000; got %d", opts.TurnBudget)
+			return api.AgentDefinitionUpdate{}, false, fmt.Errorf("--turn-budget must be between 1 and 1000; got %d", opts.TurnBudget)
 		}
-		body["turn_budget"] = opts.TurnBudget
+		turnBudget := opts.TurnBudget
+		body.TurnBudget = &turnBudget
+		anySet = true
 	}
 	if opts.toolsetSet {
 		toolset, err := loadJSONObjectFlag(cmd, opts.ToolsetArg, "--toolset")
 		if err != nil {
-			return nil, err
+			return api.AgentDefinitionUpdate{}, false, err
 		}
-		body["toolset"] = toolset
+		body.Toolset = &toolset
+		anySet = true
 	}
 	if opts.outputSchemaSet {
 		schema, err := loadJSONObjectFlag(cmd, opts.OutputSchemaArg, "--output-schema")
 		if err != nil {
-			return nil, err
+			return api.AgentDefinitionUpdate{}, false, err
 		}
-		body["output_schema"] = schema
+		body.OutputSchema = &schema
+		anySet = true
 	}
 	if opts.enabledSet {
-		body["enabled"] = true
+		enabled := true
+		body.Enabled = &enabled
+		anySet = true
 	}
 	if opts.disabledSet {
-		body["enabled"] = false
+		disabled := false
+		body.Enabled = &disabled
+		anySet = true
 	}
-	return body, nil
+	return body, anySet, nil
 }
 
 func patchEdit(
 	ctx context.Context,
 	backplaneURL, name string,
-	body map[string]any,
-) (*Entry, error) {
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal agent edit request: %w", err)
-	}
-	resp, err := doAuthedRequest(ctx, backplaneURL, "PATCH", buildShowPath(name), raw)
+	body api.AgentDefinitionUpdate,
+) (*api.EditAgentApiV1AgentsNamePatchResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("decode agent edit response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.EditAgentApiV1AgentsNamePatchResponse, error) {
+			return authed.EditAgentApiV1AgentsNamePatchWithResponse(ctx, name, nil, body)
+		},
+		func(r *api.EditAgentApiV1AgentsNamePatchResponse) int { return r.StatusCode() },
+	)
 }

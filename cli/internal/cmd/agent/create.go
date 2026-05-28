@@ -5,31 +5,15 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// createRequest mirrors the backend AgentDefinitionCreate pydantic
-// model. Optional JSON-object fields use pointers / omitempty so an
-// omitted flag is left out of the request body (the backend applies
-// its documented defaults). `Enabled` is a pointer so the CLI can omit
-// it (backend default true) yet still send an explicit false when
-// --disabled is passed.
-type createRequest struct {
-	Name         string         `json:"name"`
-	IdentityRef  string         `json:"identity_ref"`
-	ModelTier    string         `json:"model_tier"`
-	SystemPrompt string         `json:"system_prompt"`
-	Toolset      map[string]any `json:"toolset,omitempty"`
-	TurnBudget   int            `json:"turn_budget"`
-	OutputSchema map[string]any `json:"output_schema,omitempty"`
-	Enabled      *bool          `json:"enabled,omitempty"`
-}
 
 // newCreateCmd returns the `meho agent create` command.
 //
@@ -97,7 +81,7 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&disabled, "disabled", false,
 		"create the definition parked (enabled=false; default is enabled)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry JSON instead of the human summary")
+		"emit raw AgentDefinitionRead JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	_ = cmd.MarkFlagRequired("identity-ref")
@@ -149,43 +133,53 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 
-	req := createRequest{
+	body := api.AgentDefinitionCreate{
 		Name:         opts.Name,
 		IdentityRef:  opts.IdentityRef,
-		ModelTier:    opts.ModelTier,
+		ModelTier:    api.AgentModelTier(opts.ModelTier),
 		SystemPrompt: opts.SystemPrompt,
-		Toolset:      toolset,
 		TurnBudget:   opts.TurnBudget,
-		OutputSchema: outputSchema,
+	}
+	// Toolset is `*map[string]interface{}` with `omitempty` — leaving it
+	// nil tells the backend to apply its documented default ({}).
+	if toolset != nil {
+		body.Toolset = &toolset
+	}
+	// OutputSchema is `*map[string]interface{}` without `omitempty`, so a
+	// nil pointer round-trips to wire `null`, matching the backend's
+	// "no structured-output schema" semantics.
+	if outputSchema != nil {
+		body.OutputSchema = &outputSchema
 	}
 	if opts.Disabled {
 		disabled := false
-		req.Enabled = &disabled
+		body.Enabled = &disabled
 	}
-	entry, err := postCreate(cmd.Context(), backplaneURL, req)
+	resp, err := postCreate(cmd.Context(), backplaneURL, body)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusCreated {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	entry := resp.JSON201
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "created agent definition %q\n", entry.Name)
-	printEntrySummary(cmd.OutOrStdout(), entry)
+	printDefinitionSummary(cmd.OutOrStdout(), entry)
 	return nil
 }
 
-func postCreate(ctx context.Context, backplaneURL string, req createRequest) (*Entry, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal agent create request: %w", err)
-	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/agents", body)
+func postCreate(ctx context.Context, backplaneURL string, body api.AgentDefinitionCreate) (*api.CreateAgentApiV1AgentsPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode agent create response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.CreateAgentApiV1AgentsPostResponse, error) {
+			return authed.CreateAgentApiV1AgentsPostWithResponse(ctx, nil, body)
+		},
+		func(r *api.CreateAgentApiV1AgentsPostResponse) int { return r.StatusCode() },
+	)
 }

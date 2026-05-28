@@ -8,26 +8,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// RunStatus mirrors the backend AgentRunStatusResponse pydantic model
-// (`backend/src/meho_backplane/api/v1/agent_runs.py`). Output / Error are
-// populated only once the run reaches a terminal state.
-type RunStatus struct {
-	RunID    string         `json:"run_id"`
-	Status   string         `json:"status"`
-	Turns    int            `json:"turns"`
-	Provider *string        `json:"provider"`
-	Model    *string        `json:"model"`
-	Output   map[string]any `json:"output"`
-	Error    *string        `json:"error"`
-}
 
 // newRunStatusCmd returns the `meho agent run-status` command.
 //
@@ -61,7 +50,7 @@ func newRunStatusCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit the raw status JSON instead of the human summary")
+		"emit the raw AgentRunStatusResponse JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -78,46 +67,53 @@ func runRunStatus(cmd *cobra.Command, opts runStatusOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("run-status requires a non-empty <handle> argument"), opts.JSONOut)
 	}
+	// The generated client takes the handle as a uuid.UUID (the OpenAPI
+	// spec marks the path param as format=uuid), so parse the operator's
+	// string argument once at the verb edge and surface a clean
+	// CLI-side error before the request is built.
+	handle, err := uuid.Parse(opts.Handle)
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("invalid <handle>: %v", err)), opts.JSONOut)
+	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	status, err := getRunStatus(cmd.Context(), backplaneURL, opts.Handle)
+	resp, err := getRunStatus(cmd.Context(), backplaneURL, handle)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), status)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printRunStatus(cmd.OutOrStdout(), status)
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printRunStatus(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-// buildRunStatusPath assembles the GET path. Exposed for unit tests so URL
-// encoding of the handle stays covered.
-func buildRunStatusPath(handle string) string {
-	return "/api/v1/agents/runs/" + url.PathEscape(handle)
-}
-
-func getRunStatus(ctx context.Context, backplaneURL, handle string) (*RunStatus, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildRunStatusPath(handle), nil)
+func getRunStatus(ctx context.Context, backplaneURL string, handle uuid.UUID) (*api.GetRunStatusApiV1AgentsRunsHandleGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out RunStatus
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode agent run-status response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.GetRunStatusApiV1AgentsRunsHandleGetResponse, error) {
+			return authed.GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx, handle, nil)
+		},
+		func(r *api.GetRunStatusApiV1AgentsRunsHandleGetResponse) int { return r.StatusCode() },
+	)
 }
 
 // printRunStatus renders a run status as a key-value summary.
-func printRunStatus(w io.Writer, s *RunStatus) {
+func printRunStatus(w io.Writer, s *api.AgentRunStatusResponse) {
 	if s == nil {
 		return
 	}
-	fmt.Fprintf(w, "%-16s %s\n", "run_id:", s.RunID)
-	fmt.Fprintf(w, "%-16s %s\n", "status:", s.Status)
+	fmt.Fprintf(w, "%-16s %s\n", "run_id:", s.RunId.String())
+	fmt.Fprintf(w, "%-16s %s\n", "status:", string(s.Status))
 	fmt.Fprintf(w, "%-16s %d\n", "turns:", s.Turns)
 	if s.Provider != nil {
 		fmt.Fprintf(w, "%-16s %s\n", "provider:", *s.Provider)
@@ -129,7 +125,7 @@ func printRunStatus(w io.Writer, s *RunStatus) {
 		fmt.Fprintf(w, "%-16s %s\n", "error:", *s.Error)
 	}
 	if s.Output != nil {
-		if encoded, err := json.Marshal(s.Output); err == nil {
+		if encoded, err := json.Marshal(*s.Output); err == nil {
 			fmt.Fprintf(w, "%-16s %s\n", "output:", string(encoded))
 		}
 	}

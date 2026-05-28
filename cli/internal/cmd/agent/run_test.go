@@ -10,15 +10,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // --- run ---
-
-func TestBuildRunPathEscapes(t *testing.T) {
-	if got := buildRunPath("vm.inventory-bot"); got != "/api/v1/agents/vm.inventory-bot/run" {
-		t.Fatalf("buildRunPath: got %q", got)
-	}
-}
 
 func TestRunSyncHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
@@ -29,12 +27,21 @@ func TestRunSyncHappyPath(t *testing.T) {
 		if r.Header.Get("Authorization") == "" {
 			t.Errorf("missing Authorization header")
 		}
-		var body RunRequest
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		// Assert the typed request body decodes into the generated
+		// AgentRunRequest shape, with the operator's --input on the
+		// wire and the --async flag absent (defaults to false).
+		var body api.AgentRunRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
 		if body.Input != "what happened?" {
 			t.Errorf("unexpected input: %q", body.Input)
 		}
-		_ = json.NewEncoder(w).Encode(RunResult{
+		if body.Async != nil && *body.Async {
+			t.Errorf("expected async=false on the wire for sync run")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(runResponse{
 			RunID:  "11111111-1111-1111-1111-111111111111",
 			Status: "succeeded",
 			Output: map[string]any{"text": "triaged: ok"},
@@ -59,13 +66,14 @@ func TestRunSyncHappyPath(t *testing.T) {
 func TestRunAsyncPrintsHandleHint(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/agents/triage/run", func(w http.ResponseWriter, r *http.Request) {
-		var body RunRequest
+		var body api.AgentRunRequest
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if !body.Async {
+		if body.Async == nil || !*body.Async {
 			t.Errorf("expected async=true on the wire")
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(RunResult{
+		_ = json.NewEncoder(w).Encode(runResponse{
 			RunID:  "22222222-2222-2222-2222-222222222222",
 			Status: "running",
 		})
@@ -97,25 +105,32 @@ func TestRunRequiresInput(t *testing.T) {
 
 // --- run-status ---
 
-func TestBuildRunStatusPathEscapes(t *testing.T) {
-	got := buildRunStatusPath("11111111-1111-1111-1111-111111111111")
-	if got != "/api/v1/agents/runs/11111111-1111-1111-1111-111111111111" {
-		t.Fatalf("buildRunStatusPath: got %q", got)
+func TestRunStatusRejectsInvalidUUID(t *testing.T) {
+	cmd, _, stderr := newTestCmd(t)
+	err := runRunStatus(cmd, runStatusOptions{Handle: "abc", BackplaneOverride: "http://x"})
+	if err == nil {
+		t.Fatalf("expected error for non-UUID handle")
+	}
+	if !strings.Contains(stderr.String(), "invalid <handle>") {
+		t.Errorf("stderr missing parse-error hint; got %q", stderr.String())
 	}
 }
 
 func TestRunStatusHappyPath(t *testing.T) {
+	handle := "11111111-1111-1111-1111-111111111111"
 	provider := "anthropic"
 	model := "claude-sonnet-4-6"
+	output := map[string]any{"text": "done"}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/agents/runs/abc", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(RunStatus{
-			RunID:    "abc",
-			Status:   "succeeded",
+	mux.HandleFunc("/api/v1/agents/runs/"+handle, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.AgentRunStatusResponse{
+			RunId:    uuid.MustParse(handle),
+			Status:   api.AgentRunStatusSucceeded,
 			Turns:    2,
 			Provider: &provider,
 			Model:    &model,
-			Output:   map[string]any{"text": "done"},
+			Output:   &output,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -123,7 +138,7 @@ func TestRunStatusHappyPath(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	cmd, stdout, stderr := newTestCmd(t)
-	if err := runRunStatus(cmd, runStatusOptions{Handle: "abc", BackplaneOverride: srv.URL}); err != nil {
+	if err := runRunStatus(cmd, runStatusOptions{Handle: handle, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runRunStatus: %v; stderr=%s", err, stderr.String())
 	}
 	for _, want := range []string{"succeeded", "anthropic", "done"} {
@@ -134,8 +149,9 @@ func TestRunStatusHappyPath(t *testing.T) {
 }
 
 func TestRunStatusNotFoundRendersError(t *testing.T) {
+	handle := "33333333-3333-3333-3333-333333333333"
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/agents/runs/missing", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/agents/runs/"+handle, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]any{"detail": "agent_run_not_found"})
 	})
@@ -144,7 +160,7 @@ func TestRunStatusNotFoundRendersError(t *testing.T) {
 	seedXDGAndToken(t, srv.URL)
 
 	cmd, _, stderr := newTestCmd(t)
-	err := runRunStatus(cmd, runStatusOptions{Handle: "missing", BackplaneOverride: srv.URL})
+	err := runRunStatus(cmd, runStatusOptions{Handle: handle, BackplaneOverride: srv.URL})
 	if err == nil {
 		t.Fatalf("expected error on 404")
 	}
@@ -155,15 +171,15 @@ func TestRunStatusNotFoundRendersError(t *testing.T) {
 
 // --- run-events (SSE) ---
 
-func TestBuildRunEventsPathEscapes(t *testing.T) {
-	if got := buildRunEventsPath("vm.bot"); got != "/api/v1/agents/vm.bot/run/events" {
-		t.Fatalf("buildRunEventsPath: got %q", got)
-	}
-}
-
 func TestRunEventsStreamsFrames(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/agents/triage/run/events", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/agents/triage/run/events", func(w http.ResponseWriter, r *http.Request) {
+		// Verify the SSE-specific Accept override the verb sets via
+		// the per-call RequestEditorFn so the backend's negotiation
+		// reads the right content-type intent.
+		if got := r.Header.Get("Accept"); got != "text/event-stream" {
+			t.Errorf("Accept header: got %q; want text/event-stream", got)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "event: turn\ndata: {\"run_id\":\"r1\"}\n\n")
@@ -195,5 +211,41 @@ func TestPrintSSEEventJSON(t *testing.T) {
 	printSSEEvent(&sb, "tool_call", `{"tool_name":"call_operation"}`, true)
 	if !strings.Contains(sb.String(), `"event":"tool_call"`) {
 		t.Errorf("json event missing merged event kind; got %q", sb.String())
+	}
+}
+
+// TestRunEvents403SingleErrorLine — regression for B1 on #1277. A non-2xx
+// SSE handshake is rendered by streamRunEvents via renderHTTPStatus, which
+// returns an already-rendered *silentError. runRunEvents must NOT re-route
+// that error through renderRequestError (which would fall through to
+// output.Unreachable and emit a second `meho:` stderr line — a direct
+// regression of AC #6 "byte-identical to main output" for the 401/403/
+// 404/422 paths on this streaming verb).
+func TestRunEvents403SingleErrorLine(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/triage/run/events", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"detail":"Insufficient role: tenant_admin required"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newTestCmd(t)
+	err := runRunEvents(cmd, runEventsOptions{
+		Name: "triage", Input: "go", BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected error on 403")
+	}
+	got := stderr.String()
+	if c := strings.Count(got, "meho:"); c != 1 {
+		t.Errorf("expected exactly one 'meho:' stderr line, got %d: %q", c, got)
+	}
+	if !strings.Contains(got, "insufficient_role") {
+		t.Errorf("expected insufficient_role category in stderr; got %q", got)
+	}
+	if strings.Contains(got, "unreachable") {
+		t.Errorf("403 must not surface as 'unreachable' (B1 regression); got %q", got)
 	}
 }

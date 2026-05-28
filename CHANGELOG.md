@@ -90,10 +90,56 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-28
+
+**MVP7 — consolidated post-v0.7 release.** v0.8.0 collapses what
+were originally four separate milestones (v0.8 agent-runtime
+hardening, v0.9 operator UI, v0.10 audit replay, v0.11 Holodeck)
+into one cut, since every line item landed on `main` against the
+v0.7 tag without an intermediate release. What's new in the
+release window:
+
+- **G11.5 multi-provider seam complete** — per-tenant
+  `AgentTier → Model` resolver (T1) routes the three logical agent
+  tiers (`triage` / `investigate` / `summarize`) to per-tenant
+  Anthropic / OpenAI-compatible (T3 OpenAI + vLLM + Ollama) / AWS
+  Bedrock (T2) / VCF Private AI Foundation (T4) backends. T5
+  per-identity token budgets + T6 pre-execution budget gate close
+  the cost kill-switch leg.
+- **G11.6 reference-pattern wave** — R1 tiered triage, R2 operator
+  approval gate, R3 closed-loop KB write-back, R4 local-Claude
+  cheap-tier triage. All four runnable under `examples/` with CI.
+- **G3.11 github-rest connector** — first GitHub REST surface under
+  Goal #214: typed connector skeleton (App + PAT auth), curated
+  `gh/v3` catalog entry, the first L1 composite
+  (`gh.composite.pr_status_summary`), `requires_approval=true` on the
+  four destructive write ops, OpenAPI parser support for
+  `#/components/responses/*` + `requestBodies/*` refs to ingest the
+  GitHub spec cleanly, and an operator on-ramp runbook.
+- **G4.4 retrieval enhancements** — `retrieve` accepts
+  `metadata_filters` (JSONB containment) and `search_memory` pushes
+  RBAC into the substrate metadata_filters rather than re-filtering
+  results after the fact.
+- **G0.15 v0.7.0 closed-loop dogfood hardening** — ten signals from
+  `claude-rdc-hetzner-dc#753` closed: BFF audit-thread (every
+  `/ui/*` GET now writes an `audit_log` row), MCP `Mcp-Session-Id`
+  issued on `initialize`, probe route fingerprint_failed 500 shape,
+  HTML-portal upstream 422 rejection, MCP audit-write column
+  hoisting, `/ready` UI-surface enumeration, target version editable
+  + wildcard fan-out, JSONFlux handle envelope, UI tenant chip BFF
+  wire, UI connectors detail-page Re-probe/PATCH/DELETE distinction.
+- **G0.11 substrate hardening** — adopt GitHub merge-queue trigger,
+  UUID-audit drift-guard, heavy-pool CI docs.
+- **G0.14-T12 K8s topology populator** — first `discover_topology`
+  override; closes the v0.6.0 release-body honesty callout.
+
+No breaking changes. The v0.6.0-announced `add_to_memory` `content`
+shim continues; v0.9 will land the removal.
+
 ### Added
 
 - **BFF audit-thread — every ``/ui/*`` GET writes an audit row
-  (G0.15-T7 #1216).** Closes the governance product-completeness gap
+  (G0.15-T7 #1216 / #1240).** Closes the governance product-completeness gap
   ``claude-rdc-hetzner-dc#753`` surfaced in the v0.7.0 closed-loop
   dogfood: an operator browsing five UI surfaces generated **zero**
   ``audit_log`` rows under their ``principal_sub``. Root cause: the
@@ -147,7 +193,7 @@ connector-related release-notes line.
   deployer doc at `docs/cross-repo/vcf-paif-deployment.md`. Tenant
   policy persistence + the `AgentModelTier` ↔ `AgentTier` enum
   unification remain the M1 follow-up — the `TODO(G11.5-T2)`
-  marker stays. (#1078)
+  marker stays. (#1078 / #1208)
 - **OpenAPI parser inlines `#/components/responses/*` and
   `#/components/requestBodies/*` refs (G3.11-T7 #1241).** Unblocks
   the GitHub REST spec's live ingest: the upstream spec at
@@ -166,7 +212,7 @@ connector-related release-notes line.
   examples) so future gaps stay diagnosable. The xfail mark on
   `tests/integration/test_operations_ingest_github.py` (G3.11-T3
   #1223) was removed; the test runs cleanly under
-  `MEHO_GH_INGEST_LIVE=1`. (#1241)
+  `MEHO_GH_INGEST_LIVE=1`. (#1241 / #1248)
 - **`gh/v3` catalog entry — GitHub REST API on-ramp for L2 ingest
   (G3.11-T3 #1223).** Adds `gh/v3` to the curated connector-spec
   catalog with `impl_id: gh-rest` and `requires_connector_class:
@@ -182,7 +228,7 @@ connector-related release-notes line.
   via `meho operation review`. Live integration test guarded by
   `MEHO_GH_INGEST_LIVE=1` per AC; the operator runbook in
   `docs/cross-repo/github-connector.md` (G3.11-T6) carries the
-  end-to-end recipe.
+  end-to-end recipe. (#1223 / #1228)
 - **`KubernetesConnector.discover_topology` populator — closes v0.6.0
   signal-13 amendment promise (G0.14-T12 #1201).** First shipped
   override of `Connector.discover_topology` against the K8s connector
@@ -211,7 +257,7 @@ connector-related release-notes line.
   `claude-rdc-hetzner-dc#697` signal 13
   (`topology-refresh-no-populator-for-k8s`) and the v0.6.0 GitHub
   release body's "topology populators land in v0.7" honesty callout.
-  (#1201)
+  (#1201 / #1203)
 
 - **Agent runtime — AWS Bedrock Converse backend behind the per-tenant
   resolver (G11.5-T2 #1076).** A tenant policy now routes a logical
@@ -242,7 +288,249 @@ connector-related release-notes line.
   does not wire to `definition.tier` — the persisted vocabulary and
   the resolver's `AgentTier` vocabulary stay orthogonal until a
   follow-up reconciles them; the resolver remains exercised via
-  direct programmatic construction in v0.7.x. (#1076)
+  direct programmatic construction in v0.7.x. (#1076 / #1206)
+
+- **G11.5-T1 per-tenant tier → Model resolver** (#1075 / #1192).
+  Introduces `ModelResolver` — a per-tenant policy that maps the
+  three logical `AgentTier` values (`triage` / `investigate` /
+  `summarize`) to a registered backend builder. Backends register
+  by `id` against the resolver and carry capability flags
+  (`tool_format`, `supports_prompt_cache`, `is_saas_egress`,
+  `openai_supports_strict_tool_definition`, ...). T2 (Bedrock), T3
+  (OpenAI-compat), T4 (PAIF) all plug in behind this seam; the
+  resolver itself is provider-agnostic. Tenant policy persistence
+  + the `AgentDefinition.model_tier` ↔ `AgentTier` enum
+  reconciliation remain a follow-up; the resolver is currently
+  exercised via programmatic construction.
+
+- **G11.5-T3 OpenAI-compatible backend (OpenAI / vLLM / Ollama)**
+  (#1077 / #1204). Adds `openai_backend_builder()` constructing
+  `pydantic_ai.models.openai.OpenAIChatModel` against
+  `OpenAIProvider`. Default registration lands under the id
+  `openai-gpt` with `is_saas_egress=True` (public OpenAI); air-gapped
+  vLLM or local Ollama deploys register a sibling id with
+  `is_saas_egress=False`. Powers the T4 VCF Private AI Foundation
+  bullet above — PAIF reuses this wire format under a fixed
+  OpenAI-compatibility sub-path. The `[openai]` pydantic-ai-slim
+  extra is now pinned; the SDK stays lazy-imported.
+
+- **G11.5-T5 per-identity token budget + per-op cost source**
+  (#1194). Establishes the bookkeeping primitives behind the cost
+  kill switch. Per-identity (per-agent or per-operator) budgets are
+  persisted; every model invocation deducts the operation's reported
+  cost from the current bucket. Cost source is the agent run's
+  upstream provider response — there is no hand-tuning. Budgets are
+  scoped to the agent or operator identity, not the tenant, so a
+  runaway tier-3 agent cannot bleed a tenant's pooled budget.
+
+- **G11.5-T6 pre-execution budget gate + tier degradation + kill
+  switch** (#1207). The budget-gate decision runs **before** the
+  agent run dispatches: if the next call's projected cost exceeds
+  the remaining budget, the run either degrades to a cheaper tier
+  (`investigate` → `triage`, `summarize` → `triage`) or kills the
+  run (`triage` → terminate). The degradation policy is per-identity.
+  Operators see the gate decision on the agent_session audit row.
+
+- **G11.6-T1 R1 tiered-triage reference sample** (#1247). First
+  runnable agent pattern under `examples/r1-tiered-triage/`. Demo
+  walks a noisy `kubectl get events`-style signal stream through a
+  cheap-tier classifier, escalates flagged items to a deep-tier
+  investigator, and writes the investigator's structured findings to
+  KB via `add_to_knowledge`. The sample wires through the live agent
+  runtime (G11.1), the budget gate (G11.5-T6), the model resolver
+  (G11.5-T1), and the broadcast feed (G6.1) — every G11 primitive
+  exercised end-to-end. Documented in
+  `docs/codebase/examples-r1-tiered-triage.md`.
+
+- **G11.6-T2 R2 operator-approval-gate reference** (#1243).
+  Companion to R1 demonstrating the `requires_approval=true` flow:
+  agent dispatches a write op against a target with an approval
+  gate, the run parks at the `approval.requested` broadcast event,
+  an operator approves via CLI/MCP/REST or the UI, the run resumes
+  on the `approval.decided` broadcast event. Sample at
+  `examples/r2-approval-gate/`; guide at
+  `examples/r2-approval-gate/README.md`. No new MEHO surface —
+  composition over the G11.2 + G11.4 primitives.
+
+- **G11.6-T3 R3 closed-loop KB write-back sample** (#1245).
+  Demonstrates an agent reading a tenant convention via
+  `search_knowledge`, detecting that the convention is stale against
+  observed reality (e.g. a target list that drifted), and writing a
+  corrected entry back through `add_to_knowledge` — a closed loop
+  where the agent's reasoning improves the same KB it reads. CI
+  exercises the loop against an in-process FastAPI app; the guide at
+  `docs/codebase/examples-kb-writeback.md` walks the tenant-isolation
+  + audit-trail story.
+
+- **G11.6-T4 R4 local-Claude-as-triage + hosted cheap-tier pair**
+  (#1244). Captures the "local Claude doing first-pass triage,
+  hosted cheap tier doing the deep investigation" pattern — the
+  inverse of R1's "cheap cloud tier triages, deep cloud tier
+  investigates." Useful for tenants with strong egress posture: the
+  triage step runs entirely on the operator's workstation against a
+  local Claude (no tenant data leaves the operator); deep
+  investigation goes to a hosted cheap tier. Sample +
+  end-to-end docs round out the four-pattern G11.6 set.
+
+- **G3.11-T1 GitHubRestConnector skeleton (App + PAT auth)**
+  (#1221 / #1231). First GitHub typed connector. Registers
+  `GitHubRestConnector` with `impl_id=gh-rest` against the curated
+  catalog entry from T3. Two auth models supported: long-lived
+  classic PATs (operator-context, for low-blast-radius read ops)
+  and GitHub App installation tokens (org-context, for the
+  destructive write surface gated by T5's `requires_approval`).
+  Connector class declares the four credential families
+  (`gh_pat_*` / `gh_app_*`) the credential broker reads.
+
+- **G3.11-T2 GitHub App credential operator runbook** (#1227).
+  Step-by-step on registering a GitHub App against an org,
+  installing it onto target repos, and storing the App's private
+  key + installation id in Vault under the credential broker's
+  G3.9 layout. Doc at `docs/cross-repo/github-app-credential.md`.
+
+- **G3.11-T4 `gh.composite.pr_status_summary` — first L1
+  composite** (#1237). Composes a single agent-facing op out of
+  `pulls.get` + `repos.get-commit-status` + `pulls.list-reviews` +
+  `actions.list-workflow-runs-for-pr` — the "is this PR mergeable?"
+  question that no single REST call answers. Mirrors the
+  composite-recursion pattern from G0.6-T7 #398. First test of the
+  pattern against a third-party connector outside vSphere.
+
+- **G3.11-T5 `requires_approval=true` on 4 GitHub write ops**
+  (#1236). Gates the four destructive writes — `repos.merge-pr`,
+  `repos.delete-branch`, `issues.delete-comment`,
+  `actions.cancel-workflow-run` — behind the G11.2 approval queue.
+  Agents calling these ops park until an operator approves; ungated
+  read ops dispatch directly. Brings the GitHub surface in line with
+  the existing approval discipline on vSphere/k8s writes.
+
+- **G3.11-T6 `docs/cross-repo/github-connector.md` operator
+  on-ramp runbook** (#1235). First-day recipe for an operator
+  enabling the `gh-rest` connector against a target — App vs PAT
+  decision tree, credential layout, `meho connector ingest --catalog
+  gh/v3` walkthrough, group-by-group enable order (`pulls` →
+  `issues` → `actions` → `repos`), the four `requires_approval`
+  ops to expect at first dispatch.
+
+- **G4.4-T1 `retrieve` honours `metadata_filters` (JSONB containment)**
+  (#1177 / #1246). The `retrieve` op now accepts a
+  `metadata_filters` parameter forwarding through to the substrate's
+  pgvector + JSONB containment filter (`metadata @> $filters`).
+  Agents can scope retrieval to a target product / connector / kind
+  without a post-filter pass at the boundary — the substrate does the
+  filtering at index time. Backwards-compatible: omit the parameter
+  and behaviour is unchanged.
+
+- **G4.4-T2 `search_memory` pushes RBAC into substrate
+  metadata_filters** (#1179 / #1256). Migrates the
+  `search_memory` RBAC enforcement from a post-query filter on
+  results to a substrate-side metadata_filter on the
+  `pgvector_memory` index. Same effective security boundary — only
+  rows the operator/agent may see come back — but the cost stays
+  flat at scale instead of growing with the unfiltered candidate
+  set. Same call as the substrate-minimalism principle: smart agent,
+  dumb substrate, no DSL.
+
+- **G10.2-T2 KB upload UI — drag-and-drop + bulk + per-file
+  progress + `tenant_admin` RBAC** (#1140). The operator UI's KB
+  surface gains a drag-and-drop upload zone backed by the existing
+  `add_to_knowledge` REST surface, with per-file progress, bulk
+  Markdown ingest, and `tenant_admin`-only access. Closes the G10.2
+  Initiative by completing the KB write surface alongside the
+  read/edit surface that shipped in v0.7.
+
+- **G0.11 — adopt GitHub merge queue (`merge_group` trigger +
+  cancel-in-progress guard)** (#769 / #1107). CI workflows now also
+  trigger on `merge_group`, so the merge queue (when enabled on a
+  PR) re-runs the full test set against the queued merge commit
+  before integration. `concurrency.cancel-in-progress: true` on the
+  guard prevents stale runs from racing. Lays the groundwork for
+  enabling required-merge-queue on `evoila/meho` `main`.
+
+- **G0.11 — UUID audit + drift-guard for `str(uuid)` vs
+  `value.hex`** (#1119). Codifies the convention that audit-log
+  IDs and request-context UUIDs use the canonical
+  `str(uuid.UUID(...))` form (with dashes), not `uuid.UUID(...).hex`
+  (no dashes). A migration + CI drift-guard catch regressions where
+  a new audit-row writer accidentally emits the dashless form,
+  which would silently fail audit-replay's recursive-CTE
+  traversal.
+
+- **G0.14-T13 — MCP `initialize` surfaces protocol-version
+  mismatch as a structured 400** (#1205). When a client sends an
+  unsupported MCP protocol version in `initialize`, the server now
+  responds with a structured 400 (`code="protocol_version_mismatch"`,
+  `supported`, `requested`) instead of a silent fall-through to the
+  default version. Closes signal 15 from the v0.7.0 closed-loop
+  dogfood — Claude Code clients hitting a stale server saw a
+  half-broken session with no diagnostic.
+
+- **G0.15-T2 — Reject HTML-portal upstreams with structured 422**
+  (#1230). The OpenAPI ingest verb now detects HTML responses from
+  the upstream spec URL and emits a structured 422 with the upstream
+  content-type and first 256 bytes, rather than a confusing JSON
+  decode error. Closes signal sub-B from
+  `claude-rdc-hetzner-dc#753` — an operator pointing the ingest at
+  a portal URL (instead of the raw spec) now sees a useful diagnostic.
+
+- **G0.15-T3 — MCP audit-write column hoisting (findings 1+3+5)**
+  (#1229). Lifts three MCP audit fields from the JSON payload into
+  typed columns: `mcp_protocol_version`, `mcp_client_name`,
+  `mcp_session_id`. Query-by-MCP-client is now indexable. Closes
+  three sub-signals at once from the closed-loop dogfood.
+
+- **G0.15-T5 — `/ready` `ui_surface` enumerates
+  `UI_SESSION_ENCRYPTION_KEY` + doc-consistency CI gate** (#1232).
+  The features block on `/ready` (added in v0.7) now lists the
+  `UI_SESSION_ENCRYPTION_KEY` requirement on the `ui_surface`
+  entry. A CI gate keeps `/ready`'s reported feature set in lockstep
+  with the `docs/configuration.md` configuration matrix — a new
+  required env var on a surface forces both updates.
+
+- **G0.15-T6 — Target version editable on
+  `TargetCreate`/`TargetUpdate` + wildcard fan-out across typed
+  connectors** (#1234). The `version` field on a target row is now
+  editable post-create; the resolver applies the v0.6.0
+  versioned-beats-wildcard rule across every typed connector
+  uniformly (not just vmware-rest). Closes the v0.7.0 dogfood signal
+  where bumping a k8s target's `version` from `1.29` to `1.30`
+  silently kept dispatching the old version.
+
+- **G0.15-T8 — JSONFlux handle envelope adds `fetch_more` + audit-row
+  handle metadata** (#1250). A JSONFlux handle returned from a
+  large-payload op now carries a `fetch_more(...)` cursor in the
+  envelope, and the corresponding `audit_log` row records the
+  handle id + size + retention floor. Operators querying audit can
+  see the truncated payload's full source without resorting to
+  re-running the op. Closes the v0.7.0 dogfood gap where audit-replay
+  on JSONFlux ops was opaque about what got reduced away.
+
+- **G0.15-T9 — UI tenant chip wires to the BFF session, drops
+  "(sign in to choose)"** (#1238). The operator UI's tenant chip
+  now reads from the BFF-issued session cookie, so the displayed
+  tenant matches the one the operator's audit rows land under.
+  Closes a confusing v0.7.0 dogfood finding where the chip showed
+  a tenant the operator wasn't actually scoped to.
+
+- **G0.15-T10 — Connectors detail page distinguishes Re-probe vs
+  PATCH vs DELETE + adds Targets taxonomy** (#1239). The
+  `/ui/connectors/<name>` detail page surfaces the three lifecycle
+  ops as separate buttons with distinct semantics (`Re-probe`
+  re-runs the `about` probe and updates connector metadata; `PATCH`
+  edits the connector row; `Delete` removes the connector and its
+  targets). Adds a Targets taxonomy with per-target product /
+  version / status display.
+
+### Changed
+
+- **Reconcile `gh-rest` catalog/registry version drift** (G3.11-T8 #1249).
+  The connector-spec catalog's `version` field is now treated as
+  the canonical source for the connector's `impl_id` registration —
+  a registry entry whose version doesn't match the catalog gets a
+  validator failure at startup rather than silently dispatching
+  against a drifted catalog row. Mirrors the discipline from
+  vmware-rest where `vmware-rest-9.0` is one impl_id, one catalog
+  entry, one registry binding.
 
 ### Fixed
 
@@ -257,7 +545,45 @@ connector-related release-notes line.
   `agent_session_id`, lighting up the G8.2 audit-replay
   `query_audit shape=tree agent_session_id=<id>` flow that the v0.7.0
   rolling dogfood (`claude-rdc-hetzner-dc#753` finding 2) found inert
-  on the rke2-infra deploy. (G0.15-T4 #1213)
+  on the rke2-infra deploy. (G0.15-T4 #1213 / #1233)
+
+- **G0.15-T1 — `/api/v1/probe/...` route emits a structured
+  `fingerprint_failed` 500** (#1210 / #1255). When the probe verb
+  cannot fingerprint a target (network failure, auth refusal,
+  unexpected schema), the response now carries `code="fingerprint_failed"`
+  + the failing step + the upstream's error envelope, rather than a
+  bare 500 with a JSON decode error. Operators triaging a failed
+  `meho connector probe` get a useful diagnostic.
+
+- **G3.11-T9 — flip `gh.composite.pr_status_summary` integration
+  test to live dispatch** (#1257). The xfail mark on the integration
+  test came off — the composite now dispatches cleanly against the
+  live GitHub API under `MEHO_GH_DISPATCH_LIVE=1`.
+
+- **G3.11-T10 — connector-registry validator asserts the
+  `(product, version, impl_id)` triple** (#1259). The validator that
+  runs at backplane startup now refuses to start if any registered
+  connector class declares a `(product, version, impl_id)` triple
+  that collides with another registration. Closes a v0.7.0 latent
+  bug where two connector classes registering the same product +
+  version with different `impl_id`s would silently shadow each other.
+
+- **G3.11-T11 — Replace `capture_logs` with a monkeypatched
+  `LogCapture` in the orphan-class test** (#1258). The `structlog`
+  upstream renamed `capture_logs` to a context-manager-only helper;
+  the test fixture now monkeypatches `LogCapture` directly, matching
+  the rest of the test suite's pattern. Eliminates flake risk on
+  newer structlog releases.
+
+### Documentation
+
+- **G0.11 — Update `docs/codebase/devops.md` for heavy-pool runners
+  + `-n 6` xdist + PR-mode `--cov`** (#761 / #1110). Captures the
+  CI runner-pool right-sizing the parking-lot decision settled in
+  v0.7.x. The heavy-pool runner profile (4 vCPU / 8 GB) handles the
+  integration-test xdist load; the standard pool stays at 2 vCPU.
+  PR-mode coverage runs with `--cov` but main-branch runs strip it
+  for speed — the doc now spells out which lane uses which.
 
 ## [0.7.0] - 2026-05-27
 

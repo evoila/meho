@@ -175,13 +175,15 @@ func renderRequestError(
 // apiResponseError sentinel renderRequestError extracts via
 // errors.As. Pulled out so the three verbs share one body-truncation
 // pass — the backplane error responses are JSON envelopes well under
-// the 1 MiB ceiling, but the cap matches the previous pre-migration
-// transport's response read.
+// the 1 MiB ceiling, but maxBodyBytes matches the previous
+// pre-migration transport's response read. Name is deliberately not
+// `cap` because the revive `redefines-builtin-id` rule (enabled in
+// cli/.golangci.yml) treats shadowing the `cap` builtin as a lint error.
 func classifyNon2xx(resp *http.Response, body []byte) *apiResponseError {
-	const cap = 1 << 20 // 1 MiB
+	const maxBodyBytes = 1 << 20 // 1 MiB
 	b := body
-	if len(b) > cap {
-		b = b[:cap]
+	if len(b) > maxBodyBytes {
+		b = b[:maxBodyBytes]
 	}
 	return &apiResponseError{
 		StatusCode: resp.StatusCode,

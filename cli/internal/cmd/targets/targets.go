@@ -36,10 +36,22 @@
 //     every connector registered for `<product>` can reach but that
 //     are not yet registered; never auto-creates rows.
 //
-// Each verb wraps one or more backplane routes and renders the
-// response in either a human-readable form or `--json` mode.
-// Authentication piggybacks on the token meho login wrote — same
-// pattern as `meho operation` and `meho retrieval eval`.
+// G0.12-T14 #1272 migrated `list` / `describe` / `probe` / `discover`
+// off hand-rolled HTTP onto the generated `api.ClientWithResponses`
+// surface — verbs now consume `api.TargetSummary`, `api.Target`,
+// `api.FingerprintResult`, `api.CandidateHint`, `api.SkippedConnector`,
+// and `api.TargetsDiscoverResult` directly, kept in lock-step with the
+// FastAPI Pydantic models by the `cli-api-snapshot-freshness` CI gate
+// (Initiative #1118). `import` still owns local `httpDoer` /
+// `doAuthedRequest` plumbing because its sparse-PATCH + extras-spill
+// mapping reads YAML into untyped `map[string]any` bodies (see
+// `import.go`'s `entryToCreateBody` / `entryToUpdateBody`), which the
+// untyped POST/PATCH path serves more cleanly than coercing through
+// `api.TargetCreate` / `api.TargetUpdate`. Each verb wraps one or
+// more backplane routes and renders the response in either a human-
+// readable form or `--json` mode. Authentication piggybacks on the
+// token meho login wrote — same pattern as `meho operation` and
+// `meho retrieval eval`.
 //
 // Write verbs (`create` / `update` / `delete`) are out of scope for
 // v0.2 per the issue body — operators use `import --update` for
@@ -47,12 +59,10 @@
 package targets
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -83,32 +93,86 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
+// errMissingAccessToken is the sentinel newAuthedClient returns when
+// the stored token row exists but its access_token is empty — a
+// credential-state failure that renderRequestError maps to
+// auth_expired with a `meho login` hint. Mirrors the agent / approvals
+// siblings' shape.
+var errMissingAccessToken = errors.New("meho: stored token has no access_token")
+
+// newAuthedClient builds an api.AuthedClient for the supplied backplane
+// URL and verifies a non-empty bearer is loaded. Centralised so every
+// verb's typed-call path goes through the same "stored-token-loaded +
+// non-empty bearer" gate; the caller forwards any returned error to
+// renderRequestError for category mapping.
+func newAuthedClient(ctx context.Context, backplaneURL string) (*api.AuthedClient, error) {
+	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if authed.AccessToken() == "" {
+		return nil, errMissingAccessToken
+	}
+	return authed, nil
+}
+
+// retryOn401 invokes call once, and if the typed response carries a
+// 401, runs a one-shot bearer refresh and re-issues call. Mirrors the
+// behaviour `api.AuthedClient.GetHealth` implements for the
+// /api/v1/health endpoint, generalised so every targets verb runs the
+// same transparent-retry contract.
+//
+// statusOf reads the StatusCode off the typed response envelope (the
+// generated *Response types expose StatusCode() through their embedded
+// *http.Response). A nil response counts as "no retry" — the transport
+// already failed and the caller surfaces err directly.
+func retryOn401[R any](
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*R, error),
+	statusOf func(*R) int,
+) (*R, error) {
+	resp, err := call(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || statusOf(resp) != http.StatusUnauthorized {
+		return resp, nil
+	}
+	if rerr := authed.Refresh(ctx); rerr != nil {
+		return resp, rerr
+	}
+	return call(ctx)
+}
+
 // renderRequestError translates an error from one of the per-verb
 // request helpers into the right output.StructuredError category.
-// Same classification ladder as operation/operation.go but with
-// extra dispatch for the target-specific 4xx envelopes:
+// Same classification ladder as the pre-G0.12 shape but acting on
+// transport-layer errors only — non-2xx HTTP responses now arrive on
+// the typed response envelope and route through renderHTTPStatus
+// instead.
 //
-//   - 401 (refresh failed / no_refresh_token / token_not_found) →
-//     auth_expired with a `meho login <url>` hint.
-//   - 403 (RBAC denial) → insufficient_role; the backend's 403
-//     detail string names the required role.
-//   - 404 with detail.error == "no_target" → unexpected_response,
-//     with the target query and any near-miss names surfaced in
-//     the detail for operator scannability.
-//   - 409 with detail.error == "ambiguous_target" → unexpected,
-//     listing the colliding names so the operator can disambiguate.
-//   - 501 → unexpected with the "no connector registered for
-//     product=X yet" string the operator needs to resolve the gap
-//     (file a Goal G3 connector task).
-//   - Any other 4xx/5xx → unexpected with the raw body.
-//   - Pure transport errors (timeouts, DNS, connection refused) →
-//     unreachable.
+//   - empty stored bearer → auth_expired with a `meho login` hint.
+//   - token never stored (auth.ErrTokenNotFound wrapper) → auth_expired
+//     with a `meho login` hint.
+//   - refresh impossible (errNoRefreshToken) → auth_expired.
+//   - any other error → unreachable (network / transport failure
+//     before the backplane responded).
 func renderRequestError(
 	cmd *cobra.Command,
 	backplaneURL string,
 	err error,
 	jsonOut bool,
 ) error {
+	if errors.Is(err, errMissingAccessToken) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.AuthExpired(fmt.Sprintf(
+				"stored credentials for %s are incomplete; run `meho login %s`",
+				backplaneURL, backplaneURL,
+			)),
+			jsonOut,
+		)
+	}
 	if api.IsTokenNotFound(err) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -127,30 +191,33 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
-		return renderHTTPError(cmd, backplaneURL, he, jsonOut)
-	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,
 	)
 }
 
-// renderHTTPError classifies a non-2xx response into the right
+// renderHTTPStatus classifies a non-2xx response into the right
 // StructuredError category. Lifted into its own helper so per-verb
 // shims (probe wants the 501 message to point at G3) can wrap it.
-func renderHTTPError(
+// Acts on the (statusCode, body) pair the typed-client response
+// envelope already buffered.
+//
+// The 401 case fires when the one-shot refresh inside retryOn401 ran
+// and the re-issued call also came back 401 — the stored credentials
+// are dead and the operator must rerun `meho login`.
+func renderHTTPStatus(
 	cmd *cobra.Command,
 	backplaneURL string,
-	he *httpError,
+	statusCode int,
+	body []byte,
 	jsonOut bool,
 ) error {
-	switch he.StatusCode {
+	bodyStr := strings.TrimSpace(string(body))
+	switch statusCode {
 	case http.StatusUnauthorized:
-		// The 401-refresh-retry path in doAuthedRequest already
-		// exhausted the refresh budget. The token is dead; the
-		// operator must rerun `meho login`.
+		// The retryOn401 path already exhausted the refresh budget.
+		// The token is dead; the operator must rerun `meho login`.
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
 				"backplane rejected the stored token; run `meho login %s`",
@@ -164,7 +231,7 @@ func renderHTTPError(
 		// writes the required role into the detail string; pass it
 		// through verbatim so the operator sees what role they need.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(decodeDetailString(he.Body)),
+			output.InsufficientRole(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotFound:
@@ -174,7 +241,7 @@ func renderHTTPError(
 		// near-miss suggestions when the structured form lands so the
 		// operator sees "did you mean rdc-vcenter? rdc-vsphere?".
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(formatNotFound(he.Body)),
+			output.Unexpected(formatNotFound(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusConflict:
@@ -182,7 +249,7 @@ func renderHTTPError(
 		// colliding names so the operator can re-issue with the
 		// disambiguated name.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(formatAmbiguous(he.Body)),
+			output.Unexpected(formatAmbiguous(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotImplemented:
@@ -190,13 +257,13 @@ func renderHTTPError(
 		// product=<X>". Pointer to G3 connector goals so operators
 		// know where to look for the work.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(formatNoConnector(he.Body)),
+			output.Unexpected(formatNoConnector(bodyStr)),
 			jsonOut,
 		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
 	}
@@ -297,102 +364,6 @@ func parseResolverDetail(body string) ([]resolverMatchOnTheWire, string, bool) {
 		return nil, "", false
 	}
 	return detail.Matches, detail.Query, true
-}
-
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection + one-shot 401-refresh-retry. Returns the
-// response body bytes (already drained) on a 2xx outcome, or an
-// *httpError when the backplane returned a non-2xx, or an error
-// categorised by api.IsTokenNotFound / api.IsNoRefreshToken / generic
-// transport so renderRequestError can pick the right StructuredError
-// category.
-//
-// Mirrors cli/internal/cmd/operation/operation.go::doAuthedRequest.
-// Kept independent of the operation package for the import-cycle
-// reason called out on resolveBackplane.
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
-	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		// One-shot refresh + retry, mirroring api.AuthedClient.GetHealth
-		// and operation/operation.go doAuthedRequest.
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// httpError carries a non-2xx response so per-verb runners can
-// render the right category (404 → not-found with near-misses, 501 →
-// no-connector pointer, etc.). Not an output.StructuredError directly
-// — renderHTTPError decides exit-code class based on status.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// sendRequest is the bottom of the stack: build the http.Request,
-// stamp bearer + content headers, fire it. Split out so the
-// 401-refresh-retry path in doAuthedRequest can reuse the same body
-// bytes without re-marshalling.
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
 }
 
 // pathEscape escapes a single path segment for use inside a backend

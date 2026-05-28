@@ -941,17 +941,24 @@ under G0.3-T6 (#257).
 
 ### HTTP shape + error envelopes
 
-All three verbs route through `api.NewAuthedClient(...)` for bearer
-injection + one-shot 401-refresh-retry, mirroring the
-`meho operation` sibling. The shared `doAuthedRequest` helper in
-`targets.go` builds the request manually (rather than using the
-generated `ClientWithResponses`) because the target verbs need
-fine-grained 4xx classification: 404 carries the resolver's
+`list` / `describe` / `probe` / `discover` route through the
+generated `api.ClientWithResponses` typed client (G0.12-T14 #1272),
+wrapped by `api.AuthedClient` for the bearer + one-shot
+401-refresh-retry. Each verb's runner reads the typed response
+envelope's `JSON200`/`StatusCode()`/`Body` fields directly — no
+hand-written `json.Unmarshal` step — so consumer-side struct drift
+(the G0.12 root cause documented on Initiative #1118) can't recur.
+The targets-specific error-classification ladder lives in
+`renderHTTPStatus` (in `targets.go`): 404 carries the resolver's
 structured `{"error": "no_target", "query": "...", "matches": [...]}`
 envelope, 409 carries `ambiguous_target` with colliding names, and
-501 carries the "no connector registered" detail. The hand-written
-`renderHTTPError` ladder classifies each status into the right
-`output.StructuredError` category.
+501 carries the "no connector registered" detail.
+
+`import` keeps its own untyped HTTP plumbing
+(`doAuthedRequest` / `httpDoer` / local `httpError`) in `import.go`
+because the YAML-to-API mapping emits a sparse `map[string]any`
+body to preserve the partial-PATCH + extras-spill semantics — see
+the comment block on `httpDoer` for the rationale.
 
 ### Exit codes
 

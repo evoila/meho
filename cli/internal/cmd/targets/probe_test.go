@@ -11,23 +11,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
-
-// TestBuildProbePathSimpleName — operator-typical names produce a
-// clean POST path.
-func TestBuildProbePathSimpleName(t *testing.T) {
-	if got := buildProbePath("rdc-vcenter"); got != "/api/v1/targets/rdc-vcenter/probe" {
-		t.Fatalf("probe path: got %q", got)
-	}
-}
-
-// TestBuildProbePathEscapesSpecial — names with slashes / spaces are
-// path-escaped so the URL stays a single segment.
-func TestBuildProbePathEscapesSpecial(t *testing.T) {
-	if got := buildProbePath("a/b c"); got != "/api/v1/targets/a%2Fb%20c/probe" {
-		t.Fatalf("escape: got %q", got)
-	}
-}
 
 // TestRunProbeRejectsEmptyQuery — defensive guard against the
 // argv-empty case that ExactArgs(1) lets through.
@@ -49,16 +36,17 @@ func TestPrintFingerprintRendersAllFields(t *testing.T) {
 	ver := "9.0.0"
 	build := "12345"
 	edition := "enterprise"
-	fp := &FingerprintResult{
+	extras := map[string]interface{}{"datacenter_count": float64(2)}
+	fp := &api.FingerprintResult{
 		Vendor:      "vmware",
 		Product:     "vcenter",
 		Version:     &ver,
 		Build:       &build,
 		Edition:     &edition,
 		Reachable:   true,
-		ProbedAt:    "2026-05-15T08:00:00Z",
+		ProbedAt:    time.Date(2026, 5, 15, 8, 0, 0, 0, time.UTC),
 		ProbeMethod: "rest",
-		Extras:      map[string]any{"datacenter_count": float64(2)},
+		Extras:      &extras,
 	}
 	var buf bytes.Buffer
 	printFingerprint(&buf, fp)
@@ -84,11 +72,11 @@ func TestPrintFingerprintRendersAllFields(t *testing.T) {
 // edition lines should not appear so operators don't see a wall of
 // empty fields when the connector reported only the required set.
 func TestPrintFingerprintOmitsNilOptionals(t *testing.T) {
-	fp := &FingerprintResult{
+	fp := &api.FingerprintResult{
 		Vendor:      "vmware",
 		Product:     "vcenter",
 		Reachable:   true,
-		ProbedAt:    "2026-05-15T08:00:00Z",
+		ProbedAt:    time.Date(2026, 5, 15, 8, 0, 0, 0, time.UTC),
 		ProbeMethod: "rest",
 	}
 	var buf bytes.Buffer
@@ -115,12 +103,12 @@ func TestRunProbeHappyPath(t *testing.T) {
 		}
 		ver := "9.0.0"
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(FingerprintResult{
+		_ = json.NewEncoder(w).Encode(api.FingerprintResult{
 			Vendor:      "vmware",
 			Product:     "vcenter",
 			Version:     &ver,
 			Reachable:   true,
-			ProbedAt:    "2026-05-15T08:00:00Z",
+			ProbedAt:    time.Date(2026, 5, 15, 8, 0, 0, 0, time.UTC),
 			ProbeMethod: "rest",
 		})
 	})
@@ -147,12 +135,12 @@ func TestRunProbeJSONRoundTrip(t *testing.T) {
 	mux.HandleFunc("/api/v1/targets/rdc-vcenter/probe", func(w http.ResponseWriter, _ *http.Request) {
 		ver := "9.0.0"
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(FingerprintResult{
+		_ = json.NewEncoder(w).Encode(api.FingerprintResult{
 			Vendor:      "vmware",
 			Product:     "vcenter",
 			Version:     &ver,
 			Reachable:   true,
-			ProbedAt:    "2026-05-15T08:00:00Z",
+			ProbedAt:    time.Date(2026, 5, 15, 8, 0, 0, 0, time.UTC),
 			ProbeMethod: "rest",
 		})
 	})
@@ -165,7 +153,7 @@ func TestRunProbeJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runProbe --json: %v", err)
 	}
-	var decoded FingerprintResult
+	var decoded api.FingerprintResult
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}

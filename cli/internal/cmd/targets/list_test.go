@@ -15,44 +15,52 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 )
 
-// TestBuildListPathOmitsEmptyFilters — the empty options shape sends
-// no query string so the backplane sees a clean
-// /api/v1/targets.
-func TestBuildListPathOmitsEmptyFilters(t *testing.T) {
-	if got := buildListPath(listOptions{}); got != "/api/v1/targets" {
-		t.Fatalf("empty opts path: got %q; want %q", got, "/api/v1/targets")
+// TestBuildListParamsOmitsEmptyFilters — the empty options shape sends
+// no query string so the backplane sees a clean /api/v1/targets.
+func TestBuildListParamsOmitsEmptyFilters(t *testing.T) {
+	p := buildListParams(listOptions{})
+	if p.Product != nil {
+		t.Errorf("empty Product should marshal as nil pointer; got %q", *p.Product)
+	}
+	if p.Limit != nil {
+		t.Errorf("empty Limit should marshal as nil pointer; got %d", *p.Limit)
+	}
+	if p.Cursor != nil {
+		t.Errorf("empty Cursor should marshal as nil pointer; got %q", *p.Cursor)
 	}
 }
 
-// TestBuildListPathSetsProduct — --product P appends ?product=P.
-func TestBuildListPathSetsProduct(t *testing.T) {
-	got := buildListPath(listOptions{Product: "vcenter"})
-	if got != "/api/v1/targets?product=vcenter" {
-		t.Fatalf("product opt: got %q", got)
+// TestBuildListParamsSetsProduct — --product P populates *Product
+// without leaking the value into other fields.
+func TestBuildListParamsSetsProduct(t *testing.T) {
+	p := buildListParams(listOptions{Product: "vcenter"})
+	if p.Product == nil || *p.Product != "vcenter" {
+		t.Fatalf("Product: got %+v; want pointer to %q", p.Product, "vcenter")
+	}
+	if p.Limit != nil || p.Cursor != nil {
+		t.Errorf("non-Product fields should stay nil; got Limit=%+v Cursor=%+v", p.Limit, p.Cursor)
 	}
 }
 
-// TestBuildListPathSetsAllFilters — every option lands on the wire.
-func TestBuildListPathSetsAllFilters(t *testing.T) {
-	got := buildListPath(listOptions{Product: "k8s", Limit: 25, Cursor: "rke2-meho"})
-	for _, want := range []string{"product=k8s", "limit=25", "cursor=rke2-meho"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("buildListPath missing %q in %q", want, got)
-		}
+// TestBuildListParamsSetsAllFilters — every option lands on the
+// typed params struct.
+func TestBuildListParamsSetsAllFilters(t *testing.T) {
+	p := buildListParams(listOptions{Product: "k8s", Limit: 25, Cursor: "rke2-meho"})
+	if p.Product == nil || *p.Product != "k8s" {
+		t.Errorf("Product: got %+v", p.Product)
 	}
-}
-
-// TestBuildListPathEncodesSpecialChars — operator-typical names with
-// hyphens stay alone; a cursor with a space gets URL-encoded.
-func TestBuildListPathEncodesSpecialChars(t *testing.T) {
-	got := buildListPath(listOptions{Cursor: "weird name"})
-	if !strings.Contains(got, "cursor=weird+name") {
-		t.Errorf("buildListPath did not URL-encode space; got %q", got)
+	if p.Limit == nil || *p.Limit != 25 {
+		t.Errorf("Limit: got %+v", p.Limit)
+	}
+	if p.Cursor == nil || *p.Cursor != "rke2-meho" {
+		t.Errorf("Cursor: got %+v", p.Cursor)
 	}
 }
 
@@ -73,9 +81,9 @@ func TestPrintTargetsTableEmpty(t *testing.T) {
 // TestPrintTargetsTableRendersColumns — happy-path render with two
 // rows: header line + each target's name / aliases / product / host.
 func TestPrintTargetsTableRendersColumns(t *testing.T) {
-	rows := []TargetSummary{
-		{ID: "1", Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
-		{ID: "2", Name: "rke2-meho", Aliases: nil, Product: "k8s", Host: "k.example"},
+	rows := []api.TargetSummary{
+		{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
+		{Id: mustUUID(t, "22222222-2222-2222-2222-222222222222"), Name: "rke2-meho", Aliases: nil, Product: "k8s", Host: "k.example"},
 	}
 	var buf bytes.Buffer
 	printTargetsTable(&buf, rows)
@@ -115,9 +123,8 @@ func TestRunListRejectsNegativeLimit(t *testing.T) {
 }
 
 // TestRunListHappyPath drives runList end-to-end through the auth
-// + transport stack against an httptest server. Mirrors the
-// retrieval / status sibling tests' file-fallback approach to
-// credential injection.
+// + transport stack against an httptest server. Asserts the typed
+// `product` query param round-trips on the wire.
 func TestRunListHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
@@ -128,8 +135,8 @@ func TestRunListHappyPath(t *testing.T) {
 			t.Errorf("missing Authorization header")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]TargetSummary{
-			{ID: "1", Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
+		_ = json.NewEncoder(w).Encode([]api.TargetSummary{
+			{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -155,8 +162,8 @@ func TestRunListJSONHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]TargetSummary{
-			{ID: "deadbeef", Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
+		_ = json.NewEncoder(w).Encode([]api.TargetSummary{
+			{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -170,7 +177,7 @@ func TestRunListJSONHappyPath(t *testing.T) {
 	}
 	// Parse stdout as JSON to confirm the operator sees a structured
 	// envelope, not the table.
-	var decoded []TargetSummary
+	var decoded []api.TargetSummary
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
 	}
@@ -281,4 +288,17 @@ func newRunCmd(t *testing.T) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	t.Cleanup(cancel)
 	cmd.SetContext(ctx)
 	return cmd, &stdout, &stderr
+}
+
+// mustUUID parses a UUID string in a test; fatal on failure. Used to
+// build `api.TargetSummary` / `api.Target` fixtures whose Id /
+// TenantId fields are `openapi_types.UUID` (a type alias for
+// `uuid.UUID`).
+func mustUUID(t *testing.T, s string) uuid.UUID {
+	t.Helper()
+	u, err := uuid.Parse(s)
+	if err != nil {
+		t.Fatalf("uuid.Parse(%q): %v", s, err)
+	}
+	return u
 }

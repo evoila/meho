@@ -5,39 +5,18 @@ package audit
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// auditQueryRequest mirrors the backend `AuditQueryRequest` Pydantic
-// model (`backend/src/meho_backplane/api/v1/audit_models.py`). Every
-// filter field is a pointer (or `omitempty`-tagged primitive) so the
-// CLI emits only the keys the operator actually set — the backend
-// treats absent keys as "no narrowing on this column". `Limit=0`
-// special-cases the unset state because Go's zero-value int collides
-// with the backend's `ge=1` validation otherwise.
-type auditQueryRequest struct {
-	Target         *string `json:"target,omitempty"`
-	Principal      *string `json:"principal,omitempty"`
-	OpID           *string `json:"op_id,omitempty"`
-	OpClass        *string `json:"op_class,omitempty"`
-	ResultStatus   *string `json:"result_status,omitempty"`
-	Since          *string `json:"since,omitempty"`
-	Until          *string `json:"until,omitempty"`
-	AuditID        *string `json:"audit_id,omitempty"`
-	ParentAuditID  *string `json:"parent_audit_id,omitempty"`
-	AgentSessionID *string `json:"agent_session_id,omitempty"`
-	Limit          int     `json:"limit,omitempty"`
-	Cursor         *string `json:"cursor,omitempty"`
-}
 
 // newQueryCmd returns the `meho audit query` command.
 //
@@ -56,7 +35,7 @@ type auditQueryRequest struct {
 //	  [--audit-id ID]              # exact-id lookup
 //	  [--parent-audit-id ID]       # v0.2 substrate rejects (400)
 //	  [--session-id ID]            # narrow to one agent session (UUID)
-//	  [--json]                     # raw RetireChecklistReport JSON
+//	  [--json]                     # raw AuditQueryResult JSON
 //	  [--backplane <url>]          # override the configured backplane
 //
 // Exit codes:
@@ -92,7 +71,7 @@ func newQueryCmd() *cobra.Command {
 			"that accepts a tenant id. --since/--until accept either a " +
 			"duration shorthand (24h / 7d / 30m / 2w) or an ISO-8601 " +
 			"datetime. --cursor pastes the opaque next_cursor from a " +
-			"prior page. --json emits the raw QueryResult so " +
+			"prior page. --json emits the raw AuditQueryResult so " +
 			"operators can pipe into jq.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -142,7 +121,7 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sessionID, "session-id", "",
 		"narrow to one agent session (UUID); the flat companion to `meho audit replay`")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw QueryResult JSON instead of the human table")
+		"emit raw AuditQueryResult JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -173,104 +152,163 @@ func runQuery(cmd *cobra.Command, opts queryOptions) error {
 			opts.JSONOut,
 		)
 	}
-	if opts.SessionID != "" {
-		// The backend declares agent_session_id as a UUID and rejects a
-		// malformed value with 422. Catch it client-side so the operator
-		// sees a clear "not a UUID" message instead of a FastAPI
-		// validation envelope after a round-trip.
-		if _, err := uuid.Parse(strings.TrimSpace(opts.SessionID)); err != nil {
-			return output.RenderError(
-				cmd.ErrOrStderr(),
-				output.Unexpected(fmt.Sprintf(
-					"--session-id must be a valid UUID; %q is not a UUID", opts.SessionID)),
-				opts.JSONOut,
-			)
-		}
+	// UUIDs live in the generated request body as
+	// `*openapi_types.UUID`; parse the operator strings at the verb
+	// edge so the bad-input case is a clean output.Unexpected rather
+	// than a server-side 422 after a round-trip. Empty string means
+	// "filter not set" and stays nil on the wire.
+	body, err := buildAuditQueryRequest(opts)
+	if err != nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(err.Error()),
+			opts.JSONOut,
+		)
 	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := postQuery(cmd.Context(), backplaneURL, opts)
+	client, cerr := newAuthedClient(cmd.Context(), cmd, backplaneURL, opts.JSONOut)
+	if cerr != nil {
+		return cerr
+	}
+	rawBody, result, err := postQuery(cmd.Context(), client, body)
 	if err != nil {
-		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+		return routeRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), result)
+		// Emit the server bytes verbatim so payload integers above
+		// 2^53 survive without rounding through the generated
+		// `map[string]interface{}` decoder. The human-rendered
+		// summary lossily accepts the float64 conversion for the
+		// table/summary view; the --json path is the precision-
+		// preserving contract callers pipe through jq.
+		_, werr := cmd.OutOrStdout().Write(append(rawBody, '\n'))
+		return werr
+	}
+	if result == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("backplane returned 200 OK but no JSON body decoded against AuditQueryResult"),
+			opts.JSONOut,
+		)
 	}
 	printQueryTable(cmd.OutOrStdout(), result)
 	return nil
 }
 
-// buildQueryRequest assembles the JSON body from the per-call
-// options. Each filter field lands on the wire only when the operator
-// set it. Empty strings stay empty (Pydantic's `extra="ignore"`
-// silently drops fields not on the model; the explicit Go-side
-// omission keeps the wire compact and matches the existing CLI
-// pattern in `cli/internal/cmd/retrieval/eval.go`).
-func buildQueryRequest(opts queryOptions) auditQueryRequest {
-	body := auditQueryRequest{}
+// buildAuditQueryRequest assembles the typed `api.AuditQueryRequest`
+// from per-call options. Filter fields land on the wire as nil
+// (omitted-or-null per the field's JSON tag) when the operator
+// didn't set them — the backend's Pydantic model treats absent /
+// null filters as "no narrowing on this column". UUIDs are parsed
+// at the edge so an obviously-malformed value short-circuits before
+// a network round-trip.
+func buildAuditQueryRequest(opts queryOptions) (api.AuditQueryRequest, error) {
+	body := api.AuditQueryRequest{}
 	if opts.Target != "" {
-		body.Target = &opts.Target
+		v := opts.Target
+		body.Target = &v
 	}
 	if opts.Principal != "" {
-		body.Principal = &opts.Principal
+		v := opts.Principal
+		body.Principal = &v
 	}
 	if opts.OpID != "" {
-		body.OpID = &opts.OpID
+		v := opts.OpID
+		body.OpId = &v
 	}
 	if opts.OpClass != "" {
-		body.OpClass = &opts.OpClass
+		v := opts.OpClass
+		body.OpClass = &v
 	}
 	if opts.ResultStatus != "" {
-		body.ResultStatus = &opts.ResultStatus
+		v := opts.ResultStatus
+		body.ResultStatus = &v
 	}
 	if opts.Since != "" {
-		body.Since = &opts.Since
+		v := opts.Since
+		body.Since = &v
 	}
 	if opts.Until != "" {
-		body.Until = &opts.Until
-	}
-	if opts.AuditID != "" {
-		body.AuditID = &opts.AuditID
-	}
-	if opts.ParentAuditID != "" {
-		body.ParentAuditID = &opts.ParentAuditID
-	}
-	if opts.SessionID != "" {
-		body.AgentSessionID = &opts.SessionID
+		v := opts.Until
+		body.Until = &v
 	}
 	if opts.Cursor != "" {
-		body.Cursor = &opts.Cursor
+		v := opts.Cursor
+		body.Cursor = &v
+	}
+	if opts.AuditID != "" {
+		u, perr := uuid.Parse(strings.TrimSpace(opts.AuditID))
+		if perr != nil {
+			return body, fmt.Errorf(
+				"--audit-id must be a valid UUID; %q is not a UUID", opts.AuditID)
+		}
+		uu := openapi_types.UUID(u)
+		body.AuditId = &uu
+	}
+	if opts.ParentAuditID != "" {
+		u, perr := uuid.Parse(strings.TrimSpace(opts.ParentAuditID))
+		if perr != nil {
+			return body, fmt.Errorf(
+				"--parent-audit-id must be a valid UUID; %q is not a UUID", opts.ParentAuditID)
+		}
+		uu := openapi_types.UUID(u)
+		body.ParentAuditId = &uu
+	}
+	if opts.SessionID != "" {
+		u, perr := uuid.Parse(strings.TrimSpace(opts.SessionID))
+		if perr != nil {
+			return body, fmt.Errorf(
+				"--session-id must be a valid UUID; %q is not a UUID", opts.SessionID)
+		}
+		uu := openapi_types.UUID(u)
+		body.AgentSessionId = &uu
 	}
 	if opts.Limit > 0 {
-		body.Limit = opts.Limit
+		l := opts.Limit
+		body.Limit = &l
 	}
-	return body
+	return body, nil
 }
 
-func postQuery(ctx context.Context, backplaneURL string, opts queryOptions) (*QueryResult, error) {
-	body := buildQueryRequest(opts)
-	raw, err := json.Marshal(body)
+// postQuery drives the typed-client `QueryApiV1AuditQueryPost`
+// endpoint with a one-shot 401-retry around the underlying
+// AuthedClient's refresh path (mirrors `AuthedClient.GetHealth`'s
+// pattern in client.go). Non-2xx responses are returned as
+// `*httpResponseError` so the caller can route them through
+// `renderHTTPStatus`; transport-layer errors return verbatim.
+// Returns both the raw response body bytes (for --json verbatim
+// passthrough) and the decoded typed envelope (for the table render).
+func postQuery(
+	ctx context.Context,
+	client *api.AuthedClient,
+	body api.AuditQueryRequest,
+) ([]byte, *api.AuditQueryResult, error) {
+	resp, err := client.QueryApiV1AuditQueryPostWithResponse(ctx, nil, body)
 	if err != nil {
-		return nil, fmt.Errorf("marshal audit query: %w", err)
+		return nil, nil, err
 	}
-	resp, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/audit/query", raw)
-	if err != nil {
-		return nil, err
+	if resp.StatusCode() == 401 {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, nil, rerr
+		}
+		resp, err = client.QueryApiV1AuditQueryPostWithResponse(ctx, nil, body)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
-	var out QueryResult
-	if err := decodeAuditResponse(resp, &out); err != nil {
-		return nil, err
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return nil, nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 	}
-	return &out, nil
+	return resp.Body, resp.JSON200, nil
 }
 
 // printQueryTable renders the audit page as a compact, scannable
 // table. Columns: TIME, PRINCIPAL, TARGET, OP_ID, CLASS, STATUS per
 // the issue body's spec. When `next_cursor` is set, a final NEXT
 // line tells the operator how to paste-paginate.
-func printQueryTable(w io.Writer, r *QueryResult) {
+func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintln(w, "no audit rows matched the filter")
 		return
@@ -283,10 +321,10 @@ func printQueryTable(w io.Writer, r *QueryResult) {
 			target = "-"
 		}
 		fmt.Fprintf(w, "%-22s %-12s %-18s %-26s %-16s %s\n",
-			truncate(row.TS, 22),
+			truncate(formatTS(row.Ts), 22),
 			truncate(row.PrincipalSub, 12),
 			truncate(target, 18),
-			truncate(row.OpID, 26),
+			truncate(row.OpId, 26),
 			truncate(row.OpClass, 16),
 			truncate(row.ResultStatus, 8),
 		)

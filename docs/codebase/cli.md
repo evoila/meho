@@ -119,7 +119,7 @@ cli/
     │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
-    │   │   ├── audit.go          # NewRootCmd + shared HTTP/auth helpers.
+    │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
     │   │   ├── recent.go         # `meho audit recent` — shortcut for `query --since 24h`.
     │   │   ├── show.go           # `meho audit show <audit-id>` (GET /api/v1/audit/show/{id}).

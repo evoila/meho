@@ -10,68 +10,89 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
-// twoLevelReplay returns a small `ReplayResult` with two chronological
-// roots; the first carries one child that itself carries a grandchild.
-// Used by the tree-render and max-depth tests so they share one fixture
-// and the expected line shapes stay in one place.
-func twoLevelReplay() ReplayResult {
-	dur := func(s string) *string { return &s }
-	return ReplayResult{
-		SessionID: "11111111-1111-1111-1111-111111111111",
-		TenantID:  "22222222-2222-2222-2222-222222222222",
-		RowCount:  4,
-		Root: []ReplayNode{
-			{
-				TS:           "2026-05-13T10:00:00Z",
-				OpID:         "vsphere.vm.migrate",
-				ResultStatus: "ok",
-				DurationMS:   dur("120.5"),
-				Depth:        0,
-				Children: []ReplayNode{
-					{
-						TS:           "2026-05-13T10:00:01Z",
-						OpID:         "vsphere.vm.power_off",
-						ResultStatus: "ok",
-						DurationMS:   dur("40"),
-						Depth:        1,
-						Children: []ReplayNode{
-							{
-								TS:           "2026-05-13T10:00:02Z",
-								OpID:         "vsphere.task.wait",
-								ResultStatus: "error",
-								DurationMS:   nil,
-								Depth:        2,
-							},
-						},
-					},
-				},
-			},
-			{
-				TS:           "2026-05-13T10:05:00Z",
-				OpID:         "vsphere.vm.list",
-				ResultStatus: "ok",
-				DurationMS:   dur("8"),
-				Depth:        0,
-			},
-		},
+// twoLevelReplay returns a small `api.AuditReplayResult` with two
+// chronological roots; the first carries one child that itself
+// carries a grandchild. Used by the tree-render and max-depth tests
+// so they share one fixture and the expected line shapes stay in
+// one place.
+func twoLevelReplay(t *testing.T) api.AuditReplayResult {
+	t.Helper()
+	dur120 := "120.5"
+	dur40 := "40"
+	dur8 := "8"
+	grandchild := api.ReplayNode{
+		Id:           mustUUID(t, "44444444-4444-4444-4444-444444444444"),
+		Ts:           mustTS(t, "2026-05-13T10:00:02Z"),
+		PrincipalSub: "damir",
+		Method:       "GET",
+		Path:         "/x/task",
+		StatusCode:   500,
+		OpId:         "vsphere.task.wait",
+		OpClass:      "read",
+		ResultStatus: "error",
+		DurationMs:   nil,
+		Depth:        2,
 	}
-}
-
-// TestBuildReplayPathEscapesSessionID — UUIDs are URL-safe, but the
-// segment is escaped defensively so a typo'd argument can't collapse
-// the path.
-func TestBuildReplayPathEscapesSessionID(t *testing.T) {
-	got := buildReplayPath("11111111-1111-1111-1111-111111111111")
-	want := "/api/v1/audit/sessions/11111111-1111-1111-1111-111111111111/replay"
-	if got != want {
-		t.Errorf("buildReplayPath: got %q; want %q", got, want)
+	grandKids := []api.ReplayNode{grandchild}
+	child := api.ReplayNode{
+		Id:           mustUUID(t, "33333333-3333-3333-3333-333333333333"),
+		Ts:           mustTS(t, "2026-05-13T10:00:01Z"),
+		PrincipalSub: "damir",
+		Method:       "POST",
+		Path:         "/x/power",
+		StatusCode:   200,
+		OpId:         "vsphere.vm.power_off",
+		OpClass:      "write",
+		ResultStatus: "ok",
+		DurationMs:   &dur40,
+		Depth:        1,
+		Children:     &grandKids,
+	}
+	childKids := []api.ReplayNode{child}
+	root1 := api.ReplayNode{
+		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		Ts:           mustTS(t, "2026-05-13T10:00:00Z"),
+		PrincipalSub: "damir",
+		Method:       "POST",
+		Path:         "/x/migrate",
+		StatusCode:   200,
+		OpId:         "vsphere.vm.migrate",
+		OpClass:      "write",
+		ResultStatus: "ok",
+		DurationMs:   &dur120,
+		Depth:        0,
+		Children:     &childKids,
+	}
+	root2 := api.ReplayNode{
+		Id:           mustUUID(t, "22222222-2222-2222-2222-222222222222"),
+		Ts:           mustTS(t, "2026-05-13T10:05:00Z"),
+		PrincipalSub: "damir",
+		Method:       "GET",
+		Path:         "/x/list",
+		StatusCode:   200,
+		OpId:         "vsphere.vm.list",
+		OpClass:      "read",
+		ResultStatus: "ok",
+		DurationMs:   &dur8,
+		Depth:        0,
+	}
+	return api.AuditReplayResult{
+		SessionId: mustUUID(t, "55555555-5555-5555-5555-555555555555"),
+		TenantId:  mustUUID(t, "66666666-6666-6666-6666-666666666666"),
+		RowCount:  4,
+		Root:      []api.ReplayNode{root1, root2},
 	}
 }
 
 // TestRunReplayRejectsNonUUID — AC: a non-UUID <session-id> is
-// rejected client-side with a clear message, before any network call.
+// rejected client-side with a clear message, before any network
+// round-trip. The typed-client path parameter is
+// `openapi_types.UUID`; parsing at the verb edge keeps the bad-
+// input error a clean output.Unexpected.
 func TestRunReplayRejectsNonUUID(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runReplay(cmd, replayOptions{SessionID: "not-a-uuid"})
@@ -103,7 +124,7 @@ func TestRunReplayRejectsNegativeMaxDepth(t *testing.T) {
 // ASCII tree with chronological roots, indented children, and the
 // documented per-line shape `<ts> <op_id> [<status>] (<ms>ms)`.
 func TestRunReplayHappyPathTree(t *testing.T) {
-	fixture := twoLevelReplay()
+	fixture := twoLevelReplay(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/audit/sessions/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -167,7 +188,7 @@ func TestRunReplayHappyPathTree(t *testing.T) {
 // TestRunReplayJSONVerbatim — AC2: --json emits the raw
 // AuditReplayResult JSON; nesting is parseable and matches the tree.
 func TestRunReplayJSONVerbatim(t *testing.T) {
-	fixture := twoLevelReplay()
+	fixture := twoLevelReplay(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/audit/sessions/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -187,7 +208,7 @@ func TestRunReplayJSONVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runReplay --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded ReplayResult
+	var decoded api.AuditReplayResult
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("--json output not parseable: %v\n%s", err, stdout.String())
 	}
@@ -195,12 +216,15 @@ func TestRunReplayJSONVerbatim(t *testing.T) {
 		t.Fatalf("--json root count: got %d; want 2", len(decoded.Root))
 	}
 	// Nesting survives: root[0] → child → grandchild.
-	if len(decoded.Root[0].Children) != 1 ||
-		len(decoded.Root[0].Children[0].Children) != 1 {
+	if decoded.Root[0].Children == nil ||
+		len(*decoded.Root[0].Children) != 1 ||
+		(*decoded.Root[0].Children)[0].Children == nil ||
+		len(*(*decoded.Root[0].Children)[0].Children) != 1 {
 		t.Errorf("--json nesting lost: %+v", decoded.Root[0])
 	}
-	if decoded.Root[0].Children[0].Children[0].OpID != "vsphere.task.wait" {
-		t.Errorf("--json grandchild op_id wrong: %+v", decoded.Root[0].Children[0].Children[0])
+	if (*(*decoded.Root[0].Children)[0].Children)[0].OpId != "vsphere.task.wait" {
+		t.Errorf("--json grandchild op_id wrong: %+v",
+			(*(*decoded.Root[0].Children)[0].Children)[0])
 	}
 	// row_count echoed verbatim.
 	if decoded.RowCount != 4 {
@@ -212,7 +236,7 @@ func TestRunReplayJSONVerbatim(t *testing.T) {
 // rendering below depth 1. The grandchild (depth 2) must be folded
 // into a "more node(s)" marker, not printed as its own line.
 func TestRunReplayMaxDepthTruncates(t *testing.T) {
-	fixture := twoLevelReplay()
+	fixture := twoLevelReplay(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/audit/sessions/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -347,7 +371,7 @@ func TestRunReplay403SurfacesInsufficientRole(t *testing.T) {
 // (covered indirectly above, pinned here directly for the renderer).
 func TestPrintReplayTreeEmpty(t *testing.T) {
 	var buf bytes.Buffer
-	printReplayTree(&buf, &ReplayResult{Root: []ReplayNode{}}, defaultReplayMaxDepth)
+	printReplayTree(&buf, &api.AuditReplayResult{Root: []api.ReplayNode{}}, defaultReplayMaxDepth)
 	if !strings.Contains(buf.String(), "no audit rows in this session") {
 		t.Errorf("empty tree missing helper line: %s", buf.String())
 	}
@@ -356,14 +380,32 @@ func TestPrintReplayTreeEmpty(t *testing.T) {
 // TestFormatReplayNodeNullDuration — a node with a null duration_ms
 // renders `(-ms)` so the column stays present and grep-friendly.
 func TestFormatReplayNodeNullDuration(t *testing.T) {
-	got := formatReplayNode(&ReplayNode{
-		TS:           "2026-05-13T10:00:00Z",
-		OpID:         "x.y",
+	got := formatReplayNode(&api.ReplayNode{
+		Id:           mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+		Ts:           mustTS(t, "2026-05-13T10:00:00Z"),
+		PrincipalSub: "damir",
+		Method:       "GET",
+		Path:         "/x",
+		StatusCode:   200,
+		OpId:         "x.y",
+		OpClass:      "read",
 		ResultStatus: "ok",
-		DurationMS:   nil,
+		DurationMs:   nil,
 	})
 	if !strings.Contains(got, "(-ms)") {
 		t.Errorf("null duration not rendered as dash: %q", got)
+	}
+}
+
+// TestCountDescendantsNilChildren pins the helper's nil-children
+// arm. The generated `ReplayNode.Children` is `*[]ReplayNode`; a
+// nil pointer must round-trip as zero descendants.
+func TestCountDescendantsNilChildren(t *testing.T) {
+	node := &api.ReplayNode{
+		Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"),
+	}
+	if got := countDescendants(node); got != 0 {
+		t.Errorf("nil-children descendants: got %d; want 0", got)
 	}
 }
 

@@ -6,11 +6,10 @@ package audit
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"strconv"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -47,7 +46,7 @@ func newWhoTouchedCmd() *cobra.Command {
 			"24h; pass a different shorthand (7d / 30m / 2w) or an " +
 			"ISO-8601 datetime to widen the window. --limit caps the " +
 			"page size (1..1000, server default 100). --json emits the " +
-			"raw QueryResult.",
+			"raw AuditQueryResult.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -66,7 +65,7 @@ func newWhoTouchedCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0,
 		"max rows (1..1000, server default 100 when omitted)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw QueryResult JSON instead of the human table")
+		"emit raw AuditQueryResult JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -99,48 +98,71 @@ func runWhoTouched(cmd *cobra.Command, opts whoTouchedOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := getWhoTouched(cmd.Context(), backplaneURL, opts)
+	client, cerr := newAuthedClient(cmd.Context(), cmd, backplaneURL, opts.JSONOut)
+	if cerr != nil {
+		return cerr
+	}
+	rawBody, result, err := getWhoTouched(cmd.Context(), client, opts)
 	if err != nil {
-		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+		return routeRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), result)
+		_, werr := cmd.OutOrStdout().Write(append(rawBody, '\n'))
+		return werr
+	}
+	if result == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("backplane returned 200 OK but no JSON body decoded against AuditQueryResult"),
+			opts.JSONOut,
+		)
 	}
 	printQueryTable(cmd.OutOrStdout(), result)
 	return nil
 }
 
-// buildWhoTouchedPath assembles the GET path with query params. Only
-// emits the query params the operator set so the backend's own
-// defaults (since=24h, limit=100) take over otherwise. Exposed for
-// unit tests so the URL encoding of names with special characters
-// stays covered.
-func buildWhoTouchedPath(target string, since string, limit int) string {
-	q := url.Values{}
-	if since != "" {
-		q.Set("since", since)
+// buildWhoTouchedParams assembles the typed-client params struct
+// from the per-call options. The target name passes as the typed
+// path parameter on the call site; only the query-string params
+// `since` / `limit` land on this struct.
+func buildWhoTouchedParams(opts whoTouchedOptions) *api.WhoTouchedApiV1AuditWhoTouchedTargetGetParams {
+	params := &api.WhoTouchedApiV1AuditWhoTouchedTargetGetParams{}
+	if opts.Since != "" {
+		v := opts.Since
+		params.Since = &v
 	}
-	if limit > 0 {
-		q.Set("limit", strconv.Itoa(limit))
+	if opts.Limit > 0 {
+		l := opts.Limit
+		params.Limit = &l
 	}
-	path := "/api/v1/audit/who-touched/" + pathEscape(target)
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func getWhoTouched(ctx context.Context, backplaneURL string, opts whoTouchedOptions) (*QueryResult, error) {
-	raw, err := doAuthedRequest(
-		ctx, backplaneURL, "GET",
-		buildWhoTouchedPath(opts.Target, opts.Since, opts.Limit), nil,
-	)
+// getWhoTouched drives the typed-client
+// `WhoTouchedApiV1AuditWhoTouchedTargetGet` endpoint with the same
+// one-shot 401-retry shape `postQuery` uses. The `target` argument
+// passes as the typed path parameter — the generated request
+// builder URL-encodes the segment.
+func getWhoTouched(
+	ctx context.Context,
+	client *api.AuthedClient,
+	opts whoTouchedOptions,
+) ([]byte, *api.AuditQueryResult, error) {
+	params := buildWhoTouchedParams(opts)
+	resp, err := client.WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse(ctx, opts.Target, params)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var out QueryResult
-	if err := decodeAuditResponse(raw, &out); err != nil {
-		return nil, err
+	if resp.StatusCode() == 401 {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, nil, rerr
+		}
+		resp, err = client.WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse(ctx, opts.Target, params)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
-	return &out, nil
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return nil, nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	return resp.Body, resp.JSON200, nil
 }

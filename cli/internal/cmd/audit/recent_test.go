@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // TestRunRecentBindsSince24h — `meho audit recent` is the shortcut
@@ -68,7 +70,7 @@ func TestRunRecentJSONRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runQuery via recent --json: %v", err)
 	}
-	var decoded QueryResult
+	var decoded api.AuditQueryResult
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}

@@ -165,16 +165,16 @@ cli/
     │   │   ├── forget.go         # `meho forget <scope>/<slug> [--confirm --target --json]` (DELETE /api/v1/memory/{scope}/{slug}).
     │   │   ├── list.go           # `meho list [--scope --tag --slug-pattern --include-expired --limit --json]` (GET /api/v1/memory).
     │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.
-    │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree.
-    │   │   ├── connector.go      # NewRootCmd + shared HTTP/auth helpers.
+    │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree. G0.12-T7 #1265 migrated every verb onto the generated typed client (api.ClientWithResponses via api.AuthedClient + retryOn401); api.CatalogListResponse / api.ConnectorReviewPayload / api.IngestRequest / api.IngestResponse / api.EditGroupBody / api.EditOpBody are the single source of truth, no consumer-side struct duplicates.
+    │   │   ├── connector.go      # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus helpers.
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest).
-    │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors).
+    │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
     │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review).
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
     │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
     │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable`.
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
-    │   │   └── connector_test.go # pure-function + httptest-mocked HTTP contract tests.
+    │   │   └── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
     │   │   ├── operation.go      # NewRootCmd + operationsAPI seam + apiResponseError sentinel + loadParamsFlag (G0.12-T2 #1260).
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.

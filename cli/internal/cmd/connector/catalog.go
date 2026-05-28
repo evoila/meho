@@ -5,39 +5,16 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// CatalogEntry mirrors the backend ConnectorSpecEntry
-// (operations/ingest/catalog.py) as served by
-// GET /api/v1/connectors/catalog (Goal #214 raw-REST ingest on-ramp;
-// #743). Upstream is nil for typed connectors (no ingestable spec) —
-// the `ingest --catalog` path refuses those rather than POSTing an
-// empty specs list. SpecInfoVersion / SHA256 are pointers so the JSON
-// null (empirical, not-yet-smoke-tested) round-trips distinctly from
-// an empty string.
-type CatalogEntry struct {
-	Product                string   `json:"product"`
-	Version                string   `json:"version"`
-	ImplID                 string   `json:"impl_id"`
-	RequiresConnectorClass string   `json:"requires_connector_class"`
-	Upstream               []string `json:"upstream"`
-	SpecInfoVersion        *string  `json:"spec_info_version"`
-	SHA256                 *string  `json:"sha256"`
-	Notes                  string   `json:"notes"`
-}
-
-// CatalogResponse is the envelope for GET /api/v1/connectors/catalog.
-// Wrapped in {"catalog": [...]} so future paging fields can land
-// non-breakingly, mirroring the GET / list shape.
-type CatalogResponse struct {
-	Catalog []CatalogEntry `json:"catalog"`
-}
 
 // newCatalogCmd returns the `meho connector catalog` parent command.
 // The catalog is the curated map of (product, version) -> recommended
@@ -111,6 +88,10 @@ func runCatalogList(cmd *cobra.Command, opts catalogListOptions) error {
 	}
 	catalog, err := getCatalog(cmd.Context(), backplaneURL)
 	if err != nil {
+		var he *httpResponseError
+		if errors.As(err, &he) {
+			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
@@ -123,16 +104,32 @@ func runCatalogList(cmd *cobra.Command, opts catalogListOptions) error {
 	return nil
 }
 
-func getCatalog(ctx context.Context, backplaneURL string) (*CatalogResponse, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", "/api/v1/connectors/catalog", nil)
+// getCatalog drives the typed-client catalog endpoint with a one-shot
+// 401-retry. The catalog endpoint declares
+// `response_model=CatalogListResponse`, so JSON200 lands as the
+// typed envelope; non-2xx surfaces as *httpResponseError for the
+// caller to route through renderHTTPStatus.
+func getCatalog(ctx context.Context, backplaneURL string) (*api.CatalogListResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out CatalogResponse
-	if err := decodeJSON(raw, "connector catalog", &out); err != nil {
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.CatalogEndpointApiV1ConnectorsCatalogGetResponse, error) {
+			return authed.CatalogEndpointApiV1ConnectorsCatalogGetWithResponse(ctx, &api.CatalogEndpointApiV1ConnectorsCatalogGetParams{})
+		},
+		func(r *api.CatalogEndpointApiV1ConnectorsCatalogGetResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
 		return nil, err
 	}
-	return &out, nil
+	if resp.StatusCode() != http.StatusOK {
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	if resp.JSON200 == nil {
+		return nil, fmt.Errorf("backplane returned 200 OK but no JSON body decoded against CatalogListResponse")
+	}
+	return resp.JSON200, nil
 }
 
 // registeredTriples returns the set of (product, version, impl_id)
@@ -158,7 +155,7 @@ func tripleKey(product, version, implID string) string {
 	return product + "\x00" + version + "\x00" + implID
 }
 
-func printCatalogTable(w io.Writer, c *CatalogResponse, registered map[string]bool) {
+func printCatalogTable(w io.Writer, c *api.CatalogListResponse, registered map[string]bool) {
 	if len(c.Catalog) == 0 {
 		fmt.Fprintln(w, "0 catalog entries")
 		return
@@ -170,22 +167,22 @@ func printCatalogTable(w io.Writer, c *CatalogResponse, registered map[string]bo
 	for _, e := range c.Catalog {
 		fmt.Fprintf(w, "%-22s %-13s %-24s %-4s %-9s %s\n",
 			truncate(e.Product+"/"+e.Version, 22),
-			truncate(e.ImplID, 13),
+			truncate(e.ImplId, 13),
 			truncate(e.RequiresConnectorClass, 24),
 			registeredLabel(registered, e),
 			truncate(specVersionLabel(e), 9),
-			truncate(e.Notes, 60),
+			truncate(strDerefAny(e.Notes), 60),
 		)
 	}
 }
 
 // registeredLabel renders the registration column: "yes"/"no" when
 // the cross-reference succeeded, "?" when it was unavailable.
-func registeredLabel(registered map[string]bool, e CatalogEntry) string {
+func registeredLabel(registered map[string]bool, e api.ConnectorSpecEntry) string {
 	if registered == nil {
 		return "?"
 	}
-	if registered[tripleKey(e.Product, e.Version, e.ImplID)] {
+	if registered[tripleKey(e.Product, e.Version, e.ImplId)] {
 		return "yes"
 	}
 	return "no"
@@ -194,11 +191,21 @@ func registeredLabel(registered map[string]bool, e CatalogEntry) string {
 // specVersionLabel renders the observed spec.info.version, or "-" when
 // the entry has not been ingest-verified yet (the common case for a
 // fresh catalog).
-func specVersionLabel(e CatalogEntry) string {
+func specVersionLabel(e api.ConnectorSpecEntry) string {
 	if e.SpecInfoVersion != nil && *e.SpecInfoVersion != "" {
 		return *e.SpecInfoVersion
 	}
 	return "-"
+}
+
+// strDerefAny returns the pointee or empty when nil. Used for the
+// generated client's `*string` optional fields (e.g. `Notes` on
+// `ConnectorSpecEntry`).
+func strDerefAny(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func pluralY(n int) string {

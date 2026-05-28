@@ -5,65 +5,16 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// ReviewOperation mirrors the backend ConnectorReviewOp Pydantic
-// model verbatim (see operations/ingest/payload.py). The fields cover
-// the operator-decision surface: which op is it, what does it do
-// (Summary / Description / CustomDescription), is it safe to run, does
-// it need approval, is it currently dispatchable? Tags carry the
-// LLM-derived group hints so the operator can spot mis-grouped ops at
-// review time.
-type ReviewOperation struct {
-	OpID              string   `json:"op_id"`
-	Summary           *string  `json:"summary"`
-	Description       *string  `json:"description"`
-	CustomDescription *string  `json:"custom_description"`
-	SafetyLevel       string   `json:"safety_level"`
-	RequiresApproval  bool     `json:"requires_approval"`
-	IsEnabled         bool     `json:"is_enabled"`
-	Tags              []string `json:"tags"`
-}
-
-// ReviewGroup mirrors the backend ConnectorReviewGroup Pydantic model
-// verbatim (operations/ingest/payload.py): the LLM-summarised group
-// payload plus the operations the LLM assigned to it. The wire field
-// is `ops` (not `operations`) — Pydantic's `model_dump()` emits the
-// attribute name, and aligning the Go tag is load-bearing for the
-// JSON envelope to decode.
-type ReviewGroup struct {
-	GroupKey     string            `json:"group_key"`
-	Name         string            `json:"name"`
-	WhenToUse    string            `json:"when_to_use"`
-	ReviewStatus string            `json:"review_status"`
-	OpCount      int               `json:"op_count"`
-	Ops          []ReviewOperation `json:"ops"`
-}
-
-// ReviewPayload mirrors the backend ConnectorReviewPayload Pydantic
-// model verbatim. Note `review_status` is per-group, not top-level —
-// a connector can have a mix of staged / enabled / disabled groups
-// (the operator-facing list verb derives a rollup label from the
-// per-status counts; see list.go).
-//
-// `tenant_id` is a UUID for tenant-curated connectors and JSON `null`
-// for built-in / global connectors; rendered as the empty string in
-// human output and as a pointer in JSON.
-type ReviewPayload struct {
-	ConnectorID  string        `json:"connector_id"`
-	Product      string        `json:"product"`
-	Version      string        `json:"version"`
-	ImplID       string        `json:"impl_id"`
-	TenantID     *string       `json:"tenant_id"`
-	Groups       []ReviewGroup `json:"groups"`
-	TotalOpCount int           `json:"total_op_count"`
-}
 
 // newReviewCmd returns the `meho connector review <connector_id>` command.
 func newReviewCmd() *cobra.Command {
@@ -116,6 +67,10 @@ func runReview(cmd *cobra.Command, opts reviewOptions) error {
 	}
 	result, err := getReview(cmd.Context(), backplaneURL, opts.ConnectorID)
 	if err != nil {
+		var he *httpResponseError
+		if errors.As(err, &he) {
+			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
@@ -125,20 +80,40 @@ func runReview(cmd *cobra.Command, opts reviewOptions) error {
 	return nil
 }
 
-func getReview(ctx context.Context, backplaneURL, connectorID string) (*ReviewPayload, error) {
-	path := "/api/v1/connectors/" + pathEscapeOpID(connectorID) + "/review"
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", path, nil)
+// getReview drives the typed-client review endpoint with a one-shot
+// 401-retry. The route declares `response_model=ConnectorReviewPayload`
+// so JSON200 carries the typed envelope; non-2xx surfaces as
+// *httpResponseError for the caller to route through renderHTTPStatus.
+func getReview(ctx context.Context, backplaneURL, connectorID string) (*api.ConnectorReviewPayload, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out ReviewPayload
-	if err := decodeJSON(raw, "review", &out); err != nil {
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse, error) {
+			return authed.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse(
+				ctx,
+				connectorID,
+				&api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams{},
+			)
+		},
+		func(r *api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) int {
+			return r.StatusCode()
+		},
+	)
+	if err != nil {
 		return nil, err
 	}
-	return &out, nil
+	if resp.StatusCode() != http.StatusOK {
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	if resp.JSON200 == nil {
+		return nil, fmt.Errorf("backplane returned 200 OK but no JSON body decoded against ConnectorReviewPayload")
+	}
+	return resp.JSON200, nil
 }
 
-func printReviewTable(w io.Writer, r *ReviewPayload) {
+func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 	// Top-level header carries the rollup label derived from the
 	// per-group review_status counts — the canonical payload no
 	// longer ships a connector-wide `review_status` field (it's
@@ -147,7 +122,7 @@ func printReviewTable(w io.Writer, r *ReviewPayload) {
 	staged, enabled, disabled := groupStatusCounts(r.Groups)
 	rollup := deriveRollupLabel(staged, enabled, disabled)
 	fmt.Fprintf(w, "%s (%s/%s/%s) — %s — %d group(s), %d op(s)\n",
-		r.ConnectorID, r.Product, r.Version, r.ImplID,
+		r.ConnectorId, r.Product, r.Version, r.ImplId,
 		rollup, len(r.Groups), r.TotalOpCount,
 	)
 	if len(r.Groups) == 0 {
@@ -173,7 +148,7 @@ func printReviewTable(w io.Writer, r *ReviewPayload) {
 		)
 		for _, op := range g.Ops {
 			fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
-				truncate(op.OpID, 42),
+				truncate(op.OpId, 42),
 				op.SafetyLevel,
 				boolFlag(op.RequiresApproval),
 				boolFlag(op.IsEnabled),
@@ -189,7 +164,7 @@ func printReviewTable(w io.Writer, r *ReviewPayload) {
 // the rollup label falls back to "mixed" when the buckets don't
 // reconcile cleanly, which is the right operator-facing answer for
 // an unrecognised state anyway.
-func groupStatusCounts(groups []ReviewGroup) (staged, enabled, disabled int) {
+func groupStatusCounts(groups []api.ConnectorReviewGroup) (staged, enabled, disabled int) {
 	for _, g := range groups {
 		switch g.ReviewStatus {
 		case "staged":

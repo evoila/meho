@@ -5,11 +5,14 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -25,6 +28,18 @@ type transitionResult struct {
 	Action      string `json:"action"`
 }
 
+// transitionVerb selects which typed-client endpoint a transition
+// command routes through. The two endpoints share signature shape
+// (path-templated connector_id, empty params, 204 success) so the
+// shared transition machinery dispatches on the verb name without
+// duplicating the call site.
+type transitionVerb string
+
+const (
+	verbEnable  transitionVerb = "enable"
+	verbDisable transitionVerb = "disable"
+)
+
 // newEnableCmd returns the `meho connector enable` command.
 //
 // CLI shape:
@@ -36,11 +51,10 @@ type transitionResult struct {
 // the prompt for scripted use. tenant_admin role required.
 func newEnableCmd() *cobra.Command {
 	return newTransitionCmd(transitionParams{
-		Verb:            "enable",
+		Verb:            verbEnable,
 		Short:           "Flip a staged or disabled connector to enabled (operations dispatchable)",
 		Action:          "enabled",
 		ConfirmQuestion: "Enable connector %s — all ops with is_enabled=true become dispatchable. Continue?",
-		Path:            "/api/v1/connectors/%s/enable",
 	})
 }
 
@@ -49,20 +63,18 @@ func newEnableCmd() *cobra.Command {
 // are the URL suffix and the prompt prose.
 func newDisableCmd() *cobra.Command {
 	return newTransitionCmd(transitionParams{
-		Verb:            "disable",
+		Verb:            verbDisable,
 		Short:           "Flip an enabled connector back to disabled (rollback; per-op overrides preserved)",
 		Action:          "disabled",
 		ConfirmQuestion: "Disable connector %s — operations become non-dispatchable. Per-op overrides preserved. Continue?",
-		Path:            "/api/v1/connectors/%s/disable",
 	})
 }
 
 type transitionParams struct {
-	Verb            string
+	Verb            transitionVerb
 	Short           string
 	Action          string
 	ConfirmQuestion string
-	Path            string
 }
 
 func newTransitionCmd(p transitionParams) *cobra.Command {
@@ -72,7 +84,7 @@ func newTransitionCmd(p transitionParams) *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   p.Verb + " <connector_id>",
+		Use:   string(p.Verb) + " <connector_id>",
 		Short: p.Short,
 		Long: fmt.Sprintf("%s calls POST /api/v1/connectors/<connector_id>/%s.\n\n"+
 			"The route is idempotent: calling it against an already-%s connector\n"+
@@ -125,27 +137,86 @@ func runTransition(cmd *cobra.Command, p transitionParams, opts transitionOption
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	path := fmt.Sprintf(p.Path, pathEscapeOpID(opts.ConnectorID))
-	if err := postTransition(cmd.Context(), backplaneURL, path); err != nil {
+	if err := postTransition(cmd.Context(), backplaneURL, p.Verb, opts.ConnectorID); err != nil {
+		var he *httpResponseError
+		if errors.As(err, &he) {
+			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	result := transitionResult{ConnectorID: opts.ConnectorID, Action: p.Action}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
 	}
-	printTransitionResult(cmd.OutOrStdout(), p.Verb, result)
+	printTransitionResult(cmd.OutOrStdout(), string(p.Verb), result)
 	return nil
 }
 
-// postTransition fires the POST against the enable / disable route.
-// The route returns HTTP 204 No Content; doAuthedRequest treats 204
-// as success and returns an empty body which we deliberately ignore.
-// Non-2xx surfaces as *httpError via doAuthedRequest's status check.
-func postTransition(ctx context.Context, backplaneURL, path string) error {
-	if _, err := doAuthedRequest(ctx, backplaneURL, "POST", path, []byte("{}")); err != nil {
+// postTransition drives the typed-client enable / disable endpoint
+// with a one-shot 401-retry. Both routes return HTTP 204 No Content
+// on success; non-2xx surfaces as *httpResponseError for the caller
+// to route through renderHTTPStatus. The verb selector picks which
+// generated `*WithResponse` method to invoke — the two routes share
+// signature shape, so dispatching here keeps the call sites in one
+// place.
+func postTransition(
+	ctx context.Context,
+	backplaneURL string,
+	verb transitionVerb,
+	connectorID string,
+) error {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
 		return err
 	}
-	return nil
+	switch verb {
+	case verbEnable:
+		resp, rerr := retryOn401(ctx, authed,
+			func(ctx context.Context) (*api.EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse, error) {
+				return authed.EnableEndpointApiV1ConnectorsConnectorIdEnablePostWithResponse(
+					ctx,
+					connectorID,
+					&api.EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams{},
+				)
+			},
+			func(r *api.EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse) int {
+				return r.StatusCode()
+			},
+		)
+		if rerr != nil {
+			return rerr
+		}
+		if resp.StatusCode() != http.StatusNoContent {
+			return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+		}
+		return nil
+	case verbDisable:
+		resp, rerr := retryOn401(ctx, authed,
+			func(ctx context.Context) (*api.DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error) {
+				return authed.DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse(
+					ctx,
+					connectorID,
+					&api.DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams{},
+				)
+			},
+			func(r *api.DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse) int {
+				return r.StatusCode()
+			},
+		)
+		if rerr != nil {
+			return rerr
+		}
+		if resp.StatusCode() != http.StatusNoContent {
+			return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+		}
+		return nil
+	default:
+		// Defensive: the only constructors that build a
+		// transitionParams hard-code verbEnable / verbDisable, so
+		// reaching here means a future maintainer added a third verb
+		// to the dispatch and forgot to update this switch.
+		return fmt.Errorf("unknown transition verb %q", verb)
+	}
 }
 
 // errTransitionAborted is the sentinel returned when the operator

@@ -13,17 +13,6 @@ import (
 	"testing"
 )
 
-// TestBuildDeletePathEscapesSlug — path encoding follows the same
-// contract as buildShowPath.
-func TestBuildDeletePathEscapesSlug(t *testing.T) {
-	if got := buildDeletePath("vcenter-9.0"); got != "/api/v1/kb/vcenter-9.0" {
-		t.Errorf("buildDeletePath: got %q", got)
-	}
-	if got := buildDeletePath("a b"); got != "/api/v1/kb/a%20b" {
-		t.Errorf("buildDeletePath space: got %q", got)
-	}
-}
-
 // TestRunDeleteRejectsEmptySlug — args[0] empty is caught.
 func TestRunDeleteRejectsEmptySlug(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
@@ -117,7 +106,9 @@ func TestRunDeleteWithConfirmSkipsPrompt(t *testing.T) {
 
 // TestRunDeleteIdempotent204 — the substrate returns 204 on a
 // missing slug; the CLI must surface that as success without
-// surfacing a not-found error.
+// surfacing a not-found error. The typed-client carries the 204
+// in `resp.StatusCode()`; the runner gates on `== 204` rather
+// than the pre-migration `httpError` branch on non-2xx.
 func TestRunDeleteIdempotent204(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb/", func(w http.ResponseWriter, _ *http.Request) {
@@ -185,5 +176,34 @@ func TestRunDelete403SurfacesInsufficientRole(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "tenant_admin required") {
 		t.Errorf("expected role hint; got %q", stderr.String())
+	}
+}
+
+// TestRunDeleteEscapesSlugOnWire confirms the typed-client embeds
+// the slug into `/api/v1/kb/{slug}` with proper URL escaping. The
+// pre-migration test pinned this via the local buildDeletePath
+// helper; the equivalent post-migration is the path the mock
+// observes when the generated DeleteKbApiV1KbSlugDeleteWithResponse
+// dispatches.
+func TestRunDeleteEscapesSlugOnWire(t *testing.T) {
+	var seenPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb/", func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, _ := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	if err := runDelete(cmd, deleteOptions{
+		Slug: "vcenter-9.0", Confirm: true, BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runDelete: %v", err)
+	}
+	if seenPath != "/api/v1/kb/vcenter-9.0" {
+		t.Errorf("path: got %q; want %q", seenPath, "/api/v1/kb/vcenter-9.0")
 	}
 }

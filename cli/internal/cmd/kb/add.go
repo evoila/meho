@@ -5,27 +5,16 @@ package kb
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// kbEntryCreateRequest mirrors the backend KbEntryCreate pydantic
-// model. The `Metadata` field is sent only when non-nil so the
-// backend's default (`{}`) applies when the operator passes no
-// `--metadata`. `slug` and `body` are required by the substrate's
-// `min_length=1` constraint; the CLI rejects empty values before
-// the request goes out.
-type kbEntryCreateRequest struct {
-	Slug     string         `json:"slug"`
-	Body     string         `json:"body"`
-	Metadata map[string]any `json:"metadata,omitempty"`
-}
 
 // newAddCmd returns the `meho kb add` command.
 //
@@ -102,7 +91,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&metadata, "metadata", "",
 		"comma-separated key=value pairs to attach as entry metadata (e.g. owner=ops,source=runbook)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry JSON instead of the human summary")
+		"emit raw KbEntry JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -138,10 +127,14 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	entry, err := postAdd(cmd.Context(), backplaneURL, opts.Slug, body, metadata)
+	resp, err := postAdd(cmd.Context(), backplaneURL, opts.Slug, body, metadata)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusCreated {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	entry := resp.JSON201
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}
@@ -149,38 +142,63 @@ func runAdd(cmd *cobra.Command, opts addOptions) error {
 	return nil
 }
 
+// buildAddBody assembles the typed POST body. `Metadata` is a
+// `*map[string]interface{}` on the generated type: we wire a
+// pointer only when the operator supplied --metadata so an unset
+// flag stays absent on the wire and the backend's default ({}) is
+// applied. The generated `KbEntryCreate` has no `omitempty` JSON
+// tag on Metadata; passing a nil pointer is the way to keep the
+// field absent.
+func buildAddBody(slug, body string, metadata map[string]any) api.KbEntryCreate {
+	req := api.KbEntryCreate{Slug: slug, Body: body}
+	if metadata != nil {
+		// The generated type expects `map[string]interface{}`, which
+		// `map[string]any` aliases (Go 1.18+ `any` == `interface{}`).
+		// Allocate via the generated alias so future codegen renames
+		// surface as a compile error here rather than at the call site.
+		md := map[string]interface{}(metadata)
+		req.Metadata = &md
+	}
+	return req
+}
+
 func postAdd(
 	ctx context.Context,
 	backplaneURL, slug, body string,
 	metadata map[string]any,
-) (*Entry, error) {
-	req := kbEntryCreateRequest{Slug: slug, Body: body, Metadata: metadata}
-	raw, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal kb add request: %w", err)
-	}
-	resp, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/kb", raw)
+) (*api.CreateKbApiV1KbPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("decode kb add response: %w", err)
-	}
-	return &out, nil
+	reqBody := buildAddBody(slug, body, metadata)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.CreateKbApiV1KbPostResponse, error) {
+			return authed.CreateKbApiV1KbPostWithResponse(
+				ctx,
+				&api.CreateKbApiV1KbPostParams{},
+				reqBody,
+			)
+		},
+		func(r *api.CreateKbApiV1KbPostResponse) int { return r.StatusCode() },
+	)
 }
 
 // printAddSummary renders the created entry as a compact one-line
 // confirmation plus the round-tripped slug / timestamps. Operators
 // who want the full body should chase with `meho kb show <slug>`.
-func printAddSummary(w io.Writer, e *Entry) {
+// The timestamps come back as `time.Time` from the generated
+// `api.KbEntry`; we format with a UTC-ISO8601 shape so the output
+// stays operator-readable and matches the pre-migration string
+// rendering for the common always-UTC case.
+func printAddSummary(w io.Writer, e *api.KbEntry) {
 	if e == nil {
 		return
 	}
 	fmt.Fprintf(w, "created kb entry %q\n", e.Slug)
-	fmt.Fprintf(w, "%-14s %s\n", "id:", e.ID)
-	fmt.Fprintf(w, "%-14s %s\n", "tenant_id:", e.TenantID)
-	fmt.Fprintf(w, "%-14s %s\n", "created_at:", e.CreatedAt)
-	fmt.Fprintf(w, "%-14s %s\n", "updated_at:", e.UpdatedAt)
+	fmt.Fprintf(w, "%-14s %s\n", "id:", e.Id.String())
+	fmt.Fprintf(w, "%-14s %s\n", "tenant_id:", e.TenantId.String())
+	fmt.Fprintf(w, "%-14s %s\n", "created_at:", e.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+	fmt.Fprintf(w, "%-14s %s\n", "updated_at:", e.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	fmt.Fprintf(w, "%-14s %d bytes\n", "body:", len(e.Body))
 }

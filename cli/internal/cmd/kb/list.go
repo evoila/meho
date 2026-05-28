@@ -5,14 +5,13 @@ package kb
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -25,7 +24,7 @@ import (
 //	  [--filter PATTERN]   # SQL LIKE pattern forwarded to the substrate
 //	  [--limit N]          # 1..500, default 100 (server-side)
 //	  [--offset N]         # offset-based pagination, default 0
-//	  [--json]             # raw ListResponse JSON instead of the table
+//	  [--json]             # raw KbListResponse JSON instead of the table
 //	  [--backplane <url>]  # override the configured backplane URL
 //
 // Exit codes:
@@ -51,7 +50,7 @@ func newListCmd() *cobra.Command {
 			"operator is the trust boundary for pattern shape). " +
 			"--limit caps the page size (1..500, server default 100). " +
 			"--offset advances the page window (default 0). --json " +
-			"emits the raw ListResponse envelope for jq pipelines.",
+			"emits the raw KbListResponse envelope for jq pipelines.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -72,7 +71,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().IntVar(&offset, "offset", 0,
 		"offset into the slug-sorted result set (default 0)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw ListResponse JSON instead of the human table")
+		"emit raw KbListResponse JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -113,44 +112,54 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), resp)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printListTable(cmd.OutOrStdout(), resp)
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printListTable(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-// buildListPath assembles the GET /api/v1/kb query string from the
-// per-call options. Exposed for unit tests so the URL construction
-// stays unit-checkable without standing up an httptest.Server.
-func buildListPath(opts listOptions) string {
-	q := url.Values{}
+// listQueryParams maps the CLI flags onto the generated query-param
+// shape. Each pointer field is set only when the operator supplied
+// the flag so the backplane's own defaults apply for unset values
+// (filter omitted entirely; limit defaults to 100 server-side;
+// offset defaults to 0).
+func listQueryParams(opts listOptions) *api.ListKbApiV1KbGetParams {
+	params := &api.ListKbApiV1KbGetParams{}
 	if opts.Filter != "" {
-		q.Set("filter", opts.Filter)
+		f := opts.Filter
+		params.Filter = &f
 	}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		l := opts.Limit
+		params.Limit = &l
 	}
 	if opts.Offset > 0 {
-		q.Set("offset", strconv.Itoa(opts.Offset))
+		o := opts.Offset
+		params.Offset = &o
 	}
-	path := "/api/v1/kb"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func getList(ctx context.Context, backplaneURL string, opts listOptions) (*ListResponse, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
+func getList(
+	ctx context.Context,
+	backplaneURL string,
+	opts listOptions,
+) (*api.ListKbApiV1KbGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out ListResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode kb list response: %w", err)
-	}
-	return &out, nil
+	params := listQueryParams(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ListKbApiV1KbGetResponse, error) {
+			return authed.ListKbApiV1KbGetWithResponse(ctx, params)
+		},
+		func(r *api.ListKbApiV1KbGetResponse) int { return r.StatusCode() },
+	)
 }
 
 // printListTable renders the list as a compact, scannable table.
@@ -161,7 +170,7 @@ func getList(ctx context.Context, backplaneURL string, opts listOptions) (*ListR
 // shape `YYYY-MM-DDTHH:MM:SS.ffffff+HH:MM`. The preview column
 // carries an 80-char excerpt of the 200-char backend preview so a
 // default terminal width doesn't wrap.
-func printListTable(w io.Writer, r *ListResponse) {
+func printListTable(w io.Writer, r *api.KbListResponse) {
 	if r == nil || len(r.Entries) == 0 {
 		fmt.Fprintln(w, "no kb entries registered in this tenant")
 		return

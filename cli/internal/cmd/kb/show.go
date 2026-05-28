@@ -5,13 +5,14 @@ package kb
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -25,7 +26,7 @@ import (
 // Default output: writes the entry's body to stdout verbatim — the
 // body is already Markdown by the substrate's contract, so an
 // operator can pipe through `glow`, `bat -l md`, etc. for rendering.
-// `--json` wraps the full Entry shape (id, tenant_id, slug, body,
+// `--json` wraps the full KbEntry shape (id, tenant_id, slug, body,
 // metadata, created_at, updated_at).
 //
 // A 404 from the backend surfaces as "slug_not_found". The
@@ -53,7 +54,7 @@ func newShowCmd() *cobra.Command {
 			"entry body to stdout. The body is Markdown by the " +
 			"substrate's contract; pipe through a Markdown renderer " +
 			"(glow, bat -l md, mdcat, etc.) for prettified output. " +
-			"--json wraps the entry in the full Entry envelope " +
+			"--json wraps the entry in the full KbEntry envelope " +
 			"(id, slug, body, metadata, timestamps). A 404 means the " +
 			"slug doesn't exist in your tenant (the route deliberately " +
 			"conflates cross-tenant probes with genuine absence so " +
@@ -70,7 +71,7 @@ func newShowCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry JSON instead of the Markdown body")
+		"emit raw KbEntry JSON instead of the Markdown body")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -94,34 +95,34 @@ func runShow(cmd *cobra.Command, opts showOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	entry, err := getEntry(cmd.Context(), backplaneURL, opts.Slug)
+	resp, err := getEntry(cmd.Context(), backplaneURL, opts.Slug)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), entry)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printEntryBody(cmd.OutOrStdout(), entry)
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printEntryBody(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-// buildShowPath assembles the GET path. Exposed for unit tests so
-// URL encoding of slugs with dots / hyphens stays covered (the
-// substrate accepts `vcenter-9.0-snapshot-revert` shaped slugs).
-func buildShowPath(slug string) string {
-	return "/api/v1/kb/" + pathEscape(slug)
-}
-
-func getEntry(ctx context.Context, backplaneURL, slug string) (*Entry, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildShowPath(slug), nil)
+func getEntry(
+	ctx context.Context,
+	backplaneURL, slug string,
+) (*api.ShowKbApiV1KbSlugGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode kb show response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ShowKbApiV1KbSlugGetResponse, error) {
+			return authed.ShowKbApiV1KbSlugGetWithResponse(ctx, slug, nil)
+		},
+		func(r *api.ShowKbApiV1KbSlugGetResponse) int { return r.StatusCode() },
+	)
 }
 
 // printEntryBody writes the entry's Markdown body to stdout
@@ -132,7 +133,7 @@ func getEntry(ctx context.Context, backplaneURL, slug string) (*Entry, error) {
 // its own. Trimming `\r` + `\n` from the right keeps the single-
 // trailing-newline contract regardless of whether the operator
 // stored their body with or without a trailing LF/CRLF.
-func printEntryBody(w io.Writer, e *Entry) {
+func printEntryBody(w io.Writer, e *api.KbEntry) {
 	if e == nil {
 		return
 	}

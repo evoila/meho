@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // TestRunIngestRejectsEmptyDirectory — empty arg is caught.
@@ -25,18 +27,21 @@ func TestRunIngestRejectsEmptyDirectory(t *testing.T) {
 }
 
 // TestRunIngestHappyPath — POSTs the right body and renders the
-// four-bucket summary.
+// four-bucket summary. The handler decodes the wire body into the
+// generated `api.IngestKbRequest` so the migration's "no
+// consumer-side ingestKbRequest" property is the load-bearing
+// claim under test.
 func TestRunIngestHappyPath(t *testing.T) {
-	var bodyJSON map[string]any
+	var bodyOnWire api.IngestKbRequest
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST; got %s", r.Method)
 		}
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &bodyJSON)
+		raw, _ := io.ReadAll(r.Body)
+		readJSONBodyOf(t, raw, &bodyOnWire)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(IngestionResult{
+		_ = json.NewEncoder(w).Encode(api.KbIngestionResult{
 			InsertedCount: 5,
 			UpdatedCount:  2,
 			SkippedCount:  37,
@@ -52,11 +57,14 @@ func TestRunIngestHappyPath(t *testing.T) {
 	if err := runIngest(cmd, ingestOptions{Directory: "/srv/kb", BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runIngest: %v; stderr=%s", err, stderr.String())
 	}
-	if bodyJSON["directory"] != "/srv/kb" {
-		t.Errorf("expected directory in request; got %+v", bodyJSON)
+	if bodyOnWire.Directory == nil || *bodyOnWire.Directory != "/srv/kb" {
+		t.Errorf("expected directory in request; got %+v", bodyOnWire)
 	}
-	if v, ok := bodyJSON["dry_run"].(bool); ok && v {
-		t.Errorf("dry_run should be omitted when false; got %+v", bodyJSON)
+	if bodyOnWire.DryRun != nil && *bodyOnWire.DryRun {
+		t.Errorf("dry_run should be omitted (or false) when not set; got %+v", *bodyOnWire.DryRun)
+	}
+	if bodyOnWire.TarballUrl != nil {
+		t.Errorf("tarball_url should be nil; got %+v", *bodyOnWire.TarballUrl)
 	}
 	for _, want := range []string{"inserted:", "updated:", "skipped:", "errored:", "total:", "5", "2", "37", "44"} {
 		if !strings.Contains(stdout.String(), want) {
@@ -68,13 +76,13 @@ func TestRunIngestHappyPath(t *testing.T) {
 // TestRunIngestDryRunBindsBody — --dry-run sets dry_run=true in
 // the body.
 func TestRunIngestDryRunBindsBody(t *testing.T) {
-	var bodyJSON map[string]any
+	var bodyOnWire api.IngestKbRequest
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &bodyJSON)
+		raw, _ := io.ReadAll(r.Body)
+		readJSONBodyOf(t, raw, &bodyOnWire)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(IngestionResult{Errors: []string{}})
+		_ = json.NewEncoder(w).Encode(api.KbIngestionResult{Errors: []string{}})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -84,8 +92,8 @@ func TestRunIngestDryRunBindsBody(t *testing.T) {
 	if err := runIngest(cmd, ingestOptions{Directory: "/srv/kb", DryRun: true, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runIngest --dry-run: %v", err)
 	}
-	if v, _ := bodyJSON["dry_run"].(bool); !v {
-		t.Errorf("expected dry_run=true; got %+v", bodyJSON)
+	if bodyOnWire.DryRun == nil || !*bodyOnWire.DryRun {
+		t.Errorf("expected dry_run=true; got %+v", bodyOnWire)
 	}
 	if !strings.Contains(stdout.String(), "dry-run:") {
 		t.Errorf("expected dry-run banner; got %q", stdout.String())
@@ -97,7 +105,7 @@ func TestRunIngestJSONHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(IngestionResult{
+		_ = json.NewEncoder(w).Encode(api.KbIngestionResult{
 			InsertedCount: 1, UpdatedCount: 2, SkippedCount: 3, ErrorCount: 0, Errors: []string{},
 		})
 	})
@@ -109,7 +117,7 @@ func TestRunIngestJSONHappyPath(t *testing.T) {
 	if err := runIngest(cmd, ingestOptions{Directory: "/x", JSONOut: true, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runIngest --json: %v", err)
 	}
-	var decoded IngestionResult
+	var decoded api.KbIngestionResult
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
@@ -167,7 +175,7 @@ func TestRunIngest403SurfacesInsufficientRole(t *testing.T) {
 // line so partial-failure runs are visible without --json.
 func TestPrintIngestSummaryWithErrors(t *testing.T) {
 	var buf bytes.Buffer
-	printIngestSummary(&buf, &IngestionResult{
+	printIngestSummary(&buf, &api.KbIngestionResult{
 		InsertedCount: 1, UpdatedCount: 0, SkippedCount: 0, ErrorCount: 2,
 		Errors: []string{"foo.md: bad slug", "bar.md: unreadable"},
 	}, false)
@@ -182,7 +190,7 @@ func TestPrintIngestSummaryWithErrors(t *testing.T) {
 // TestPrintIngestSummaryDryRunBanner — --dry-run emits a banner.
 func TestPrintIngestSummaryDryRunBanner(t *testing.T) {
 	var buf bytes.Buffer
-	printIngestSummary(&buf, &IngestionResult{}, true)
+	printIngestSummary(&buf, &api.KbIngestionResult{}, true)
 	if !strings.Contains(buf.String(), "dry-run") {
 		t.Errorf("expected dry-run banner; got %q", buf.String())
 	}

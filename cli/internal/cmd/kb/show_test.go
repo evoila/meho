@@ -11,23 +11,46 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
-// TestBuildShowPathEscapesSlug — dots / hyphens pass through;
-// space-like operator typos surface as %20 so the route's
-// `{slug:str}` matcher sees a single segment.
-func TestBuildShowPathEscapesSlug(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"vcenter-9.0", "/api/v1/kb/vcenter-9.0"},
-		{"a", "/api/v1/kb/a"},
-		{"slug with space", "/api/v1/kb/slug%20with%20space"},
+// stubEntryID / stubTenantID are deterministic UUIDs used in every
+// fixture so a test failure reads "11111111-..." in the request URL
+// or response body. Easier to chase than a uuid.New() that rotates
+// per run.
+const (
+	stubEntryID  = "11111111-1111-1111-1111-111111111111"
+	stubTenantID = "22222222-2222-2222-2222-222222222222"
+)
+
+func mustParseUUID(t *testing.T, s string) uuid.UUID {
+	t.Helper()
+	id, err := uuid.Parse(s)
+	if err != nil {
+		t.Fatalf("uuid.Parse(%q): %v", s, err)
 	}
-	for _, c := range cases {
-		if got := buildShowPath(c.in); got != c.want {
-			t.Errorf("buildShowPath(%q): got %q; want %q", c.in, got, c.want)
-		}
+	return id
+}
+
+// newKbEntry constructs an api.KbEntry fixture with deterministic
+// IDs + timestamps so handler responses survive `json.Marshal` and
+// the verb's renderer formats them stably.
+func newKbEntry(t *testing.T, slug, body string) api.KbEntry {
+	t.Helper()
+	createdAt := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	updatedAt := time.Date(2026, 5, 12, 10, 11, 12, 0, time.UTC)
+	return api.KbEntry{
+		Id:        mustParseUUID(t, stubEntryID),
+		TenantId:  mustParseUUID(t, stubTenantID),
+		Slug:      slug,
+		Body:      body,
+		Metadata:  map[string]any{},
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
 	}
 }
 
@@ -45,17 +68,11 @@ func TestRunShowRejectsEmptySlug(t *testing.T) {
 }
 
 // TestRunShowHappyPath — body goes to stdout verbatim; --json
-// wraps the full entry.
+// wraps the full entry. The handler echoes the typed `api.KbEntry`
+// directly so the migration's "no consumer-side duplicate" property
+// is the load-bearing claim under test.
 func TestRunShowHappyPath(t *testing.T) {
-	entry := Entry{
-		ID:        "00000000-0000-0000-0000-000000000001",
-		TenantID:  "00000000-0000-0000-0000-000000000002",
-		Slug:      "vcenter-9.0",
-		Body:      "# vcenter 9.0\n\nOverview body.",
-		Metadata:  map[string]any{},
-		CreatedAt: "2026-05-01T00:00:00Z",
-		UpdatedAt: "2026-05-12T10:11:12Z",
-	}
+	entry := newKbEntry(t, "vcenter-9.0", "# vcenter 9.0\n\nOverview body.")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb/", func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/vcenter-9.0") {
@@ -82,13 +99,10 @@ func TestRunShowHappyPath(t *testing.T) {
 	}
 }
 
-// TestRunShowJSONHappyPath — --json wraps the full Entry shape.
+// TestRunShowJSONHappyPath — --json wraps the full KbEntry shape.
 func TestRunShowJSONHappyPath(t *testing.T) {
-	entry := Entry{
-		ID:   "00000000-0000-0000-0000-000000000001",
-		Slug: "x", Body: "b",
-		Metadata: map[string]any{"k": "v"},
-	}
+	entry := newKbEntry(t, "x", "b")
+	entry.Metadata = map[string]any{"k": "v"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -103,7 +117,7 @@ func TestRunShowJSONHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runShow --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded Entry
+	var decoded api.KbEntry
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
 	}
@@ -154,10 +168,24 @@ func TestPrintEntryBodyEmitsBodyAndNewline(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			printEntryBody(&buf, &Entry{Body: c.body})
+			printEntryBody(&buf, &api.KbEntry{Body: c.body})
 			if buf.String() != c.want {
 				t.Errorf("unexpected render: got %q; want %q", buf.String(), c.want)
 			}
 		})
+	}
+}
+
+// TestPrintEntryBodyNilSafe pins the nil-guard: a nil entry is a
+// no-op rather than a panic. Defensive against a renderer that
+// somehow receives `nil` from runShow (the runner gates on
+// StatusCode() == 200 + non-nil JSON200, but a regression that
+// dropped the gate should surface here as a clean nothing rather
+// than a runtime crash).
+func TestPrintEntryBodyNilSafe(t *testing.T) {
+	var buf bytes.Buffer
+	printEntryBody(&buf, nil)
+	if buf.Len() != 0 {
+		t.Errorf("nil entry should write nothing; got %q", buf.String())
 	}
 }

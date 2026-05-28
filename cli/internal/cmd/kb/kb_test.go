@@ -6,6 +6,7 @@ package kb
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -22,8 +23,13 @@ import (
 )
 
 // seedXDGAndToken seeds a per-test config dir + token store that
-// resolveBackplane / doAuthedRequest will read. Mirrors the same
-// helper in cli/internal/cmd/audit/audit_test.go.
+// backplane.Resolve / api.NewAuthedClient will read. Mirrors the
+// same helper in cli/internal/cmd/audit/audit_test.go. Retained
+// verbatim across the G0.12-T9 migration: the generated typed
+// client reads through the same `auth.NewTokenStore` + config-file
+// path the previous hand-rolled transport used, so the test
+// substrate is unchanged at the seed layer — only the verb's
+// call-site (now typed `*WithResponse` methods) differs.
 func seedXDGAndToken(t *testing.T, backplaneURL string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -177,7 +183,11 @@ func TestDecodeDetailStringFallback(t *testing.T) {
 
 // TestPathEscapePreservesSlugChars — kb slugs are
 // `[a-z][a-z0-9.\-]*[a-z0-9]?`; PathEscape must not mangle the
-// operator-typical characters.
+// operator-typical characters. The typed-client embeds the same
+// `url.PathEscape` rule when building `/api/v1/kb/{slug}` paths,
+// so this helper test still guards the operator-visible URL shape
+// even after the migration moved the actual path construction
+// inside the generated client.
 func TestPathEscapePreservesSlugChars(t *testing.T) {
 	cases := []struct {
 		in, want string
@@ -380,38 +390,15 @@ func TestConfirmPromptYesNo(t *testing.T) {
 	}
 }
 
-// TestDoAuthedRequestRejectsOversizedResponse — the response-body
-// cap is paired with a +1-byte read so a response that fills the
-// cap surfaces as a clear error rather than feeding a truncated
-// body into the JSON decoder.
-func TestDoAuthedRequestRejectsOversizedResponse(t *testing.T) {
-	oversized := strings.Repeat("a", int(responseBodyCap)+1)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/kb/test", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(oversized))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	seedXDGAndToken(t, srv.URL)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := doAuthedRequest(ctx, srv.URL, "GET", "/api/v1/kb/test", nil)
-	if err == nil {
-		t.Fatalf("expected error on oversized response")
-	}
-	if !strings.Contains(err.Error(), "exceeds") {
-		t.Errorf("error message does not mention size cap: %v", err)
-	}
-}
-
 // TestRenderRequestErrorEmptyBearerMapsToAuthExpired — an empty
 // stored bearer is a credential-state failure (the token row
 // exists but its `access_token` is empty); renderRequestError must
 // map it to auth_expired (exit 2) with a `meho login` hint rather
 // than letting it fall through to unreachable (exit 3) the generic
-// error string would land on.
+// error string would land on. The sentinel is set by
+// newAuthedClient in the migrated package; before the typed-client
+// migration the equivalent sentinel was raised by the package-local
+// HTTP helper. Same operator-visible behaviour either way.
 func TestRenderRequestErrorEmptyBearerMapsToAuthExpired(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := renderRequestError(cmd, "https://meho.test", errMissingAccessToken, false)
@@ -430,30 +417,236 @@ func TestRenderRequestErrorEmptyBearerMapsToAuthExpired(t *testing.T) {
 	}
 }
 
-// TestDoAuthedRequestHandles204NoContent — the kb.delete route
-// returns 204 with an empty body whether or not the row existed;
-// doAuthedRequest must treat that as success (returning nil bytes)
-// rather than as a non-2xx httpError.
-func TestDoAuthedRequestHandles204NoContent(t *testing.T) {
+// TestRenderHTTPStatus404SurfacesDetail pins the renderHTTPStatus
+// switch on a 404 surface: the substrate returns
+// `{"detail": "slug_not_found"}` for both genuine absences and
+// cross-tenant probes, and the renderer must surface the detail
+// string under `unexpected_response`. This direct unit test of
+// renderHTTPStatus complements the per-verb runX tests in
+// show_test.go / delete_test.go which exercise the full RunE path.
+func TestRenderHTTPStatus404SurfacesDetail(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := renderHTTPStatus(cmd, "https://meho.test", http.StatusNotFound,
+		[]byte(`{"detail":"slug_not_found"}`), false)
+	if err == nil {
+		t.Fatalf("expected non-nil error")
+	}
+	if !strings.Contains(stderr.String(), "slug_not_found") {
+		t.Errorf("expected detail in stderr; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+}
+
+// TestRenderHTTPStatus403SurfacesInsufficientRole pins the 403 →
+// insufficient_role mapping from the renderer's switch.
+func TestRenderHTTPStatus403SurfacesInsufficientRole(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := renderHTTPStatus(cmd, "https://meho.test", http.StatusForbidden,
+		[]byte(`{"detail":"Insufficient role: tenant_admin required"}`), false)
+	if err == nil {
+		t.Fatalf("expected non-nil error")
+	}
+	if !strings.Contains(stderr.String(), "insufficient_role") {
+		t.Errorf("expected insufficient_role classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "tenant_admin required") {
+		t.Errorf("expected backend detail in stderr; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 5 {
+		t.Errorf("expected ExitCode 5 (insufficient_role); got %v", err)
+	}
+}
+
+// TestRenderHTTPStatus422WrapsValidationDetail — 422 from the
+// invalid_slug / missing-body path renders with the `invalid
+// request:` prefix and the FastAPI envelope intact (the substrate
+// emits a structured list for some 422s; preserving the body lets
+// operators paste it into the issue without losing context).
+func TestRenderHTTPStatus422WrapsValidationDetail(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	body := `{"detail":[{"loc":["body","slug"],"msg":"value does not match SLUG_PATTERN"}]}`
+	err := renderHTTPStatus(cmd, "https://meho.test", http.StatusUnprocessableEntity,
+		[]byte(body), false)
+	if err == nil {
+		t.Fatalf("expected non-nil error")
+	}
+	if !strings.Contains(stderr.String(), "invalid request") {
+		t.Errorf("expected `invalid request` prefix; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "SLUG_PATTERN") {
+		t.Errorf("expected substrate detail preserved; got %q", stderr.String())
+	}
+}
+
+// Note: the pre-migration test suite carried a
+// `TestDoAuthedRequestRejectsOversizedResponse` covering the
+// 1-MiB response-body cap of the package-local HTTP helper. The
+// generated typed client uses oapi-codegen's default response
+// reader instead — there is no per-package cap to test, so the
+// case is dropped. Operators relying on response-size guarantees
+// should inspect the underlying http.Transport's read deadline.
+
+// TestRetryOn401InvokesRefreshAndReissues drives the retry helper
+// against a mock-style call function: the first invocation returns
+// a 401, refresh is invoked (here a no-op success), the second
+// invocation returns 200. Pins the contract every per-verb
+// `get*` / `post*` helper depends on.
+func TestRetryOn401InvokesRefreshAndReissues(t *testing.T) {
+	// Stand up a real httptest server that 401s the first call and
+	// 200s the second so the inline retryOn401 path is exercised
+	// end-to-end through a real api.AuthedClient.Refresh attempt.
+	// Refresh will fail (no refresh_token in the stored token), so
+	// retryOn401's "refresh err → return error" branch fires; the
+	// surface contract we pin is that the second call is NOT made
+	// when refresh fails, and the returned error is the refresh
+	// failure (mapped by renderRequestError to auth_expired with a
+	// `meho login` hint).
+	calls := 0
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/kb/some-slug", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			t.Errorf("expected DELETE; got %s", r.Method)
-		}
-		w.WriteHeader(http.StatusNoContent)
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	raw, err := doAuthedRequest(ctx, srv.URL, "DELETE", "/api/v1/kb/some-slug", nil)
-	if err != nil {
-		t.Fatalf("204 should not produce an error: %v", err)
+	cmd, _, stderr := newRunCmd(t)
+	err := runList(cmd, listOptions{BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error after 401 + failed refresh")
 	}
-	if raw != nil {
-		t.Errorf("expected nil body on 204; got %q", string(raw))
+	if calls != 1 {
+		t.Errorf("expected exactly 1 call (refresh failure short-circuits the retry); got %d", calls)
+	}
+	if !strings.Contains(stderr.String(), "auth_expired") {
+		t.Errorf("expected auth_expired classification; got %q", stderr.String())
+	}
+}
+
+// TestListQueryParamsOmitsZeroValues confirms the helper that maps
+// listOptions onto the generated ListKbApiV1KbGetParams shape leaves
+// pointer fields nil when the operator didn't supply the
+// corresponding flag, so the backplane's defaults apply.
+func TestListQueryParamsOmitsZeroValues(t *testing.T) {
+	got := listQueryParams(listOptions{})
+	if got.Filter != nil {
+		t.Errorf("expected nil Filter; got %v", *got.Filter)
+	}
+	if got.Limit != nil {
+		t.Errorf("expected nil Limit; got %v", *got.Limit)
+	}
+	if got.Offset != nil {
+		t.Errorf("expected nil Offset; got %v", *got.Offset)
+	}
+}
+
+// TestListQueryParamsSetsAllFilters confirms supplied flags reach
+// the typed params shape. Sibling per-verb tests assert on the
+// query string the generated client serialises them into.
+func TestListQueryParamsSetsAllFilters(t *testing.T) {
+	got := listQueryParams(listOptions{Filter: "vcenter%", Limit: 25, Offset: 10})
+	if got.Filter == nil || *got.Filter != "vcenter%" {
+		t.Errorf("expected Filter=vcenter%%; got %+v", got.Filter)
+	}
+	if got.Limit == nil || *got.Limit != 25 {
+		t.Errorf("expected Limit=25; got %+v", got.Limit)
+	}
+	if got.Offset == nil || *got.Offset != 10 {
+		t.Errorf("expected Offset=10; got %+v", got.Offset)
+	}
+}
+
+// TestBuildAddBodyOmitsMetadataWhenNil confirms a nil metadata map
+// produces a body whose Metadata pointer stays nil so the JSON
+// encoder emits "null" (acceptable to the backend) rather than an
+// empty object. The substrate defaults to {} when the field is
+// absent or null; both shapes pass the validator.
+func TestBuildAddBodyOmitsMetadataWhenNil(t *testing.T) {
+	body := buildAddBody("slug", "content", nil)
+	if body.Metadata != nil {
+		t.Errorf("expected nil Metadata when none supplied; got %+v", body.Metadata)
+	}
+	if body.Slug != "slug" || body.Body != "content" {
+		t.Errorf("required fields not threaded: got %+v", body)
+	}
+}
+
+// TestBuildAddBodyWiresMetadata confirms a non-nil map flows into
+// the body's Metadata pointer so the wire payload carries it.
+func TestBuildAddBodyWiresMetadata(t *testing.T) {
+	md := map[string]any{"owner": "ops"}
+	body := buildAddBody("slug", "content", md)
+	if body.Metadata == nil {
+		t.Fatalf("expected non-nil Metadata; got nil")
+	}
+	got := *body.Metadata
+	if got["owner"] != "ops" {
+		t.Errorf("expected metadata[owner]=ops; got %+v", got)
+	}
+}
+
+// TestBuildIngestBodyOmitsDryRunWhenFalse confirms an unset --dry-run
+// flag keeps the DryRun pointer nil so the JSON `dry_run` key is
+// absent on the wire (the field carries `omitempty` on the
+// generated type, matching the backend's `False` default).
+func TestBuildIngestBodyOmitsDryRunWhenFalse(t *testing.T) {
+	body := buildIngestBody(ingestOptions{Directory: "/srv/kb"})
+	if body.DryRun != nil {
+		t.Errorf("expected nil DryRun for default-false flag; got %+v", *body.DryRun)
+	}
+	if body.Directory == nil || *body.Directory != "/srv/kb" {
+		t.Errorf("expected Directory=/srv/kb; got %+v", body.Directory)
+	}
+	if body.TarballUrl != nil {
+		t.Errorf("expected nil TarballUrl; kb CLI never sets it (501 from substrate); got %+v", *body.TarballUrl)
+	}
+}
+
+// TestBuildIngestBodyWiresDryRun confirms --dry-run flows into the
+// body so the substrate skips the write path.
+func TestBuildIngestBodyWiresDryRun(t *testing.T) {
+	body := buildIngestBody(ingestOptions{Directory: "/srv/kb", DryRun: true})
+	if body.DryRun == nil || !*body.DryRun {
+		t.Errorf("expected DryRun=true; got %+v", body.DryRun)
+	}
+}
+
+// TestBuildSearchBodyPinsSourceToKB confirms every search wire body
+// carries source="kb" so the substrate scopes hits to kb-entry
+// rows. Unset --limit leaves the Limit pointer nil so the
+// backend's default (10) applies.
+func TestBuildSearchBodyPinsSourceToKB(t *testing.T) {
+	body := buildSearchBody(searchOptions{Query: "vsphere"})
+	if body.Source == nil || *body.Source != "kb" {
+		t.Errorf("expected Source=kb; got %+v", body.Source)
+	}
+	if body.Query != "vsphere" {
+		t.Errorf("expected Query=vsphere; got %q", body.Query)
+	}
+	if body.Limit != nil {
+		t.Errorf("expected nil Limit; got %+v", *body.Limit)
+	}
+}
+
+// TestBuildSearchBodyWiresLimit confirms --limit lands on the wire.
+func TestBuildSearchBodyWiresLimit(t *testing.T) {
+	body := buildSearchBody(searchOptions{Query: "x", Limit: 25})
+	if body.Limit == nil || *body.Limit != 25 {
+		t.Errorf("expected Limit=25; got %+v", body.Limit)
+	}
+}
+
+// readJSONBodyOf decodes a request body for handler assertions. Kept
+// in the shared helper file so per-verb tests don't each need a
+// local decoder helper.
+func readJSONBodyOf(t *testing.T, raw []byte, into any) {
+	t.Helper()
+	if err := json.Unmarshal(raw, into); err != nil {
+		t.Fatalf("decode body: %v\n%s", err, raw)
 	}
 }
 

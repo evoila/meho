@@ -292,6 +292,18 @@ Documenting the projection is the convention. Silently
 projecting and surfacing the same shape as detail is the
 anti-pattern.
 
+Code reference: :class:`TargetSummary` in
+[`backend/src/meho_backplane/targets/schemas.py`](../../backend/src/meho_backplane/targets/schemas.py)
+mirrors :class:`Target`'s field set with the two deliberate
+omissions (``notes``, ``extras``) called out as
+operator-authored free-form blobs that inflate the list page
+without serving the common "names + routing" question. The
+regression test
+:func:`test_target_summary_field_set_superset_of_target` pins
+the contract structurally so a future field added to
+:class:`Target` without a matching :class:`TargetSummary`
+update fails CI (G0.16-T6 Finding D #1312).
+
 ## 6. Event-stream discriminators
 
 **Multi-shape event streams carry an explicit `kind` field.**

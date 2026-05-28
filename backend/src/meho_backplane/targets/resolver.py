@@ -287,10 +287,31 @@ async def _near_misses(
 
 
 def _to_summary(t: TargetORM) -> TargetSummary:
+    """Project an ORM row to the wire :class:`TargetSummary` shape.
+
+    Mirror of :func:`meho_backplane.api.v1.targets._to_summary`; both
+    sites carry the same projection so the list endpoint and the
+    near-miss diagnostic surface produce identical row shapes
+    (per ``docs/codebase/api-shape-conventions.md`` §5).
+    """
+    from meho_backplane.connectors.schemas import AuthModel
+
     return TargetSummary(
         id=t.id,
+        tenant_id=t.tenant_id,
         name=t.name,
         aliases=tuple(t.aliases),
         product=t.product,
+        version=t.version,
         host=t.host,
+        port=t.port,
+        fqdn=t.fqdn,
+        secret_ref=t.secret_ref,
+        auth_model=AuthModel(t.auth_model),
+        vpn_required=t.vpn_required,
+        fingerprint=t.fingerprint,
+        preferred_impl_id=t.preferred_impl_id,
+        created_at=t.created_at,
+        updated_at=t.updated_at,
+        deleted_at=t.deleted_at,
     )

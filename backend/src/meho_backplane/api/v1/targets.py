@@ -275,15 +275,36 @@ class TargetsDiscoverResult(BaseModel):
 
 
 def _to_summary(t: TargetORM) -> TargetSummary:
+    """Project an ORM row to the wire :class:`TargetSummary` shape.
+
+    G0.16-T6 Finding D (#1312) widened the summary to mirror the
+    detail-endpoint shape per
+    ``docs/codebase/api-shape-conventions.md`` §5, so list-row field
+    set ⊇ detail field set holds for every field except the two
+    deliberately-omitted free-form blobs (``notes``, ``extras``); see
+    :class:`TargetSummary` for the rationale.
+    """
     return TargetSummary(
         id=t.id,
+        tenant_id=t.tenant_id,
         name=t.name,
         # ORM stores aliases as ``list[str]`` (mutable JSON column);
         # the response schema declares ``tuple[str, ...]`` for
         # frozen-model immutability. Coerce at the boundary.
         aliases=tuple(t.aliases),
         product=t.product,
+        version=t.version,
         host=t.host,
+        port=t.port,
+        fqdn=t.fqdn,
+        secret_ref=t.secret_ref,
+        auth_model=AuthModel(t.auth_model),
+        vpn_required=t.vpn_required,
+        fingerprint=t.fingerprint,
+        preferred_impl_id=t.preferred_impl_id,
+        created_at=t.created_at,
+        updated_at=t.updated_at,
+        deleted_at=t.deleted_at,
     )
 
 

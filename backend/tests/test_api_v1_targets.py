@@ -1209,6 +1209,57 @@ def test_update_target_clear_preferred_impl_id_succeeds(client: TestClient) -> N
     assert response.json()["preferred_impl_id"] is None
 
 
+@pytest.mark.asyncio
+async def test_list_target_field_set_superset_of_detail(client: TestClient) -> None:
+    """List rows surface every field the detail endpoint exposes (no masking).
+
+    G0.16-T6 Finding D (#1312). Per
+    ``docs/codebase/api-shape-conventions.md`` §5 the list endpoint
+    must not silently null out fields the detail endpoint returns.
+    The v0.8.0 shape masked ``version``, ``secret_ref``, and
+    ``preferred_impl_id`` on list rows; this regression test pins
+    the new contract.
+    """
+    tenant_a = str(uuid.uuid4())
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_a),
+        name="prod-vc-1",
+        product="vsphere",
+        host="vcenter.corp.internal",
+        version="9.0",
+        secret_ref="secret/meho/vc",
+        preferred_impl_id="vmware-rest",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        list_resp = client.get(
+            "/api/v1/targets",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_a)}"},
+        )
+        detail_resp = client.get(
+            "/api/v1/targets/prod-vc-1",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_a)}"},
+        )
+    assert list_resp.status_code == 200
+    assert detail_resp.status_code == 200
+    list_row = next(r for r in list_resp.json() if r["name"] == "prod-vc-1")
+    detail_row = detail_resp.json()
+    # The only fields a list row is allowed to omit are the
+    # operator-authored free-form blobs the convention doc names.
+    allowed_omissions = {"notes", "extras"}
+    masked = {
+        k
+        for k in detail_row
+        if k not in allowed_omissions and k not in list_row
+    }
+    assert masked == set(), f"list silently masks {masked!r} relative to detail"
+    # And the load-bearing routing fields specifically carry the
+    # same non-null value the detail surface returned.
+    for key_name in ("version", "secret_ref", "preferred_impl_id"):
+        assert list_row[key_name] == detail_row[key_name]
+
+
 def test_create_target_versioned_preferred_impl_id_succeeds(client: TestClient) -> None:
     """POST with the versioned ``preferred_impl_id`` form is accepted.
 

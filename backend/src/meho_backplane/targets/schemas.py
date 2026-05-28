@@ -65,19 +65,54 @@ __all__ = [
 class TargetSummary(BaseModel):
     """Short shape for list endpoints.
 
-    Omits ``notes``, ``extras``, and connection-auth details to keep
-    list responses fast and small. The ``aliases`` field is included
-    because list consumers (CLI ``meho target list``, autocomplete)
-    need it to display secondary names.
+    G0.16-T6 Finding D (#1312) widened this from the previous narrow
+    projection (``id, name, aliases, product, host``) to mirror the
+    detail-endpoint shape's identification + connection-routing
+    fields, including ``version``, ``port``, ``fqdn``, ``secret_ref``,
+    ``auth_model``, ``vpn_required``, ``preferred_impl_id``, and the
+    server-managed timestamps. Per
+    ``docs/codebase/api-shape-conventions.md`` §5, list endpoints
+    must not silently mask fields the detail endpoint exposes
+    (RDC #771 Finding 8 caught list returning ``version=null,
+    secret_ref=null, preferred_impl_id=null`` for targets whose
+    detail endpoint returned actual values; adopters either wrote
+    N+1 calls or accepted silent data masking).
+
+    The two remaining omissions vs :class:`Target` are deliberate:
+    ``notes`` and ``extras``. Both are operator-authored free-form
+    blobs that can carry meaningful payload (``extras`` is
+    capability-marker metadata; ``notes`` is operator commentary)
+    and shipping them in the list response would inflate the page
+    size for the common "give me the names and routing" question
+    that list consumers ask. The convention doc's escape valve
+    applies: when an N+1 cost on these specifically becomes a real
+    concern, a future ``GET /api/v1/targets/summary`` projection
+    endpoint can carry the narrow shape under an explicit name
+    (anti-pattern is silent masking, not documented projection).
+
+    Frozen so callers can stash instances in request state or
+    structured logs without fear of mutation.
     """
 
     model_config = ConfigDict(frozen=True)
 
     id: UUID
+    tenant_id: UUID
     name: str
     aliases: tuple[str, ...]
     product: str
+    version: str | None = None
     host: str
+    port: int | None
+    fqdn: str | None
+    secret_ref: str | None
+    auth_model: AuthModel
+    vpn_required: bool
+    fingerprint: Mapping[str, Any] | None
+    preferred_impl_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None = None
 
 
 class Target(BaseModel):

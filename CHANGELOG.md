@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /api/v1/targets` no longer silently masks detail fields
+  (G0.16-T6 Finding D #1312).** `TargetSummary` widened to mirror
+  the detail-endpoint shape per
+  `docs/codebase/api-shape-conventions.md` §5: list rows now
+  surface `version`, `tenant_id`, `port`, `fqdn`, `secret_ref`,
+  `auth_model`, `vpn_required`, `fingerprint`, `preferred_impl_id`,
+  and the `created_at` / `updated_at` / `deleted_at` timestamps.
+  The two deliberate omissions (`notes`, `extras`) are operator
+  free-form blobs documented in `TargetSummary`'s docstring. A
+  structural regression test in
+  `tests/test_targets_schemas.py` keeps the contract pinned so a
+  future field added to `Target` without the matching summary
+  update fails CI.
+
 ### Changed
 
 - **`preferred_impl_id` accepts the versioned form on both POST and

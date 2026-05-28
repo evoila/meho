@@ -5,14 +5,14 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -109,62 +109,122 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 			output.Unexpected(fmt.Sprintf("--offset must be non-negative; got %d", opts.Offset)),
 			opts.JSONOut)
 	}
+	// Parse --tenant CLI-side so a malformed UUID surfaces locally
+	// as a clear error rather than after the server's 422 round-trip.
+	// The generated `TenantFilter` is `*openapi_types.UUID`; sending
+	// raw strings is not an option on the typed client.
+	var tenantFilter *openapi_types.UUID
+	if opts.Tenant != "" {
+		var parsed openapi_types.UUID
+		if err := parsed.UnmarshalText([]byte(opts.Tenant)); err != nil {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf("--tenant is not a valid UUID: %v", err)),
+				opts.JSONOut)
+		}
+		tenantFilter = &parsed
+	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	resp, err := getList(cmd.Context(), backplaneURL, opts)
+	resp, err := getList(cmd.Context(), backplaneURL, opts, tenantFilter)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), resp)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printListTable(cmd.OutOrStdout(), resp)
+	// Guard against 200 + missing-content-type leaving JSON200 nil
+	// (oapi-codegen's `ParseListTriggers...` only populates the
+	// typed field when Content-Type contains `application/json`).
+	// Without this guard, a malformed 200 would print "no scheduled
+	// triggers in this tenant" as if the tenant genuinely had zero
+	// — actively misleading. Mirrors the convention in
+	// `cli/internal/cmd/status.go:142` and the post-iter-2 fix the
+	// kb sibling adopted on PR #1282.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a scheduler list payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printListTable(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-// buildListPath assembles the GET /api/v1/scheduler/triggers query
-// string. Exposed for unit tests so URL construction stays checkable.
-func buildListPath(opts listOptions) string {
-	q := url.Values{}
+// listQueryParams maps the CLI flags onto the generated query-param
+// shape. Mirrors the pre-migration `buildListPath` query-string
+// composition exactly: --kind / --status are typed enum pointers;
+// --tenant is a UUID pointer; --limit / --offset only send when
+// non-zero so the backend's default-100 page-size kicks in when the
+// operator omits the flag. The bearer header is injected by the
+// `api.AuthedClient` request editor; the `Authorization` form param
+// the generated `Params` struct exposes is left nil so we don't
+// double-emit it.
+func listQueryParams(opts listOptions, tenantFilter *openapi_types.UUID) *api.ListTriggersApiV1SchedulerTriggersGetParams {
+	params := &api.ListTriggersApiV1SchedulerTriggersGetParams{}
 	if opts.Kind != "" {
-		q.Set("kind", opts.Kind)
+		k := api.ListTriggersApiV1SchedulerTriggersGetParamsKind(opts.Kind)
+		params.Kind = &k
 	}
 	if opts.Status != "" {
-		q.Set("status", opts.Status)
+		s := api.ListTriggersApiV1SchedulerTriggersGetParamsStatus(opts.Status)
+		params.Status = &s
 	}
-	if opts.Tenant != "" {
-		q.Set("tenant_filter", opts.Tenant)
+	if tenantFilter != nil {
+		params.TenantFilter = tenantFilter
 	}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		l := opts.Limit
+		params.Limit = &l
 	}
 	if opts.Offset > 0 {
-		q.Set("offset", strconv.Itoa(opts.Offset))
+		o := opts.Offset
+		params.Offset = &o
 	}
-	path := "/api/v1/scheduler/triggers"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func getList(ctx context.Context, backplaneURL string, opts listOptions) (*ListResponse, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
+// getList calls GET /api/v1/scheduler/triggers via the generated
+// typed client. The 401-refresh-retry loop runs through retryOn401.
+// The authed-client construction is hoisted out of the retry loop
+// so a credential failure routes directly to renderRequestError
+// rather than getting swallowed by the retry shape (per the T11
+// #1285 iter-2 lesson).
+func getList(
+	ctx context.Context,
+	backplaneURL string,
+	opts listOptions,
+	tenantFilter *openapi_types.UUID,
+) (*api.ListTriggersApiV1SchedulerTriggersGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out ListResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode scheduler list response: %w", err)
-	}
-	return &out, nil
+	params := listQueryParams(opts, tenantFilter)
+	return retryOn401(
+		ctx,
+		authed,
+		func(ctx context.Context) (*api.ListTriggersApiV1SchedulerTriggersGetResponse, error) {
+			return authed.ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx, params)
+		},
+		func(r *api.ListTriggersApiV1SchedulerTriggersGetResponse) int { return r.StatusCode() },
+	)
 }
 
 // printListTable renders the triggers as a compact table:
 // ID, KIND, STATUS, SCHEDULE (cron_expr or fire_at), NEXT_FIRE_AT.
-func printListTable(w io.Writer, r *ListResponse) {
+// Consumes `api.ScheduledTriggerListResponse` directly so the
+// generated typed envelope is the single source of truth for the
+// on-screen shape.
+func printListTable(w io.Writer, r *api.ScheduledTriggerListResponse) {
 	if r == nil || len(r.Triggers) == 0 {
 		fmt.Fprintln(w, "no scheduled triggers in this tenant")
 		return
@@ -173,7 +233,7 @@ func printListTable(w io.Writer, r *ListResponse) {
 		"ID", "KIND", "STATUS", "SCHEDULE", "NEXT_FIRE_AT")
 	for _, t := range r.Triggers {
 		schedule := ""
-		switch t.Kind {
+		switch string(t.Kind) {
 		case "cron":
 			if t.CronExpr != nil {
 				schedule = *t.CronExpr
@@ -183,16 +243,16 @@ func printListTable(w io.Writer, r *ListResponse) {
 			}
 		case "one_off":
 			if t.FireAt != nil {
-				schedule = *t.FireAt
+				schedule = formatTime(t.FireAt)
 			}
 		case "event":
 			schedule = "event-filter"
 		}
 		next := "-"
 		if t.NextFireAt != nil {
-			next = *t.NextFireAt
+			next = formatTime(t.NextFireAt)
 		}
 		fmt.Fprintf(w, "%-36s %-8s %-10s %-30s %s\n",
-			t.ID, t.Kind, t.Status, schedule, next)
+			t.Id.String(), string(t.Kind), string(t.Status), schedule, next)
 	}
 }

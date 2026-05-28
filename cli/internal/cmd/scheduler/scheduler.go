@@ -24,14 +24,20 @@
 // non-tenant_admin write callers with HTTP 403; the verbs render this
 // as insufficient_role.
 //
-// The implementation follows the in-package HTTP helper pattern the
-// sibling verb trees use (a local doAuthedRequest / renderRequestError
-// pair) rather than a shared client package, for the import-cycle
-// reason every sibling cites.
+// G0.12-T13 #1271 migrated this package off the sibling-verb pattern
+// of hand-rolled HTTP + hand-typed copies of backend pydantic models.
+// Every verb here drives the generated `api.ClientWithResponses`
+// surface directly: `api.NewAuthedClient` wires the bearer + lazy
+// 401-refresh editor onto the embedded `ClientWithResponses`, and
+// the verbs call the typed `*WithResponse` methods
+// (`ListTriggersApiV1SchedulerTriggersGetWithResponse` etc.).
+// Consumer-side struct drift — the #1069 root cause Initiative
+// #1118 targets — can't recur because we now consume
+// `api.ScheduledTriggerRead`, `api.ScheduledTriggerListResponse`,
+// and `api.ScheduledTriggerCreate` directly.
 package scheduler
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,6 +46,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -145,38 +152,11 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// Trigger mirrors the backend ScheduledTriggerRead pydantic model
-// (`backend/src/meho_backplane/scheduler/schemas.py`). Hand-written
-// rather than aliased to a generated client type so the scheduler
-// package stays decoupled from oapi-codegen churn — the stance the
-// agent / kb / audit / broadcast packages take.
-type Trigger struct {
-	ID                string         `json:"id"`
-	TenantID          string         `json:"tenant_id"`
-	AgentDefinitionID string         `json:"agent_definition_id"`
-	Kind              string         `json:"kind"`
-	CronExpr          *string        `json:"cron_expr"`
-	Timezone          string         `json:"timezone"`
-	FireAt            *string        `json:"fire_at"`
-	EventFilter       map[string]any `json:"event_filter"`
-	Status            string         `json:"status"`
-	InFlightPolicy    string         `json:"in_flight_policy"`
-	NextFireAt        *string        `json:"next_fire_at"`
-	LastFiredAt       *string        `json:"last_fired_at"`
-	Inputs            map[string]any `json:"inputs"`
-	IdentitySub       string         `json:"identity_sub"`
-	CreatedBySub      string         `json:"created_by_sub"`
-	CreatedAt         string         `json:"created_at"`
-	UpdatedAt         string         `json:"updated_at"`
-}
-
-// ListResponse mirrors the backend ScheduledTriggerListResponse
-// envelope (`{"triggers": [...]}`).
-type ListResponse struct {
-	Triggers []Trigger `json:"triggers"`
-}
-
-// validKinds mirrors the backend ScheduledTriggerKind enum.
+// validKinds mirrors the backend ScheduledTriggerKind enum. Kept as a
+// plain-string set so the per-verb pre-check (rejects unknown --kind
+// before the round-trip) can be exercised in tests without parsing the
+// generated `api.ScheduledTriggerKind` constants — the wire-level
+// values are the canonical truth.
 var validKinds = map[string]bool{"cron": true, "one_off": true, "event": true}
 
 // validStatuses mirrors the backend ScheduledTriggerStatus enum.
@@ -193,12 +173,155 @@ var validInFlightPolicies = map[string]bool{
 	"resume":          true,
 }
 
-// errMissingAccessToken is the sentinel doAuthedRequest returns when
-// the stored token row exists but its access_token is empty.
+// errMissingAccessToken is the sentinel newAuthedClient returns when
+// the stored token row exists but its `access_token` field is empty.
+// It's a credential-state failure rather than a transport failure, so
+// renderRequestError maps it to auth_expired (exit 2) with a `meho
+// login` hint — not unreachable (exit 3). Mirrors the shape adopted
+// by the sibling typed-client migrations on Initiative #1118 (T1
+// #1251 approvals, T4 #1262 agent-principal, T9 #1267 kb, T12 #1270
+// retrieval).
 var errMissingAccessToken = errors.New("meho: stored token has no access_token")
 
-// renderRequestError translates a request error into the right
-// output.StructuredError category, mirroring the agent package shape.
+// responseBodyCap bounds the bytes the scheduler verb tree's
+// transport will read off any backplane response body before
+// surfacing `*http.MaxBytesError`. 1 MiB is generous for a paginated
+// trigger list (limit 500 with full row payloads stays well under
+// even with verbose `event_filter` JSON / `inputs` maps).
+//
+// Without the cap, an adversarial or runaway backplane response
+// could OOM the CLI because the generated `Parse*Response` helpers
+// call `io.ReadAll(rsp.Body)` on an unbounded body before
+// constructing the typed envelope. The cap is installed at the
+// transport layer via an inline `capRoundTripper` so it applies
+// uniformly to every typed verb on the same `AuthedClient`. The kb
+// / memory siblings install the same cap via
+// `api.AuthedClientOptions.ResponseBodyLimit`; we duplicate the
+// wrapper locally rather than reach into `cli/internal/api/client.go`
+// to keep this PR's blast radius inside the scheduler verb tree
+// (per Initiative #1118's "blast radius = touched files" discipline
+// — the shared options struct will land separately when the sibling
+// PRs settle).
+const responseBodyCap int64 = 1 << 20
+
+// capRoundTripper wraps an http.RoundTripper so every response body
+// is re-bound to an http.MaxBytesReader before the typed-client
+// parsers (oapi-codegen's generated `Parse*Response` helpers, which
+// `io.ReadAll(rsp.Body)` to populate `*Response.Body []byte`) get a
+// chance to drain it. A read at or past `limit` surfaces as
+// `*http.MaxBytesError`, which `renderRequestError` maps to
+// `output.Unexpected` (exit 4 — `unexpected_response`) rather than
+// `output.Unreachable` (exit 3 — `network_unreachable`).
+//
+// The `*http.MaxBytesError` shape was added in Go 1.19 and is the
+// canonical signal for "transport refused to read past N bytes."
+// The wrapper applies the cap server-wide on the underlying
+// transport so every typed verb on the same AuthedClient inherits
+// it uniformly.
+type capRoundTripper struct {
+	base  http.RoundTripper
+	limit int64
+}
+
+func (c *capRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := c.base.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	if resp.Body != nil && c.limit > 0 {
+		// http.MaxBytesReader returns an io.ReadCloser whose Close
+		// closes the underlying body, so the existing close
+		// discipline on the caller (oapi-codegen's `defer
+		// rsp.Body.Close()` inside every `*WithResponse` method)
+		// still drains the original body cleanly.
+		resp.Body = http.MaxBytesReader(nil, resp.Body, c.limit)
+	}
+	return resp, nil
+}
+
+// cappedHTTPClient returns an http.Client whose Transport caps every
+// response body at responseBodyCap. The clone keeps Timeout / Jar /
+// CheckRedirect intact and only swaps the Transport for the capped
+// wrapper so callers don't mutate http.DefaultClient (which is
+// process-global). Passing the returned client to
+// `api.AuthedClientOptions.HTTPClient` threads the cap through both
+// the bearer-injecting editor and the oauth2 refresh exchange.
+func cappedHTTPClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	clone := *base
+	transport := clone.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	clone.Transport = &capRoundTripper{base: transport, limit: responseBodyCap}
+	return &clone
+}
+
+// newAuthedClient builds an api.AuthedClient for the supplied
+// backplane URL with the 1 MiB response-body cap installed at the
+// transport layer, and verifies a non-empty bearer is loaded. The
+// caller forwards any returned error to renderRequestError for
+// category mapping. Mirrors the sibling verb-tree migrations
+// (G0.12-T4 #1262, G0.12-T9 #1267, G0.12-T12 #1270).
+func newAuthedClient(ctx context.Context, backplaneURL string) (*api.AuthedClient, error) {
+	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{
+		HTTPClient: cappedHTTPClient(nil),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if authed.AccessToken() == "" {
+		return nil, errMissingAccessToken
+	}
+	return authed, nil
+}
+
+// retryOn401 invokes call once, and if the typed response carries a
+// 401, runs a one-shot bearer refresh and re-issues call. Mirrors
+// the behaviour `api.AuthedClient.GetHealth` implements for the
+// /api/v1/health endpoint, generalised so every scheduler verb runs
+// the same transparent-retry contract.
+//
+// statusOf reads the StatusCode off the typed response envelope (the
+// generated *Response types expose StatusCode() through their
+// embedded *http.Response). A nil response counts as "no retry" —
+// the transport already failed and the caller surfaces err directly.
+func retryOn401[R any](
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*R, error),
+	statusOf func(*R) int,
+) (*R, error) {
+	resp, err := call(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || statusOf(resp) != http.StatusUnauthorized {
+		return resp, nil
+	}
+	if rerr := authed.Refresh(ctx); rerr != nil {
+		return resp, rerr
+	}
+	return call(ctx)
+}
+
+// renderRequestError translates a transport-layer request error into
+// the right output.StructuredError category. Maps the scheduler REST
+// surface's pre-response failures: missing bearer, no-refresh-token,
+// token-not-found, body-cap / parse failures bubbling out of the
+// generated `*WithResponse` parsers, plus the generic transport-down
+// case. Non-2xx status codes carried in a typed response envelope
+// are classified by renderHTTPStatus instead.
+//
+// Parse / cap failures route to `output.Unexpected` (exit 4 —
+// `unexpected_response`) rather than `output.Unreachable` (exit 3 —
+// `network_unreachable`). A 1 MiB body cap firing or a JSON decode
+// rejecting a malformed payload is a contract / shape failure on
+// the server side, not a transport-down failure on the operator's
+// side; surfacing it as "unreachable" would send operators chasing
+// a network ghost.
 func renderRequestError(
 	cmd *cobra.Command,
 	backplaneURL string,
@@ -232,9 +355,23 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
-		return renderHTTPError(cmd, backplaneURL, he, jsonOut)
+	// Transport-layer body-cap firing (*http.MaxBytesError out of
+	// the capRoundTripper) and JSON shape failures bubbling out of
+	// the generated parsers are server-side contract failures, not
+	// transport-down failures — surface them as unexpected_response
+	// (exit 4) with the backplane URL so the operator sees the
+	// origin without chasing a network ghost.
+	var maxBytesErr *http.MaxBytesError
+	var syntaxErr *json.SyntaxError
+	var unmarshalErr *json.UnmarshalTypeError
+	if errors.As(err, &maxBytesErr) ||
+		errors.As(err, &syntaxErr) ||
+		errors.As(err, &unmarshalErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: %v", backplaneURL, err)),
+			jsonOut,
+		)
 	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
@@ -242,14 +379,38 @@ func renderRequestError(
 	)
 }
 
-// renderHTTPError classifies a non-2xx response.
-func renderHTTPError(
+// renderHTTPStatus classifies a non-2xx response carried in the
+// typed envelope into the right StructuredError category. Mirrors
+// the pre-migration `renderHTTPError` switch but acts on the
+// (statusCode, body) pair lifted off the generated
+// `*Response.HTTPResponse` + `Body` fields rather than a sentinel
+// value. Scheduler-route-specific notes:
+//
+//   - 403 — write to a trigger the operator's role can't reach (the
+//     operator-role caller using --tenant lands here too).
+//   - 404 — `trigger_not_found` covers both genuine absence and
+//     cross-tenant probes; the existence of a trigger is **not**
+//     leaked across tenants via a 403/404 differential.
+//   - 409 — `trigger_already_fired` on a cancel against a terminal
+//     one-off trigger (lifecycle is `fired → end`, not
+//     `fired → cancelled`).
+//   - 422 — FastAPI validation envelope (invalid cron, unknown
+//     `agent_definition_id`, malformed body); the verb surfaces
+//     the backend's detail so the operator sees the field that
+//     failed.
+//   - 401 — backplane rejected the stored token after a refresh
+//     attempt; auth_expired with a `meho login` hint.
+//   - Other non-2xx — `Unexpected` carrying the raw body so the
+//     operator sees an actionable signal.
+func renderHTTPStatus(
 	cmd *cobra.Command,
 	backplaneURL string,
-	he *httpError,
+	statusCode int,
+	body []byte,
 	jsonOut bool,
 ) error {
-	switch he.StatusCode {
+	bodyStr := strings.TrimSpace(string(body))
+	switch statusCode {
 	case http.StatusUnauthorized:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -260,7 +421,7 @@ func renderHTTPError(
 		)
 	case http.StatusForbidden:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(decodeDetailString(he.Body)),
+			output.InsufficientRole(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotFound:
@@ -268,24 +429,24 @@ func renderHTTPError(
 		// `trigger_not_found` covers both genuine absence and
 		// cross-tenant probes (no existence leak across tenants).
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusConflict:
 		// `trigger_already_fired` on a cancel against a terminal one-off.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusUnprocessableEntity:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("invalid request: %s", he.Body)),
+			output.Unexpected(fmt.Sprintf("invalid request: %s", bodyStr)),
 			jsonOut,
 		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
 	}
@@ -308,123 +469,50 @@ func decodeDetailString(body string) string {
 	return strings.TrimSpace(body)
 }
 
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection and one-shot 401-refresh-retry.
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
-	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errMissingAccessToken
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, responseBodyCap+1))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if int64(len(raw)) > responseBodyCap {
-		return nil, fmt.Errorf(
-			"response body exceeds %d-byte cap; refusing to decode possibly-truncated JSON",
-			responseBodyCap,
-		)
-	}
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// responseBodyCap bounds the response body the CLI will read. 1 MiB
-// is comfortable for a paginated trigger list (limit 500 with full row
-// payloads stays well under).
-const responseBodyCap int64 = 1 << 20
-
-// httpError carries a non-2xx response.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
-}
-
 // printTriggerSummary renders one trigger as a key-value summary.
-func printTriggerSummary(w io.Writer, t *Trigger) {
+// Consumes `api.ScheduledTriggerRead` directly so the generated
+// typed envelope is the single source of truth for the on-screen
+// shape; drift in the backend pydantic model now surfaces here at
+// `go build` time rather than at runtime via the freshness gate.
+func printTriggerSummary(w io.Writer, t *api.ScheduledTriggerRead) {
 	if t == nil {
 		return
 	}
-	fmt.Fprintf(w, "%-22s %s\n", "id:", t.ID)
-	fmt.Fprintf(w, "%-22s %s\n", "tenant_id:", t.TenantID)
-	fmt.Fprintf(w, "%-22s %s\n", "agent_definition_id:", t.AgentDefinitionID)
-	fmt.Fprintf(w, "%-22s %s\n", "kind:", t.Kind)
-	fmt.Fprintf(w, "%-22s %s\n", "status:", t.Status)
-	fmt.Fprintf(w, "%-22s %s\n", "in_flight_policy:", t.InFlightPolicy)
+	fmt.Fprintf(w, "%-22s %s\n", "id:", t.Id.String())
+	fmt.Fprintf(w, "%-22s %s\n", "tenant_id:", t.TenantId.String())
+	fmt.Fprintf(w, "%-22s %s\n", "agent_definition_id:", t.AgentDefinitionId.String())
+	fmt.Fprintf(w, "%-22s %s\n", "kind:", string(t.Kind))
+	fmt.Fprintf(w, "%-22s %s\n", "status:", string(t.Status))
+	fmt.Fprintf(w, "%-22s %s\n", "in_flight_policy:", string(t.InFlightPolicy))
 	if t.CronExpr != nil {
 		fmt.Fprintf(w, "%-22s %s\n", "cron_expr:", *t.CronExpr)
 		fmt.Fprintf(w, "%-22s %s\n", "timezone:", t.Timezone)
 	}
 	if t.FireAt != nil {
-		fmt.Fprintf(w, "%-22s %s\n", "fire_at:", *t.FireAt)
+		fmt.Fprintf(w, "%-22s %s\n", "fire_at:", formatTime(t.FireAt))
 	}
 	if t.NextFireAt != nil {
-		fmt.Fprintf(w, "%-22s %s\n", "next_fire_at:", *t.NextFireAt)
+		fmt.Fprintf(w, "%-22s %s\n", "next_fire_at:", formatTime(t.NextFireAt))
 	}
 	if t.LastFiredAt != nil {
-		fmt.Fprintf(w, "%-22s %s\n", "last_fired_at:", *t.LastFiredAt)
+		fmt.Fprintf(w, "%-22s %s\n", "last_fired_at:", formatTime(t.LastFiredAt))
 	}
 	fmt.Fprintf(w, "%-22s %s\n", "identity_sub:", t.IdentitySub)
 	fmt.Fprintf(w, "%-22s %s\n", "created_by:", t.CreatedBySub)
-	fmt.Fprintf(w, "%-22s %s\n", "created_at:", t.CreatedAt)
+	fmt.Fprintf(w, "%-22s %s\n", "created_at:", formatTime(&t.CreatedAt))
+}
+
+// formatTime renders a *time.Time the way the backend ships it on
+// the wire: ISO 8601 with sub-second precision when present. Go's
+// stdlib `time.RFC3339Nano` layout matches what FastAPI emits for a
+// `datetime` field (which uses Python's `isoformat()` and preserves
+// microsecond precision). Rendering it here keeps the human-readable
+// summary's wall-clock strings byte-for-byte aligned with the
+// pre-migration output (which passed the JSON string through
+// untouched).
+func formatTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.Format(time.RFC3339Nano)
 }

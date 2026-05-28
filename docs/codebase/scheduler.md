@@ -337,6 +337,32 @@ of `null` into `map[string]any` sets the map to nil without error,
 which would silently forward an empty body field that the backend
 cannot distinguish from "omitted").
 
+### CLI transport (G0.12-T13 #1271)
+
+`cli/internal/cmd/scheduler/` drives the generated
+`api.ClientWithResponses` surface directly: `api.NewAuthedClient`
+wires the bearer + lazy 401-refresh editor onto the embedded
+`ClientWithResponses`, and the verbs call the typed `*WithResponse`
+methods (`ListTriggersApiV1SchedulerTriggersGetWithResponse`,
+`CreateTriggerApiV1SchedulerTriggersPostWithResponse`,
+`CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse`).
+Consumer-side struct duplicates of the backend pydantic models
+(previously `Trigger`, `ListResponse`) are gone — every wire shape
+is now sourced from `cli/internal/api/client.gen.go`
+(`api.ScheduledTriggerRead`, `api.ScheduledTriggerListResponse`,
+`api.ScheduledTriggerCreate`) so a schema drift between the backend
+and the CLI surfaces at `go build` time rather than as the kind of
+#1069-class silent loss the freshness gate at
+`.github/workflows/cli-api-snapshot.yml` is designed to catch.
+
+A 1 MiB response-body cap is installed at the transport layer via
+an inline `capRoundTripper` threaded through
+`api.AuthedClientOptions.HTTPClient` (mirroring the T12 retrieval
+sibling on PR #1286). The wrapper re-binds every response body to
+`http.MaxBytesReader` so the generated `Parse*Response` helpers
+(which `io.ReadAll(rsp.Body)` into the typed envelope) can't be
+pinned by an adversarial / runaway backplane response.
+
 ## References
 
 - Issue #823 (G11.3-T2 cron + one-off triggers)

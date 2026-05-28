@@ -6,6 +6,7 @@ package audit
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,17 +14,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/backplane"
 )
 
 // seedXDGAndToken seeds a per-test config dir + token store that
-// resolveBackplane / doAuthedRequest will read. Mirrors the same
-// helper in cli/internal/cmd/targets/list_test.go — the auth
-// package's keyring backend defaults are disabled for tests so the
-// file-store path is exercised deterministically.
+// the typed client's `api.NewAuthedClient` will read via the default
+// `auth.NewTokenStore` path. Mirrors the same helper in
+// cli/internal/cmd/targets/list_test.go.
 func seedXDGAndToken(t *testing.T, backplaneURL string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -154,6 +157,31 @@ func TestDecodeDetailStringFallsBackOnNonJSON(t *testing.T) {
 	}
 }
 
+// TestTrimmedBodyDropsTrailingWhitespace pins the small renderer
+// helper. Backplane responses often arrive with a trailing newline;
+// dropping it keeps the error envelope's `HTTP 500: foo` shape
+// stable in the operator-visible output. Mirrors the approvals
+// migration's namesake helper (G0.12-T1 #1276).
+func TestTrimmedBodyDropsTrailingWhitespace(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"plain", "plain"},
+		{"trail\n", "trail"},
+		{"trail \r\n", "trail"},
+		{"trail\t  ", "trail"},
+		{"", "(empty body)"},
+		{"   \n", "(empty body)"},
+		{"   leading kept", "   leading kept"},
+	}
+	for _, tc := range cases {
+		if got := trimmedBody([]byte(tc.in)); got != tc.want {
+			t.Errorf("trimmedBody(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestTruncateRuneAware — multi-byte UTF-8 stays valid when the
 // table renderer truncates a long target name.
 func TestTruncateRuneAware(t *testing.T) {
@@ -175,117 +203,250 @@ func TestStrDerefHandlesNil(t *testing.T) {
 	}
 }
 
-// TestDoAuthedRequestRejectsOversizedResponse — the 1 MiB cap on
-// “io.LimitReader“ is paired with a +1-byte read so a response
-// that fills the cap surfaces as a clear error rather than feeding
-// a silently-truncated JSON body into the decoder. Without this
-// guard, an oversized audit page would surface as
-// "unexpected end of JSON input" — confusing to operators and
-// indistinguishable from a malformed backend response.
-func TestDoAuthedRequestRejectsOversizedResponse(t *testing.T) {
-	// Emit 1 MiB + 1 byte of payload — exactly at the threshold the
-	// truncation guard fires. Anything strictly above the cap must
-	// fail loud rather than silently decode.
-	oversized := strings.Repeat("a", int(responseBodyCap)+1)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/audit/test", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(oversized))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	seedXDGAndToken(t, srv.URL)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := doAuthedRequest(ctx, srv.URL, "GET", "/api/v1/audit/test", nil)
-	if err == nil {
-		t.Fatalf("expected error on oversized response")
-	}
-	if !strings.Contains(err.Error(), "exceeds") {
-		t.Errorf("error message does not mention size cap: %v", err)
+// TestUUIDDerefHandlesNil pins the renderer's nil-UUID rendering.
+// The generated client surfaces nullable UUIDs as
+// `*openapi_types.UUID`; the summary's "-" rendering depends on
+// the nil-safe deref.
+func TestUUIDDerefHandlesNil(t *testing.T) {
+	if got := uuidDeref(nil); got != "" {
+		t.Errorf("uuidDeref(nil): got %q", got)
 	}
 }
 
-// TestDoAuthedRequestAcceptsResponseExactlyAtCap — the threshold
-// itself is allowed through. The +1-byte read distinguishes
-// "fits in the cap" from "spilled past the cap"; exactly-at-cap
-// must still decode.
-func TestDoAuthedRequestAcceptsResponseExactlyAtCap(t *testing.T) {
-	exact := strings.Repeat("a", int(responseBodyCap))
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/audit/test", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(exact))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	seedXDGAndToken(t, srv.URL)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	raw, err := doAuthedRequest(ctx, srv.URL, "GET", "/api/v1/audit/test", nil)
+// TestFormatTSRendersUTCRFC3339 — the generated client decodes the
+// backend's ISO-8601 `ts` string into `time.Time`; the renderer
+// re-serialises in UTC RFC3339 so the operator-visible column
+// matches the pre-migration `Entry.TS` string field shape.
+func TestFormatTSRendersUTCRFC3339(t *testing.T) {
+	ts, err := time.Parse(time.RFC3339, "2026-05-13T15:42:11Z")
 	if err != nil {
-		t.Fatalf("exact-cap response should not error: %v", err)
+		t.Fatalf("parse fixture: %v", err)
 	}
-	if int64(len(raw)) != responseBodyCap {
-		t.Errorf("expected %d bytes; got %d", responseBodyCap, len(raw))
+	got := formatTS(ts)
+	if got != "2026-05-13T15:42:11Z" {
+		t.Errorf("formatTS round-trip: got %q", got)
 	}
 }
 
-// TestDecodeAuditResponsePreservesLargeIntegers — Unix-millis
-// timestamps and other 64-bit integers in audit payloads must
-// survive the JSON round-trip without losing precision. Without
-// “UseNumber()“ they collapse to “float64“ and any integer above
-// 2^53 rounds — silently mangling forensic data.
-func TestDecodeAuditResponsePreservesLargeIntegers(t *testing.T) {
-	// 1745923128091 is a real Unix-millis timestamp shape; well
-	// below 2^53 so the failure mode for ``float64`` would be a
-	// trailing-decimal render rather than a precision loss, but the
-	// principle covers the larger range too.
-	raw := []byte(`{
-		"id": "00000000-0000-0000-0000-000000000001",
-		"ts": "2026-05-13T00:00:00Z",
-		"tenant_id": null,
-		"principal_sub": "damir",
-		"principal_name": null,
-		"target_id": null,
-		"target_name": null,
-		"method": "GET",
-		"path": "/x",
-		"status_code": 200,
-		"request_id": null,
-		"duration_ms": null,
-		"payload": {"hit_count": 1745923128091, "ratio": 0.5},
-		"op_id": "x.y",
-		"op_class": "read",
-		"result_status": "ok",
-		"parent_audit_id": null,
-		"agent_session_id": null,
-		"broadcast_event_id": null
-	}`)
-	var entry Entry
-	if err := decodeAuditResponse(raw, &entry); err != nil {
-		t.Fatalf("decodeAuditResponse: %v", err)
+// TestRenderHTTPStatusMaps401ToAuthExpired pins the 401 arm of the
+// shared HTTP-status switch. The backend 401 surface lands here when
+// a refresh failed mid-call; the operator sees a `meho login` hint.
+func TestRenderHTTPStatusMaps401ToAuthExpired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorised"))
+	}))
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runMyRecent(cmd, myRecentOptions{
+		JSONOut:           true,
+		BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected error on 401")
 	}
-	// The payload's integer must render exactly — no scientific
-	// notation, no trailing ``.0``. With ``UseNumber()`` it lands
-	// as ``json.Number("1745923128091")`` and formatPayloadScalar
-	// emits the bare digits.
-	hit, ok := entry.Payload["hit_count"]
-	if !ok {
-		t.Fatalf("payload missing hit_count: %+v", entry.Payload)
-	}
-	got := formatPayloadScalar(hit)
-	if got != "1745923128091" {
-		t.Errorf("integer precision lost: got %q; want %q", got, "1745923128091")
-	}
-	// And the float case still renders compactly.
-	ratio, ok := entry.Payload["ratio"]
-	if !ok {
-		t.Fatalf("payload missing ratio: %+v", entry.Payload)
-	}
-	if got := formatPayloadScalar(ratio); got != "0.5" {
-		t.Errorf("float render: got %q; want %q", got, "0.5")
+	if !strings.Contains(stderr.String(), "meho login") {
+		t.Errorf("stderr missing login hint: %s", stderr.String())
 	}
 }
+
+// TestRouteRequestErrorRoutesHTTPStatus — the dispatcher correctly
+// routes an `*httpResponseError` through `renderHTTPStatus` rather
+// than the transport ladder.
+func TestRouteRequestErrorRoutesHTTPStatus(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	he := &httpResponseError{statusCode: http.StatusForbidden, body: []byte(`{"detail":"operator required"}`)}
+	if err := routeRequestError(cmd, "https://meho.example", he, true); err == nil {
+		t.Fatalf("expected error returned from routeRequestError")
+	}
+	if !strings.Contains(stderr.String(), "operator required") {
+		t.Errorf("stderr missing 403 detail: %s", stderr.String())
+	}
+}
+
+// TestRouteRequestErrorRoutesTransport — a non-HTTP error path takes
+// the transport ladder (Unreachable) rather than the HTTP-status
+// switch.
+func TestRouteRequestErrorRoutesTransport(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	if err := routeRequestError(cmd, "https://meho.example", context.Canceled, true); err == nil {
+		t.Fatalf("expected error returned from routeRequestError")
+	}
+	if !strings.Contains(stderr.String(), "call ") {
+		t.Errorf("stderr does not look like Unreachable: %s", stderr.String())
+	}
+}
+
+// TestNewAuthedClientNoStoredTokenSurfacesAuthExpired pins the
+// `renderClientError` `IsTokenNotFound` arm — invoking any verb
+// against a backplane that has no stored token surfaces an
+// auth_expired envelope with a `meho login` hint, before any
+// network round-trip.
+func TestNewAuthedClientNoStoredTokenSurfacesAuthExpired(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("MEHO_KEYRING_DISABLE", "1")
+	if err := auth.SaveConfigAt(
+		filepath.Join(dir, "meho", "config.json"),
+		auth.Config{BackplaneURL: "https://meho.example"},
+	); err != nil {
+		t.Fatalf("SaveConfigAt: %v", err)
+	}
+
+	cmd, _, stderr := newRunCmd(t)
+	_, err := newAuthedClient(cmd.Context(), cmd, "https://meho.example", true)
+	if err == nil {
+		t.Fatalf("expected error from newAuthedClient with no stored token")
+	}
+	if !strings.Contains(stderr.String(), "meho login") {
+		t.Errorf("stderr missing login hint: %s", stderr.String())
+	}
+}
+
+// TestPostQueryReturnsHTTPErrorOnNon2xx pins the `postQuery` helper
+// behaviour: a non-2xx response lands as an `*httpResponseError`
+// (not a transport error), so `routeRequestError` can classify it.
+func TestPostQueryReturnsHTTPErrorOnNon2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("forbidden"))
+	}))
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+	client, err := api.NewAuthedClient(context.Background(), srv.URL, api.AuthedClientOptions{})
+	if err != nil {
+		t.Fatalf("NewAuthedClient: %v", err)
+	}
+	_, _, err = postQuery(context.Background(), client, api.AuditQueryRequest{})
+	if err == nil {
+		t.Fatalf("expected error on 403")
+	}
+	var he *httpResponseError
+	if !asHTTPResponseError(err, &he) {
+		t.Errorf("expected *httpResponseError; got %T: %v", err, err)
+	} else if he.statusCode != http.StatusForbidden {
+		t.Errorf("statusCode: got %d; want 403", he.statusCode)
+	}
+}
+
+// asHTTPResponseError is a tiny test helper that wraps errors.As so
+// the cast above stays readable without dragging the std-lib import
+// into the assertion site.
+func asHTTPResponseError(err error, target **httpResponseError) bool {
+	for cause := err; cause != nil; {
+		if h, ok := cause.(*httpResponseError); ok {
+			*target = h
+			return true
+		}
+		// Stop at the first non-wrap; this skill's errors don't
+		// nest under wrap helpers.
+		break
+	}
+	return false
+}
+
+// TestRenderHTTPStatus404SurfacesAuditRowNotFound pins the audit-
+// specific 404 arm. The cross-tenant probe always reads as 404 —
+// the substrate's tenant WHERE clause yields zero rows and the
+// route returns 404 rather than 403 so existence never leaks.
+func TestRenderHTTPStatus404SurfacesAuditRowNotFound(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	if err := renderHTTPStatus(cmd, "https://meho.example", http.StatusNotFound,
+		[]byte(`{"detail":"audit row not found"}`), true); err == nil {
+		t.Fatalf("expected error returned for 404")
+	}
+	if !strings.Contains(stderr.String(), "audit row not found") {
+		t.Errorf("stderr missing not-found hint: %s", stderr.String())
+	}
+}
+
+// TestRenderHTTPStatus400SurfacesParserDetail — 400 from the audit
+// API is DurationParseError / InvalidCursorError /
+// UnsupportedFilterError; the operator sees the parser's own message.
+func TestRenderHTTPStatus400SurfacesParserDetail(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	if err := renderHTTPStatus(cmd, "https://meho.example", http.StatusBadRequest,
+		[]byte(`{"detail":"unrecognised duration 'foo'"}`), true); err == nil {
+		t.Fatalf("expected error returned for 400")
+	}
+	if !strings.Contains(stderr.String(), "unrecognised duration") {
+		t.Errorf("stderr missing parser detail: %s", stderr.String())
+	}
+}
+
+// TestRenderHTTPStatus413DefensiveFallback — the replay verb shadows
+// this arm with its own session-id-aware redirect, but a non-replay
+// caller hitting 413 still gets the cap + redirect hint.
+func TestRenderHTTPStatus413DefensiveFallback(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	if err := renderHTTPStatus(cmd, "https://meho.example", http.StatusRequestEntityTooLarge,
+		[]byte(`{"detail":{"detail":"session_too_large","row_count":12345}}`), true); err == nil {
+		t.Fatalf("expected error returned for 413")
+	}
+	if !strings.Contains(stderr.String(), "12345 rows") {
+		t.Errorf("stderr missing row count: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "meho audit query") {
+		t.Errorf("stderr missing redirect hint: %s", stderr.String())
+	}
+}
+
+// TestRenderHTTPStatus422SurfacesValidation — FastAPI's validation
+// envelope passes through with the "invalid request" prefix.
+func TestRenderHTTPStatus422SurfacesValidation(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	body := []byte(`{"detail":[{"loc":["path","audit_id"],"msg":"value is not a valid uuid"}]}`)
+	if err := renderHTTPStatus(cmd, "https://meho.example", http.StatusUnprocessableEntity,
+		body, true); err == nil {
+		t.Fatalf("expected error returned for 422")
+	}
+	if !strings.Contains(stderr.String(), "invalid request") {
+		t.Errorf("stderr missing validation hint: %s", stderr.String())
+	}
+}
+
+// TestRenderHTTPStatusDefaultArm — anything else surfaces as
+// unexpected with the raw body for the operator.
+func TestRenderHTTPStatusDefaultArm(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	if err := renderHTTPStatus(cmd, "https://meho.example", http.StatusServiceUnavailable,
+		[]byte("maintenance"), true); err == nil {
+		t.Fatalf("expected error returned for 503")
+	}
+	if !strings.Contains(stderr.String(), "HTTP 503") {
+		t.Errorf("stderr missing HTTP code: %s", stderr.String())
+	}
+}
+
+// mustUUID parses s as a UUID and casts to the openapi_types alias,
+// failing the test on error. Used by fixtures that need a canonical
+// UUID for typed `api.AuditEntry.Id` / `.TenantId` / etc. fields.
+func mustUUID(t *testing.T, s string) openapi_types.UUID {
+	t.Helper()
+	parsed, err := uuid.Parse(s)
+	if err != nil {
+		t.Fatalf("mustUUID(%q): %v", s, err)
+	}
+	return openapi_types.UUID(parsed)
+}
+
+// mustUUIDPtr is the pointer companion to mustUUID for the
+// nullable-UUID fields on `api.AuditEntry` (TenantId, TargetId,
+// RequestId, ParentAuditId, AgentSessionId, BroadcastEventId).
+func mustUUIDPtr(t *testing.T, s string) *openapi_types.UUID {
+	t.Helper()
+	u := mustUUID(t, s)
+	return &u
+}
+
+// Sentinel: package-level helpers compile against the typed client's
+// public surface. A regression that drops one of the imports surfaces
+// as a build failure pinning the helper-shape contract.
+var (
+	_ = json.NewDecoder
+	_ = newAuthedClient
+	_ = mustUUIDPtr
+	_ api.AuditEntry
+)

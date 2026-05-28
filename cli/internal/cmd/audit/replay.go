@@ -4,6 +4,7 @@
 package audit
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,8 +12,10 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -24,38 +27,6 @@ import (
 // limit are folded into a single "… N more level(s) (use --max-depth
 // to expand)" marker. 20 matches the issue's spec.
 const defaultReplayMaxDepth = 20
-
-// ReplayNode mirrors the backend `ReplayNode` Pydantic model
-// (`backend/src/meho_backplane/audit_query/schemas.py`), which
-// subclasses `AuditEntry` and adds `depth` + `children`. Like `Entry`
-// the fields are hand-written rather than aliased to the generated
-// `api.ReplayNode` so the audit package stays decoupled from
-// oapi-codegen churn — the same stance the rest of this package takes.
-//
-// Only the rendering-relevant fields are pulled out as named members;
-// every other audit column survives the --json round-trip because the
-// verb re-marshals the raw server bytes verbatim rather than this
-// struct (see runReplay's --json branch). `DurationMS` is a `*string`
-// because Pydantic v2 serialises `Decimal` as a quoted decimal string
-// (or null).
-type ReplayNode struct {
-	TS           string       `json:"ts"`
-	OpID         string       `json:"op_id"`
-	ResultStatus string       `json:"result_status"`
-	DurationMS   *string      `json:"duration_ms"`
-	Depth        int          `json:"depth"`
-	Children     []ReplayNode `json:"children"`
-}
-
-// ReplayResult mirrors the backend `AuditReplayResult` envelope — a
-// `ReplayNode` forest plus the echoed session/tenant identity and the
-// session's anchor-row count.
-type ReplayResult struct {
-	Root      []ReplayNode `json:"root"`
-	SessionID string       `json:"session_id"`
-	TenantID  string       `json:"tenant_id"`
-	RowCount  int          `json:"row_count"`
-}
 
 // newReplayCmd returns the `meho audit replay` command.
 //
@@ -71,7 +42,7 @@ type ReplayResult struct {
 // A 413 from the backend means the session exceeds the server's
 // 10 000-anchor-row replay cap. The verb surfaces a friendly redirect
 // to `meho audit query --session-id <id>` (which paginates the flat
-// rows) and exits non-zero — see renderHTTPError's 413 arm in audit.go.
+// rows) and exits non-zero — see renderReplayRequestError.
 //
 // Exit codes:
 //   - 0   tree rendered cleanly (incl. an empty / unknown session)
@@ -129,7 +100,12 @@ type replayOptions struct {
 }
 
 func runReplay(cmd *cobra.Command, opts replayOptions) error {
-	if _, err := uuid.Parse(strings.TrimSpace(opts.SessionID)); err != nil {
+	// The typed-client's `sessionId` path parameter is
+	// `openapi_types.UUID`. Parse the operator string at the verb
+	// edge so a non-UUID argument surfaces as a clean
+	// output.Unexpected before any network round-trip.
+	parsed, err := uuid.Parse(strings.TrimSpace(opts.SessionID))
+	if err != nil {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
@@ -137,6 +113,7 @@ func runReplay(cmd *cobra.Command, opts replayOptions) error {
 			opts.JSONOut,
 		)
 	}
+	sessionID := openapi_types.UUID(parsed)
 	if opts.MaxDepth < 0 {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
@@ -148,30 +125,59 @@ func runReplay(cmd *cobra.Command, opts replayOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	raw, err := doAuthedRequest(
-		cmd.Context(), backplaneURL, "GET", buildReplayPath(opts.SessionID), nil)
+	client, cerr := newAuthedClient(cmd.Context(), cmd, backplaneURL, opts.JSONOut)
+	if cerr != nil {
+		return cerr
+	}
+	rawBody, result, err := fetchReplay(cmd.Context(), client, sessionID)
 	if err != nil {
 		return renderReplayRequestError(cmd, backplaneURL, opts.SessionID, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
 		// Emit the server bytes verbatim so every audit column on each
 		// node survives the round-trip — the compliance-export contract
-		// must not be lossy through the CLI's render-only struct.
-		_, werr := cmd.OutOrStdout().Write(append(raw, '\n'))
+		// must not be lossy through the CLI's typed-decode pass.
+		_, werr := cmd.OutOrStdout().Write(append(rawBody, '\n'))
 		return werr
 	}
-	var result ReplayResult
-	if derr := decodeAuditResponse(raw, &result); derr != nil {
-		return renderRequestError(cmd, backplaneURL, derr, opts.JSONOut)
+	if result == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("backplane returned 200 OK but no JSON body decoded against AuditReplayResult"),
+			opts.JSONOut,
+		)
 	}
-	printReplayTree(cmd.OutOrStdout(), &result, opts.MaxDepth)
+	printReplayTree(cmd.OutOrStdout(), result, opts.MaxDepth)
 	return nil
 }
 
-// buildReplayPath assembles the GET path. Exposed for unit tests so the
-// URL encoding of the session id stays covered.
-func buildReplayPath(sessionID string) string {
-	return "/api/v1/audit/sessions/" + pathEscape(sessionID) + "/replay"
+// fetchReplay drives the typed-client
+// `ReplayApiV1AuditSessionsSessionIdReplayGet` endpoint with the
+// same one-shot 401-retry shape `postQuery` uses. Returns the raw
+// body bytes (for --json verbatim), the decoded result (for the
+// tree render), and an `*httpResponseError` carrying the non-2xx
+// status code + body for the renderer to classify.
+func fetchReplay(
+	ctx context.Context,
+	client *api.AuthedClient,
+	sessionID openapi_types.UUID,
+) ([]byte, *api.AuditReplayResult, error) {
+	resp, err := client.ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse(ctx, sessionID, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.StatusCode() == 401 {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, nil, rerr
+		}
+		resp, err = client.ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse(ctx, sessionID, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return nil, nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	return resp.Body, resp.JSON200, nil
 }
 
 // renderReplayRequestError adds the 413 session-too-large redirect on
@@ -180,22 +186,22 @@ func buildReplayPath(sessionID string) string {
 // the verb turns it into an actionable `meho audit query --session-id`
 // pointer (the query verb paginates the flat rows the over-cap tree
 // can't render). Every other status falls through to the shared
-// renderRequestError ladder used by the sibling verbs.
+// `routeRequestError` ladder used by the sibling verbs.
 func renderReplayRequestError(
 	cmd *cobra.Command,
 	backplaneURL, sessionID string,
 	err error,
 	jsonOut bool,
 ) error {
-	var he *httpError
-	if errors.As(err, &he) && he.StatusCode == http.StatusRequestEntityTooLarge {
-		rows := decodeSessionTooLargeRowCount(he.Body)
+	var he *httpResponseError
+	if errors.As(err, &he) && he.statusCode == http.StatusRequestEntityTooLarge {
+		rows := decodeSessionTooLargeRowCount(trimmedBody(he.body))
 		msg := fmt.Sprintf(
 			"session %s has %s rows (cap %d); use: meho audit query --session-id %s",
 			sessionID, rows, replayRowCap, sessionID)
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(msg), jsonOut)
 	}
-	return renderRequestError(cmd, backplaneURL, err, jsonOut)
+	return routeRequestError(cmd, backplaneURL, err, jsonOut)
 }
 
 // printReplayTree renders the replay forest as an ASCII tree. Roots are
@@ -204,7 +210,7 @@ func renderReplayRequestError(
 // parent with the standard `├──`/`└──` connectors and `│  `/`   `
 // continuation prefixes. Nodes deeper than maxDepth are folded into a
 // single marker so a pathological session can't flood the terminal.
-func printReplayTree(w io.Writer, r *ReplayResult, maxDepth int) {
+func printReplayTree(w io.Writer, r *api.AuditReplayResult, maxDepth int) {
 	if r == nil || len(r.Root) == 0 {
 		fmt.Fprintln(w, "no audit rows in this session")
 		return
@@ -219,7 +225,7 @@ func printReplayTree(w io.Writer, r *ReplayResult, maxDepth int) {
 // continuation lines; `isLast` selects the connector for this node.
 func printReplayNode(
 	w io.Writer,
-	node *ReplayNode,
+	node *api.ReplayNode,
 	prefix string,
 	isLast bool,
 	depth, maxDepth int,
@@ -239,9 +245,13 @@ func printReplayNode(
 		}
 		return
 	}
-	for i := range node.Children {
+	if node.Children == nil {
+		return
+	}
+	kids := *node.Children
+	for i := range kids {
 		printReplayNode(
-			w, &node.Children[i], childPrefix, i == len(node.Children)-1, depth+1, maxDepth)
+			w, &kids[i], childPrefix, i == len(kids)-1, depth+1, maxDepth)
 	}
 }
 
@@ -252,21 +262,25 @@ func printReplayNode(
 // `occurred_at` is the node's `ts` field (the audit row's
 // `occurred_at`). A null duration renders as `(-ms)` so the column
 // stays present and grep-friendly across nodes.
-func formatReplayNode(node *ReplayNode) string {
-	dur := strDeref(node.DurationMS)
+func formatReplayNode(node *api.ReplayNode) string {
+	dur := strDeref(node.DurationMs)
 	if dur == "" {
 		dur = "-"
 	}
-	return fmt.Sprintf("%s %s [%s] (%sms)", node.TS, node.OpID, node.ResultStatus, dur)
+	return fmt.Sprintf("%s %s [%s] (%sms)", formatTS(node.Ts), node.OpId, node.ResultStatus, dur)
 }
 
 // countDescendants counts every node strictly below `node` (its whole
 // subtree minus itself). Used to summarise how many nodes the
 // --max-depth fold hid.
-func countDescendants(node *ReplayNode) int {
+func countDescendants(node *api.ReplayNode) int {
+	if node.Children == nil {
+		return 0
+	}
+	kids := *node.Children
 	total := 0
-	for i := range node.Children {
-		total += 1 + countDescendants(&node.Children[i])
+	for i := range kids {
+		total += 1 + countDescendants(&kids[i])
 	}
 	return total
 }

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 evoila Group
 
 // Package audit hosts the cobra commands under `meho audit ...` for
-// G8.1-T3 (#467) of Initiative #334. v0.2 ships five operator-facing
+// G8.1-T3 (#467) of Initiative #334. v0.2 ships six operator-facing
 // verbs that wrap the T2 REST surface (#466) shipped by
 // `backend/src/meho_backplane/api/v1/audit.py`:
 //
@@ -24,24 +24,40 @@
 //   - `meho audit my-recent [--since DUR] [--limit N] [--json]` —
 //     pre-canned shortcut filtered to the operator's own JWT subject
 //     via GET /api/v1/audit/my-recent.
+//   - `meho audit replay <session-id> [--json] [--max-depth N]` —
+//     parent/child audit tree via
+//     GET /api/v1/audit/sessions/{session_id}/replay.
 //
 // Each verb wraps one backplane route, renders the response either
 // as a human-readable table / key-value summary or as raw JSON when
 // `--json` is set. Authentication piggybacks on the token meho login
 // wrote — same pattern as `meho targets` and `meho retrieval`.
+//
+// G0.12-T5 #1263 migrated this package off the sibling-verb pattern
+// of hand-rolled HTTP + hand-typed copies of backend pydantic models.
+// Every verb here drives the generated `api.ClientWithResponses`
+// surface directly: `api.NewAuthedClient` wires the bearer + lazy
+// 401-refresh editor onto the embedded `ClientWithResponses`, and
+// the verbs call the typed `*WithResponse` methods
+// (`QueryApiV1AuditQueryPostWithResponse`,
+// `ShowApiV1AuditShowAuditIdGetWithResponse`,
+// `ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse`,
+// `MyRecentApiV1AuditMyRecentGetWithResponse`,
+// `WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse`).
+// Consumer-side struct drift can't recur because we now consume
+// `api.AuditEntry` / `api.AuditQueryResult` / `api.AuditReplayResult`
+// / `api.ReplayNode` directly.
 package audit
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"strings"
+	"time"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
@@ -73,69 +89,48 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// Entry mirrors the backend `AuditEntry` Pydantic model
-// (`backend/src/meho_backplane/audit_query/schemas.py`). Fields are
-// hand-written rather than aliased to a generated client type so the
-// audit package stays decoupled from oapi-codegen churn — the
-// targets / retrieval / operation packages take the same stance.
-//
-// Optional Pydantic fields land as `*string` so the JSON round-trip
-// preserves the explicit-null wire shape. `DurationMS` is a string
-// because Pydantic v2 serialises `Decimal` as a quoted decimal string
-// by default.
-type Entry struct {
-	ID               string         `json:"id"`
-	TS               string         `json:"ts"`
-	TenantID         *string        `json:"tenant_id"`
-	PrincipalSub     string         `json:"principal_sub"`
-	PrincipalName    *string        `json:"principal_name"`
-	TargetID         *string        `json:"target_id"`
-	TargetName       *string        `json:"target_name"`
-	Method           string         `json:"method"`
-	Path             string         `json:"path"`
-	StatusCode       int            `json:"status_code"`
-	RequestID        *string        `json:"request_id"`
-	DurationMS       *string        `json:"duration_ms"`
-	Payload          map[string]any `json:"payload"`
-	OpID             string         `json:"op_id"`
-	OpClass          string         `json:"op_class"`
-	ResultStatus     string         `json:"result_status"`
-	ParentAuditID    *string        `json:"parent_audit_id"`
-	AgentSessionID   *string        `json:"agent_session_id"`
-	BroadcastEventID *string        `json:"broadcast_event_id"`
+// httpResponseError carries a non-2xx status from a typed-client
+// `*WithResponse` call up to the verb's renderer. The typed-client
+// surface returns non-2xx responses in-band on the `(*Response, nil)`
+// tuple (transport-layer failures come back on the `(nil, err)`
+// tuple instead) — we lift the HTTP-failure case to an error type so
+// the call sites can use a single `if err != nil` branch and
+// `errors.As` routes the right way (HTTP status → `renderHTTPStatus`,
+// everything else → `renderTransportError`). See `routeRequestError`.
+type httpResponseError struct {
+	statusCode int
+	body       []byte
 }
 
-// QueryResult mirrors the backend `AuditQueryResult` Pydantic model
-// — a page of audit rows plus the opaque forward-only cursor.
-// `NextCursor` keeps the JSON key on null (no omitempty) so the wire
-// shape matches the Pydantic side, where the field is always emitted
-// as `null` when there is no further page. The retire-checklist PR
-// (#497) tripped on the same omitempty / schema-stability gotcha and
-// the fix is to never drop the key on Go re-marshal.
-type QueryResult struct {
-	Rows       []Entry `json:"rows"`
-	NextCursor *string `json:"next_cursor"`
+func (e *httpResponseError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.statusCode, trimmedBody(e.body))
 }
 
-// renderRequestError translates an error from one of the per-verb
-// request helpers into the right output.StructuredError category.
-// Same classification ladder as targets / operation packages with
-// audit-specific 400 handling:
-//
-//   - 401 (refresh failed) → auth_expired with a `meho login` hint.
-//   - 403 (RBAC denial) → insufficient_role; the backend's 403 detail
-//     names the required role.
-//   - 400 → unexpected with the parser / substrate error message —
-//     `DurationParseError`, `InvalidCursorError`, and
-//     `UnsupportedFilterError` (v0.2's `parent_audit_id` /
-//     `agent_session_id` gap) all surface as 400 from the backend.
-//   - 404 → unexpected with "audit row not found" (only the
-//     show endpoint emits this; cross-tenant probes also surface
-//     here per the substrate's tenant-scoping discipline).
-//   - 422 → unexpected with the FastAPI validation envelope.
-//   - Any other 4xx/5xx → unexpected with the raw body.
-//   - Pure transport errors → unreachable.
-func renderRequestError(
+// newAuthedClient builds an `api.AuthedClient` and surfaces its
+// construction-time errors as the right `output.StructuredError`
+// category (auth_expired when no token was ever stored, else
+// unexpected_response with the underlying error wrapped). Splits the
+// boilerplate every verb here used to duplicate inline.
+func newAuthedClient(
+	ctx context.Context,
+	cmd *cobra.Command,
+	backplaneURL string,
+	jsonOut bool,
+) (*api.AuthedClient, error) {
+	client, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+	if err != nil {
+		return nil, renderClientError(cmd, backplaneURL, err, jsonOut)
+	}
+	return client, nil
+}
+
+// renderClientError maps `api.NewAuthedClient` failures onto the
+// structured-error envelope. `IsTokenNotFound` is the "operator
+// never ran meho login" sentinel and surfaces as auth_expired with a
+// `meho login` hint; anything else is a build-time failure of the
+// authed transport itself (token store unreadable, etc.) and
+// surfaces as unexpected_response so the operator sees the cause.
+func renderClientError(
 	cmd *cobra.Command,
 	backplaneURL string,
 	err error,
@@ -150,6 +145,43 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
+	return output.RenderError(cmd.ErrOrStderr(),
+		output.Unexpected(fmt.Sprintf("build authed client for %s: %v", backplaneURL, err)),
+		jsonOut,
+	)
+}
+
+// routeRequestError is the single dispatcher every verb feeds an
+// error from `postQuery` / `getEntry` / `getMyRecent` /
+// `getWhoTouched` / `fetchReplay` into. The error is either an
+// `*httpResponseError` (the backplane responded with a non-2xx
+// status) or a transport-layer failure (network, refresh-impossible,
+// etc.); we route the former through `renderHTTPStatus` and the
+// latter through `renderTransportError`.
+func routeRequestError(
+	cmd *cobra.Command,
+	backplaneURL string,
+	err error,
+	jsonOut bool,
+) error {
+	var he *httpResponseError
+	if errors.As(err, &he) {
+		return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, jsonOut)
+	}
+	return renderTransportError(cmd, backplaneURL, err, jsonOut)
+}
+
+// renderTransportError maps a generated-client call's transport-layer
+// error (network failure, refresh-impossible after a 401) onto the
+// right structured-error category. The typed-client surface returns
+// `(nil, err)` for these; non-2xx HTTP responses arrive as
+// `(*Response, nil)` and are routed through `renderHTTPStatus` instead.
+func renderTransportError(
+	cmd *cobra.Command,
+	backplaneURL string,
+	err error,
+	jsonOut bool,
+) error {
 	if api.IsNoRefreshToken(err) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -159,25 +191,41 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
-		return renderHTTPError(cmd, backplaneURL, he, jsonOut)
-	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,
 	)
 }
 
-// renderHTTPError classifies a non-2xx response into the right
-// StructuredError category.
-func renderHTTPError(
+// renderHTTPStatus classifies a non-2xx HTTP status (lifted off the
+// generated `*Response.HTTPResponse.StatusCode` + `.Body` fields)
+// into the right StructuredError category. Mirrors the audit-specific
+// ladder the pre-G0.12-T5 `renderHTTPError` enforced:
+//
+//   - 401 (refresh failed) → auth_expired with a `meho login` hint.
+//   - 403 (RBAC denial) → insufficient_role; the backend's 403 detail
+//     names the required role.
+//   - 400 → unexpected with the parser / substrate error message —
+//     `DurationParseError`, `InvalidCursorError`, and
+//     `UnsupportedFilterError` (v0.2's `parent_audit_id` /
+//     `agent_session_id` gap) all surface as 400 from the backend.
+//   - 404 → unexpected with "audit row not found" (only the
+//     show endpoint emits this; cross-tenant probes also surface
+//     here per the substrate's tenant-scoping discipline).
+//   - 413 → defensive fallback to a session-too-large hint; the
+//     replay verb intercepts 413 before reaching here so it can
+//     append the session id to the `meho audit query` redirect.
+//   - 422 → unexpected with the FastAPI validation envelope.
+//   - Any other 4xx/5xx → unexpected with the raw body.
+func renderHTTPStatus(
 	cmd *cobra.Command,
 	backplaneURL string,
-	he *httpError,
+	statusCode int,
+	body []byte,
 	jsonOut bool,
 ) error {
-	switch he.StatusCode {
+	bodyStr := trimmedBody(body)
+	switch statusCode {
 	case http.StatusUnauthorized:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -188,7 +236,7 @@ func renderHTTPError(
 		)
 	case http.StatusForbidden:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(decodeDetailString(he.Body)),
+			output.InsufficientRole(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusBadRequest:
@@ -197,7 +245,7 @@ func renderHTTPError(
 		// (substrate). The backend's HTTPException detail is the
 		// parser's own message; surface it verbatim.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotFound:
@@ -209,32 +257,50 @@ func renderHTTPError(
 			jsonOut,
 		)
 	case http.StatusRequestEntityTooLarge:
-		// Only the replay endpoint emits 413 (session_too_large): a
-		// session above the server's replayRowCap anchor rows. The
-		// replay verb intercepts this status before reaching here so it
-		// can append the `meho audit query --session-id <id>` redirect
-		// (it knows the session id; this shared renderer does not). This
-		// arm is the defensive fallback for any other caller — surface
-		// the cardinality and the same query-verb pointer.
+		// Defensive fallback for any caller that didn't intercept
+		// the replay-specific 413 before reaching here. The replay
+		// verb's `renderReplayRequestError` shadows this arm so it
+		// can append the session id to the `meho audit query
+		// --session-id <id>` redirect.
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
 				"session too large to replay (%s rows, cap %d); "+
 					"use `meho audit query --session-id <id>` to page the flat rows",
-				decodeSessionTooLargeRowCount(he.Body), replayRowCap)),
+				decodeSessionTooLargeRowCount(bodyStr), replayRowCap)),
 			jsonOut,
 		)
 	case http.StatusUnprocessableEntity:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("invalid request: %s", he.Body)),
+			output.Unexpected(fmt.Sprintf("invalid request: %s", bodyStr)),
 			jsonOut,
 		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
 	}
+}
+
+// trimmedBody renders a response body for inclusion in an error
+// envelope: trims trailing whitespace, surfaces a placeholder when
+// the backend returned an empty body so the operator-facing string
+// is never just "HTTP 500:".
+func trimmedBody(body []byte) string {
+	s := string(body)
+	for len(s) > 0 {
+		last := s[len(s)-1]
+		if last == ' ' || last == '\n' || last == '\r' || last == '\t' {
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
+	if s == "" {
+		return "(empty body)"
+	}
+	return s
 }
 
 // replayRowCap mirrors the backend `_REPLAY_ROW_CAP`
@@ -289,126 +355,14 @@ func decodeDetailString(body string) string {
 			return s
 		}
 	}
-	return strings.TrimSpace(body)
-}
-
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection and one-shot 401-refresh-retry. Returns the
-// response body bytes (already drained) on 2xx, or an *httpError on
-// non-2xx, or an error categorised by api.IsTokenNotFound /
-// api.IsNoRefreshToken / generic transport.
-//
-// Mirrors cli/internal/cmd/targets/targets.go::doAuthedRequest and
-// operation/operation.go's namesake — kept independent for the
-// import-cycle reason called out on resolveBackplane.
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
+	// Trim trailing whitespace defensively when falling back to the
+	// raw body — keeps the operator-visible message stable when the
+	// backend appends a newline.
+	for len(body) > 0 && (body[len(body)-1] == ' ' || body[len(body)-1] == '\n' ||
+		body[len(body)-1] == '\r' || body[len(body)-1] == '\t') {
+		body = body[:len(body)-1]
 	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	// Read with a 1-MiB cap. The +1 byte over the cap is the
-	// truncation-detection trick: if ReadAll returns more than
-	// ``responseBodyCap`` bytes, the response was at least cap+1 bytes
-	// long and the decoder would otherwise consume a silently-truncated
-	// JSON payload. Fail loud instead — a truncated audit response
-	// surfaces as "decode error: unexpected end of JSON input" without
-	// this guard, which buries the real cause (response too large for
-	// the chassis CLI's safety cap).
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, responseBodyCap+1))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if int64(len(raw)) > responseBodyCap {
-		return nil, fmt.Errorf(
-			"response body exceeds %d-byte cap; refusing to decode possibly-truncated JSON",
-			responseBodyCap,
-		)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// responseBodyCap is the hard upper bound on a backplane response
-// body the CLI is willing to read. Audit pages cap at 1000 rows
-// server-side; a typical row at ~500 B yields ~500 KiB, so 1 MiB
-// is comfortable headroom. The cap protects against an
-// adversarial / misconfigured backplane sending an unbounded
-// response — the alternative is OOM. The +1-byte read pattern in
-// “doAuthedRequest“ distinguishes "fits in the cap" from
-// "truncated at the cap" so the decoder doesn't silently consume
-// a half-JSON.
-const responseBodyCap int64 = 1 << 20
-
-// httpError carries a non-2xx response so per-verb runners can
-// render the right category.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// sendRequest is the bottom of the stack: build the http.Request,
-// stamp bearer + content headers, fire it.
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
-}
-
-// pathEscape escapes a single path segment for use inside a backend
-// URL.
-func pathEscape(segment string) string {
-	return url.PathEscape(segment)
+	return body
 }
 
 // truncate cuts s to maxLen runes, appending an ellipsis when
@@ -435,21 +389,24 @@ func strDeref(s *string) string {
 	return *s
 }
 
-// decodeAuditResponse JSON-decodes *raw* into *out* via a
-// “json.Decoder“ configured with “UseNumber()“ so payload numbers
-// survive as “json.Number“ rather than collapsing to “float64“.
-// Audit payloads carry integer-valued fields (“hit_count“,
-// “query_count“, timestamps stored as Unix seconds, etc.) that
-// silently lose precision when decoded as IEEE-754 doubles past
-// 2^53. The exact-integer-preserving path lets jq pipelines and the
-// human-readable summary render the value the backend actually wrote
-// instead of a rounded float. Used by every audit verb that decodes
-// an “Entry“ or “QueryResult“.
-func decodeAuditResponse(raw []byte, out any) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(out); err != nil {
-		return fmt.Errorf("decode audit response: %w", err)
+// uuidDeref returns u.String() or empty string when u is nil. The
+// generated client surfaces nullable UUID fields as `*openapi_types.UUID`
+// (= `*uuid.UUID`); the renderers consume them via this helper so the
+// "-" placeholder rendering stays in one place.
+func uuidDeref(u *openapi_types.UUID) string {
+	if u == nil {
+		return ""
 	}
-	return nil
+	return u.String()
+}
+
+// formatTS renders an `api.AuditEntry.Ts` (`time.Time`) as the
+// RFC3339-with-nanos string the pre-migration `Entry.TS` string
+// field carried verbatim. The backend emits the column as an
+// ISO-8601 string; the generated client decodes it into `time.Time`
+// via the JSON unmarshal default; the renderer re-serialises with
+// the same precision so the operator-visible column matches the
+// pre-migration shape. UTC is the substrate-canonical zone.
+func formatTS(ts time.Time) string {
+	return ts.UTC().Format(time.RFC3339Nano)
 }

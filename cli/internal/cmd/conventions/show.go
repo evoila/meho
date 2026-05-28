@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -87,34 +89,84 @@ func runShow(cmd *cobra.Command, opts showOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	conv, err := getConvention(cmd.Context(), backplaneURL, opts.Slug)
+	resp, err := getShow(cmd.Context(), backplaneURL, opts.Slug)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode, resp.Body, opts.JSONOut)
+	}
+	var conv api.Convention
+	if err := json.Unmarshal(resp.Body, &conv); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("decode conventions show response: %v", err)),
+			opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), conv)
 	}
-	printConventionBody(cmd.OutOrStdout(), conv)
+	printConventionBody(cmd.OutOrStdout(), &conv)
 	return nil
 }
 
-// buildShowPath assembles the GET path. Exposed for unit tests so URL
-// encoding of slugs stays covered (slugs are constrained to lowercase
-// ASCII + digits + hyphen server-side, but the escape is defensive).
-func buildShowPath(slug string) string {
-	return "/api/v1/conventions/" + pathEscape(slug)
-}
-
-func getConvention(ctx context.Context, backplaneURL, slug string) (*Convention, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildShowPath(slug), nil)
+// getShow runs the typed Show call against the generated client with
+// the standard 401-refresh retry around it.
+func getShow(
+	ctx context.Context,
+	backplaneURL, slug string,
+) (*rawResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Convention
-	if err := json.Unmarshal(raw, &out); err != nil {
+	return doRequest(ctx, authed,
+		func(ctx context.Context) (*http.Response, error) {
+			return authed.ShowConventionApiV1ConventionsSlugGet(
+				ctx, slug, &api.ShowConventionApiV1ConventionsSlugGetParams{},
+			)
+		},
+	)
+}
+
+// getConvention is the success-path convenience wrapper for callers
+// that just want the decoded Convention (or an error categorised by
+// the standard ladder). Used by the edit verb's $EDITOR-mode
+// pre-fetch; the verb separately classifies non-2xx via
+// renderHTTPStatus on the wrapping run handler so a 404 surfaces with
+// the backend's `convention_not_found` detail.
+func getConvention(
+	ctx context.Context,
+	backplaneURL, slug string,
+) (*api.Convention, error) {
+	resp, err := getShow(ctx, backplaneURL, slug)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &showHTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       resp.Body,
+		}
+	}
+	var conv api.Convention
+	if err := json.Unmarshal(resp.Body, &conv); err != nil {
 		return nil, fmt.Errorf("decode conventions show response: %w", err)
 	}
-	return &out, nil
+	return &conv, nil
+}
+
+// showHTTPError wraps a non-2xx response from the show endpoint so
+// the edit verb's pre-fetch can route it back through renderHTTPStatus
+// once it reaches the runEdit caller (the categorisation matches
+// pre-migration behaviour: 404 on the show fetch surfaces as
+// convention_not_found, not as a generic "couldn't fetch" message).
+type showHTTPError struct {
+	StatusCode int
+	Body       []byte
+}
+
+func (e *showHTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, strings.TrimSpace(string(e.Body)))
 }
 
 // printConventionBody writes the convention's Markdown body to stdout
@@ -125,7 +177,7 @@ func getConvention(ctx context.Context, backplaneURL, slug string) (*Convention,
 // Trimming `\r` + `\n` from the right keeps the single-trailing-
 // newline contract regardless of whether the operator stored their
 // body with or without a trailing LF/CRLF.
-func printConventionBody(w io.Writer, c *Convention) {
+func printConventionBody(w io.Writer, c *api.Convention) {
 	if c == nil {
 		return
 	}

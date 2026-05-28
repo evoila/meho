@@ -318,7 +318,15 @@ T3 (#315) ships the `meho conventions ...` cobra subcommand tree
 Each verb wraps exactly one T2 route; the audit log row + history
 row are written server-side, so the CLI is a thin HTTP client over
 the same JWT auth + bearer-refresh path the sibling `meho kb` /
-`meho agent` trees use.
+`meho agent` trees use. G0.12-T8 (#1266, Initiative #1118) migrated
+the package off the per-package hand-rolled `doAuthedRequest` +
+consumer-side `Convention` / `Summary` / `BudgetStatus` /
+`ListResponse` / `HistoryEntry` duplicates onto the generated typed
+client (`api.ClientWithResponses` via `api.AuthedClient`);
+`api.Convention`, `api.ConventionSummary`, `api.ConventionListResponse`,
+`api.ConventionHistoryEntry`, and `api.BudgetStatus` are now the
+single source of truth on the CLI side, kept in lock-step with the
+FastAPI Pydantic models by the `cli-api-snapshot-freshness` CI gate.
 
 Six verbs:
 

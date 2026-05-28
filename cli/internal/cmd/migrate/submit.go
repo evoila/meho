@@ -267,6 +267,18 @@ func buildRememberBody(plan migrate.SubmitPlan) api.RememberBody {
 // 504 from the backplane. 201-without-body (transientStatusError with
 // status 201) is NOT transient — the server confirmed the row exists,
 // the contract failure is on the response shape.
+//
+// Credential-state failures returned by newAuthedClient
+// (errMissingAccessToken, api.IsTokenNotFound, api.IsNoRefreshToken)
+// short-circuit BEFORE any HTTP call leaves the process — retrying
+// cannot resolve them. The pre-T11 code resolved the auth token outside
+// the retry loop, so these errors never reached isTransient; the
+// migration moved the call site into the loop, which would otherwise
+// classify them as transient and burn three retries (non-interactive)
+// or three Retry/Skip/Abort prompts (interactive) before
+// renderSubmitError finally rendered the correct auth_expired hint.
+// Short-circuit here so postWithRetry sees a single non-transient
+// failure and routes straight to renderSubmitError.
 func isTransient(err error) bool {
 	var tse *transientStatusError
 	if errors.As(err, &tse) {
@@ -277,6 +289,16 @@ func isTransient(err error) bool {
 			http.StatusGatewayTimeout:
 			return true
 		}
+		return false
+	}
+	// Credential failures from newAuthedClient surface before the HTTP
+	// call; no amount of retrying gets the operator a token. Match the
+	// three sentinels renderSubmitError already maps to auth_expired so
+	// the retry-vs-permanent decision and the exit-code classification
+	// agree on what "credential failure" means.
+	if errors.Is(err, errMissingAccessToken) ||
+		api.IsTokenNotFound(err) ||
+		api.IsNoRefreshToken(err) {
 		return false
 	}
 	// Transport / parse errors (connection refused, timeout, MaxBytesError,

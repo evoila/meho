@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -348,6 +349,90 @@ func TestIsTransient_ClientErrors(t *testing.T) {
 func TestIsTransient_TransportError(t *testing.T) {
 	if !isTransient(errors.New("connection refused")) {
 		t.Error("expected isTransient(transport error)=true")
+	}
+}
+
+// TestIsTransient_CredentialFailuresAreNonTransient is the unit-level
+// guard for the B1 regression on PR #1285. Before the fix, the migration
+// moved the auth-token resolution inside the retry loop; isTransient's
+// generic "transport error → retry" fallthrough then classified
+// errMissingAccessToken / auth.ErrTokenNotFound / errNoRefreshToken as
+// transient, triggering up-to-3 wasted retries (non-interactive) or 3
+// spurious Retry/Skip/Abort prompts (interactive) for an error that
+// retrying CANNOT resolve — the operator must run `meho login`.
+//
+// Pin each of the three credential sentinels renderSubmitError already
+// maps to auth_expired so the retry-vs-permanent decision agrees with
+// the exit-code classification.
+func TestIsTransient_CredentialFailuresAreNonTransient(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"errMissingAccessToken", errMissingAccessToken},
+		{"errMissingAccessToken wrapped", fmt.Errorf("postOne: %w", errMissingAccessToken)},
+		{"auth.ErrTokenNotFound", auth.ErrTokenNotFound},
+		{"auth.ErrTokenNotFound wrapped", fmt.Errorf("api.NewAuthedClient: %w", auth.ErrTokenNotFound)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if isTransient(tc.err) {
+				t.Errorf("expected isTransient(%v)=false (credential failures are not retryable)", tc.err)
+			}
+		})
+	}
+}
+
+// TestSubmit_MissingTokenExitsOnceNoRetries is the end-to-end guard
+// for the B1 regression on PR #1285. With XDG_CONFIG_HOME pointing at
+// an empty dir, api.NewAuthedClient surfaces auth.ErrTokenNotFound;
+// the fix routes that straight to renderSubmitError, so the operator
+// sees a single auth_expired hint with zero HTTP calls and zero
+// retries. Before the fix, isTransient classified it as transient and
+// postWithRetry burned three retries (non-interactive) before giving
+// up.
+func TestSubmit_MissingTokenExitsOnceNoRetries(t *testing.T) {
+	var serverCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, _ *http.Request) {
+		serverCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write(stubMemoryEntry(t, "user", "foo"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Empty XDG dir + keyring disabled → auth.ErrTokenNotFound from
+	// api.NewAuthedClient. Mirrors the same env shape the production
+	// "operator never ran `meho login`" path produces.
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("MEHO_KEYRING_DISABLE", "1")
+
+	plan := makePlan("foo", "user", "body", "aabbccdd1122")
+	cmd, stdout, stderr := newTestCmd(t)
+	if err := cmd.Flags().Set("non-interactive", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := doSubmit(cmd, srv.URL, []migrate.SubmitPlan{plan})
+	if err == nil {
+		t.Fatalf("expected error when token store is empty; got nil. stdout=%q stderr=%q",
+			stdout.String(), stderr.String())
+	}
+	if got := serverCalls.Load(); got != 0 {
+		t.Errorf("expected zero HTTP calls (credential failure short-circuits before POST); got %d", got)
+	}
+	if !strings.Contains(stderr.String(), "auth_expired") &&
+		!strings.Contains(stderr.String(), "meho login") {
+		t.Errorf("expected auth_expired classification or `meho login` hint; got stderr=%q", stderr.String())
+	}
+	// The summary line is printed by doSubmit before renderSubmitError
+	// fires; it MUST show zero retries because credential failures are
+	// non-transient and postWithRetry must NOT enter the retry path.
+	if !strings.Contains(stdout.String(), "retried 0") {
+		t.Errorf("expected 'retried 0' in summary (no retry attempts on credential failure); got stdout=%q", stdout.String())
 	}
 }
 

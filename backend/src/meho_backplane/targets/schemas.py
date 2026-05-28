@@ -30,7 +30,13 @@ The G0.3-T1.5 (#477) amendment added two fields to :class:`Target`:
   ``extra='forbid'`` so clients cannot seed the G0.6 resolver with
   fabricated values.
 * ``preferred_impl_id`` — operator override for the G0.6 resolver's
-  tie-break ladder. Acceptable on both write schemas.
+  tie-break ladder. Acceptable on both write schemas. The canonical
+  form is **versioned** (``"nsx-rest-4.2"``) per
+  ``docs/codebase/api-shape-conventions.md`` §3 (Enum vocabulary
+  discipline); the base form (``"nsx-rest"``) stays accepted on both
+  ``TargetCreate`` and ``TargetUpdate`` for backward compatibility,
+  and the resolver normalizes both to the same connector
+  (G0.16-T6 Finding C #1312).
 
 ``AuthModel`` is imported from :mod:`meho_backplane.connectors.schemas`
 (G0.2-T1) and re-used here so the enum value set stays in one place.

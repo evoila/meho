@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`preferred_impl_id` accepts the versioned form on both POST and
+  PATCH (G0.16-T6 Finding C #1312).** `TargetCreate` and `TargetUpdate`
+  validators now treat the canonical `"impl_id-version"` shape
+  (e.g. `"nsx-rest-4.2"`) as a valid alternative to the base
+  `"nsx-rest"` form, matching `docs/codebase/api-shape-conventions.md`
+  §3. The resolver normalizes versioned → base before tie-break
+  matching, so an operator typing either form lands on the same
+  connector. The unknown-impl 422 lists both forms in
+  `valid_impl_ids` for branchable client recovery.
+
 ## [0.8.0] - 2026-05-28
 
 **MVP7 — consolidated post-v0.7 release.** v0.8.0 collapses what

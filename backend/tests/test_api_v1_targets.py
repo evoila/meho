@@ -1209,6 +1209,33 @@ def test_update_target_clear_preferred_impl_id_succeeds(client: TestClient) -> N
     assert response.json()["preferred_impl_id"] is None
 
 
+def test_create_target_versioned_preferred_impl_id_succeeds(client: TestClient) -> None:
+    """POST with the versioned ``preferred_impl_id`` form is accepted.
+
+    G0.16-T6 Finding C (#1312). The canonical form per
+    ``docs/codebase/api-shape-conventions.md`` §3 is versioned
+    (``"impl_id-version"``). Both the base form (``"k8s"``) and the
+    versioned form (``"k8s-1.x"``) must be accepted; the resolver
+    normalizes both to the same connector.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "versioned-impl",
+                "product": "k8s",
+                "host": "10.0.0.70",
+                "preferred_impl_id": "k8s-1.x",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["preferred_impl_id"] == "k8s-1.x"
+
+
 # ---------------------------------------------------------------------------
 # Cross-tenant isolation
 # ---------------------------------------------------------------------------

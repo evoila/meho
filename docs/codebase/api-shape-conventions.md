@@ -212,6 +212,14 @@ is named:
     "no version specified, pick the best match" cleanly.
   - The release-readiness doc cites connectors by versioned
     impl_id throughout.
+
+  Code reference: `_registered_impl_ids` in
+  [`backend/src/meho_backplane/api/v1/targets.py`](../../backend/src/meho_backplane/api/v1/targets.py)
+  and the `preferred_impl_id` branch of `_run_tie_break_ladder`
+  in [`backend/src/meho_backplane/connectors/resolver.py`](../../backend/src/meho_backplane/connectors/resolver.py)
+  both accept the versioned form alongside the base form
+  (G0.16-T6 Finding C #1312); the resolver normalizes versioned →
+  base before matching candidates.
 - **Connector-protocol vocabulary stays inside the connector.**
   GitHub's "App vs PAT" is a connector-internal concern; the
   TargetCreate enum sees only the identity-model dimension

@@ -378,8 +378,23 @@ def _run_tie_break_ladder(
     # the override doesn't disambiguate (zero matches → ignored; multiple
     # matches → corner case where two impls share the preferred id, so
     # let priority break it rather than raising).
+    #
+    # G0.16-T6 Finding C (#1312). Accept both the base ``impl_id``
+    # (``"nsx-rest"``) AND the versioned ``"{impl_id}-{version}"`` form
+    # (``"nsx-rest-4.2"``) — the latter is the canonical shape per
+    # ``docs/codebase/api-shape-conventions.md`` §3 and matches the
+    # ``connector_id`` string the dispatcher's ``parse_connector_id``
+    # round-trips through. Match on either alias against each
+    # candidate's ``impl_id``-or-``impl_id-version`` pair so an
+    # operator pinning the versioned form selects the connector that
+    # registered under the matching base/version pair.
     if preferred_impl_id:
-        preferred = [c for c in candidates if c.impl_id == preferred_impl_id]
+        preferred = [
+            c
+            for c in candidates
+            if c.impl_id == preferred_impl_id
+            or (c.impl_id and c.version and f"{c.impl_id}-{c.version}" == preferred_impl_id)
+        ]
         if len(preferred) == 1:
             return preferred[0], "operator_preference", preferred
         if len(preferred) > 1:

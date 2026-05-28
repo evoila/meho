@@ -348,6 +348,40 @@ def test_resolve_operator_preference_does_not_override_specificity() -> None:
     assert resolve_connector(target) is _VmwareRest9
 
 
+def test_resolve_operator_preference_versioned_form_picks_winner() -> None:
+    """preferred_impl_id in the canonical versioned form (``"impl-version"``) matches.
+
+    G0.16-T6 Finding C (#1312). The convention doc §3 names the
+    versioned form as canonical; the resolver must match a
+    ``preferred_impl_id="vmware-rest-rest"`` against a candidate
+    registered as ``(product, version, impl_id) =
+    ("vmware", "rest", "vmware-rest")`` so the operator typing the
+    ``connector_id``-shaped slug from the dispatcher's
+    ``parse_connector_id`` round-trips selects the same connector
+    as the base form would.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="rest",
+        impl_id="vmware-rest",
+        cls=_VmwareWide,
+    )
+    register_connector_v2(
+        product="vmware",
+        version="pyvmomi",
+        impl_id="vmware-pyvmomi",
+        cls=_VmwarePyvmomi,
+    )
+    target = _FakeTarget(
+        product="vmware",
+        fingerprint=_fingerprint("9.0.2"),
+        # Versioned form ("impl-version"). Should match the same
+        # candidate as preferred_impl_id="vmware-pyvmomi".
+        preferred_impl_id="vmware-pyvmomi-pyvmomi",
+    )
+    assert resolve_connector(target) is _VmwarePyvmomi
+
+
 def test_resolve_operator_preference_not_a_candidate_is_ignored() -> None:
     """preferred_impl_id pointing at a non-candidate impl falls through to priority."""
     register_connector_v2(

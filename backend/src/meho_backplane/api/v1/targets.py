@@ -394,8 +394,29 @@ def _registered_impl_ids() -> set[str]:
     ``None``, not the empty string). Returned as a fresh ``set`` so
     callers can mutate / sort without affecting the underlying
     registry.
+
+    G0.16-T6 Finding C (#1312). The set now includes BOTH the base
+    ``impl_id`` (``"nsx-rest"``) AND the versioned form
+    ``"{impl_id}-{version}"`` (``"nsx-rest-4.2"``) for every triple
+    with a non-empty ``version``. The versioned form is the canonical
+    shape per ``docs/codebase/api-shape-conventions.md`` §3 because
+    it's more specific (disambiguates when multiple connector versions
+    ship in one release) and it matches the ``connector_id`` string
+    the dispatcher's ``parse_connector_id`` round-trips through. The
+    base form stays accepted so existing operators / fixtures that
+    pin ``preferred_impl_id="nsx-rest"`` aren't broken. The resolver
+    (:func:`meho_backplane.connectors.resolver._run_tie_break_ladder`)
+    normalizes both forms to the base ``impl_id`` before matching
+    candidates, so picking either form selects the same connector
+    when only one version is registered.
     """
-    return {impl_id for (_product, _version, impl_id) in all_connectors_v2() if impl_id}
+    base_ids = {impl_id for (_product, _version, impl_id) in all_connectors_v2() if impl_id}
+    versioned_ids = {
+        f"{impl_id}-{version}"
+        for (_product, version, impl_id) in all_connectors_v2()
+        if impl_id and version
+    }
+    return base_ids | versioned_ids
 
 
 def _build_unknown_preferred_impl_detail(
@@ -411,6 +432,13 @@ def _build_unknown_preferred_impl_detail(
     remediation step. The 422 status (vs 404) matches the rest of the
     targets surface: a body field carried a value the server cannot
     honour, so the request was unprocessable.
+
+    G0.16-T6 Finding C (#1312). ``valid_impl_ids`` carries BOTH the
+    base ``impl_id`` and the canonical versioned
+    ``"{impl_id}-{version}"`` form per
+    ``docs/codebase/api-shape-conventions.md`` §3, so an operator
+    typing either shape gets the same actionable diagnostic listing
+    both alternatives.
     """
     return {
         "kind": "unknown_preferred_impl_id",
@@ -419,10 +447,14 @@ def _build_unknown_preferred_impl_detail(
         "message": (
             f"preferred_impl_id={preferred_impl_id!r} is not registered; "
             f"pick one of {valid_impl_ids!r} or register a connector for "
-            f"it before retrying. The resolver silently ignores unknown "
-            f"impl_id overrides; this 422 surfaces the foot-gun at write "
-            f"time. See docs/codebase/error-message-shape.md for the "
-            f"convention."
+            f"it before retrying. The canonical form is versioned "
+            f"(e.g. 'nsx-rest-4.2'); the base form ('nsx-rest') stays "
+            f"accepted for backward compatibility. The resolver silently "
+            f"ignores unknown impl_id overrides; this 422 surfaces the "
+            f"foot-gun at write time. See "
+            f"docs/codebase/error-message-shape.md for the convention "
+            f"and docs/codebase/api-shape-conventions.md §3 for the "
+            f"versioned-vs-base impl-id discipline."
         ),
     }
 

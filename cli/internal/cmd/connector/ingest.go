@@ -5,107 +5,17 @@ package connector
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// SpecSource mirrors the backend SpecSource Pydantic model (T6
-// #406's IngestRequest.specs[] element). Single field for v0.2; the
-// shape leaves room for per-spec overrides (e.g. spec_source tag,
-// auth headers for HTTPS-fetched specs) in v0.2.next without a
-// wire-shape break.
-type SpecSource struct {
-	URI string `json:"uri"`
-}
-
-// IngestRequest mirrors the backend IngestRequest Pydantic model.
-// Two mutually-exclusive request shapes:
-//
-//   - Explicit-quadruple shape: product / version / impl_id / specs
-//     carry the resolved triple plus the spec sources. The historical
-//     manual-mode --product/--version/--impl/--spec form uses this.
-//   - Catalog-driven shape (G0.14-T9 / #1150): catalog_entry carries a
-//     "<product>/<version>" reference; the backplane resolves the
-//     entry against the packaged catalog and fills in the quadruple
-//     server-side. The --catalog flag uses this shape so REST-native
-//     agent runtimes and the CLI share a single ingest path.
-//
-// Quadruple fields are pointers so the JSON serializer omits them on
-// the catalog-driven shape: an empty string would fail the backend
-// validator's mutual-exclusivity check (the empty quadruple is read
-// as "explicit-quadruple supplied but blank").
-//
-// DryRun=true makes the backplane parse + plan without writing to
-// the DB; the response carries the same IngestionResult shape but
-// the GroupingResult field is null (no LLM call on dry-run).
-type IngestRequest struct {
-	Product      *string      `json:"product,omitempty"`
-	Version      *string      `json:"version,omitempty"`
-	ImplID       *string      `json:"impl_id,omitempty"`
-	Specs        []SpecSource `json:"specs,omitempty"`
-	CatalogEntry *string      `json:"catalog_entry,omitempty"`
-	DryRun       bool         `json:"dry_run"`
-}
-
-// IngestionResult mirrors the canonical backend IngestionResultModel
-// Pydantic model (operations/ingest/api_schemas.py) that lands with T6
-// (#488). Counts cover the bulk-upsert outcome aggregated across every
-// spec in the request; ConnectorID is the derived identifier the
-// dispatcher uses for subsequent calls (`<impl_id>-<version>`, e.g.
-// `vmware-rest-9.0`).
-//
-// connector_registered flips to true when this ingest call was the
-// first to land the (product, version, impl_id) triple — the T2
-// auto-registration of the GenericRestConnector shim ran. Subsequent
-// ingests against the same triple return connector_registered=false.
-//
-// operations_grouped flips to true when the T3 LLM-grouping pass
-// actually ran (every newly-ingested op got assigned to an
-// OperationGroup row). False on the dry-run path and on the
-// already-grouped-no-op path. The CLI renders it so the operator
-// knows whether `meho connector review <id>` will have any groups
-// to show.
-type IngestionResult struct {
-	ConnectorID         string `json:"connector_id"`
-	InsertedCount       int    `json:"inserted_count"`
-	UpdatedCount        int    `json:"updated_count"`
-	SkippedCount        int    `json:"skipped_count"`
-	ConnectorRegistered bool   `json:"connector_registered"`
-	OperationsGrouped   bool   `json:"operations_grouped"`
-}
-
-// GroupingResult mirrors the canonical backend GroupingResultModel
-// Pydantic model (operations/ingest/api_schemas.py). Counts cover the
-// LLM-summarised grouping pass; the field is null on dry_run=true
-// (no LLM call) and on the no-op re-run path (every op already
-// grouped from a prior pass).
-//
-// LlmDurationMs is float (the Python field uses float seconds*1000)
-// so the Go side mirrors it as float64 — an int truncation would
-// silently drop sub-millisecond timings on fast LLM stub paths.
-type GroupingResult struct {
-	ConnectorID          string  `json:"connector_id"`
-	GroupsCreated        int     `json:"groups_created"`
-	OperationsAssigned   int     `json:"operations_assigned"`
-	OperationsUnassigned int     `json:"operations_unassigned"`
-	LLMCallCount         int     `json:"llm_call_count"`
-	LLMDurationMs        float64 `json:"llm_duration_ms"`
-}
-
-// IngestResponse mirrors T6's IngestResponse Pydantic model. The
-// Grouping field is null on a dry_run=true request because the LLM
-// pass only runs when the operations actually land in the DB.
-type IngestResponse struct {
-	Ingestion IngestionResult `json:"ingestion"`
-	Grouping  *GroupingResult `json:"grouping"`
-}
 
 // newIngestCmd returns the `meho connector ingest` command.
 //
@@ -220,6 +130,10 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 
 	result, err := postIngest(cmd.Context(), backplaneURL, body)
 	if err != nil {
+		var he *httpResponseError
+		if errors.As(err, &he) {
+			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
@@ -236,32 +150,40 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 // the entry against the packaged catalog so REST-native clients and
 // the CLI share the resolution path. Manual mode resolves each spec
 // URI locally to give the operator a fast hint on a typo'd scheme.
-func buildIngestRequest(opts ingestOptions) (IngestRequest, error) {
+//
+// The generated `api.IngestRequest` carries the
+// catalog-vs-quadruple-vs-`dry_run` discriminator on the wire via
+// pointer fields the JSON serialiser omits when nil. Setting only
+// what the operator asked for keeps the wire shape narrow and lets
+// the backend's mutual-exclusivity validator stay green in both
+// modes; the existing tests pin both branches.
+func buildIngestRequest(opts ingestOptions) (api.IngestRequest, error) {
+	body := api.IngestRequest{}
+	if opts.DryRun {
+		dr := true
+		body.DryRun = &dr
+	}
 	if opts.Catalog != "" {
 		catalog := opts.Catalog
-		return IngestRequest{
-			CatalogEntry: &catalog,
-			DryRun:       opts.DryRun,
-		}, nil
+		body.CatalogEntry = &catalog
+		return body, nil
 	}
-	specs := make([]SpecSource, 0, len(opts.Specs))
+	specs := make([]api.SpecSource, 0, len(opts.Specs))
 	for _, raw := range opts.Specs {
 		uri, uerr := resolveSpecURI(raw)
 		if uerr != nil {
-			return IngestRequest{}, uerr
+			return api.IngestRequest{}, uerr
 		}
-		specs = append(specs, SpecSource{URI: uri})
+		specs = append(specs, api.SpecSource{Uri: uri})
 	}
 	product := opts.Product
 	version := opts.Version
 	implID := opts.ImplID
-	return IngestRequest{
-		Product: &product,
-		Version: &version,
-		ImplID:  &implID,
-		Specs:   specs,
-		DryRun:  opts.DryRun,
-	}, nil
+	body.Product = &product
+	body.Version = &version
+	body.ImplId = &implID
+	body.Specs = &specs
+	return body, nil
 }
 
 // validateIngestMode enforces the catalog/manual split: exactly one
@@ -303,20 +225,35 @@ func validateIngestMode(opts ingestOptions) error {
 	return nil
 }
 
-func postIngest(ctx context.Context, backplaneURL string, body IngestRequest) (*IngestResponse, error) {
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal ingest request: %w", err)
-	}
-	respBody, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/connectors/ingest", raw)
+// postIngest drives the typed-client ingest endpoint with a one-shot
+// 401-retry. The route declares `response_model=IngestResponse` so
+// JSON200 carries the typed envelope; non-2xx surfaces as
+// *httpResponseError for the caller to route through renderHTTPStatus.
+func postIngest(ctx context.Context, backplaneURL string, body api.IngestRequest) (*api.IngestResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out IngestResponse
-	if err := decodeJSON(respBody, "ingest", &out); err != nil {
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.IngestEndpointApiV1ConnectorsIngestPostResponse, error) {
+			return authed.IngestEndpointApiV1ConnectorsIngestPostWithResponse(
+				ctx,
+				&api.IngestEndpointApiV1ConnectorsIngestPostParams{},
+				body,
+			)
+		},
+		func(r *api.IngestEndpointApiV1ConnectorsIngestPostResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
 		return nil, err
 	}
-	return &out, nil
+	if resp.StatusCode() != http.StatusOK {
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	if resp.JSON200 == nil {
+		return nil, fmt.Errorf("backplane returned 200 OK but no JSON body decoded against IngestResponse")
+	}
+	return resp.JSON200, nil
 }
 
 // printIngestSummary renders an IngestResponse for human eyes. The
@@ -340,14 +277,14 @@ func postIngest(ctx context.Context, backplaneURL string, body IngestRequest) (*
 // the resolved triple via `connector_id`. Deriving from the response
 // keeps the heading correct in both modes and matches the pre-#1150
 // operator-visible output.
-func printIngestSummary(w io.Writer, opts ingestOptions, r *IngestResponse) {
+func printIngestSummary(w io.Writer, opts ingestOptions, r *api.IngestResponse) {
 	totalOps := r.Ingestion.InsertedCount + r.Ingestion.UpdatedCount + r.Ingestion.SkippedCount
-	heading := ingestSummaryHeading(r.Ingestion.ConnectorID)
+	heading := ingestSummaryHeading(r.Ingestion.ConnectorId)
 	if opts.DryRun {
 		fmt.Fprintf(w, "ingest %s — DRY RUN (no DB writes)\n", heading)
 	} else {
 		fmt.Fprintf(w, "ingest %s — connector_id=%s\n",
-			heading, r.Ingestion.ConnectorID,
+			heading, r.Ingestion.ConnectorId,
 		)
 	}
 	fmt.Fprintf(w, "  operations: %d total (%d inserted / %d updated / %d skipped)\n",
@@ -368,9 +305,9 @@ func printIngestSummary(w io.Writer, opts ingestOptions, r *IngestResponse) {
 			r.Grouping.OperationsAssigned,
 			r.Grouping.OperationsUnassigned,
 		)
-		if r.Grouping.LLMCallCount > 0 {
+		if r.Grouping.LlmCallCount > 0 {
 			fmt.Fprintf(w, " (%d LLM call(s), %.0fms)",
-				r.Grouping.LLMCallCount, r.Grouping.LLMDurationMs,
+				r.Grouping.LlmCallCount, r.Grouping.LlmDurationMs,
 			)
 		}
 		fmt.Fprintln(w)
@@ -382,7 +319,7 @@ func printIngestSummary(w io.Writer, opts ingestOptions, r *IngestResponse) {
 			"\nConnector is in review_status=staged. Next:\n"+
 				"  meho connector review %s\n"+
 				"  meho connector enable %s --confirm\n",
-			r.Ingestion.ConnectorID, r.Ingestion.ConnectorID,
+			r.Ingestion.ConnectorId, r.Ingestion.ConnectorId,
 		)
 	}
 }

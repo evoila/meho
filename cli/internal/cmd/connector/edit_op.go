@@ -5,12 +5,14 @@ package connector
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -18,20 +20,17 @@ import (
 // Matches the safety_level column on endpoint_descriptor (G0.6-T1
 // #392 schema). Fail fast in the CLI rather than letting the
 // backplane 422 surface an unfamiliar value.
-var validSafetyLevels = map[string]struct{}{
-	"safe":      {},
-	"caution":   {},
-	"dangerous": {},
-}
-
-// EditOpBody mirrors the backend EditOpBody Pydantic model. Every
-// field is optional + nullable so partial patches work. Pointer
-// types let json.Marshal omit unset fields cleanly via `omitempty`.
-type EditOpBody struct {
-	CustomDescription *string `json:"custom_description,omitempty"`
-	SafetyLevel       *string `json:"safety_level,omitempty"`
-	RequiresApproval  *bool   `json:"requires_approval,omitempty"`
-	IsEnabled         *bool   `json:"is_enabled,omitempty"`
+//
+// Mirrors the generated `api.EditOpBodySafetyLevel` enum constants
+// (`Safe` / `Caution` / `Dangerous`) so the validator and the wire
+// shape stay in lockstep. The generator-shipped enum values are the
+// authoritative source — we keep this map only to render the verb's
+// helptext + the "expected one of" message in the same order the
+// operator sees in --help.
+var validSafetyLevels = map[string]api.EditOpBodySafetyLevel{
+	"safe":      api.Safe,
+	"caution":   api.Caution,
+	"dangerous": api.Dangerous,
 }
 
 // newEditOpCmd returns the `meho connector edit-op` command.
@@ -46,7 +45,7 @@ type EditOpBody struct {
 //	  [--json] [--backplane <url>]
 //
 // Hits PATCH /api/v1/connectors/<connector_id>/operations/<op_id>
-// with an EditOpBody. tenant_admin role required.
+// with an api.EditOpBody. tenant_admin role required.
 func newEditOpCmd() *cobra.Command {
 	var (
 		customDesc        string
@@ -133,7 +132,7 @@ type editOpOptions struct {
 }
 
 func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
-	body := EditOpBody{}
+	body := api.EditOpBody{}
 
 	descText, descSet, err := loadTextFlag(cmd, "custom-description")
 	if err != nil {
@@ -144,7 +143,8 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 	}
 
 	if opts.SafetyFlag != "" {
-		if _, ok := validSafetyLevels[opts.SafetyFlag]; !ok {
+		level, ok := validSafetyLevels[opts.SafetyFlag]
+		if !ok {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected(fmt.Sprintf(
 					"--safety %q invalid; expected one of: safe | caution | dangerous",
@@ -153,7 +153,7 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 				opts.JSONOut,
 			)
 		}
-		body.SafetyLevel = &opts.SafetyFlag
+		body.SafetyLevel = &level
 	}
 
 	if opts.RequiresApproval {
@@ -184,6 +184,10 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
 	if err := patchOp(cmd.Context(), backplaneURL, opts.ConnectorID, opts.OpID, body); err != nil {
+		var he *httpResponseError
+		if errors.As(err, &he) {
+			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
@@ -204,31 +208,49 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 // invoked edit-op without any actual change. Without this guard the
 // CLI would ship an empty PATCH that succeeds at the route layer
 // but does nothing, surprising the operator.
-func isEmptyEditOpBody(b EditOpBody) bool {
+func isEmptyEditOpBody(b api.EditOpBody) bool {
 	return b.CustomDescription == nil &&
 		b.SafetyLevel == nil &&
 		b.RequiresApproval == nil &&
 		b.IsEnabled == nil
 }
 
-// patchOp issues the PATCH against T6's per-op route. The route
-// returns HTTP 204 No Content — no JSON body, so we deliberately
-// don't decode anything. A non-2xx surfaces as *httpError via
-// doAuthedRequest's status check.
+// patchOp drives the typed-client edit-op endpoint with a one-shot
+// 401-retry. The route returns HTTP 204 No Content; the typed
+// envelope's body is empty on success and we deliberately don't
+// decode anything. Non-2xx surfaces as *httpResponseError for the
+// caller to route through renderHTTPStatus. The op_id segment may
+// contain `:` and `/` (canonical form `METHOD:/path`); the generated
+// client URL-escapes the path parameter, so the colons / slashes
+// survive the routing layer.
 func patchOp(
 	ctx context.Context,
 	backplaneURL, connectorID, opID string,
-	body EditOpBody,
+	body api.EditOpBody,
 ) error {
-	raw, err := json.Marshal(body)
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return fmt.Errorf("marshal edit-op request: %w", err)
-	}
-	path := fmt.Sprintf("/api/v1/connectors/%s/operations/%s",
-		pathEscapeOpID(connectorID), pathEscapeOpID(opID),
-	)
-	if _, err := doAuthedRequest(ctx, backplaneURL, "PATCH", path, raw); err != nil {
 		return err
+	}
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error) {
+			return authed.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithResponse(
+				ctx,
+				connectorID,
+				opID,
+				&api.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams{},
+				body,
+			)
+		},
+		func(r *api.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse) int {
+			return r.StatusCode()
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() != http.StatusNoContent {
+		return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 	}
 	return nil
 }
@@ -237,15 +259,15 @@ func patchOp(
 // operators. The PATCH route returns 204 No Content; the only
 // structured record of the operator's edit is the body they sent.
 type editOpResult struct {
-	ConnectorID string     `json:"connector_id"`
-	OpID        string     `json:"op_id"`
-	Patched     EditOpBody `json:"patched"`
+	ConnectorID string         `json:"connector_id"`
+	OpID        string         `json:"op_id"`
+	Patched     api.EditOpBody `json:"patched"`
 }
 
-func printEditOpResult(w io.Writer, connectorID, opID string, body EditOpBody) {
+func printEditOpResult(w io.Writer, connectorID, opID string, body api.EditOpBody) {
 	fmt.Fprintf(w, "%s/%s — updated (204 No Content)\n", connectorID, opID)
 	if body.SafetyLevel != nil {
-		fmt.Fprintf(w, "  safety: %s\n", *body.SafetyLevel)
+		fmt.Fprintf(w, "  safety: %s\n", string(*body.SafetyLevel))
 	}
 	if body.RequiresApproval != nil {
 		fmt.Fprintf(w, "  requires_approval: %t\n", *body.RequiresApproval)

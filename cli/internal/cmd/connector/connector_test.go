@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 )
 
@@ -105,26 +106,6 @@ func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
 	se = classifyBackplaneError(errors.New("parse failure"))
 	if se == nil || se.Code != "unexpected_response" {
 		t.Fatalf("parse failure should classify as unexpected_response; got %+v", se)
-	}
-}
-
-// TestPathEscapeOpIDColonsAndSlashes — op_id values carry method
-// + path (`GET:/api/vcenter/cluster`); the escape must keep them
-// safe for URL path segments.
-func TestPathEscapeOpIDColonsAndSlashes(t *testing.T) {
-	got := pathEscapeOpID("GET:/api/vcenter/cluster")
-	// url.PathEscape leaves ':' unescaped (RFC 3986 sub-delim-ok in
-	// path segments) but escapes '/'. Both behaviours are correct;
-	// we only assert that the result decodes back to the input.
-	decoded, err := url.PathUnescape(got)
-	if err != nil {
-		t.Fatalf("PathUnescape: %v", err)
-	}
-	if decoded != "GET:/api/vcenter/cluster" {
-		t.Fatalf("escape round-trip: got %q want %q", decoded, "GET:/api/vcenter/cluster")
-	}
-	if strings.Contains(got, "/") {
-		t.Fatalf("op_id slashes should be escaped; got %q", got)
 	}
 }
 
@@ -343,6 +324,41 @@ func TestLoadTextFlagPresentEmpty(t *testing.T) {
 	}
 }
 
+// ---------- validateIngestMode ----------
+
+func TestValidateIngestModeTable(t *testing.T) {
+	cases := []struct {
+		name    string
+		opts    ingestOptions
+		wantErr string // substring; "" = no error
+	}{
+		{"catalog only", ingestOptions{Catalog: "vmware/9.0"}, ""},
+		{"manual complete", ingestOptions{
+			Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
+			Specs: []string{"file:///x.yaml"},
+		}, ""},
+		{"catalog + manual", ingestOptions{
+			Catalog: "vmware/9.0", Product: "vmware",
+		}, "cannot be combined"},
+		{"neither", ingestOptions{}, "specify a connector"},
+		{"manual missing impl+spec", ingestOptions{
+			Product: "vmware", Version: "9.0",
+		}, "manual ingest requires --impl, --spec"},
+	}
+	for _, c := range cases {
+		err := validateIngestMode(c.opts)
+		if c.wantErr == "" {
+			if err != nil {
+				t.Errorf("%s: want nil, got %v", c.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: want error containing %q, got %v", c.name, c.wantErr, err)
+		}
+	}
+}
+
 // ---------- renderers ----------
 
 // TestPrintIngestSummaryDryRun — dry-run header + counts; no
@@ -352,9 +368,9 @@ func TestLoadTextFlagPresentEmpty(t *testing.T) {
 // skipped counts plus the two boolean flags — no per-spec
 // breakdown, no embeddings split. Total is derived client-side.
 func TestPrintIngestSummaryDryRun(t *testing.T) {
-	r := &IngestResponse{
-		Ingestion: IngestionResult{
-			ConnectorID:   "vmware-rest-9.0",
+	r := &api.IngestResponse{
+		Ingestion: api.IngestionResultModel{
+			ConnectorId:   "vmware-rest-9.0",
 			InsertedCount: 12,
 		},
 	}
@@ -385,9 +401,7 @@ func TestPrintIngestSummaryDryRun(t *testing.T) {
 // mode. The heading must still carry the resolved triple — derived
 // from the response's connector_id via parseConnectorID — so the
 // operator-visible output (`ingest vmware/9.0/vmware-rest — ...`)
-// matches v0.6.0 verbatim. The B1 review on PR #1182 caught the
-// regression where opts.Product/Version/ImplID being empty rendered
-// `ingest // — ...` (bare slashes); this test pins the fix.
+// matches v0.6.0 verbatim.
 func TestPrintIngestSummaryCatalogMode(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -418,9 +432,9 @@ func TestPrintIngestSummaryCatalogMode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &IngestResponse{
-				Ingestion: IngestionResult{
-					ConnectorID:         "vmware-rest-9.0",
+			r := &api.IngestResponse{
+				Ingestion: api.IngestionResultModel{
+					ConnectorId:         "vmware-rest-9.0",
 					InsertedCount:       961,
 					ConnectorRegistered: true,
 					OperationsGrouped:   !tc.dryRun,
@@ -448,19 +462,12 @@ func TestPrintIngestSummaryCatalogMode(t *testing.T) {
 }
 
 // TestIngestSummaryHeadingFromConnectorID — table-pins the parser's
-// shape against the backend's parse_connector_id convention
-// (backend/src/meho_backplane/operations/ingest/parser.py). The
-// heading derives the (product, version, impl_id) triple from the
-// response's connector_id so catalog mode (G0.14-T9 / #1150) renders
-// the resolved triple instead of empty placeholders.
+// shape against the backend's parse_connector_id convention.
 func TestIngestSummaryHeadingFromConnectorID(t *testing.T) {
 	cases := []struct {
 		in   string
 		want string
 	}{
-		// Worked examples from parse_connector_id's docstring — the
-		// CLI parser must agree on every one or the heading drifts
-		// from `meho connector list` / review output.
 		{"vmware-rest-9.0", "vmware/9.0/vmware-rest"},
 		{"nsx-4.2", "nsx/4.2/nsx"},
 		{"harbor-2.x", "harbor/2.x/harbor"},
@@ -487,19 +494,19 @@ func TestIngestSummaryHeadingFromConnectorID(t *testing.T) {
 // (connector_registered, operations_grouped) and the canonical
 // GroupingResult fields (groups_created, llm_call_count).
 func TestPrintIngestSummaryNonDryRun(t *testing.T) {
-	r := &IngestResponse{
-		Ingestion: IngestionResult{
-			ConnectorID:         "vmware-rest-9.0",
+	r := &api.IngestResponse{
+		Ingestion: api.IngestionResultModel{
+			ConnectorId:         "vmware-rest-9.0",
 			InsertedCount:       961,
 			ConnectorRegistered: true,
 			OperationsGrouped:   true,
 		},
-		Grouping: &GroupingResult{
-			ConnectorID:        "vmware-rest-9.0",
+		Grouping: &api.GroupingResultModel{
+			ConnectorId:        "vmware-rest-9.0",
 			GroupsCreated:      9,
 			OperationsAssigned: 961,
-			LLMCallCount:       20,
-			LLMDurationMs:      4321,
+			LlmCallCount:       20,
+			LlmDurationMs:      4321,
 		},
 	}
 	opts := ingestOptions{Product: "vmware", Version: "9.0", ImplID: "vmware-rest", DryRun: false}
@@ -550,12 +557,12 @@ func TestIngestResponseDecodesCanonical(t *testing.T) {
 			"llm_duration_ms": 4321.5
 		}
 	}`)
-	var got IngestResponse
+	var got api.IngestResponse
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode IngestResponse: %v", err)
 	}
-	if got.Ingestion.ConnectorID != "vmware-rest-9.0" {
-		t.Errorf("ingestion.connector_id: got %q", got.Ingestion.ConnectorID)
+	if got.Ingestion.ConnectorId != "vmware-rest-9.0" {
+		t.Errorf("ingestion.connector_id: got %q", got.Ingestion.ConnectorId)
 	}
 	if got.Ingestion.InsertedCount != 961 ||
 		got.Ingestion.UpdatedCount != 0 ||
@@ -571,12 +578,13 @@ func TestIngestResponseDecodesCanonical(t *testing.T) {
 	if got.Grouping.GroupsCreated != 9 || got.Grouping.OperationsAssigned != 961 {
 		t.Errorf("grouping counts: got %+v", got.Grouping)
 	}
-	if got.Grouping.LLMCallCount != 20 {
-		t.Errorf("llm_call_count: got %d, want 20", got.Grouping.LLMCallCount)
+	if got.Grouping.LlmCallCount != 20 {
+		t.Errorf("llm_call_count: got %d, want 20", got.Grouping.LlmCallCount)
 	}
-	// Float decode preserves sub-ms timing — int would truncate.
-	if got.Grouping.LLMDurationMs != 4321.5 {
-		t.Errorf("llm_duration_ms: got %v, want 4321.5", got.Grouping.LLMDurationMs)
+	// Generated client decodes llm_duration_ms as float32 — sub-ms
+	// precision still survives at this magnitude.
+	if got.Grouping.LlmDurationMs != 4321.5 {
+		t.Errorf("llm_duration_ms: got %v, want 4321.5", got.Grouping.LlmDurationMs)
 	}
 }
 
@@ -596,7 +604,7 @@ func TestIngestResponseDecodesDryRun(t *testing.T) {
 		},
 		"grouping": null
 	}`)
-	var got IngestResponse
+	var got api.IngestResponse
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode dry-run IngestResponse: %v", err)
 	}
@@ -611,7 +619,7 @@ func TestIngestResponseDecodesDryRun(t *testing.T) {
 // TestPrintListTableEmpty — zero connectors renders the count line.
 func TestPrintListTableEmpty(t *testing.T) {
 	var buf bytes.Buffer
-	printListTable(&buf, "staged", &ListResponse{})
+	printListTable(&buf, "staged", &connectorListEnvelope{})
 	if !strings.Contains(buf.String(), "0 connector(s) with status=staged") {
 		t.Errorf("empty list: missing 0-count line; got:\n%s", buf.String())
 	}
@@ -624,8 +632,8 @@ func TestPrintListTableEmpty(t *testing.T) {
 // connector-wide review_status field.
 func TestPrintListTableHappyPath(t *testing.T) {
 	tenantA := "tenant-a"
-	r := &ListResponse{
-		Connectors: []Summary{
+	r := &connectorListEnvelope{
+		Connectors: []listEntry{
 			{
 				ConnectorID:       "vault-1.x",
 				GroupCount:        2,
@@ -678,12 +686,14 @@ func TestDeriveRollupLabelTable(t *testing.T) {
 	}
 }
 
-// TestSummaryDecodesCanonicalListItem pins the wire shape: the
-// canonical ConnectorListItem (PR #488 api_schemas.py) ships
-// per-status group counts and no top-level review_status. Decoding
-// drift here surfaces as a Major-class wire-contract failure on the
-// next ingest round-trip.
-func TestSummaryDecodesCanonicalListItem(t *testing.T) {
+// TestListEntryDecodesCanonical pins the wire shape: the canonical
+// ConnectorListItem (PR #488 api_schemas.py) ships per-status group
+// counts and no top-level review_status. The list endpoint
+// deliberately returns `dict[str, list[dict[str, object]]]` (no
+// `response_model`), so we keep a package-private listEntry struct
+// for the decode; drift here surfaces as a Major-class wire-contract
+// failure on the next list round-trip.
+func TestListEntryDecodesCanonical(t *testing.T) {
 	raw := []byte(`{
 		"connector_id": "vmware-rest-9.0",
 		"product": "vmware",
@@ -696,9 +706,9 @@ func TestSummaryDecodesCanonicalListItem(t *testing.T) {
 		"disabled_group_count": 1,
 		"operation_count": 961
 	}`)
-	var got Summary
+	var got listEntry
 	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("decode ConnectorListItem: %v", err)
+		t.Fatalf("decode listEntry: %v", err)
 	}
 	if got.ConnectorID != "vmware-rest-9.0" {
 		t.Errorf("connector_id: got %q", got.ConnectorID)
@@ -717,22 +727,22 @@ func TestSummaryDecodesCanonicalListItem(t *testing.T) {
 // `meho connector list`).
 func TestPrintReviewTableHappyPath(t *testing.T) {
 	summary := "List vSphere clusters"
-	r := &ReviewPayload{
-		ConnectorID:  "vmware-rest-9.0",
+	r := &api.ConnectorReviewPayload{
+		ConnectorId:  "vmware-rest-9.0",
 		Product:      "vmware",
 		Version:      "9.0",
-		ImplID:       "vmware-rest",
+		ImplId:       "vmware-rest",
 		TotalOpCount: 2,
-		Groups: []ReviewGroup{
+		Groups: []api.ConnectorReviewGroup{
 			{
 				GroupKey:     "cluster",
 				Name:         "Cluster",
 				WhenToUse:    "Use for vSphere cluster lifecycle ops.",
 				ReviewStatus: "staged",
 				OpCount:      2,
-				Ops: []ReviewOperation{
-					{OpID: "GET:/api/vcenter/cluster", Summary: &summary, SafetyLevel: "safe", IsEnabled: false},
-					{OpID: "DELETE:/api/vcenter/cluster/{id}", SafetyLevel: "dangerous", RequiresApproval: true, IsEnabled: false},
+				Ops: []api.ConnectorReviewOp{
+					{OpId: "GET:/api/vcenter/cluster", Summary: &summary, SafetyLevel: "safe", IsEnabled: false},
+					{OpId: "DELETE:/api/vcenter/cluster/{id}", SafetyLevel: "dangerous", RequiresApproval: true, IsEnabled: false},
 				},
 			},
 		},
@@ -750,7 +760,7 @@ func TestPrintReviewTableHappyPath(t *testing.T) {
 // TestPrintReviewTableEmptyGroups — zero-group connector renders
 // the explanation line and shows "(empty)" rollup.
 func TestPrintReviewTableEmptyGroups(t *testing.T) {
-	r := &ReviewPayload{ConnectorID: "k8s-1.x", Groups: nil}
+	r := &api.ConnectorReviewPayload{ConnectorId: "k8s-1.x", Groups: nil}
 	var buf bytes.Buffer
 	printReviewTable(&buf, r)
 	if !strings.Contains(buf.String(), "no groups") {
@@ -794,7 +804,7 @@ func TestReviewPayloadDecodesCanonical(t *testing.T) {
 		],
 		"total_op_count": 1
 	}`)
-	var got ReviewPayload
+	var got api.ConnectorReviewPayload
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode ConnectorReviewPayload: %v", err)
 	}
@@ -815,64 +825,11 @@ func TestReviewPayloadDecodesCanonical(t *testing.T) {
 		t.Fatalf("group ops: got %d, want 1", len(g.Ops))
 	}
 	op := g.Ops[0]
-	if op.OpID != "GET:/api/vcenter/cluster" {
-		t.Errorf("op_id: got %q", op.OpID)
+	if op.OpId != "GET:/api/vcenter/cluster" {
+		t.Errorf("op_id: got %q", op.OpId)
 	}
 	if len(op.Tags) != 2 || op.Tags[0] != "cluster" {
 		t.Errorf("op tags: got %v", op.Tags)
-	}
-}
-
-// ---------- EditOpBody marshal ----------
-
-// TestEditOpBodyMarshalOmitsUnset — a body with only IsEnabled set
-// must marshal to exactly that one field; absent fields stay absent
-// (no explicit null) so the PATCH semantic on the backend stays
-// "leave unchanged".
-func TestEditOpBodyMarshalOmitsUnset(t *testing.T) {
-	enabled := true
-	body := EditOpBody{IsEnabled: &enabled}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if string(raw) != `{"is_enabled":true}` {
-		t.Fatalf("unset fields should be omitted; got %s", raw)
-	}
-}
-
-// TestEditOpBodyMarshalAllFields — all-fields-set marshal round-
-// trips with the right keys.
-func TestEditOpBodyMarshalAllFields(t *testing.T) {
-	desc := "Read a vault KV secret"
-	safety := "caution"
-	req := true
-	enabled := false
-	body := EditOpBody{
-		CustomDescription: &desc,
-		SafetyLevel:       &safety,
-		RequiresApproval:  &req,
-		IsEnabled:         &enabled,
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	for _, want := range []string{`"custom_description":"Read a vault KV secret"`, `"safety_level":"caution"`, `"requires_approval":true`, `"is_enabled":false`} {
-		if !strings.Contains(string(raw), want) {
-			t.Errorf("marshal missing %q in %s", want, raw)
-		}
-	}
-}
-
-// TestIsEmptyEditOpBody — both branches.
-func TestIsEmptyEditOpBody(t *testing.T) {
-	if !isEmptyEditOpBody(EditOpBody{}) {
-		t.Fatalf("zero-value body should be empty")
-	}
-	enabled := true
-	if isEmptyEditOpBody(EditOpBody{IsEnabled: &enabled}) {
-		t.Fatalf("body with IsEnabled set should not be empty")
 	}
 }
 
@@ -931,14 +888,14 @@ func TestPrintTransitionResult(t *testing.T) {
 	}
 }
 
-// ---------- httpError ----------
+// ---------- httpResponseError ----------
 
-// TestHTTPErrorString — Error() format pins the renderer's input
-// shape.
-func TestHTTPErrorString(t *testing.T) {
-	he := &httpError{StatusCode: 403, Body: "forbidden"}
+// TestHTTPResponseErrorString — Error() format pins the renderer's
+// input shape.
+func TestHTTPResponseErrorString(t *testing.T) {
+	he := &httpResponseError{statusCode: 403, body: []byte("forbidden")}
 	if he.Error() != "HTTP 403: forbidden" {
-		t.Fatalf("httpError format: got %q", he.Error())
+		t.Fatalf("httpResponseError format: got %q", he.Error())
 	}
 }
 
@@ -955,32 +912,28 @@ func TestPostIngestRoundTripWithMockServer(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
-			var req IngestRequest
+			var req api.IngestRequest
 			if err := json.Unmarshal(body, &req); err != nil {
 				t.Errorf("decode IngestRequest body: %v", err)
 				w.WriteHeader(400)
 				return
 			}
-			// G0.14-T9 (#1150): IngestRequest.Product/Version/ImplID are
-			// now *string so the JSON serializer can omit them on the
-			// catalog-driven shape. Deref for the equality check; nil
-			// here means the test request was misconstructed.
-			if req.Product == nil || req.Version == nil || req.ImplID == nil ||
-				*req.Product != "vmware" || *req.Version != "9.0" || *req.ImplID != "vmware-rest" {
+			if req.Product == nil || req.Version == nil || req.ImplId == nil ||
+				*req.Product != "vmware" || *req.Version != "9.0" || *req.ImplId != "vmware-rest" {
 				t.Errorf("unexpected triple: %+v", req)
 			}
-			if len(req.Specs) != 1 || req.Specs[0].URI != "file:///abs/vcenter.yaml" {
+			if req.Specs == nil || len(*req.Specs) != 1 || (*req.Specs)[0].Uri != "file:///abs/vcenter.yaml" {
 				t.Errorf("unexpected specs: %+v", req.Specs)
 			}
-			resp := IngestResponse{
-				Ingestion: IngestionResult{
-					ConnectorID:         "vmware-rest-9.0",
+			resp := api.IngestResponse{
+				Ingestion: api.IngestionResultModel{
+					ConnectorId:         "vmware-rest-9.0",
 					InsertedCount:       961,
 					ConnectorRegistered: true,
 					OperationsGrouped:   true,
 				},
-				Grouping: &GroupingResult{
-					ConnectorID:        "vmware-rest-9.0",
+				Grouping: &api.GroupingResultModel{
+					ConnectorId:        "vmware-rest-9.0",
 					GroupsCreated:      9,
 					OperationsAssigned: 961,
 				},
@@ -994,14 +947,15 @@ func TestPostIngestRoundTripWithMockServer(t *testing.T) {
 	product := "vmware"
 	version := "9.0"
 	implID := "vmware-rest"
-	got, err := postIngest(context.Background(), srv.URL, IngestRequest{
-		Product: &product, Version: &version, ImplID: &implID,
-		Specs: []SpecSource{{URI: "file:///abs/vcenter.yaml"}},
+	specs := []api.SpecSource{{Uri: "file:///abs/vcenter.yaml"}}
+	got, err := postIngest(context.Background(), srv.URL, api.IngestRequest{
+		Product: &product, Version: &version, ImplId: &implID,
+		Specs: &specs,
 	})
 	if err != nil {
 		t.Fatalf("postIngest: %v", err)
 	}
-	if got.Ingestion.ConnectorID != "vmware-rest-9.0" || got.Ingestion.InsertedCount != 961 {
+	if got.Ingestion.ConnectorId != "vmware-rest-9.0" || got.Ingestion.InsertedCount != 961 {
 		t.Fatalf("unexpected ingest result: %+v", got)
 	}
 	if got.Grouping == nil || got.Grouping.GroupsCreated != 9 {
@@ -1009,16 +963,165 @@ func TestPostIngestRoundTripWithMockServer(t *testing.T) {
 	}
 }
 
+// TestRunIngestCatalogModePostsCatalogEntry pins the post-#1150
+// contract: catalog mode POSTs `{"catalog_entry": "..."}` directly
+// without the explicit quadruple. The backplane resolves the entry
+// server-side, so the CLI no longer pre-fetches the catalog.
+func TestRunIngestCatalogModePostsCatalogEntry(t *testing.T) {
+	var rawBody []byte
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, r *http.Request) {
+			rawBody, _ = io.ReadAll(r.Body)
+			writeJSON(t, w, 200, api.IngestResponse{
+				Ingestion: api.IngestionResultModel{ConnectorId: "vmware-rest-9.0", InsertedCount: 961},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runIngest catalog mode: %v", err)
+	}
+
+	// Decode into a generic map to inspect the exact wire shape. The
+	// CLI must NOT post product/version/impl_id/specs in catalog mode
+	// — the backend's mutual-exclusivity validator would reject the
+	// body. Since the generated `api.IngestRequest` tags lack
+	// `omitempty`, the JSON marshal still emits the unset pointer
+	// fields as JSON `null`; the validator interprets null as
+	// "field unset", so the wire shape stays catalog-only without
+	// regressing the round-trip.
+	var posted map[string]any
+	if err := json.Unmarshal(rawBody, &posted); err != nil {
+		t.Fatalf("decode posted body: %v", err)
+	}
+	if posted["catalog_entry"] != "vmware/9.0" {
+		t.Errorf("catalog_entry not posted: %+v", posted)
+	}
+	for _, banned := range []string{"product", "version", "impl_id"} {
+		// Catalog mode must leave the quadruple slots null, never
+		// populate them with strings — the route's mutual-exclusivity
+		// validator treats any non-null value as "quadruple shape".
+		if v, present := posted[banned]; present && v != nil {
+			t.Errorf("catalog mode must not populate %q (would conflict): got %v", banned, v)
+		}
+	}
+	// specs has `omitempty` on the generated tag (it's a slice of
+	// struct), so its absence is the right check.
+	if v, present := posted["specs"]; present && v != nil {
+		t.Errorf("catalog mode must not populate specs: got %v", v)
+	}
+}
+
+// TestRunIngestCatalogModeRendersResolvedTriple pins the operator-
+// visible summary heading in catalog mode. The CLI posts
+// `{"catalog_entry": "vmware/9.0"}` without the explicit quadruple;
+// the backplane resolves the entry and returns a connector_id
+// (`vmware-rest-9.0`) that round-trips through parse_connector_id
+// to the resolved triple. The heading derives from that response
+// value.
+func TestRunIngestCatalogModeRendersResolvedTriple(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, api.IngestResponse{
+				Ingestion: api.IngestionResultModel{
+					ConnectorId:   "vmware-rest-9.0",
+					InsertedCount: 961,
+				},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		DryRun:            true,
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runIngest catalog mode: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "ingest vmware/9.0/vmware-rest") {
+		t.Errorf("catalog-mode summary missing resolved triple `vmware/9.0/vmware-rest` in:\n%s", out)
+	}
+	if strings.Contains(out, "ingest // —") {
+		t.Errorf("catalog-mode summary contains bare `//` heading (B1 regression); got:\n%s", out)
+	}
+}
+
+// TestRunIngestManualModePostsQuadruple pins the parallel contract:
+// manual mode POSTs the explicit quadruple, not a catalog_entry.
+// Regression guard for the historical --product/--version/--impl/--spec
+// form.
+func TestRunIngestManualModePostsQuadruple(t *testing.T) {
+	var rawBody []byte
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, r *http.Request) {
+			rawBody, _ = io.ReadAll(r.Body)
+			writeJSON(t, w, 200, api.IngestResponse{
+				Ingestion: api.IngestionResultModel{ConnectorId: "test-1.0", InsertedCount: 2},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runIngest(cmd, ingestOptions{
+		Product: "test", Version: "1.0", ImplID: "test-impl",
+		Specs:             []string{"https://example.test/spec.yaml"},
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runIngest manual mode: %v", err)
+	}
+
+	var posted map[string]any
+	if err := json.Unmarshal(rawBody, &posted); err != nil {
+		t.Fatalf("decode posted body: %v", err)
+	}
+	// catalog_entry tag has no `omitempty`, so the marshal still
+	// emits the field as `null` when unset; the route's validator
+	// reads null as "absent". The right contract is "no string
+	// value present", not "key absent".
+	if v, present := posted["catalog_entry"]; present && v != nil {
+		t.Errorf("manual mode must not populate catalog_entry: got %v", v)
+	}
+	if posted["product"] != "test" || posted["version"] != "1.0" || posted["impl_id"] != "test-impl" {
+		t.Errorf("manual mode posted quadruple wrong: %+v", posted)
+	}
+}
+
 // TestGetListWithMockServer — validates the status query param
-// shape and the list response decode.
+// shape and the list response decode through the typed-client surface.
 func TestGetListWithMockServer(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"GET /api/v1/connectors": func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("status") != "staged" {
 				t.Errorf("expected status=staged; got %q", r.URL.Query().Get("status"))
 			}
-			writeJSON(t, w, 200, ListResponse{
-				Connectors: []Summary{
+			writeJSON(t, w, 200, connectorListEnvelope{
+				Connectors: []listEntry{
 					{
 						ConnectorID:      "vmware-rest-9.0",
 						GroupCount:       9,
@@ -1049,7 +1152,7 @@ func TestGetListAllOmitsStatusQueryParam(t *testing.T) {
 			if got := r.URL.Query().Get("status"); got != "" {
 				t.Errorf("status=all should not send param; got %q", got)
 			}
-			writeJSON(t, w, 200, ListResponse{})
+			writeJSON(t, w, 200, connectorListEnvelope{})
 		},
 	})
 	defer srv.Close()
@@ -1057,6 +1160,125 @@ func TestGetListAllOmitsStatusQueryParam(t *testing.T) {
 
 	if _, err := getList(context.Background(), srv.URL, "all"); err != nil {
 		t.Fatalf("getList all: %v", err)
+	}
+}
+
+// TestGetCatalogDecodesEntries — round-trips the typed
+// CatalogListResponse through the generated client decoder. Pins
+// the `ConnectorSpecEntry` field-name shape (`ImplId`, not
+// `ImplID`) and the nullable `Upstream` / `SpecInfoVersion`
+// passthrough.
+func TestGetCatalogDecodesEntries(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/connectors/catalog": func(w http.ResponseWriter, _ *http.Request) {
+			specVer := "9.0.1"
+			upstream := []string{"https://example.test/vcenter.yaml"}
+			writeJSON(t, w, 200, api.CatalogListResponse{Catalog: []api.ConnectorSpecEntry{
+				{
+					Product: "vmware", Version: "9.0", ImplId: "vmware-rest",
+					RequiresConnectorClass: "VmwareRestConnector",
+					Upstream:               &upstream,
+					SpecInfoVersion:        &specVer,
+				},
+				{
+					Product: "vault", Version: "1.x", ImplId: "vault",
+					RequiresConnectorClass: "VaultConnector",
+					Upstream:               nil,
+					SpecInfoVersion:        nil,
+				},
+			}})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	got, err := getCatalog(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("getCatalog: %v", err)
+	}
+	if len(got.Catalog) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(got.Catalog))
+	}
+	if got.Catalog[1].Upstream != nil {
+		t.Errorf("typed entry upstream should decode to nil, got %+v", got.Catalog[1].Upstream)
+	}
+	if got.Catalog[1].SpecInfoVersion != nil {
+		t.Errorf("null spec_info_version should decode to nil pointer")
+	}
+	if got.Catalog[0].SpecInfoVersion == nil || *got.Catalog[0].SpecInfoVersion != "9.0.1" {
+		t.Errorf("spec_info_version decode wrong: %+v", got.Catalog[0].SpecInfoVersion)
+	}
+}
+
+// TestPrintCatalogTableHappyPath — happy-path table render with one
+// registered and one unregistered entry; the cross-reference column
+// reflects map membership.
+func TestPrintCatalogTableHappyPath(t *testing.T) {
+	specVer := "9.0.1"
+	upstream := []string{"https://example.test/x.yaml"}
+	notes := "generic"
+	notesV := "typed"
+	var buf bytes.Buffer
+	registered := map[string]bool{tripleKey("vmware", "9.0", "vmware-rest"): true}
+	printCatalogTable(&buf, &api.CatalogListResponse{Catalog: []api.ConnectorSpecEntry{
+		{Product: "vmware", Version: "9.0", ImplId: "vmware-rest",
+			RequiresConnectorClass: "VmwareRestConnector",
+			Upstream:               &upstream,
+			SpecInfoVersion:        &specVer, Notes: &notes},
+		{Product: "vault", Version: "1.x", ImplId: "vault",
+			RequiresConnectorClass: "VaultConnector", Notes: &notesV},
+	}}, registered)
+	out := buf.String()
+	for _, want := range []string{"vmware/9.0", "VmwareRestConnector", "9.0.1", "yes", "vault/1.x", "no"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("catalog table missing %q\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintCatalogTableUnknownRegistration — nil registered map →
+// registration column renders "?".
+func TestPrintCatalogTableUnknownRegistration(t *testing.T) {
+	upstream := []string{"https://example.test/x.yaml"}
+	var buf bytes.Buffer
+	printCatalogTable(&buf, &api.CatalogListResponse{Catalog: []api.ConnectorSpecEntry{
+		{Product: "vmware", Version: "9.0", ImplId: "vmware-rest",
+			RequiresConnectorClass: "VmwareRestConnector",
+			Upstream:               &upstream},
+	}}, nil)
+	if !strings.Contains(buf.String(), "?") {
+		t.Errorf("nil registration map should render ?\n%s", buf.String())
+	}
+}
+
+// TestPrintCatalogTableEmpty — zero entries renders the count line.
+func TestPrintCatalogTableEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	printCatalogTable(&buf, &api.CatalogListResponse{}, map[string]bool{})
+	if !strings.Contains(buf.String(), "0 catalog entries") {
+		t.Errorf("empty catalog render wrong: %q", buf.String())
+	}
+}
+
+// TestRegisteredTriplesFromMockServer — exercises the cross-
+// reference helper end-to-end against a mocked list endpoint.
+func TestRegisteredTriplesFromMockServer(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/connectors": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, connectorListEnvelope{Connectors: []listEntry{
+				{ConnectorID: "vmware-rest-9.0", Product: "vmware", Version: "9.0", ImplID: "vmware-rest"},
+			}})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	set := registeredTriples(context.Background(), srv.URL)
+	if !set[tripleKey("vmware", "9.0", "vmware-rest")] {
+		t.Fatalf("expected vmware triple registered; got %+v", set)
+	}
+	if set[tripleKey("nsx", "4.2", "nsx-rest")] {
+		t.Fatalf("nsx should not be registered")
 	}
 }
 
@@ -1068,7 +1290,7 @@ func TestPatchGroupSendsBody(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"PATCH /api/v1/connectors/vmware-rest-9.0/groups/cluster": func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
-			var got EditGroupBody
+			var got api.EditGroupBody
 			if err := json.Unmarshal(body, &got); err != nil {
 				t.Errorf("decode: %v", err)
 				w.WriteHeader(400)
@@ -1088,7 +1310,7 @@ func TestPatchGroupSendsBody(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	whenToUse := "use for cluster ops"
-	if err := patchGroup(context.Background(), srv.URL, "vmware-rest-9.0", "cluster", EditGroupBody{WhenToUse: &whenToUse}); err != nil {
+	if err := patchGroup(context.Background(), srv.URL, "vmware-rest-9.0", "cluster", api.EditGroupBody{WhenToUse: &whenToUse}); err != nil {
 		t.Fatalf("patchGroup: %v", err)
 	}
 }
@@ -1100,7 +1322,7 @@ func TestPrintEditGroupResultRendersBody(t *testing.T) {
 	whenToUse := "use for cluster lifecycle ops"
 	name := "Cluster"
 	var buf bytes.Buffer
-	printEditGroupResult(&buf, "vmware-rest-9.0", "cluster", EditGroupBody{
+	printEditGroupResult(&buf, "vmware-rest-9.0", "cluster", api.EditGroupBody{
 		WhenToUse: &whenToUse,
 		Name:      &name,
 	})
@@ -1117,18 +1339,16 @@ func TestPrintEditGroupResultRendersBody(t *testing.T) {
 	}
 }
 
-// TestPatchOpEscapesOpID — colons and slashes in op_id must
-// survive the URL path. The mock asserts the decoded segment and
-// returns the canonical T6 204 No Content response.
+// TestPatchOpEscapesOpID — colons and slashes in op_id must survive
+// the URL path. The generated client URL-escapes the path parameter,
+// so the colons / slashes round-trip back to the canonical
+// `METHOD:/path` form on the server side.
 func TestPatchOpEscapesOpID(t *testing.T) {
 	called := false
 	srv := mockBackplane(t, map[string]mockHandler{
 		"": func(w http.ResponseWriter, r *http.Request) {
 			// Catch-all: confirm the escaped path segment carrying
 			// the op_id round-trips back to "GET:/api/vcenter/cluster".
-			// r.URL.RawPath holds the on-the-wire encoded form;
-			// r.URL.Path is the auto-decoded form FastAPI's
-			// `{op_id:path}` route ultimately sees.
 			called = true
 			if r.Method != "PATCH" {
 				t.Errorf("expected PATCH; got %s", r.Method)
@@ -1157,8 +1377,8 @@ func TestPatchOpEscapesOpID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	safety := "dangerous"
-	if err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", EditOpBody{SafetyLevel: &safety}); err != nil {
+	safety := api.Dangerous
+	if err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", api.EditOpBody{SafetyLevel: &safety}); err != nil {
 		t.Fatalf("patchOp: %v", err)
 	}
 	if !called {
@@ -1167,46 +1387,35 @@ func TestPatchOpEscapesOpID(t *testing.T) {
 }
 
 // TestPostTransitionEnable204 — pins the canonical enable / disable
-// wire shape. T6 returns HTTP 204 No Content with no body; the CLI
-// must accept the 204 as success without trying to decode a JSON
-// envelope. A regression to the old 200+JSON contract would either
-// fail decode (empty body) or 500-classify (200 with malformed body).
+// wire shape. T6 returns HTTP 204 No Content with no body; the typed
+// client surfaces 204 as a success envelope with empty Body.
 func TestPostTransitionEnable204(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
-		"POST /api/v1/connectors/vmware-rest-9.0/enable": func(w http.ResponseWriter, r *http.Request) {
-			// Canonical T6 response: 204 No Content with no body.
+		"POST /api/v1/connectors/vmware-rest-9.0/enable": func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if err := postTransition(context.Background(), srv.URL, "/api/v1/connectors/vmware-rest-9.0/enable"); err != nil {
-		t.Fatalf("postTransition: %v", err)
+	if err := postTransition(context.Background(), srv.URL, verbEnable, "vmware-rest-9.0"); err != nil {
+		t.Fatalf("postTransition enable: %v", err)
 	}
 }
 
-// TestDoAuthedRequest204AcceptsEmptyBody — pins the load-bearing
-// behaviour of the shared HTTP helper: a 204 No Content response
-// must surface as a nil error with an empty byte slice, NOT as an
-// *httpError. Three of the seven T6 routes return 204 (enable,
-// disable, PATCH edit-group, PATCH edit-op), so this property gates
-// the entire mutating-verb surface.
-func TestDoAuthedRequest204AcceptsEmptyBody(t *testing.T) {
+// TestPostTransitionDisable204 — mirror of TestPostTransitionEnable204
+// for the disable route.
+func TestPostTransitionDisable204(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
-		"POST /api/v1/test": func(w http.ResponseWriter, r *http.Request) {
+		"POST /api/v1/connectors/vmware-rest-9.0/disable": func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	body, err := doAuthedRequest(context.Background(), srv.URL, "POST", "/api/v1/test", []byte("{}"))
-	if err != nil {
-		t.Fatalf("204 should be a success; got err %v", err)
-	}
-	if len(body) != 0 {
-		t.Fatalf("204 should yield empty body; got %q", body)
+	if err := postTransition(context.Background(), srv.URL, verbDisable, "vmware-rest-9.0"); err != nil {
+		t.Fatalf("postTransition disable: %v", err)
 	}
 }
 
@@ -1218,7 +1427,7 @@ func TestDoAuthedRequest204AcceptsEmptyBody(t *testing.T) {
 // "your network is down", which is misleading.
 func TestDecodeErrorClassifiedAsUnexpected(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
-		"GET /api/v1/connectors": func(w http.ResponseWriter, r *http.Request) {
+		"GET /api/v1/connectors": func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(200)
 			// Malformed JSON — triggers json.SyntaxError on decode.
@@ -1242,11 +1451,11 @@ func TestDecodeErrorClassifiedAsUnexpected(t *testing.T) {
 }
 
 // TestHTTPErrorClassification403 — backplane 403 propagates as a
-// *httpError with the right status code; renderRequestError maps
-// to insufficient_role.
+// *httpResponseError with the right status code; renderHTTPStatus
+// maps to insufficient_role at the verb edge.
 func TestHTTPErrorClassification403(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
-		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, r *http.Request) {
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(403)
 			_, _ = w.Write([]byte("tenant_admin required"))
 		},
@@ -1257,16 +1466,78 @@ func TestHTTPErrorClassification403(t *testing.T) {
 	product := "x"
 	version := "y"
 	implID := "z"
-	_, err := postIngest(context.Background(), srv.URL, IngestRequest{
-		Product: &product, Version: &version, ImplID: &implID,
-		Specs: []SpecSource{{URI: "file:///a.yaml"}},
+	specs := []api.SpecSource{{Uri: "file:///a.yaml"}}
+	_, err := postIngest(context.Background(), srv.URL, api.IngestRequest{
+		Product: &product, Version: &version, ImplId: &implID,
+		Specs: &specs,
 	})
 	if err == nil {
 		t.Fatalf("expected 403 error; got nil")
 	}
-	var he *httpError
-	if !errors.As(err, &he) || he.StatusCode != 403 {
-		t.Fatalf("expected *httpError 403; got %T %v", err, err)
+	var he *httpResponseError
+	if !errors.As(err, &he) || he.statusCode != 403 {
+		t.Fatalf("expected *httpResponseError 403; got %T %v", err, err)
+	}
+}
+
+// TestRetryOn401FastPath — when the first call returns a non-401
+// status the wrapper skips the retry entirely. This pins the
+// hot-path latency contract: every successful connector verb pays
+// at most one round-trip.
+func TestRetryOn401FastPath(t *testing.T) {
+	calls := 0
+	type fakeResp struct{ status int }
+	srv := mockBackplane(t, map[string]mockHandler{}) // unused; we exercise the wrapper directly
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	authed, err := newAuthedClient(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("newAuthedClient: %v", err)
+	}
+	resp, err := retryOn401(context.Background(), authed,
+		func(_ context.Context) (*fakeResp, error) {
+			calls++
+			return &fakeResp{status: 200}, nil
+		},
+		func(r *fakeResp) int { return r.status },
+	)
+	if err != nil {
+		t.Fatalf("retryOn401: %v", err)
+	}
+	if resp == nil || resp.status != 200 {
+		t.Fatalf("expected 200; got %+v", resp)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 call on the fast path; got %d", calls)
+	}
+}
+
+// TestRetryOn401TransportErrorPropagates — a transport-layer error
+// surfaces verbatim without a retry attempt. This is the contract
+// renderRequestError consumes on the verb edge.
+func TestRetryOn401TransportErrorPropagates(t *testing.T) {
+	type fakeResp struct{ status int }
+	srv := mockBackplane(t, map[string]mockHandler{})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+	authed, err := newAuthedClient(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("newAuthedClient: %v", err)
+	}
+	sentinel := errors.New("network down")
+	calls := 0
+	_, err = retryOn401(context.Background(), authed,
+		func(_ context.Context) (*fakeResp, error) {
+			calls++
+			return nil, sentinel
+		},
+		func(r *fakeResp) int { return r.status },
+	)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel to propagate; got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 call on transport error; got %d", calls)
 	}
 }
 

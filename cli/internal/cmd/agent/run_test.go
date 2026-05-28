@@ -213,3 +213,39 @@ func TestPrintSSEEventJSON(t *testing.T) {
 		t.Errorf("json event missing merged event kind; got %q", sb.String())
 	}
 }
+
+// TestRunEvents403SingleErrorLine — regression for B1 on #1277. A non-2xx
+// SSE handshake is rendered by streamRunEvents via renderHTTPStatus, which
+// returns an already-rendered *silentError. runRunEvents must NOT re-route
+// that error through renderRequestError (which would fall through to
+// output.Unreachable and emit a second `meho:` stderr line — a direct
+// regression of AC #6 "byte-identical to main output" for the 401/403/
+// 404/422 paths on this streaming verb).
+func TestRunEvents403SingleErrorLine(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/triage/run/events", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"detail":"Insufficient role: tenant_admin required"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newTestCmd(t)
+	err := runRunEvents(cmd, runEventsOptions{
+		Name: "triage", Input: "go", BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected error on 403")
+	}
+	got := stderr.String()
+	if c := strings.Count(got, "meho:"); c != 1 {
+		t.Errorf("expected exactly one 'meho:' stderr line, got %d: %q", c, got)
+	}
+	if !strings.Contains(got, "insufficient_role") {
+		t.Errorf("expected insufficient_role category in stderr; got %q", got)
+	}
+	if strings.Contains(got, "unreachable") {
+		t.Errorf("403 must not surface as 'unreachable' (B1 regression); got %q", got)
+	}
+}

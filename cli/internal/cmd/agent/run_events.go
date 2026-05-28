@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,6 +86,17 @@ func runRunEvents(cmd *cobra.Command, opts runEventsOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 	if err := streamRunEvents(cmd, backplaneURL, opts); err != nil {
+		// streamRunEvents calls renderHTTPStatus on a non-2xx handshake,
+		// which already writes the rendered category to stderr and returns
+		// an output.ExitCoder (silent sentinel). Forwarding that through
+		// renderRequestError would print a SECOND stderr line —
+		// `meho: unreachable: …` with an empty error tail — directly
+		// violating AC #6 (byte-identical to main) on the 401/403/404/422
+		// paths. Only transport-level errors need renderRequestError.
+		var rendered output.ExitCoder
+		if errors.As(err, &rendered) {
+			return err
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	return nil

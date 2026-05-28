@@ -5,8 +5,6 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -114,7 +113,7 @@ func NewPromoteCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&moveFlag, "move", false,
 		"delete the source row in the same transaction (broadens-and-leaves vs. broadens-and-rewires)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry JSON instead of the human summary")
+		"emit raw MemoryEntry JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by `meho login`)")
 	// --to is required at the CLI layer; failing to flag it raises a
@@ -141,17 +140,6 @@ type promoteOptions struct {
 	Now func() time.Time
 }
 
-// promoteRequest mirrors the backend “PromoteBody“ pydantic model
-// (`backend/src/meho_backplane/api/v1/memory.py`). “move“ is sent
-// regardless of value (the route's pydantic v2 “BaseModel“ accepts
-// the default “false“ explicitly — same shape “forget“ /
-// “remember“ use).
-type promoteRequest struct {
-	To         Scope  `json:"to"`
-	Move       bool   `json:"move"`
-	TargetName string `json:"target_name,omitempty"`
-}
-
 func runPromote(cmd *cobra.Command, opts promoteOptions) error {
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -171,9 +159,9 @@ func runPromote(cmd *cobra.Command, opts promoteOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			backplane.ClassifyError(err), opts.JSONOut)
 	}
-	req := promoteRequest{
+	reqBody := api.PromoteBody{
 		To:   targetScope,
-		Move: opts.Move,
+		Move: &opts.Move,
 	}
 	// Capture the pre-POST wall clock so a successful response can be
 	// classified as fresh (entry.CreatedAt >= preCallAt) vs.
@@ -186,9 +174,28 @@ func runPromote(cmd *cobra.Command, opts promoteOptions) error {
 	// from a previous wall-clock, which is on the seconds-or-more
 	// timescale.
 	preCallAt := opts.Now().UTC()
-	entry, err := postPromote(cmd.Context(), backplaneURL, sourceScope, sourceSlug, req)
+	resp, err := postPromote(cmd.Context(), backplaneURL, sourceScope, sourceSlug, reqBody)
 	if err != nil {
 		return renderPromoteRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return renderPromoteHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	// Guard against 200 + missing-content-type leaving JSON200 nil
+	// (printPromoteSummary nil-guards, but the operator would see an
+	// empty line with exit 0 — phantom success). Mirrors
+	// `cli/internal/cmd/status.go:142` + the kb sibling's
+	// post-iter-2 nil-guard pattern.
+	entry := resp.JSON200
+	if entry == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a memory entry payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
 	}
 	idempotent := isIdempotentRerun(entry, preCallAt)
 	if opts.JSONOut {
@@ -233,29 +240,20 @@ func (*idempotentPromoteError) ExitCode() int { return exitIdempotentPromote }
 //
 // Robustness notes:
 //
-//   - Empty / unparseable “created_at“ → treated as fresh (false).
+//   - Zero / unset “CreatedAt“ → treated as fresh (false).
 //     Misclassifying a re-run as fresh degrades the UX (operator sees
 //     exit 0 + "promoted" wording) but never returns the wrong row;
-//     the alternative — treating a parse failure as idempotent —
+//     the alternative — treating a missing timestamp as idempotent —
 //     would block a successful first promotion behind a false-positive
 //     warning.
 //   - Sub-second skew between client and server clocks is tolerable
 //     because a re-run carries the “created_at“ from a previous
 //     promotion, which is seconds-or-more in the past.
-func isIdempotentRerun(entry *Entry, preCallAt time.Time) bool {
-	if entry == nil || entry.CreatedAt == "" {
+func isIdempotentRerun(entry *api.MemoryEntry, preCallAt time.Time) bool {
+	if entry == nil || entry.CreatedAt.IsZero() {
 		return false
 	}
-	createdAt, err := time.Parse(time.RFC3339Nano, entry.CreatedAt)
-	if err != nil {
-		// Fall back to RFC3339 for backends that strip sub-second
-		// precision in serialisation.
-		createdAt, err = time.Parse(time.RFC3339, entry.CreatedAt)
-		if err != nil {
-			return false
-		}
-	}
-	return createdAt.UTC().Before(preCallAt)
+	return entry.CreatedAt.UTC().Before(preCallAt)
 }
 
 func postPromote(
@@ -263,51 +261,56 @@ func postPromote(
 	backplaneURL string,
 	sourceScope Scope,
 	sourceSlug string,
-	req promoteRequest,
-) (*Entry, error) {
-	raw, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal promote request: %w", err)
-	}
-	path := fmt.Sprintf("/api/v1/memory/%s/%s/promote",
-		pathEscape(string(sourceScope)), pathEscape(sourceSlug))
-	resp, err := doAuthedRequest(ctx, backplaneURL, "POST", path, raw)
+	req api.PromoteBody,
+) (*api.PromoteApiV1MemoryScopeSlugPromotePostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("decode promote response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.PromoteApiV1MemoryScopeSlugPromotePostResponse, error) {
+			return authed.PromoteApiV1MemoryScopeSlugPromotePostWithResponse(
+				ctx,
+				sourceScope,
+				sourceSlug,
+				&api.PromoteApiV1MemoryScopeSlugPromotePostParams{},
+				req,
+			)
+		},
+		func(r *api.PromoteApiV1MemoryScopeSlugPromotePostResponse) int { return r.StatusCode() },
+	)
 }
 
-// renderPromoteRequestError translates an error from postPromote into
-// the right “output.StructuredError“ category. Specialises the
-// shared :func:`renderRequestError` to surface the promote route's
-// 403 canonical detail (“insufficient_promotion_authority“) under
-// the explicit “insufficient_promotion_authority“ exit code 5 from
-// the issue #627 mapping, and to keep the 400 cross-ladder /
-// 404 source-not-visible branches uniformly under
-// “unexpected_response“ (exit 4).
+// renderPromoteRequestError translates a transport-layer error from
+// postPromote into the right “output.StructuredError“ category.
+// The transport surface is identical to the shared
+// :func:`renderRequestError`; specialisation is at the HTTP-status
+// layer (:func:`renderPromoteHTTPStatus`).
 func renderPromoteRequestError(
 	cmd *cobra.Command,
 	backplaneURL string,
 	err error,
 	jsonOut bool,
 ) error {
-	// Sentinel-error paths (errMissingAccessToken / token-not-found /
-	// no-refresh-token / transport) flow through the shared helper
-	// unchanged — only the http-status branch needs verb-specific
-	// shaping.
-	var he *httpError
-	if !errors.As(err, &he) {
-		return renderRequestError(cmd, backplaneURL, err, jsonOut)
-	}
-	switch he.StatusCode {
+	return renderRequestError(cmd, backplaneURL, err, jsonOut)
+}
+
+// renderPromoteHTTPStatus classifies a non-2xx promote response.
+// Specialises the shared :func:`renderHTTPStatus` for the promote
+// route's distinct 403 mapping (`insufficient_promotion_authority`)
+// and the 400 cross-ladder / 404 source-not-visible / 409 / 422 /
+// 501 spread that all collapse to `unexpected_response` (exit 4).
+func renderPromoteHTTPStatus(
+	cmd *cobra.Command,
+	backplaneURL string,
+	statusCode int,
+	body []byte,
+	jsonOut bool,
+) error {
+	switch statusCode {
 	case http.StatusUnauthorized:
-		// Mirrors the shared helper; pinned here so the per-verb error
-		// table is one read.
+		// Mirrors the shared helper; pinned here so the per-verb
+		// error table is one read.
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
 				"backplane rejected the stored token; run `meho login %s`",
@@ -323,7 +326,7 @@ func renderPromoteRequestError(
 		// :func:`api.v1.memory.promote`); decodeDetailString unwraps
 		// it.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(decodeDetailString(he.Body)),
+			output.InsufficientRole(decodeDetailString(string(body))),
 			jsonOut,
 		)
 	default:
@@ -335,7 +338,7 @@ func renderPromoteRequestError(
 		// detail prose.
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, decodeDetailString(he.Body))),
+				backplaneURL, statusCode, decodeDetailString(string(body)))),
 			jsonOut,
 		)
 	}
@@ -347,7 +350,7 @@ func renderPromoteRequestError(
 // On an idempotent re-run the wording flips to "already promoted" so
 // the operator sees the no-op explicitly; the human-mode exit-6 code
 // is what scripts read.
-func printPromoteSummary(w io.Writer, e *Entry, idempotent bool, move bool) {
+func printPromoteSummary(w io.Writer, e *api.MemoryEntry, idempotent bool, move bool) {
 	if e == nil {
 		return
 	}
@@ -364,13 +367,13 @@ func printPromoteSummary(w io.Writer, e *Entry, idempotent bool, move bool) {
 		suffix = " (source row removed)"
 	}
 	fmt.Fprintf(w, "%s %s/%s%s\n", verb, e.Scope, e.Slug, suffix)
-	fmt.Fprintf(w, "%-14s %s\n", "id:", e.ID)
+	fmt.Fprintf(w, "%-14s %s\n", "id:", e.Id.String())
 	fmt.Fprintf(w, "%-14s %s\n", "scope:", e.Scope)
 	fmt.Fprintf(w, "%-14s %s\n", "slug:", e.Slug)
-	fmt.Fprintf(w, "%-14s %s\n", "expires_at:", pluralisePtr(e.ExpiresAt))
+	fmt.Fprintf(w, "%-14s %s\n", "expires_at:", formatTimePtr(e.ExpiresAt))
 	fmt.Fprintf(w, "%-14s %s\n", "user_sub:", pluralisePtr(e.UserSub))
 	fmt.Fprintf(w, "%-14s %s\n", "target_name:", pluralisePtr(e.TargetName))
-	fmt.Fprintf(w, "%-14s %s\n", "created_at:", e.CreatedAt)
+	fmt.Fprintf(w, "%-14s %s\n", "created_at:", e.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	if promotedFrom := metadataStringField(e.Metadata, "promoted_from"); promotedFrom != "" {
 		fmt.Fprintf(w, "%-14s %s\n", "promoted_from:", promotedFrom)
 	}

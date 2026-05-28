@@ -158,8 +158,8 @@ cli/
     │   │   ├── history.go        # `meho conventions history <slug> [--limit N]` (GET /api/v1/conventions/{slug}/history); unified-diff per row.
     │   │   ├── conventions_test.go # helpers + register-all-six-verbs + body/confirm/path-escape contract tests.
     │   │   └── crud_test.go      # per-verb HTTP-server tests: list table + JSON, show 404, create 409/422-over-budget, edit flag/$EDITOR modes + 422 inline surface, delete confirm/decline/404, history diffs + --limit + --json.
-    │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list` (no parent).
-    │   │   ├── memory.go         # Scope enum + Entry/ListResponse/RetrievalHit + shared HTTP/auth helpers + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
+    │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list/promote` (no parent).
+    │   │   ├── memory.go         # Scope alias for api.MemoryScope + newAuthedClient/retryOn401/renderHTTPStatus typed-client helpers (G0.12-T10 #1268) + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
     │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --persist --json]` (POST /api/v1/memory). `--persist` (G5.2-T2 #624) sends explicit `expires_at: null` to opt out of the backend's default-7-day TTL on `memory-user` writes.
     │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/retrieve, source="memory").
     │   │   ├── forget.go         # `meho forget <scope>/<slug> [--confirm --target --json]` (DELETE /api/v1/memory/{scope}/{slug}).

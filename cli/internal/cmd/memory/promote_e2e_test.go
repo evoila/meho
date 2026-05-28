@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 )
 
@@ -76,8 +77,9 @@ func requireLiveBackplane(t *testing.T) string {
 // debugging a failed CI job.
 //
 // `seedXDGAndToken` writes a placeholder StoredToken; we overwrite
-// it with the operator's real bearer here so `doAuthedRequest`
-// sends production credentials to the live backplane.
+// it with the operator's real bearer here so the typed-client's
+// bearer-injecting editor sends production credentials to the live
+// backplane.
 func seedLiveTokenStore(t *testing.T, backplaneURL, accessToken string) {
 	t.Helper()
 	seedXDGAndToken(t, backplaneURL)
@@ -265,7 +267,7 @@ func TestE2EPromoteIdempotentRerun(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("E2E idempotent --json: %v", err)
 	}
-	var decoded Entry
+	var decoded api.MemoryEntry
 	if err := json.Unmarshal(stdoutJSON.Bytes(), &decoded); err != nil {
 		t.Fatalf("E2E idempotent --json: stdout not JSON: %v\n%s", err, stdoutJSON.String())
 	}

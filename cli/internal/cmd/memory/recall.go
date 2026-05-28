@@ -5,13 +5,13 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -97,6 +97,7 @@ func NewRecallCmd() *cobra.Command {
 				QueryArg:          queryFlag,
 				ScopeFilterArg:    scopeFlag,
 				LimitArg:          limitFlag,
+				LimitChanged:      cmd.Flags().Changed("limit"),
 				TargetArg:         targetFlag,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
@@ -113,17 +114,25 @@ func NewRecallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&targetFlag, "target", "",
 		"target name for user-target / target scopes (positional mode only)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry / RetrieveResponse JSON instead of human output")
+		"emit raw MemoryEntry / RetrieveResponse JSON instead of human output")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by `meho login`)")
 	return cmd
 }
 
 type recallOptions struct {
-	ScopeSlugArg      string
-	QueryArg          string
-	ScopeFilterArg    string
-	LimitArg          int
+	ScopeSlugArg   string
+	QueryArg       string
+	ScopeFilterArg string
+	LimitArg       int
+	// LimitChanged mirrors `cmd.Flags().Changed("limit")` for
+	// runRecallByQuery's "operator-supplied 0 is an error;
+	// default-0 means 'use the server default'" gate. Threaded as
+	// a field rather than re-reading off cmd so tests that drive
+	// runRecall directly (bypassing the cobra flag-parse path) can
+	// opt in / out of the gate explicitly. Mirrors the kb sibling's
+	// searchOptions.Changed shape.
+	LimitChanged      bool
 	TargetArg         string
 	JSONOut           bool
 	BackplaneOverride string
@@ -165,14 +174,32 @@ func runRecallByKey(cmd *cobra.Command, backplaneURL string, opts recallOptions)
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(err.Error()), opts.JSONOut)
 	}
-	entry, err := getRecall(cmd.Context(), backplaneURL, scope, slug, opts.TargetArg)
+	resp, err := getRecall(cmd.Context(), backplaneURL, scope, slug, opts.TargetArg)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), entry)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	writeBodyToStdout(cmd.OutOrStdout(), entry.Body)
+	// Guard against 200 + missing-content-type leaving JSON200 nil
+	// (writeBodyToStdout silently writes one newline, so the operator
+	// would see an empty stdout with exit 0 — phantom success).
+	// Mirrors `cli/internal/cmd/status.go:142` + the kb sibling's
+	// post-iter-2 nil-guard pattern.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a memory entry payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	writeBodyToStdout(cmd.OutOrStdout(), resp.JSON200.Body)
 	return nil
 }
 
@@ -180,8 +207,7 @@ func runRecallByQuery(cmd *cobra.Command, backplaneURL string, opts recallOption
 	// Mirror the --limit clamp from `meho kb search`: backend
 	// rejects with 422 outside 1..50; surface the constraint string
 	// locally so operators see the bound without a round-trip.
-	limitProvided := cmd.Flags().Changed("limit")
-	if opts.LimitArg < 0 || opts.LimitArg > 50 || (limitProvided && opts.LimitArg == 0) {
+	if opts.LimitArg < 0 || opts.LimitArg > 50 || (opts.LimitChanged && opts.LimitArg == 0) {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
@@ -207,27 +233,42 @@ func runRecallByQuery(cmd *cobra.Command, backplaneURL string, opts recallOption
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), resp)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printRecallTable(cmd.OutOrStdout(), resp)
+	// Guard against 200 + missing-content-type leaving JSON200 nil
+	// (printRecallTable's nil-or-empty branch would print "no hits"
+	// — actively misleading on a malformed 200). Mirrors the kb
+	// sibling's post-iter-2 nil-guard pattern.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a retrieve response payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printRecallTable(cmd.OutOrStdout(), resp.JSON200)
 	return nil
 }
 
-// buildRecallPath assembles the GET path. Exposed for unit tests so
-// URL encoding of slugs (which admit hyphen / underscore / dot per
-// SLUG_PATTERN) stays covered. The optional `target_name` query
-// param is appended only when set — `user` / `user-tenant` /
-// `tenant` recalls have no target_name semantics.
-func buildRecallPath(scope Scope, slug, targetName string) string {
-	path := fmt.Sprintf("/api/v1/memory/%s/%s",
-		pathEscape(string(scope)), pathEscape(slug))
+// buildRecallParams maps the positional-mode CLI flags onto the
+// generated query-param shape. `TargetName` is set only when the
+// operator supplied `--target` so an unset flag stays absent on the
+// wire (user / user-tenant / tenant recalls have no target_name
+// semantics).
+func buildRecallParams(targetName string) *api.RecallApiV1MemoryScopeSlugGetParams {
+	params := &api.RecallApiV1MemoryScopeSlugGetParams{}
 	if targetName != "" {
-		q := url.Values{}
-		q.Set("target_name", targetName)
-		path = path + "?" + q.Encode()
+		t := targetName
+		params.TargetName = &t
 	}
-	return path
+	return params
 }
 
 func getRecall(
@@ -235,18 +276,43 @@ func getRecall(
 	backplaneURL string,
 	scope Scope,
 	slug, targetName string,
-) (*Entry, error) {
-	raw, err := doAuthedRequest(
-		ctx, backplaneURL, "GET", buildRecallPath(scope, slug, targetName), nil,
-	)
+) (*api.RecallApiV1MemoryScopeSlugGetResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode recall response: %w", err)
+	params := buildRecallParams(targetName)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RecallApiV1MemoryScopeSlugGetResponse, error) {
+			return authed.RecallApiV1MemoryScopeSlugGetWithResponse(ctx, scope, slug, params)
+		},
+		func(r *api.RecallApiV1MemoryScopeSlugGetResponse) int { return r.StatusCode() },
+	)
+}
+
+// buildRecallQueryBody assembles the typed POST body for
+// /api/v1/retrieve. `Source` is pinned to "memory" so the substrate
+// scopes hits to memory-entry rows. `Kind` is set only when the
+// operator narrowed via --scope (translated to `memory-<scope>`).
+// `Limit` flows onto the wire only when the operator passed a
+// positive value; the generated field tag is `omitempty`, so a nil
+// pointer keeps the JSON key absent and the backend's
+// `Field(ge=1, le=50, default=10)` applies.
+func buildRecallQueryBody(opts recallOptions, kindFilter string) api.RetrieveRequest {
+	src := "memory"
+	body := api.RetrieveRequest{
+		Query:  opts.QueryArg,
+		Source: &src,
 	}
-	return &out, nil
+	if kindFilter != "" {
+		k := kindFilter
+		body.Kind = &k
+	}
+	if opts.LimitArg > 0 {
+		limit := opts.LimitArg
+		body.Limit = &limit
+	}
+	return body
 }
 
 func postRecallQuery(
@@ -254,28 +320,22 @@ func postRecallQuery(
 	backplaneURL string,
 	opts recallOptions,
 	kindFilter string,
-) (*RetrieveResponse, error) {
-	req := retrieveRequest{
-		Query:  opts.QueryArg,
-		Source: "memory",
-		Kind:   kindFilter,
-	}
-	if opts.LimitArg > 0 {
-		req.Limit = opts.LimitArg
-	}
-	raw, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal recall query: %w", err)
-	}
-	resp, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/retrieve", raw)
+) (*api.RetrieveEndpointApiV1RetrievePostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out RetrieveResponse
-	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("decode recall query response: %w", err)
-	}
-	return &out, nil
+	reqBody := buildRecallQueryBody(opts, kindFilter)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RetrieveEndpointApiV1RetrievePostResponse, error) {
+			return authed.RetrieveEndpointApiV1RetrievePostWithResponse(
+				ctx,
+				&api.RetrieveEndpointApiV1RetrievePostParams{},
+				reqBody,
+			)
+		},
+		func(r *api.RetrieveEndpointApiV1RetrievePostResponse) int { return r.StatusCode() },
+	)
 }
 
 // printRecallTable renders the ranked hits from --query mode as a
@@ -284,7 +344,7 @@ func postRecallQuery(
 // SLUG (the substrate's `source_id`), SNIPPET (200-char excerpt).
 // The fused / per-signal scores are visible in --json output for
 // retrieval-tuning sessions.
-func printRecallTable(w io.Writer, r *RetrieveResponse) {
+func printRecallTable(w io.Writer, r *api.RetrieveResponse) {
 	if r == nil || len(r.Hits) == 0 {
 		fmt.Fprintln(w, "no memory hits for this query")
 		return
@@ -296,12 +356,12 @@ func printRecallTable(w io.Writer, r *RetrieveResponse) {
 			i+1,
 			hit.FusedScore,
 			scopeFromKind(hit.Kind),
-			truncate(slugFromSourceID(hit.SourceID), 40),
+			truncate(slugFromSourceID(hit.SourceId), 40),
 			truncate(snippetOf(hit.Body), 80),
 		)
 	}
-	if r.QueryDurationMS > 0 {
-		fmt.Fprintf(w, "queried in %.2f ms\n", r.QueryDurationMS)
+	if r.QueryDurationMs > 0 {
+		fmt.Fprintf(w, "queried in %.2f ms\n", r.QueryDurationMs)
 	}
 }
 

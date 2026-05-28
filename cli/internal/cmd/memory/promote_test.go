@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // TestRunPromoteHappyPath exercises the fresh-promotion branch end-to-
@@ -37,14 +39,14 @@ func TestRunPromoteHappyPath(t *testing.T) {
 			// CreatedAt slightly in the future ensures
 			// isIdempotentRerun returns false even if the test
 			// runner's clock skews backward by milliseconds.
-			created := time.Now().UTC().Add(50 * time.Millisecond).Format(time.RFC3339Nano)
-			_ = json.NewEncoder(w).Encode(Entry{
-				ID:        "00000000-0000-0000-0000-000000000001",
-				TenantID:  "00000000-0000-0000-0000-000000000002",
+			created := time.Now().UTC().Add(50 * time.Millisecond)
+			_ = json.NewEncoder(w).Encode(api.MemoryEntry{
+				Id:        uuidFromString(t, "00000000-0000-0000-0000-000000000001"),
+				TenantId:  uuidFromString(t, "00000000-0000-0000-0000-000000000002"),
 				Scope:     ScopeUserTenant,
 				Slug:      "wine-preference",
 				Body:      "Prefers dry red.",
-				Metadata:  map[string]any{"promoted_from": "user/wine-preference"},
+				Metadata:  map[string]interface{}{"promoted_from": "user/wine-preference"},
 				CreatedAt: created,
 				UpdatedAt: created,
 			})
@@ -92,11 +94,12 @@ func TestRunPromoteMoveHappyPath(t *testing.T) {
 			if err := json.Unmarshal(body, &bodyJSON); err != nil {
 				t.Fatalf("decode: %v", err)
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			created := time.Now().UTC().Add(50 * time.Millisecond).Format(time.RFC3339Nano)
-			_ = json.NewEncoder(w).Encode(Entry{
+			created := time.Now().UTC().Add(50 * time.Millisecond)
+			_ = json.NewEncoder(w).Encode(api.MemoryEntry{
 				Scope: ScopeUserTenant, Slug: "note", Body: "z",
-				Metadata:  map[string]any{"promoted_from": "user/note"},
+				Metadata:  map[string]interface{}{"promoted_from": "user/note"},
 				CreatedAt: created, UpdatedAt: created,
 			})
 		})
@@ -130,15 +133,16 @@ func TestRunPromoteIdempotentRerunHumanExit6(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory/user/wine/promote",
 		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			// Created an hour ago — well before any pre-POST clock.
-			ancient := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339Nano)
-			_ = json.NewEncoder(w).Encode(Entry{
-				ID:        "11111111-1111-1111-1111-111111111111",
+			ancient := time.Now().UTC().Add(-1 * time.Hour)
+			_ = json.NewEncoder(w).Encode(api.MemoryEntry{
+				Id:        uuidFromString(t, "11111111-1111-1111-1111-111111111111"),
 				Scope:     ScopeUserTenant,
 				Slug:      "wine",
 				Body:      "prefers dry red",
-				Metadata:  map[string]any{"promoted_from": "user/wine"},
+				Metadata:  map[string]interface{}{"promoted_from": "user/wine"},
 				CreatedAt: ancient,
 				UpdatedAt: ancient,
 			})
@@ -180,14 +184,15 @@ func TestRunPromoteIdempotentRerunJSONExit0(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory/user/wine/promote",
 		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			ancient := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339Nano)
-			_ = json.NewEncoder(w).Encode(Entry{
-				ID:        "22222222-2222-2222-2222-222222222222",
+			ancient := time.Now().UTC().Add(-1 * time.Hour)
+			_ = json.NewEncoder(w).Encode(api.MemoryEntry{
+				Id:        uuidFromString(t, "22222222-2222-2222-2222-222222222222"),
 				Scope:     ScopeUserTenant,
 				Slug:      "wine",
 				Body:      "prefers dry red",
-				Metadata:  map[string]any{"promoted_from": "user/wine"},
+				Metadata:  map[string]interface{}{"promoted_from": "user/wine"},
 				CreatedAt: ancient,
 				UpdatedAt: ancient,
 			})
@@ -207,11 +212,11 @@ func TestRunPromoteIdempotentRerunJSONExit0(t *testing.T) {
 	if err != nil {
 		t.Fatalf("--json idempotent should be exit 0; got %v; stderr=%s", err, stderr.String())
 	}
-	var decoded Entry
+	var decoded api.MemoryEntry
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
-	if decoded.ID != "22222222-2222-2222-2222-222222222222" {
+	if decoded.Id.String() != "22222222-2222-2222-2222-222222222222" {
 		t.Errorf("expected target row id round-trip; got %+v", decoded)
 	}
 	// The promoted_from marker must survive the JSON round-trip so a
@@ -403,19 +408,20 @@ func TestRunPromote401AuthExpiredSurfacesExit2(t *testing.T) {
 }
 
 // TestRunPromoteJSONHappyPathEmitsEntry — “--json“ on the fresh-
-// promotion branch emits the raw Entry envelope; exit 0.
+// promotion branch emits the raw MemoryEntry envelope; exit 0.
 func TestRunPromoteJSONHappyPathEmitsEntry(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/memory/user/wine/promote",
 		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			created := time.Now().UTC().Add(50 * time.Millisecond).Format(time.RFC3339Nano)
-			_ = json.NewEncoder(w).Encode(Entry{
-				ID:        "33333333-3333-3333-3333-333333333333",
+			created := time.Now().UTC().Add(50 * time.Millisecond)
+			_ = json.NewEncoder(w).Encode(api.MemoryEntry{
+				Id:        uuidFromString(t, "33333333-3333-3333-3333-333333333333"),
 				Scope:     ScopeUserTenant,
 				Slug:      "wine",
 				Body:      "prefers dry red",
-				Metadata:  map[string]any{"promoted_from": "user/wine"},
+				Metadata:  map[string]interface{}{"promoted_from": "user/wine"},
 				CreatedAt: created,
 				UpdatedAt: created,
 			})
@@ -435,11 +441,11 @@ func TestRunPromoteJSONHappyPathEmitsEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runPromote --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded Entry
+	var decoded api.MemoryEntry
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
-	if decoded.ID != "33333333-3333-3333-3333-333333333333" {
+	if decoded.Id.String() != "33333333-3333-3333-3333-333333333333" {
 		t.Errorf("expected target row id round-trip; got %+v", decoded)
 	}
 	got, _ := decoded.Metadata["promoted_from"].(string)
@@ -526,7 +532,7 @@ func TestIsIdempotentRerunVariousTimestamps(t *testing.T) {
 	preCall := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name  string
-		entry *Entry
+		entry *api.MemoryEntry
 		want  bool
 	}{
 		{
@@ -535,34 +541,24 @@ func TestIsIdempotentRerunVariousTimestamps(t *testing.T) {
 			want:  false,
 		},
 		{
-			name:  "empty created_at returns false",
-			entry: &Entry{CreatedAt: ""},
-			want:  false,
-		},
-		{
-			name:  "unparseable created_at returns false",
-			entry: &Entry{CreatedAt: "not-a-timestamp"},
+			name:  "zero created_at returns false",
+			entry: &api.MemoryEntry{},
 			want:  false,
 		},
 		{
 			name:  "created_at strictly before pre-call wall clock is idempotent",
-			entry: &Entry{CreatedAt: "2026-05-21T11:00:00Z"},
+			entry: &api.MemoryEntry{CreatedAt: time.Date(2026, 5, 21, 11, 0, 0, 0, time.UTC)},
 			want:  true,
 		},
 		{
 			name:  "created_at after pre-call wall clock is fresh",
-			entry: &Entry{CreatedAt: "2026-05-21T13:00:00Z"},
+			entry: &api.MemoryEntry{CreatedAt: time.Date(2026, 5, 21, 13, 0, 0, 0, time.UTC)},
 			want:  false,
 		},
 		{
 			name:  "created_at equal to pre-call wall clock is fresh",
-			entry: &Entry{CreatedAt: "2026-05-21T12:00:00Z"},
+			entry: &api.MemoryEntry{CreatedAt: time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)},
 			want:  false,
-		},
-		{
-			name:  "RFC3339 without sub-second precision parses cleanly",
-			entry: &Entry{CreatedAt: "2026-05-21T11:00:00Z"},
-			want:  true,
 		},
 	}
 	for _, tc := range cases {
@@ -590,5 +586,34 @@ func TestMetadataStringFieldEdgeCases(t *testing.T) {
 	}
 	if got := metadataStringField(map[string]any{"promoted_from": "user/x"}, "promoted_from"); got != "user/x" {
 		t.Errorf("string field: got %q", got)
+	}
+}
+
+// TestRunPromote200WithoutPayloadSurfacesUnexpected pins the
+// nil-guard on the promote path. Mirrors the kb sibling's
+// post-iter-2 nil-guard pattern.
+func TestRunPromote200WithoutPayloadSurfacesUnexpected(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory/user/wine/promote",
+		func(w http.ResponseWriter, _ *http.Request) {
+			// No Content-Type → JSON200 stays nil.
+			_, _ = w.Write([]byte(`{"id":"00000000-0000-0000-0000-000000000099"}`))
+		})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runPromote(cmd, promoteOptions{
+		ScopeSlugArg:      "user/wine",
+		ToArg:             "user-tenant",
+		BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected nil-guard error on missing payload")
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without a memory entry payload") {
+		t.Errorf("expected nil-guard message; got %q", stderr.String())
 	}
 }

@@ -6,9 +6,11 @@ package memory
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -151,8 +153,19 @@ func runForget(cmd *cobra.Command, opts forgetOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			backplane.ClassifyError(err), opts.JSONOut)
 	}
-	if err := callForget(cmd.Context(), backplaneURL, scope, slug, opts.TargetArg); err != nil {
+	resp, err := callForget(cmd.Context(), backplaneURL, scope, slug, opts.TargetArg)
+	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	// The forget route is idempotent server-side: a delete against
+	// an absent slug returns 204. Treat anything other than 204 as
+	// a non-success and route through renderHTTPStatus — the
+	// pre-migration ladder rejected non-2xx via the local httpError
+	// sentinel, and the typed-client equivalent is to gate on the
+	// 204 status code (the only success code the substrate emits
+	// for this route).
+	if resp.StatusCode() != http.StatusNoContent {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	result := forgetResult{
 		Scope:  string(scope),
@@ -167,18 +180,34 @@ func runForget(cmd *cobra.Command, opts forgetOptions) error {
 	return nil
 }
 
+// buildForgetParams maps the CLI flags onto the generated query-
+// param shape. `TargetName` is set only when the operator supplied
+// `--target` so an unset flag stays absent on the wire (user /
+// user-tenant / tenant forgets carry no target_name).
+func buildForgetParams(targetName string) *api.ForgetApiV1MemoryScopeSlugDeleteParams {
+	params := &api.ForgetApiV1MemoryScopeSlugDeleteParams{}
+	if targetName != "" {
+		t := targetName
+		params.TargetName = &t
+	}
+	return params
+}
+
 func callForget(
 	ctx context.Context,
 	backplaneURL string,
 	scope Scope,
 	slug, targetName string,
-) error {
-	// doAuthedRequest returns (nil, nil) on a 204; the forget route
-	// emits an empty 204 body whether or not the row existed
-	// server-side. We discard the (nil) response — the success
-	// signal is the absence of an error.
-	_, err := doAuthedRequest(
-		ctx, backplaneURL, "DELETE", buildRecallPath(scope, slug, targetName), nil,
+) (*api.ForgetApiV1MemoryScopeSlugDeleteResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	params := buildForgetParams(targetName)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.ForgetApiV1MemoryScopeSlugDeleteResponse, error) {
+			return authed.ForgetApiV1MemoryScopeSlugDeleteWithResponse(ctx, scope, slug, params)
+		},
+		func(r *api.ForgetApiV1MemoryScopeSlugDeleteResponse) int { return r.StatusCode() },
 	)
-	return err
 }

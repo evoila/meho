@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // TestRunAddRejectsEmptySlug — empty slug short-circuits before the
@@ -55,29 +57,23 @@ func TestRunAddRejectsBadMetadata(t *testing.T) {
 }
 
 // TestRunAddHappyPath — the runner POSTs the right body and renders
-// the success summary.
+// the success summary. The handler decodes the wire body into the
+// generated `api.KbEntryCreate` to pin the migration's "no
+// consumer-side request-body duplicate" claim.
 func TestRunAddHappyPath(t *testing.T) {
-	var bodyJSON map[string]any
+	var bodyOnWire api.KbEntryCreate
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST; got %s", r.Method)
 		}
-		body, _ := io.ReadAll(r.Body)
-		if err := json.Unmarshal(body, &bodyJSON); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
+		raw, _ := io.ReadAll(r.Body)
+		readJSONBodyOf(t, raw, &bodyOnWire)
 		w.Header().Set("Content-Type", "application/json")
+		entry := newKbEntry(t, bodyOnWire.Slug, bodyOnWire.Body)
+		entry.Metadata = map[string]any{"owner": "ops"}
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{
-			ID:        "00000000-0000-0000-0000-000000000001",
-			TenantID:  "00000000-0000-0000-0000-000000000002",
-			Slug:      "new-slug",
-			Body:      "body content",
-			Metadata:  map[string]any{"owner": "ops"},
-			CreatedAt: "2026-05-15T00:00:00Z",
-			UpdatedAt: "2026-05-15T00:00:00Z",
-		})
+		_ = json.NewEncoder(w).Encode(entry)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -94,16 +90,16 @@ func TestRunAddHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runAdd: %v; stderr=%s", err, stderr.String())
 	}
-	if got := bodyJSON["slug"]; got != "new-slug" {
-		t.Errorf("expected slug in body; got %+v", bodyJSON)
+	if bodyOnWire.Slug != "new-slug" {
+		t.Errorf("expected slug in body; got %+v", bodyOnWire)
 	}
-	if got := bodyJSON["body"]; got != "body content" {
-		t.Errorf("expected body in request; got %+v", bodyJSON)
+	if bodyOnWire.Body != "body content" {
+		t.Errorf("expected body in request; got %+v", bodyOnWire)
 	}
-	md, ok := bodyJSON["metadata"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected metadata map; got %T", bodyJSON["metadata"])
+	if bodyOnWire.Metadata == nil {
+		t.Fatalf("expected metadata pointer set; got nil")
 	}
+	md := *bodyOnWire.Metadata
 	if md["owner"] != "ops" {
 		t.Errorf("expected owner=ops in metadata; got %+v", md)
 	}
@@ -113,18 +109,23 @@ func TestRunAddHappyPath(t *testing.T) {
 }
 
 // TestRunAddOmitsMetadataWhenAbsent — without --metadata the JSON
-// body must not carry a metadata field (so the backend's default {}
-// applies).
+// body's `metadata` key arrives as `null` (the generated
+// KbEntryCreate field is `*map[string]interface{}` with no
+// omitempty tag), which the substrate treats equivalently to
+// "missing" — the model_validator falls through to the {} default.
+// Pre-migration this was tested as "field absent"; post-migration
+// the wire shape carries `null` instead, both being acceptable to
+// the FastAPI side.
 func TestRunAddOmitsMetadataWhenAbsent(t *testing.T) {
-	var bodyJSON map[string]any
+	var rawBody bytes.Buffer
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if err := json.Unmarshal(body, &bodyJSON); err != nil {
-			t.Fatalf("decode: %v", err)
+		if _, err := rawBody.ReadFrom(r.Body); err != nil {
+			t.Fatalf("read body: %v", err)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{Slug: "x"})
+		_ = json.NewEncoder(w).Encode(newKbEntry(t, "x", ""))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -135,17 +136,25 @@ func TestRunAddOmitsMetadataWhenAbsent(t *testing.T) {
 	if err := runAdd(cmd, addOptions{Slug: "x", BodyArg: "b", BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runAdd: %v", err)
 	}
-	if _, ok := bodyJSON["metadata"]; ok {
-		t.Errorf("expected metadata absent; got %+v", bodyJSON)
+	body := rawBody.String()
+	// Confirm we never sent metadata as an empty-string or
+	// otherwise-confused shape. The wire carries either
+	// `"metadata":null` (acceptable to the backend's {} default)
+	// or no metadata key at all; both are acceptable, the
+	// load-bearing property is "operator gets the backend default".
+	if strings.Contains(body, `"metadata":{}`) {
+		t.Errorf("expected metadata absent or null, not empty object; got %s", body)
 	}
 }
 
 // TestRunAddJSONHappyPath — --json emits the round-tripped entry.
 func TestRunAddJSONHappyPath(t *testing.T) {
+	entry := newKbEntry(t, "x", "y")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{Slug: "x", Body: "y"})
+		_ = json.NewEncoder(w).Encode(entry)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -156,7 +165,7 @@ func TestRunAddJSONHappyPath(t *testing.T) {
 	if err := runAdd(cmd, addOptions{Slug: "x", BodyArg: "y", JSONOut: true, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runAdd --json: %v", err)
 	}
-	var decoded Entry
+	var decoded api.KbEntry
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
@@ -227,13 +236,14 @@ func TestRunAdd422SurfacesValidationDetail(t *testing.T) {
 // TestRunAddReadsBodyFromStdin — --body @- pipes content through
 // cmd.InOrStdin().
 func TestRunAddReadsBodyFromStdin(t *testing.T) {
-	var bodyJSON map[string]any
+	var bodyOnWire api.KbEntryCreate
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &bodyJSON)
+		raw, _ := io.ReadAll(r.Body)
+		readJSONBodyOf(t, raw, &bodyOnWire)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(Entry{Slug: "x", Body: "from stdin"})
+		_ = json.NewEncoder(w).Encode(newKbEntry(t, "x", "from stdin"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -244,8 +254,49 @@ func TestRunAddReadsBodyFromStdin(t *testing.T) {
 	if err := runAdd(cmd, addOptions{Slug: "x", BodyArg: "@-", BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runAdd: %v", err)
 	}
-	if got := bodyJSON["body"]; got != "from stdin" {
-		t.Errorf("expected stdin body; got %+v", bodyJSON)
+	if bodyOnWire.Body != "from stdin" {
+		t.Errorf("expected stdin body; got %+v", bodyOnWire)
+	}
+}
+
+// TestRunAddRejects201WithoutJSONPayload pins the JSON201 nil-guard
+// (M2). The generated `ParseCreateKbApiV1KbPostResponse` only
+// populates JSON201 when the response carries Content-Type with
+// `json` AND status 201; a backplane / proxy that returns 201 with
+// a missing or mistyped content-type leaves JSON201 nil. Without
+// the guard, `--json` would emit `null` and the summary mode would
+// silently no-op (printAddSummary nil-guards) — phantom success.
+// The verb must instead route to output.Unexpected (exit 4).
+func TestRunAddRejects201WithoutJSONPayload(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		// Deliberately omit Content-Type so the generated parser
+		// leaves JSON201 nil. Body content is irrelevant for the
+		// guard's behaviour.
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("not-json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runAdd(cmd, addOptions{
+		Slug: "x", BodyArg: "y", BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected error on 201 without JSON payload")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "HTTP 201 without a kb entry payload") {
+		t.Errorf("expected detail mentioning missing payload; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4; got %v", err)
 	}
 }
 

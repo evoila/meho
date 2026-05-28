@@ -5,25 +5,16 @@ package kb
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// ingestKbRequest mirrors the backend IngestKbRequest pydantic
-// model. The substrate's `@model_validator(mode="after")` enforces
-// "exactly one of `directory` / `tarball_url`"; the CLI only sets
-// `directory` because `tarball_url` ingest returns 501 from the
-// route in v0.2 (the substrate exposes only `ingest_directory`).
-type ingestKbRequest struct {
-	Directory string `json:"directory"`
-	DryRun    bool   `json:"dry_run,omitempty"`
-}
 
 // newIngestCmd returns the `meho kb ingest` command.
 //
@@ -44,7 +35,7 @@ type ingestKbRequest struct {
 // returns 501 when `tarball_url` is set).
 //
 // `--dry-run` short-circuits the substrate's write path; the
-// counters in the returned `IngestionResult` reflect what _would_
+// counters in the returned `KbIngestionResult` reflect what _would_
 // have been inserted / updated / skipped / errored.
 //
 // Exit codes:
@@ -72,7 +63,7 @@ func newIngestCmd() *cobra.Command {
 			"their kb/ tree on the backplane host (or run the CLI on " +
 			"the backplane host itself).\n\n" +
 			"--dry-run short-circuits the substrate's write path; the " +
-			"counters in the returned IngestionResult reflect what " +
+			"counters in the returned KbIngestionResult reflect what " +
 			"would have been inserted / updated / skipped / errored " +
 			"without actually writing.\n\n" +
 			"The substrate's body-hash short-circuit means re-ingesting " +
@@ -93,7 +84,7 @@ func newIngestCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"resolve the plan without writing to the substrate (counters reflect intent only)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw IngestionResult JSON instead of the human summary")
+		"emit raw KbIngestionResult JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -118,39 +109,79 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := postIngest(cmd.Context(), backplaneURL, opts)
+	resp, err := postIngest(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), result)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	printIngestSummary(cmd.OutOrStdout(), result, opts.DryRun)
+	// Guard against 200 + missing-content-type leaving JSON200 nil
+	// (printIngestSummary nil-guards, so the operator would see an
+	// empty stdout with exit 0 — phantom success). Mirrors the
+	// convention in `cli/internal/cmd/status.go:142`.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without an ingestion result payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	printIngestSummary(cmd.OutOrStdout(), resp.JSON200, opts.DryRun)
 	return nil
 }
 
-func postIngest(ctx context.Context, backplaneURL string, opts ingestOptions) (*IngestionResult, error) {
-	body := ingestKbRequest{Directory: opts.Directory, DryRun: opts.DryRun}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal kb ingest request: %w", err)
+// buildIngestBody maps the operator's options onto the generated
+// `IngestKbRequest`. `Directory` and `TarballUrl` are both
+// `*string` on the generated type to mirror pydantic's `str | None`;
+// we only ever set `Directory` because the substrate exposes
+// `ingest_directory` only and a `tarball_url`-bearing request
+// returns 501 from the route handler. `DryRun` carries an
+// `omitempty` JSON tag so a `nil` pointer keeps the field absent,
+// matching the backend's `False` default.
+func buildIngestBody(opts ingestOptions) api.IngestKbRequest {
+	dir := opts.Directory
+	body := api.IngestKbRequest{Directory: &dir}
+	if opts.DryRun {
+		dry := true
+		body.DryRun = &dry
 	}
-	resp, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/kb/ingest", raw)
+	return body
+}
+
+func postIngest(
+	ctx context.Context,
+	backplaneURL string,
+	opts ingestOptions,
+) (*api.IngestKbApiV1KbIngestPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out IngestionResult
-	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("decode kb ingest response: %w", err)
-	}
-	return &out, nil
+	reqBody := buildIngestBody(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.IngestKbApiV1KbIngestPostResponse, error) {
+			return authed.IngestKbApiV1KbIngestPostWithResponse(
+				ctx,
+				&api.IngestKbApiV1KbIngestPostParams{},
+				reqBody,
+			)
+		},
+		func(r *api.IngestKbApiV1KbIngestPostResponse) int { return r.StatusCode() },
+	)
 }
 
 // printIngestSummary renders the four-bucket counter result as a
 // stable key-value summary. Errors (if any) are appended one per
 // line so an operator triaging a partial-failure run sees every
 // file path that failed without needing --json.
-func printIngestSummary(w io.Writer, r *IngestionResult, dryRun bool) {
+func printIngestSummary(w io.Writer, r *api.KbIngestionResult, dryRun bool) {
 	if r == nil {
 		return
 	}

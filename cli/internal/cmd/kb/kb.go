@@ -33,19 +33,23 @@
 // on the token meho login wrote — same pattern as `meho audit`,
 // `meho targets`, and `meho connector`.
 //
-// The implementation deliberately follows the in-package HTTP helper
-// pattern the sibling verb trees use (one resolveBackplane /
-// doAuthedRequest / renderRequestError trio per package) rather
-// than a shared cli/internal/api_client package. The reason is the
-// import-cycle one: each verb tree is registered onto the root
-// command, so a shared helper imported from cmd/* and from any
-// per-tree package would close the cycle. Duplicating the helpers
-// (a handful of small, stable functions) is the convention every
-// sibling package follows.
+// G0.12-T9 #1267 migrated this package off the sibling-verb pattern
+// of hand-rolled HTTP + hand-typed copies of backend pydantic models.
+// Every verb here drives the generated `api.ClientWithResponses`
+// surface directly: `api.NewAuthedClient` wires the bearer + lazy
+// 401-refresh editor onto the embedded `ClientWithResponses`, and
+// the verbs call the typed `*WithResponse` methods
+// (`ListKbApiV1KbGetWithResponse` etc.). Consumer-side struct drift
+// — the #1069 root cause Initiative #1118 targets — can't recur
+// because we now consume `api.KbEntry`, `api.KbEntryPreview`,
+// `api.KbListResponse`, `api.KbIngestionResult`, `api.RetrievalHit`,
+// and `api.RetrieveResponse` directly. The shared retrieval route's
+// types live only in the generated client now (the parallel
+// memory/ migration to land in G0.12-T10 removes its sibling
+// duplicates).
 package kb
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,120 +92,98 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// EntryPreview mirrors the backend KbEntryPreview pydantic model
-// (`backend/src/meho_backplane/api/v1/kb.py`). Hand-written rather
-// than aliased to the generated client type so the kb package stays
-// decoupled from oapi-codegen churn — the targets / retrieval /
-// audit / connector / operation packages take the same stance.
-// Unprefixed name follows the sibling-package convention
-// (`audit.Entry`, `connector.IngestionResult`, etc.) and avoids the
-// `revive` stutter rule (`kb.KbEntryPreview` → `kb.EntryPreview`).
-type EntryPreview struct {
-	Slug      string         `json:"slug"`
-	Preview   string         `json:"preview"`
-	Metadata  map[string]any `json:"metadata"`
-	CreatedAt string         `json:"created_at"`
-	UpdatedAt string         `json:"updated_at"`
-}
-
-// ListResponse mirrors the backend KbListResponse envelope. Wrapped
-// in `{"entries": [...]}` for forward-compat with future paging
-// fields — same shape connectors_ingest adopted for its list
-// response.
-type ListResponse struct {
-	Entries []EntryPreview `json:"entries"`
-}
-
-// Entry mirrors the backend KbEntry pydantic model — the full entry
-// shape returned by GET /api/v1/kb/{slug} and POST /api/v1/kb.
-// `Metadata` decodes as `map[string]any` so the CLI can re-emit it
-// in --json mode without re-typing every Markdown front-matter shape
-// the operator might store.
-type Entry struct {
-	ID        string         `json:"id"`
-	TenantID  string         `json:"tenant_id"`
-	Slug      string         `json:"slug"`
-	Body      string         `json:"body"`
-	Metadata  map[string]any `json:"metadata"`
-	CreatedAt string         `json:"created_at"`
-	UpdatedAt string         `json:"updated_at"`
-}
-
-// IngestionResult mirrors the backend KbIngestionResult shape.
-// Counters partition every discovered .md file into exactly one of
-// four buckets (inserted / updated / skipped / error); the substrate
-// invariant is `inserted + updated + skipped + error == total .md
-// files`. `Errors` carries per-file error strings (path + reason).
-type IngestionResult struct {
-	InsertedCount int      `json:"inserted_count"`
-	UpdatedCount  int      `json:"updated_count"`
-	SkippedCount  int      `json:"skipped_count"`
-	ErrorCount    int      `json:"error_count"`
-	Errors        []string `json:"errors"`
-}
-
-// RetrievalHit mirrors the backend RetrievalHit pydantic model
-// (`backend/src/meho_backplane/retrieval/retriever.py`). Returned by
-// POST /api/v1/retrieve. `BM25Score`, `CosineScore`, `BM25Rank`, and
-// `CosineRank` are `*float64` / `*int` because the backend emits
-// `null` for documents that did not appear in that signal's top-K
-// candidate list.
-type RetrievalHit struct {
-	DocumentID  string         `json:"document_id"`
-	TenantID    string         `json:"tenant_id"`
-	Source      string         `json:"source"`
-	SourceID    string         `json:"source_id"`
-	Kind        string         `json:"kind"`
-	Body        string         `json:"body"`
-	DocMetadata map[string]any `json:"doc_metadata"`
-	FusedScore  float64        `json:"fused_score"`
-	BM25Score   *float64       `json:"bm25_score"`
-	CosineScore *float64       `json:"cosine_score"`
-	BM25Rank    *int           `json:"bm25_rank"`
-	CosineRank  *int           `json:"cosine_rank"`
-}
-
-// RetrieveResponse mirrors the backend RetrieveResponse envelope.
-type RetrieveResponse struct {
-	Hits            []RetrievalHit `json:"hits"`
-	QueryDurationMS float64        `json:"query_duration_ms"`
-}
-
-// errMissingAccessToken is the sentinel doAuthedRequest returns
-// when the stored token row exists but its `access_token` field is
+// errMissingAccessToken is the sentinel newAuthedClient returns when
+// the stored token row exists but its `access_token` field is
 // empty. It's a credential-state failure rather than a transport
 // failure, so renderRequestError maps it to auth_expired (exit 2)
-// with a `meho login` hint — not unreachable (exit 3). Pre-existing
-// sibling packages (audit/, targets/, etc.) emit a generic error
-// here that falls through to unreachable; the local fix here is
-// scoped to the kb package (m3 in the review punch list).
+// with a `meho login` hint — not unreachable (exit 3). Mirrors the
+// shape adopted by the sibling typed-client migrations on Initiative
+// #1118 (T1 #1251 approvals, T4 #1262 agent-principal).
 var errMissingAccessToken = errors.New("meho: stored token has no access_token")
 
-// renderRequestError translates an error from one of the per-verb
-// request helpers into the right output.StructuredError category.
-// Same classification ladder as the audit / targets siblings with
-// kb-specific 4xx handling:
+// responseBodyCap bounds the bytes the kb verb tree's transport will
+// read off any backplane response body before surfacing
+// `*http.MaxBytesError`. 1 MiB is generous for every documented kb
+// payload (list pages cap at 500 entries × ~256-byte previews; show
+// returns one entry whose body is itself capped by the substrate's
+// `min_length=1` constraint with no documented upper bound but
+// audited median ~10 KB; ingest returns at most a few hundred
+// counters + error strings). Without the cap, an adversarial or
+// runaway backplane response could OOM the CLI because the generated
+// `Parse*Response` helpers call `io.ReadAll(rsp.Body)` on an
+// unbounded body before constructing the typed envelope. The cap is
+// installed at the transport layer via
+// `api.AuthedClientOptions.ResponseBodyLimit` so it applies
+// uniformly to every typed verb on the same `AuthedClient`.
+const responseBodyCap int64 = 1 << 20
+
+// newAuthedClient builds an api.AuthedClient for the supplied
+// backplane URL and verifies a non-empty bearer is loaded. Centralised
+// so every verb's typed-call path goes through the same
+// "stored-token-loaded + non-empty bearer" gate; the caller forwards
+// any returned error to renderRequestError for category mapping.
+// Mirrors the helper sibling verb-tree migrations (G0.12-T4 #1262)
+// adopted for the same reason. Opts into the transport-layer
+// response-body cap (responseBodyCap) so the generated typed
+// parsers can't be pinned by an unbounded backplane response.
+func newAuthedClient(ctx context.Context, backplaneURL string) (*api.AuthedClient, error) {
+	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{
+		ResponseBodyLimit: responseBodyCap,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if authed.AccessToken() == "" {
+		return nil, errMissingAccessToken
+	}
+	return authed, nil
+}
+
+// retryOn401 invokes call once, and if the typed response carries a
+// 401, runs a one-shot bearer refresh and re-issues call. Mirrors
+// the behaviour `api.AuthedClient.GetHealth` implements for the
+// /api/v1/health endpoint, generalised so every kb verb runs the
+// same transparent-retry contract.
 //
-//   - empty stored bearer → auth_expired (the row exists but its
-//     access_token is empty, so the right fix is `meho login` even
-//     though there's no transport-level 401 yet).
-//   - 401 (refresh failed) → auth_expired with a `meho login` hint.
-//   - 403 (RBAC denial) → insufficient_role; the backend's 403 detail
-//     names the required role.
-//   - 404 → unexpected with the backend's detail (kb routes return
-//     `slug_not_found` for cross-tenant or absent slug — the
-//     conflation prevents enumerating other tenants via status-code
-//     differential).
-//   - 422 → unexpected with the FastAPI validation envelope (invalid
-//     slug, missing required field, both-or-neither directory and
-//     tarball_url).
-//   - 400 → unexpected with the backend's detail string
-//     (`directory_not_found` / `not_a_directory` from the ingest
-//     route).
-//   - 501 → unexpected with the backend's detail (tarball_url ingest
-//     is not implemented in v0.2).
-//   - Any other 4xx/5xx → unexpected with the raw body.
-//   - Pure transport errors → unreachable.
+// statusOf reads the StatusCode off the typed response envelope (the
+// generated *Response types expose StatusCode() through their
+// embedded *http.Response). A nil response counts as "no retry" —
+// the transport already failed and the caller surfaces err directly.
+func retryOn401[R any](
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*R, error),
+	statusOf func(*R) int,
+) (*R, error) {
+	resp, err := call(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || statusOf(resp) != http.StatusUnauthorized {
+		return resp, nil
+	}
+	if rerr := authed.Refresh(ctx); rerr != nil {
+		return resp, rerr
+	}
+	return call(ctx)
+}
+
+// renderRequestError translates a transport-layer request error into
+// the right output.StructuredError category. Maps the kb REST
+// surface's pre-response failures: missing bearer, no-refresh-
+// token, token-not-found, body-cap / parse failures bubbling out of
+// the generated `*WithResponse` parsers, plus the generic transport-
+// down case. Non-2xx status codes carried in a typed response
+// envelope are classified by renderHTTPStatus instead.
+//
+// Parse / cap failures route to `output.Unexpected` (exit 4 —
+// `unexpected_response`) rather than `output.Unreachable` (exit 3 —
+// `network_unreachable`). A 1 MiB body cap firing or a JSON decode
+// rejecting a malformed payload is a contract / shape failure on the
+// server side, not a transport-down failure on the operator's side;
+// surfacing it as "unreachable" would send operators chasing a
+// network ghost. The cap is installed by `newAuthedClient` via
+// `api.AuthedClientOptions.ResponseBodyLimit` (responseBodyCap).
 func renderRequestError(
 	cmd *cobra.Command,
 	backplaneURL string,
@@ -235,9 +217,23 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
-		return renderHTTPError(cmd, backplaneURL, he, jsonOut)
+	// Transport-layer body-cap firing (*http.MaxBytesReader returned
+	// from capRoundTripper) and JSON shape failures bubbling out of
+	// the generated parsers are server-side contract failures, not
+	// transport-down failures — surface them as unexpected_response
+	// (exit 4) with the backplane URL so the operator sees the
+	// origin without chasing a network ghost.
+	var maxBytesErr *http.MaxBytesError
+	var syntaxErr *json.SyntaxError
+	var unmarshalErr *json.UnmarshalTypeError
+	if errors.As(err, &maxBytesErr) ||
+		errors.As(err, &syntaxErr) ||
+		errors.As(err, &unmarshalErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: %v", backplaneURL, err)),
+			jsonOut,
+		)
 	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
@@ -245,15 +241,35 @@ func renderRequestError(
 	)
 }
 
-// renderHTTPError classifies a non-2xx response into the right
-// StructuredError category.
-func renderHTTPError(
+// renderHTTPStatus classifies a non-2xx response (or 401 after a
+// failed refresh) carried in the typed envelope into the right
+// StructuredError category. Mirrors the pre-migration `renderHTTPError`
+// switch but acts on the (statusCode, body) pair lifted off the
+// generated `*Response.HTTPResponse` + `Body` fields rather than a
+// sentinel value. The mapping preserved across the migration:
+//
+//   - 401 → auth_expired (refresh impossible / token rejected).
+//   - 403 → insufficient_role with the backend's detail string.
+//   - 400 → unexpected with the backend's detail (kb.ingest
+//     directory_not_found / not_a_directory).
+//   - 404 → unexpected with the backend's detail (slug_not_found;
+//     cross-tenant probes land here per the no-existence-leak
+//     posture).
+//   - 422 → unexpected wrapping the FastAPI validation envelope
+//     (invalid slug, missing required body field, both-or-neither
+//     directory/tarball_url).
+//   - 501 → unexpected with the backend's detail (tarball_url ingest
+//     unsupported in v0.2).
+//   - Other non-2xx → unexpected with the raw body.
+func renderHTTPStatus(
 	cmd *cobra.Command,
 	backplaneURL string,
-	he *httpError,
+	statusCode int,
+	body []byte,
 	jsonOut bool,
 ) error {
-	switch he.StatusCode {
+	bodyStr := strings.TrimSpace(string(body))
+	switch statusCode {
 	case http.StatusUnauthorized:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -264,7 +280,7 @@ func renderHTTPError(
 		)
 	case http.StatusForbidden:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(decodeDetailString(he.Body)),
+			output.InsufficientRole(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusBadRequest:
@@ -272,7 +288,7 @@ func renderHTTPError(
 		// backplane substrate. Surface the detail verbatim so the
 		// operator sees the path the backplane failed to read.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotFound:
@@ -285,7 +301,7 @@ func renderHTTPError(
 		// 404 from delete therefore signals a contract drift worth
 		// surfacing rather than swallowing.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	case http.StatusUnprocessableEntity:
@@ -293,7 +309,7 @@ func renderHTTPError(
 		// or the exactly-one-of directory/tarball_url contract. The
 		// backend emits the FastAPI validation envelope.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("invalid request: %s", he.Body)),
+			output.Unexpected(fmt.Sprintf("invalid request: %s", bodyStr)),
 			jsonOut,
 		)
 	case http.StatusNotImplemented:
@@ -302,13 +318,13 @@ func renderHTTPError(
 		// in v0.2; the route surfaces a clear "not implemented" so
 		// callers don't silently lose work.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(decodeDetailString(he.Body)),
+			output.Unexpected(decodeDetailString(bodyStr)),
 			jsonOut,
 		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, statusCode, bodyStr)),
 			jsonOut,
 		)
 	}
@@ -320,8 +336,9 @@ type detailEnvelope struct {
 }
 
 // decodeDetailString pulls the `detail` field out of a FastAPI error
-// body when it's a plain string. Falls back to the raw body when the
-// JSON shape doesn't match.
+// body when it's a plain string. Falls back to the trimmed raw body
+// when the JSON shape doesn't match (non-JSON body or `detail` is a
+// structured value such as the FastAPI validation list).
 func decodeDetailString(body string) string {
 	var env detailEnvelope
 	if err := json.Unmarshal([]byte(body), &env); err == nil {
@@ -333,128 +350,11 @@ func decodeDetailString(body string) string {
 	return strings.TrimSpace(body)
 }
 
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection and one-shot 401-refresh-retry. Returns the
-// response body bytes (already drained) on 2xx, or an *httpError on
-// non-2xx, or an error categorised by api.IsTokenNotFound /
-// api.IsNoRefreshToken / generic transport.
-//
-// Mirrors cli/internal/cmd/audit/audit.go::doAuthedRequest and its
-// targets / operation siblings.
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
-	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errMissingAccessToken
-	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	// Read with a 1-MiB cap. The +1 byte over the cap is the
-	// truncation-detection trick: if ReadAll returns more than
-	// responseBodyCap bytes, the response was at least cap+1 bytes
-	// long and the decoder would otherwise consume a silently-
-	// truncated JSON payload. Fail loud instead — a truncated kb
-	// response surfaces as "decode error: unexpected end of JSON
-	// input" without this guard, which buries the real cause
-	// (response too large for the chassis CLI's safety cap).
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, responseBodyCap+1))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if int64(len(raw)) > responseBodyCap {
-		return nil, fmt.Errorf(
-			"response body exceeds %d-byte cap; refusing to decode possibly-truncated JSON",
-			responseBodyCap,
-		)
-	}
-	// DELETE returns 204 with no body — the substrate of kb.delete
-	// is idempotent and emits an empty body whether or not the row
-	// existed. Treat 204 as success even when the response body is
-	// empty so the verb's runner can render the success line without
-	// trying to decode JSON.
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// responseBodyCap is the hard upper bound on a backplane response
-// body the CLI is willing to read. Kb list pages cap at 500 rows
-// server-side and each row carries only a 200-char preview; a full
-// page is ~500 × 1 KB ≈ 500 KiB. 1 MiB is comfortable headroom.
-// `meho kb show` of a real-world Markdown entry tops out at ~50 KB.
-// The cap protects against an adversarial / misconfigured backplane
-// sending an unbounded response — the alternative is OOM. The
-// +1-byte read pattern in doAuthedRequest distinguishes "fits in
-// the cap" from "truncated at the cap".
-const responseBodyCap int64 = 1 << 20
-
-// httpError carries a non-2xx response so per-verb runners can
-// render the right category.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// sendRequest is the bottom of the stack: build the http.Request,
-// stamp bearer + content headers, fire it.
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
-}
-
 // pathEscape escapes a single path segment for use inside a backend
-// URL.
+// URL. Retained because tests pin the operator-typical slug shapes
+// (dots, hyphens) survive escaping intact; the typed-client's
+// `ShowKbApiV1KbSlugGetWithResponse` path-parameter encoding uses
+// the same `url.PathEscape` rule under the hood.
 func pathEscape(segment string) string {
 	return url.PathEscape(segment)
 }
@@ -525,9 +425,9 @@ func loadBodyFlag(cmd *cobra.Command, raw string) (string, error) {
 }
 
 // loadBodyStdinCap bounds the @- read so an adversarial / malformed
-// pipe can't pin a kb add verb in unbounded ReadAll. 1 MiB matches
-// the response-body cap and is generous for any realistic Markdown
-// entry (the consumer's longest entries are ~10 KB).
+// pipe can't pin a kb add verb in unbounded ReadAll. 1 MiB is
+// generous for any realistic Markdown entry (the consumer's longest
+// entries are ~10 KB).
 const loadBodyStdinCap int64 = 1 << 20
 
 // readBodyFile is the file-read seam — split out so kb_test.go can

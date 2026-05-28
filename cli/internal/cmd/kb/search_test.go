@@ -12,6 +12,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // TestRunSearchRejectsEmptyQuery — empty <query> arg is caught.
@@ -40,7 +43,8 @@ func TestRunSearchRejectsOutOfRangeLimit(t *testing.T) {
 // TestRunSearchRejectsExplicitZeroLimit — `--limit 0` is outside
 // the documented 1..50 range and must be rejected. The cobra-default
 // zero (no flag passed) is still permitted; the distinction is made
-// via `cmd.Flags().Changed("limit")`.
+// via `searchOptions.Changed`, which the verb's RunE wires from
+// `cmd.Flags().Changed("limit")`.
 func TestRunSearchRejectsExplicitZeroLimit(t *testing.T) {
 	// Build a real cobra command so Changed("limit") returns true
 	// after the flag is set by name — the runSearch-only helper used
@@ -59,14 +63,14 @@ func TestRunSearchRejectsExplicitZeroLimit(t *testing.T) {
 	}
 }
 
-// TestRunSearchAllowsDefaultZeroLimit — without `--limit`, opts.Limit
-// is cobra's default zero and must be treated as "unset" (server-side
-// default applies). Range gate must not fire.
+// TestRunSearchAllowsDefaultZeroLimit — without `--limit`,
+// opts.Limit is cobra's default zero and Changed is false; the
+// range gate must not fire so the backend's default applies.
 func TestRunSearchAllowsDefaultZeroLimit(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(RetrieveResponse{})
+		_ = json.NewEncoder(w).Encode(api.RetrieveResponse{})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -84,29 +88,36 @@ func TestRunSearchAllowsDefaultZeroLimit(t *testing.T) {
 }
 
 // TestRunSearchHappyPath — POSTs the right body (source pinned to
-// "kb") and renders the ranked-hits table.
+// "kb") and renders the ranked-hits table. Handler decodes the
+// wire body into the generated `api.RetrieveRequest` so the
+// "no consumer-side retrieveRequest" property is the load-bearing
+// claim under test.
 func TestRunSearchHappyPath(t *testing.T) {
-	var bodyJSON map[string]any
+	var bodyOnWire api.RetrieveRequest
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST; got %s", r.Method)
 		}
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &bodyJSON)
+		raw, _ := io.ReadAll(r.Body)
+		readJSONBodyOf(t, raw, &bodyOnWire)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(RetrieveResponse{
-			Hits: []RetrievalHit{
+		_ = json.NewEncoder(w).Encode(api.RetrieveResponse{
+			Hits: []api.RetrievalHit{
 				{
-					DocumentID: "00000000-0000-0000-0000-000000000001",
-					Source:     "kb",
-					SourceID:   "vcenter-9.0-snapshot-revert",
-					Kind:       "kb-entry",
-					Body:       "Revert a snapshot in vCenter 9.0 via …",
-					FusedScore: 0.95,
+					DocumentId:  mustParseUUID(t, "00000000-0000-0000-0000-000000000001"),
+					TenantId:    mustParseUUID(t, stubTenantID),
+					Source:      "kb",
+					SourceId:    "vcenter-9.0-snapshot-revert",
+					Kind:        "kb-entry",
+					Body:        "Revert a snapshot in vCenter 9.0 via …",
+					DocMetadata: map[string]any{},
+					FusedScore:  0.95,
+					CreatedAt:   time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+					UpdatedAt:   time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC),
 				},
 			},
-			QueryDurationMS: 12.5,
+			QueryDurationMs: 12.5,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -118,16 +129,14 @@ func TestRunSearchHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runSearch: %v; stderr=%s", err, stderr.String())
 	}
-	if bodyJSON["source"] != "kb" {
-		t.Errorf("expected source=kb pinned; got %+v", bodyJSON)
+	if bodyOnWire.Source == nil || *bodyOnWire.Source != "kb" {
+		t.Errorf("expected source=kb pinned; got %+v", bodyOnWire)
 	}
-	if bodyJSON["query"] != "vsphere snapshot" {
-		t.Errorf("expected query in body; got %+v", bodyJSON)
+	if bodyOnWire.Query != "vsphere snapshot" {
+		t.Errorf("expected query in body; got %+v", bodyOnWire)
 	}
-	// limit=0 → omitempty drops it from the wire; the backend's
-	// default of 10 applies.
-	if _, present := bodyJSON["limit"]; present {
-		t.Errorf("expected limit omitted at zero; got %+v", bodyJSON)
+	if bodyOnWire.Limit != nil {
+		t.Errorf("expected limit nil at zero (omitempty); got %+v", *bodyOnWire.Limit)
 	}
 	for _, want := range []string{"RANK", "SCORE", "SLUG", "vcenter-9.0-snapshot-revert", "0.9500"} {
 		if !strings.Contains(stdout.String(), want) {
@@ -137,15 +146,15 @@ func TestRunSearchHappyPath(t *testing.T) {
 }
 
 // TestRunSearchSendsLimitWhenSet — operator-supplied --limit lands
-// on the wire.
+// on the wire as the typed pointer.
 func TestRunSearchSendsLimitWhenSet(t *testing.T) {
-	var bodyJSON map[string]any
+	var bodyOnWire api.RetrieveRequest
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &bodyJSON)
+		raw, _ := io.ReadAll(r.Body)
+		readJSONBodyOf(t, raw, &bodyOnWire)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(RetrieveResponse{Hits: nil})
+		_ = json.NewEncoder(w).Encode(api.RetrieveResponse{Hits: nil})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -155,9 +164,8 @@ func TestRunSearchSendsLimitWhenSet(t *testing.T) {
 	if err := runSearch(cmd, searchOptions{Query: "x", Limit: 25, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runSearch: %v", err)
 	}
-	got, ok := bodyJSON["limit"].(float64)
-	if !ok || int(got) != 25 {
-		t.Errorf("expected limit=25; got %+v", bodyJSON)
+	if bodyOnWire.Limit == nil || *bodyOnWire.Limit != 25 {
+		t.Errorf("expected limit=25; got %+v", bodyOnWire.Limit)
 	}
 }
 
@@ -166,7 +174,7 @@ func TestRunSearchZeroHits(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(RetrieveResponse{Hits: []RetrievalHit{}})
+		_ = json.NewEncoder(w).Encode(api.RetrieveResponse{Hits: []api.RetrievalHit{}})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -186,9 +194,21 @@ func TestRunSearchJSONHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(RetrieveResponse{
-			Hits:            []RetrievalHit{{SourceID: "x", FusedScore: 0.5}},
-			QueryDurationMS: 1.0,
+		_ = json.NewEncoder(w).Encode(api.RetrieveResponse{
+			Hits: []api.RetrievalHit{
+				{
+					DocumentId:  mustParseUUID(t, "00000000-0000-0000-0000-000000000001"),
+					TenantId:    mustParseUUID(t, stubTenantID),
+					Source:      "kb",
+					SourceId:    "x",
+					Kind:        "kb-entry",
+					DocMetadata: map[string]any{},
+					FusedScore:  0.5,
+					CreatedAt:   time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+					UpdatedAt:   time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC),
+				},
+			},
+			QueryDurationMs: 1.0,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -199,11 +219,11 @@ func TestRunSearchJSONHappyPath(t *testing.T) {
 	if err := runSearch(cmd, searchOptions{Query: "x", JSONOut: true, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runSearch --json: %v", err)
 	}
-	var decoded RetrieveResponse
+	var decoded api.RetrieveResponse
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
-	if len(decoded.Hits) != 1 || decoded.Hits[0].SourceID != "x" {
+	if len(decoded.Hits) != 1 || decoded.Hits[0].SourceId != "x" {
 		t.Errorf("decode produced %+v", decoded)
 	}
 }
@@ -251,15 +271,57 @@ func TestSnippetOfLongBody(t *testing.T) {
 	}
 }
 
-// TestPrintSearchTableRendersBM25CosineScores — *float64 fields
-// must render without panic when nil (one signal missed the hit).
+// TestRunSearchRejects200WithoutJSONPayload pins the JSON200
+// nil-guard (M5). A 200 with a missing or mistyped Content-Type
+// leaves resp.JSON200 nil; without the guard, printSearchTable
+// prints "no kb hits for this query" — actively misleading
+// (conflated with a genuinely-empty result set). Route to
+// output.Unexpected (exit 4) instead.
+func TestRunSearchRejects200WithoutJSONPayload(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
+		// Deliberately omit Content-Type so the generated parser
+		// leaves JSON200 nil.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runSearch(cmd, searchOptions{Query: "x", BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error on 200 without JSON payload")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without a retrieve response payload") {
+		t.Errorf("expected detail mentioning missing payload; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4; got %v", err)
+	}
+}
+
+// TestPrintSearchTableHandlesNilScores — *float32 fields must
+// render without panic when nil (one signal missed the hit). The
+// generated RetrievalHit type uses *float32 (matching the
+// substrate's pydantic Field shape); ranks are *int.
 func TestPrintSearchTableHandlesNilScores(t *testing.T) {
-	cosine := 0.8
-	r := &RetrieveResponse{
-		Hits: []RetrievalHit{
-			{SourceID: "only-cosine", FusedScore: 0.5, CosineScore: &cosine, BM25Score: nil},
+	cosine := float32(0.8)
+	r := &api.RetrieveResponse{
+		Hits: []api.RetrievalHit{
+			{
+				SourceId:    "only-cosine",
+				FusedScore:  0.5,
+				CosineScore: &cosine,
+				Bm25Score:   nil,
+			},
 		},
-		QueryDurationMS: 2.0,
+		QueryDurationMs: 2.0,
 	}
 	var buf bytes.Buffer
 	printSearchTable(&buf, r)

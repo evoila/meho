@@ -134,7 +134,7 @@ cli/
     │   │   ├── my_recent_test.go # JWT-only-principal contract tests.
     │   │   └── recent_test.go    # since=24h binding + --json passthrough tests.
     │   ├── kb/               # G4.1-T4 #418 — `meho kb …` verb tree.
-    │   │   ├── kb.go             # NewRootCmd + shared HTTP/auth helpers + body/metadata/confirm helpers.
+    │   │   ├── kb.go             # NewRootCmd + newAuthedClient / retryOn401 / renderHTTPStatus typed-client helpers (G0.12-T9 #1267) + body/metadata/confirm helpers.
     │   │   ├── ingest.go         # `meho kb ingest <directory> [--dry-run]` (POST /api/v1/kb/ingest).
     │   │   ├── search.go         # `meho kb search <query>` (POST /api/v1/retrieve, source="kb").
     │   │   ├── list.go           # `meho kb list [--filter --limit --offset]` (GET /api/v1/kb).

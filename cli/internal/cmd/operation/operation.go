@@ -16,8 +16,9 @@
 // Each verb wraps one backplane route and renders the response in
 // either a human-readable table or `--json` mode. Authentication
 // piggybacks on the token meho login wrote — api.NewAuthedClient
-// handles the bearer injection + 401 refresh dance, same as
-// `meho retrieval eval` and `meho status`.
+// handles the bearer injection + 401 refresh dance via the generated
+// typed client, same as `meho status` and the rest of the G0.12 CLI
+// hygiene migration (Initiative #1118).
 //
 // The fourth route `GET /api/v1/operations/{descriptor_id}` (tenant-
 // admin diagnostic) is deferred — the DoD line for G0.6-T13 #481 was
@@ -25,12 +26,10 @@
 package operation
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -58,11 +57,62 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
+// operationsAPI is the minimal slice of api.ClientWithResponsesInterface
+// the three operation verbs consume, plus the Refresh hook the
+// per-verb 401-retry path invokes. Defined as a per-package interface
+// so the test suite can substitute a tiny fake without reaching for
+// the full ~140-method generated surface. *api.AuthedClient satisfies
+// this directly: it embeds *ClientWithResponses (which provides the
+// three *WithResponse calls) and defines Refresh of its own.
+type operationsAPI interface {
+	PostCallApiV1OperationsCallPostWithResponse(
+		ctx context.Context,
+		params *api.PostCallApiV1OperationsCallPostParams,
+		body api.PostCallApiV1OperationsCallPostJSONRequestBody,
+		reqEditors ...api.RequestEditorFn,
+	) (*api.PostCallApiV1OperationsCallPostResponse, error)
+	GetGroupsApiV1OperationsGroupsGetWithResponse(
+		ctx context.Context,
+		params *api.GetGroupsApiV1OperationsGroupsGetParams,
+		reqEditors ...api.RequestEditorFn,
+	) (*api.GetGroupsApiV1OperationsGroupsGetResponse, error)
+	GetSearchApiV1OperationsSearchGetWithResponse(
+		ctx context.Context,
+		params *api.GetSearchApiV1OperationsSearchGetParams,
+		reqEditors ...api.RequestEditorFn,
+	) (*api.GetSearchApiV1OperationsSearchGetResponse, error)
+	Refresh(ctx context.Context) error
+}
+
+// newAuthedClient is the production-mode factory the verbs default to
+// — overridden in tests via newAuthedClientForTest. Returning the
+// operationsAPI interface (not *api.AuthedClient) keeps the call
+// sites typed against the per-package seam, not the generated client.
+var newAuthedClient = func(ctx context.Context, backplaneURL string) (operationsAPI, error) {
+	return api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+}
+
+// apiResponseError carries a non-2xx response so renderRequestError
+// can pick the right output category (401 → auth_expired, other
+// non-2xx → unexpected_response). Constructed from the generated
+// *Response.HTTPResponse.StatusCode + Body fields after the per-verb
+// 401-retry path has exhausted its refresh shot.
+type apiResponseError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *apiResponseError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
+}
+
 // renderRequestError translates an error from one of the per-verb
-// request helpers into the right output.RenderError category.
-// Same classification ladder as retrieval/eval.go: token-not-found
-// and no-refresh-token surface as auth_expired with `meho login`
-// hints; everything else is unreachable.
+// request helpers into the right output.RenderError category. Same
+// classification ladder as retrieval/eval.go: token-not-found and
+// no-refresh-token surface as auth_expired with `meho login` hints;
+// a non-2xx response from the backplane after auth refresh wraps as
+// *apiResponseError so the renderer can split 401 from the rest;
+// everything else (transport / DNS / TLS) falls through to unreachable.
 func renderRequestError(
 	cmd *cobra.Command,
 	backplaneURL string,
@@ -87,18 +137,31 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	// HTTP-level errors from the backplane (4xx/5xx with a body) come
-	// back wrapped in *httpError. Those are structured responses, not
-	// transport failures — classify as unexpected_response (exit 4) so
-	// the operator sees the right "this is a backend disagreement" hint
-	// rather than the "your network is down" one. Pure transport errors
-	// (timeouts, DNS, connection refused) still fall through to
-	// unreachable (exit 3).
-	var he *httpError
-	if errors.As(err, &he) {
+	// HTTP-level errors from the backplane (a non-2xx response with a
+	// body) come back wrapped in *apiResponseError. 401 here means the
+	// one-shot refresh either was not attempted (Refresh failure was
+	// already surfaced upstream) or returned a fresh token that the
+	// backplane still rejected — either way the operator needs to
+	// re-login, so surface as auth_expired (exit 2). Every other non-2xx
+	// is a structured backplane disagreement, not a transport failure
+	// — classify as unexpected_response (exit 4) so the operator sees
+	// the "this is a backend disagreement" hint rather than the "your
+	// network is down" one. Pure transport errors (timeouts, DNS,
+	// connection refused) still fall through to unreachable (exit 3).
+	var apiErr *apiResponseError
+	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusUnauthorized {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.AuthExpired(fmt.Sprintf(
+					"backplane rejected the refreshed token; run `meho login %s`",
+					backplaneURL,
+				)),
+				jsonOut,
+			)
+		}
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-				backplaneURL, he.StatusCode, he.Body)),
+				backplaneURL, apiErr.StatusCode, apiErr.Body)),
 			jsonOut,
 		)
 	}
@@ -108,110 +171,22 @@ func renderRequestError(
 	)
 }
 
-// doAuthedRequest issues a single HTTP request against the backplane
-// with bearer injection + one-shot 401-refresh-retry. Returns the
-// response body bytes (already drained) on a 2xx outcome, or an
-// error categorised by api.IsTokenNotFound / api.IsNoRefreshToken /
-// generic transport so renderRequestError can pick the right
-// StructuredError category.
-//
-// Centralised here (rather than duplicated per verb) because all
-// three operation verbs share the same auth + refresh pattern. The
-// retrieval/eval.go sibling inlines an equivalent helper as
-// postEval; this package factors it out so the three verbs stay
-// small.
-func doAuthedRequest(
-	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
-	if err != nil {
-		return nil, err
+// classifyNon2xx wraps the generated *Response fields into the local
+// apiResponseError sentinel renderRequestError extracts via
+// errors.As. Pulled out so the three verbs share one body-truncation
+// pass — the backplane error responses are JSON envelopes well under
+// the 1 MiB ceiling, but the cap matches the previous pre-migration
+// transport's response read.
+func classifyNon2xx(resp *http.Response, body []byte) *apiResponseError {
+	const cap = 1 << 20 // 1 MiB
+	b := body
+	if len(b) > cap {
+		b = b[:cap]
 	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
+	return &apiResponseError{
+		StatusCode: resp.StatusCode,
+		Body:       strings.TrimSpace(string(b)),
 	}
-
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		// One-shot refresh + retry, mirroring api.AuthedClient.GetHealth
-		// and retrieval.postEval.
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
-}
-
-// httpError carries a non-2xx response so per-verb runners can
-// render the right category (4xx → unexpected with body, 5xx →
-// unreachable, etc.). Not an output.StructuredError directly — the
-// renderer decides exit-code class based on status.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// sendRequest is the bottom of the stack: build the http.Request,
-// stamp bearer + content headers, fire it. Split out so the
-// 401-refresh-retry path in doAuthedRequest can reuse the same
-// body bytes without re-marshalling.
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = newBodyReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
-}
-
-// newBodyReader wraps a fresh io.Reader around the request body
-// bytes for each attempt (the 401-retry path needs a fresh reader,
-// can't rewind the previous one). bytes.NewReader matches the
-// retrieval/eval.go sibling's choice and avoids the string<->bytes
-// round-trip strings.NewReader would impose.
-func newBodyReader(body []byte) io.Reader {
-	return bytes.NewReader(body)
 }
 
 // loadParamsFlag parses the --params flag value. Prefixing with '@'

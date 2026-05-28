@@ -176,11 +176,12 @@ cli/
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
     │   │   └── connector_test.go # pure-function + httptest-mocked HTTP contract tests.
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
-    │   │   ├── operation.go      # NewRootCmd + shared HTTP/auth helpers.
-    │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups).
-    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search).
-    │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call).
-    │   │   └── operation_test.go # render + helper + sentinel tests.
+    │   │   ├── operation.go      # NewRootCmd + operationsAPI seam + apiResponseError sentinel + loadParamsFlag (G0.12-T2 #1260).
+    │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.
+    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search) — typed via api.GetSearchApiV1OperationsSearchGetParams.
+    │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call) — typed via api.CallOperationBody + FromCallOperationBodyTarget0.
+    │   │   ├── operation_test.go # render + helper + sentinel tests.
+    │   │   └── client_test.go    # G0.12-T2 #1260 — fakeOperationsClient mocks the operationsAPI seam; asserts typed request params + 401 refresh dance + error classification.
     │   ├── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling.
     │   │   ├── retrieval.go            # NewRootCmd.
     │   │   ├── eval.go                 # `meho retrieval eval` (POST /api/v1/retrieve/eval).
@@ -840,17 +841,53 @@ narrow-waist contract.
 
 ### HTTP shape
 
-All three verbs route through `api.NewAuthedClient(...)` for bearer
-injection + 401-refresh-retry. The shared `doAuthedRequest` helper in
-`operation.go` builds the request manually (rather than using the
-generated `ClientWithResponses`) because the openapi spec types the
-three routes' responses as `dict[str, Any]`; the generated `JSON200`
-is `*map[string]interface{}` which doesn't expose the typed
+All three verbs route through `api.NewAuthedClient(...)` and call the
+generated typed client directly (G0.12-T2 #1260 — Initiative #1118
+CLI hygiene migration). Per-verb request helpers (`getGroups`,
+`getSearch`, `postCall`) build the typed params/body structs
+(`api.GetGroupsApiV1OperationsGroupsGetParams`,
+`api.GetSearchApiV1OperationsSearchGetParams`,
+`api.CallOperationBody`), invoke the `*WithResponse` methods on the
+embedded `*api.ClientWithResponses`, run a one-shot 401-refresh dance
+on the `*api.AuthedClient.Refresh` hook (mirroring
+`AuthedClient.GetHealth`), and parse the 200 body into the
+hand-written response struct. Non-2xx outcomes wrap as the local
+`*apiResponseError` sentinel that `renderRequestError` extracts
+(`errors.As`) to pick the right `output.RenderError` category
+(401→`auth_expired`, other non-2xx→`unexpected_response`, transport
+failures→`unreachable`).
+
+Response models stay hand-typed (`GroupSummary` + `GroupsResponse`,
+`SearchHit` + `SearchResponse`, `CallResult`) because the FastAPI
+surface types these routes' responses as `dict[str, Any]`; the
+generator therefore emits the response as
+`*map[string]interface{}`, which doesn't expose the typed
 `OperationGroupSummary` / `OperationSearchHit` / `OperationResult`
-shapes the renderer needs. Hand-written structs (`GroupSummary`,
-`SearchHit`, `CallResult`) mirror the backend Pydantic models
-one-for-one; backend tests + CLI tests lock the contract on both
-sides.
+shapes the renderer needs. Promoting the FastAPI return to a typed
+model so the generator picks it up is a separate backend Task
+explicitly out of scope for the consumer-side Initiative #1118.
+
+For `call`, the `target` field uses the bare-string oneOf shape
+via `api.CallOperationBody_Target.FromCallOperationBodyTarget0`
+(G0.13-T2 #1132 — the forward-preferred form that round-trips
+through the `query_topology` / `query_audit` read surfaces). The
+CLI never emits the dict shape — the `fqdn` override is an MCP-
+handler use case, not an operator-CLI use case. When `--target` is
+omitted, `body.Target = nil` so the wire emits `"target": null`,
+which the dispatcher accepts for typed handlers that resolve their
+own context.
+
+The package-local `operationsAPI` interface in `operation.go`
+defines the minimal slice of `api.ClientWithResponsesInterface` the
+three verbs consume (three `*WithResponse` methods + `Refresh`) so
+`client_test.go` can substitute a tiny `fakeOperationsClient`
+without reaching for the full ~140-method generated interface.
+`*api.AuthedClient` satisfies the seam directly: it embeds
+`*ClientWithResponses` (which provides the three `*WithResponse`
+calls) and defines `Refresh` of its own. The test fake records the
+typed params/body each verb passes and pops canned responses from
+per-verb queues to drive the 401-dance and error-classification
+scenarios.
 
 ### Exit codes
 

@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -105,9 +107,18 @@ func runHistory(cmd *cobra.Command, opts historyOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	entries, err := getHistory(cmd.Context(), backplaneURL, opts.Slug)
+	resp, err := getHistory(cmd.Context(), backplaneURL, opts.Slug)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode, resp.Body, opts.JSONOut)
+	}
+	var entries []api.ConventionHistoryEntry
+	if err := json.Unmarshal(resp.Body, &entries); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("decode conventions history response: %v", err)),
+			opts.JSONOut)
 	}
 	if opts.Limit > 0 && len(entries) > opts.Limit {
 		entries = entries[:opts.Limit]
@@ -119,21 +130,21 @@ func runHistory(cmd *cobra.Command, opts historyOptions) error {
 	return nil
 }
 
-// buildHistoryPath assembles the GET path. Exposed for unit tests.
-func buildHistoryPath(slug string) string {
-	return "/api/v1/conventions/" + pathEscape(slug) + "/history"
-}
-
-func getHistory(ctx context.Context, backplaneURL, slug string) ([]HistoryEntry, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildHistoryPath(slug), nil)
+func getHistory(
+	ctx context.Context,
+	backplaneURL, slug string,
+) (*rawResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out []HistoryEntry
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode conventions history response: %w", err)
-	}
-	return out, nil
+	return doRequest(ctx, authed,
+		func(ctx context.Context) (*http.Response, error) {
+			return authed.ListHistoryApiV1ConventionsSlugHistoryGet(
+				ctx, slug, &api.ListHistoryApiV1ConventionsSlugHistoryGetParams{},
+			)
+		},
+	)
 }
 
 // printHistoryDiffs renders each history row as a header + a unified
@@ -150,7 +161,12 @@ func getHistory(ctx context.Context, backplaneURL, slug string) ([]HistoryEntry,
 // transaction boundary. The substrate writes one history row per
 // transaction, so the row-local before/after pair is already the right
 // granularity.
-func printHistoryDiffs(w io.Writer, slug string, entries []HistoryEntry) {
+//
+// Ts is a typed time.Time off the generated ConventionHistoryEntry
+// (was a string on the pre-migration consumer-side duplicate); we
+// format it back to the RFC 3339 / ISO 8601 shape the operator-facing
+// history contract has always used.
+func printHistoryDiffs(w io.Writer, slug string, entries []api.ConventionHistoryEntry) {
 	if len(entries) == 0 {
 		fmt.Fprintf(w, "no history for convention %q\n", slug)
 		return
@@ -159,9 +175,10 @@ func printHistoryDiffs(w io.Writer, slug string, entries []HistoryEntry) {
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "=== %s  actor=%s  history_id=%s\n", e.Ts, e.ActorSub, e.ID)
-		if e.AuditID != nil {
-			fmt.Fprintf(w, "    audit_id=%s\n", *e.AuditID)
+		tsStr := e.Ts.UTC().Format("2006-01-02T15:04:05Z")
+		fmt.Fprintf(w, "=== %s  actor=%s  history_id=%s\n", tsStr, e.ActorSub, e.Id.String())
+		if e.AuditId != nil {
+			fmt.Fprintf(w, "    audit_id=%s\n", e.AuditId.String())
 		} else {
 			fmt.Fprintln(w, "    audit_id=<seed>")
 		}
@@ -171,7 +188,7 @@ func printHistoryDiffs(w io.Writer, slug string, entries []HistoryEntry) {
 			// the initial body as a + block so the trail visibly
 			// distinguishes the create from a body-replacing edit.
 			fmt.Fprintln(w, "--- /dev/null")
-			fmt.Fprintf(w, "+++ %s @ %s\n", slug, e.Ts)
+			fmt.Fprintf(w, "+++ %s @ %s\n", slug, tsStr)
 			for _, line := range strings.Split(strings.TrimRight(e.BodyAfter, "\r\n"), "\n") {
 				fmt.Fprintf(w, "+ %s\n", line)
 			}
@@ -190,7 +207,7 @@ func printHistoryDiffs(w io.Writer, slug string, entries []HistoryEntry) {
 			continue
 		}
 		fmt.Fprintf(w, "--- %s @ <prev>\n", slug)
-		fmt.Fprintf(w, "+++ %s @ %s\n", slug, e.Ts)
+		fmt.Fprintf(w, "+++ %s @ %s\n", slug, tsStr)
 		writeUnifiedDiff(w, before, after)
 	}
 }

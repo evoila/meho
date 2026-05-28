@@ -8,10 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -65,8 +66,8 @@ func newListCmd() *cobra.Command {
 			"conventions registered in the operator's tenant, sorted " +
 			"priority DESC, created_at ASC — the same order T4's preamble " +
 			"assembler uses. --kind filters by operational | workflow | " +
-			"reference. --json emits the raw ListResponse envelope for jq " +
-			"pipelines.",
+			"reference. --json emits the raw ConventionListResponse envelope " +
+			"for jq pipelines.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -81,7 +82,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&kind, "kind", "",
 		"narrow entries by kind: operational | workflow | reference")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw ListResponse JSON instead of the human table")
+		"emit raw ConventionListResponse JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -114,15 +115,24 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode, resp.Body, opts.JSONOut)
+	}
+	var payload api.ConventionListResponse
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("decode conventions list response: %v", err)),
+			opts.JSONOut)
+	}
 	if opts.JSONOut {
 		// --json mode is the agent / scripting surface: emit the full
 		// envelope (entries + budget_status) and exit 0 regardless of
 		// over-budget state. JSON consumers parse budget_status
 		// themselves; the human warning + exit-code-5 branch is for
 		// the table mode below.
-		return output.PrintJSON(cmd.OutOrStdout(), resp)
+		return output.PrintJSON(cmd.OutOrStdout(), payload)
 	}
-	printListTable(cmd.OutOrStdout(), resp)
+	printListTable(cmd.OutOrStdout(), &payload)
 	// G7.1-T7 (#1094): when the tenant is over budget, the table is
 	// still useful (it shows what's there), so we always print it.
 	// But we also need to alert the operator that some conventions
@@ -132,11 +142,11 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	// makes the failure machine-detectable. T3 #315 deferred this AC
 	// because the list endpoint had no dropped_slugs surface; T7 is
 	// the plumbing that finally satisfies it.
-	if resp != nil && resp.BudgetStatus.OverBudget {
-		printOverBudgetWarning(cmd.ErrOrStderr(), &resp.BudgetStatus)
+	if payload.BudgetStatus.OverBudget {
+		printOverBudgetWarning(cmd.ErrOrStderr(), &payload.BudgetStatus)
 		return output.RenderError(
 			cmd.ErrOrStderr(),
-			output.InsufficientBudget(formatBudgetDetail(&resp.BudgetStatus)),
+			output.InsufficientBudget(formatBudgetDetail(&payload.BudgetStatus)),
 			false, // JSON mode exited earlier; this path is human-only
 		)
 	}
@@ -161,7 +171,7 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 // The remediation hint is concrete — operators routinely run `meho
 // conventions edit <slug>` after seeing this, so the message points
 // them at the right next action.
-func printOverBudgetWarning(stderrW io.Writer, bs *BudgetStatus) {
+func printOverBudgetWarning(stderrW io.Writer, bs *api.BudgetStatus) {
 	fmt.Fprintf(stderrW,
 		"WARNING: tenant operational conventions exceed preamble budget "+
 			"(max_tokens=%d; estimated=%d).\n",
@@ -183,7 +193,7 @@ func printOverBudgetWarning(stderrW io.Writer, bs *BudgetStatus) {
 // is the structured detail jq-style consumers see in the JSON
 // envelope's "detail" field. Compact + machine-friendly: names the
 // slug count and the overflow magnitude.
-func formatBudgetDetail(bs *BudgetStatus) string {
+func formatBudgetDetail(bs *api.BudgetStatus) string {
 	return fmt.Sprintf(
 		"%d operational convention(s) will be dropped from the agent preamble "+
 			"(estimated=%d, max_tokens=%d): %v",
@@ -191,38 +201,47 @@ func formatBudgetDetail(bs *BudgetStatus) string {
 	)
 }
 
-// buildListPath assembles the GET /api/v1/conventions query string from
-// the per-call options. Exposed for unit tests so the URL construction
-// stays unit-checkable without standing up an httptest.Server.
-func buildListPath(opts listOptions) string {
-	q := url.Values{}
+// listQueryParams maps the CLI flags onto the generated query-param
+// shape. The `kind` query param is omitted from the wire when the
+// operator didn't pass --kind so the backend's "return all kinds"
+// default applies cleanly; sending an explicit empty kind would be
+// rejected by pydantic's enum validation.
+func listQueryParams(opts listOptions) *api.ListConventionsApiV1ConventionsGetParams {
+	params := &api.ListConventionsApiV1ConventionsGetParams{}
 	if opts.Kind != "" {
-		q.Set("kind", opts.Kind)
+		kind := api.ConventionKind(opts.Kind)
+		params.Kind = &kind
 	}
-	path := "/api/v1/conventions"
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path
+	return params
 }
 
-func getList(ctx context.Context, backplaneURL string, opts listOptions) (*ListResponse, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
+func getList(
+	ctx context.Context,
+	backplaneURL string,
+	opts listOptions,
+) (*rawResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out ListResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode conventions list response: %w", err)
-	}
-	return &out, nil
+	params := listQueryParams(opts)
+	return doRequest(ctx, authed,
+		func(ctx context.Context) (*http.Response, error) {
+			return authed.ListConventionsApiV1ConventionsGet(ctx, params)
+		},
+	)
 }
 
 // printListTable renders the list as a compact, scannable table.
 // Columns: SLUG, KIND, PRIORITY, UPDATED, TITLE. The full ISO-8601
 // timestamp is kept verbatim (not truncated) because operators
 // correlating with audit-log rows want the precise updated_at.
-func printListTable(w io.Writer, r *ListResponse) {
+//
+// UpdatedAt is now a typed time.Time off the generated
+// ConventionSummary (was a string on the pre-migration consumer-side
+// Summary duplicate); we format it back to the RFC 3339 / ISO 8601
+// shape the operator-facing table contract has always used.
+func printListTable(w io.Writer, r *api.ConventionListResponse) {
 	if r == nil || len(r.Entries) == 0 {
 		fmt.Fprintln(w, "no conventions registered in this tenant")
 		return
@@ -233,7 +252,7 @@ func printListTable(w io.Writer, r *ListResponse) {
 			truncate(e.Slug, 32),
 			e.Kind,
 			e.Priority,
-			e.UpdatedAt,
+			e.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 			truncate(e.Title, 60),
 		)
 	}

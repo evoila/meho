@@ -4,6 +4,7 @@
 package conventions
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,46 +12,117 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
-func sampleConvention() Convention {
-	return Convention{
-		ID:        "11111111-1111-1111-1111-111111111111",
-		TenantID:  "22222222-2222-2222-2222-222222222222",
+// stubID / stubTenantID are the fixed UUIDs every fixture uses so a
+// test failure reads "11111111-..." in the request URL or response
+// body — easier to chase than a uuid.New() that rotates per run.
+// Mirrors the same const pair in cli/internal/cmd/agent-principal/
+// agent_principal_test.go (T4 #1262).
+const (
+	stubID       = "11111111-1111-1111-1111-111111111111"
+	stubTenantID = "22222222-2222-2222-2222-222222222222"
+)
+
+func mustUUID(t *testing.T, s string) uuid.UUID {
+	t.Helper()
+	id, err := uuid.Parse(s)
+	if err != nil {
+		t.Fatalf("mustUUID(%q): %v", s, err)
+	}
+	return id
+}
+
+// writeJSON wraps the common httptest.Server handler pattern so every
+// mock response sets `Content-Type: application/json` before writing.
+// The generated client's Parse* helpers only populate JSON200 / JSON201
+// when the response Content-Type contains "json"; a bare Encode against
+// http.ResponseWriter omits the header and the response body bytes
+// land in `.Body` but the typed `JSONxxx` pointer stays nil. Centralise
+// the header-then-encode so a test failure can't be a misset header.
+func writeJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Errorf("writeJSON encode: %v", err)
+	}
+}
+
+// writeJSONErr is the equivalent of writeJSON for error bodies — the
+// status code is the *first* arg (mirrors writeJSON's signature)
+// and the body is the raw JSON envelope the FastAPI route would emit
+// for that status. Returns a (status, body) shape into the typed
+// response's `.Body` field so renderHTTPStatus can pick up the
+// backend's `detail` field.
+func writeJSONErr(t *testing.T, w http.ResponseWriter, status int, body string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if _, err := w.Write([]byte(body)); err != nil {
+		t.Errorf("writeJSONErr write: %v", err)
+	}
+}
+
+// sampleConvention returns a fully-populated api.Convention (the
+// generated type) for happy-path round-trips. Same field semantics
+// as the pre-migration consumer-side duplicate; only the type moved.
+func sampleConvention(t *testing.T) api.Convention {
+	t.Helper()
+	ts := time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC)
+	return api.Convention{
+		Id:        mustUUID(t, stubID),
+		TenantId:  mustUUID(t, stubTenantID),
 		Slug:      "vault-canonical",
 		Title:     "Vault is canonical",
 		Body:      "Vault is the canonical secret store.\nNever paste secrets into chat.",
 		Kind:      "operational",
 		Priority:  10,
-		CreatedAt: "2026-05-24T00:00:00Z",
-		UpdatedAt: "2026-05-24T00:00:00Z",
+		CreatedAt: ts,
+		UpdatedAt: ts,
 	}
 }
 
-func sampleSummary() Summary {
-	return Summary{
-		ID:        "11111111-1111-1111-1111-111111111111",
-		TenantID:  "22222222-2222-2222-2222-222222222222",
+func sampleSummary(t *testing.T) api.ConventionSummary {
+	t.Helper()
+	ts := time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC)
+	return api.ConventionSummary{
+		Id:        mustUUID(t, stubID),
+		TenantId:  mustUUID(t, stubTenantID),
 		Slug:      "vault-canonical",
 		Title:     "Vault is canonical",
 		Kind:      "operational",
 		Priority:  10,
-		CreatedAt: "2026-05-24T00:00:00Z",
-		UpdatedAt: "2026-05-24T00:00:00Z",
+		CreatedAt: ts,
+		UpdatedAt: ts,
 	}
 }
 
 // --- list ---
 
-func TestBuildListPath(t *testing.T) {
-	if got := buildListPath(listOptions{}); got != "/api/v1/conventions" {
-		t.Fatalf("empty opts: got %q", got)
+// TestListQueryParamsOmitsKindWhenUnset confirms the default flag
+// state sends no `kind` query param. The backplane's own default
+// (returning all kinds) then applies; sending an explicit empty
+// `kind` would trip pydantic's enum validation.
+func TestListQueryParamsOmitsKindWhenUnset(t *testing.T) {
+	params := listQueryParams(listOptions{})
+	if params.Kind != nil {
+		t.Errorf("unset --kind should leave params.Kind nil; got %+v", params.Kind)
 	}
-	got := buildListPath(listOptions{Kind: "operational"})
-	if !strings.Contains(got, "kind=operational") {
-		t.Errorf("buildListPath kind: got %q", got)
+}
+
+// TestListQueryParamsPassesKindWhenSet pins that the validated
+// string is forwarded as the generated typed enum.
+func TestListQueryParamsPassesKindWhenSet(t *testing.T) {
+	params := listQueryParams(listOptions{Kind: "operational"})
+	if params.Kind == nil || *params.Kind != api.ConventionKind("operational") {
+		t.Errorf("expected params.Kind == operational; got %+v", params.Kind)
 	}
 }
 
@@ -71,7 +143,9 @@ func TestRunListHappyPath(t *testing.T) {
 		if r.Header.Get("Authorization") == "" {
 			t.Errorf("missing Authorization header")
 		}
-		_ = json.NewEncoder(w).Encode(ListResponse{Entries: []Summary{sampleSummary()}})
+		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
+			Entries: []api.ConventionSummary{sampleSummary(t)},
+		})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -91,7 +165,9 @@ func TestRunListHappyPath(t *testing.T) {
 func TestRunListJSONPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(ListResponse{Entries: []Summary{sampleSummary()}})
+		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
+			Entries: []api.ConventionSummary{sampleSummary(t)},
+		})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -101,7 +177,7 @@ func TestRunListJSONPath(t *testing.T) {
 	if err := runList(cmd, listOptions{BackplaneOverride: srv.URL, JSONOut: true}); err != nil {
 		t.Fatalf("runList --json: %v", err)
 	}
-	var got ListResponse
+	var got api.ConventionListResponse
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("decode stdout JSON: %v; raw=%s", err, stdout.String())
 	}
@@ -112,7 +188,7 @@ func TestRunListJSONPath(t *testing.T) {
 
 func TestPrintListTableEmpty(t *testing.T) {
 	var sb strings.Builder
-	printListTable(&sb, &ListResponse{})
+	printListTable(&sb, &api.ConventionListResponse{})
 	if !strings.Contains(sb.String(), "no conventions registered") {
 		t.Errorf("empty render missing hint; got %q", sb.String())
 	}
@@ -126,9 +202,9 @@ func TestPrintListTableEmpty(t *testing.T) {
 func TestRunListOverBudgetExitsFive(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(ListResponse{
-			Entries: []Summary{sampleSummary()},
-			BudgetStatus: BudgetStatus{
+		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
+			Entries: []api.ConventionSummary{sampleSummary(t)},
+			BudgetStatus: api.BudgetStatus{
 				MaxTokens:       600,
 				EstimatedTokens: 920,
 				OverBudget:      true,
@@ -182,9 +258,9 @@ func TestRunListOverBudgetExitsFive(t *testing.T) {
 func TestRunListOverBudgetJSONExitsZero(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(ListResponse{
-			Entries: []Summary{sampleSummary()},
-			BudgetStatus: BudgetStatus{
+		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
+			Entries: []api.ConventionSummary{sampleSummary(t)},
+			BudgetStatus: api.BudgetStatus{
 				MaxTokens:       600,
 				EstimatedTokens: 920,
 				OverBudget:      true,
@@ -205,7 +281,7 @@ func TestRunListOverBudgetJSONExitsZero(t *testing.T) {
 		t.Errorf("expected clean stderr under --json; got %q", stderr.String())
 	}
 	// stdout carries the full envelope including budget_status.
-	var got ListResponse
+	var got api.ConventionListResponse
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("decode stdout JSON: %v; raw=%s", err, stdout.String())
 	}
@@ -223,9 +299,9 @@ func TestRunListOverBudgetJSONExitsZero(t *testing.T) {
 func TestRunListFittingTenantExitsZero(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(ListResponse{
-			Entries: []Summary{sampleSummary()},
-			BudgetStatus: BudgetStatus{
+		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
+			Entries: []api.ConventionSummary{sampleSummary(t)},
+			BudgetStatus: api.BudgetStatus{
 				MaxTokens:       600,
 				EstimatedTokens: 120,
 				OverBudget:      false,
@@ -249,18 +325,36 @@ func TestRunListFittingTenantExitsZero(t *testing.T) {
 	}
 }
 
-// --- show ---
+// TestRunListPassesKindOnWire confirms the typed query-param shape
+// surfaces on the wire as `kind=operational`. The generated client
+// handles the URL building; this test pins that we feed it the
+// right value, not just that the func runs.
+func TestRunListPassesKindOnWire(t *testing.T) {
+	var seenKind string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, r *http.Request) {
+		seenKind = r.URL.Query().Get("kind")
+		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
 
-func TestBuildShowPath(t *testing.T) {
-	if got := buildShowPath("vault-canonical"); got != "/api/v1/conventions/vault-canonical" {
-		t.Fatalf("buildShowPath: got %q", got)
+	cmd, _, stderr := newRunCmd(t)
+	if err := runList(cmd, listOptions{Kind: "workflow", BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runList --kind: %v; stderr=%s", err, stderr.String())
+	}
+	if seenKind != "workflow" {
+		t.Errorf("--kind=workflow should send kind=workflow on wire; got %q", seenKind)
 	}
 }
+
+// --- show ---
 
 func TestRunShowHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/vault-canonical", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(sampleConvention())
+		writeJSON(t, w, http.StatusOK, sampleConvention(t))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -279,8 +373,7 @@ func TestRunShowHappyPath(t *testing.T) {
 func TestRunShow404SurfacesNotFound(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/nope", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprint(w, `{"detail":"convention_not_found"}`)
+		writeJSONErr(t, w, http.StatusNotFound, `{"detail":"convention_not_found"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -315,16 +408,21 @@ func TestRunCreateHappyPath(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method: got %s; want POST", r.Method)
 		}
-		var body createRequest
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body.Slug != "vault-canonical" || body.Kind != "operational" || body.Title != "Vault is canonical" {
+		// Decode against the generated request body type so a
+		// schema-drift between the CLI's send and the backend's
+		// expected shape would fail at unmarshal time.
+		var body api.ConventionCreate
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body.Slug != "vault-canonical" || body.Kind != api.ConventionKind("operational") ||
+			body.Title != "Vault is canonical" {
 			t.Errorf("unexpected request body: %+v", body)
 		}
 		if body.Body == "" {
 			t.Errorf("body missing")
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(sampleConvention())
+		writeJSON(t, w, http.StatusCreated, sampleConvention(t))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -389,8 +487,7 @@ func TestRunCreateRejectsEmptyTitle(t *testing.T) {
 func TestRunCreate409SurfacesDuplicate(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		fmt.Fprint(w, `{"detail":"convention_already_exists"}`)
+		writeJSONErr(t, w, http.StatusConflict, `{"detail":"convention_already_exists"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -412,8 +509,7 @@ func TestRunCreate409SurfacesDuplicate(t *testing.T) {
 func TestRunCreate403SurfacesInsufficientRole(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, `{"detail":"Insufficient role: tenant_admin required"}`)
+		writeJSONErr(t, w, http.StatusForbidden, `{"detail":"Insufficient role: tenant_admin required"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -435,8 +531,8 @@ func TestRunCreate403SurfacesInsufficientRole(t *testing.T) {
 func TestRunCreate422SurfacesOverBudget(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		fmt.Fprint(w, `{"detail":"convention body exceeds preamble budget (estimated=1200, budget=800)"}`)
+		writeJSONErr(t, w, http.StatusUnprocessableEntity,
+			`{"detail":"convention body exceeds preamble budget (estimated=1200, budget=800)"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -458,18 +554,20 @@ func TestRunCreate422SurfacesOverBudget(t *testing.T) {
 	}
 }
 
+// TestRunCreatePriorityOmittedWhenNotSet — load-bearing wire-format
+// guarantee: an unset --priority flag must NOT marshal as
+// `"priority":0` (which the backend would treat as "operator pinned
+// to 0" if the column default ever moves). It also must NOT marshal
+// as `"priority":null` (the generated `Priority *int` field has
+// `omitempty`, so a nil pointer drops the key entirely).
 func TestRunCreatePriorityOmittedWhenNotSet(t *testing.T) {
-	var got createRequest
+	var rawBody bytes.Buffer
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		// Confirm "priority" key is not in the JSON when not set.
-		if strings.Contains(string(raw), `"priority"`) {
-			t.Errorf("priority key present when --priority not set: %s", raw)
+		if _, err := rawBody.ReadFrom(r.Body); err != nil {
+			t.Fatalf("read body: %v", err)
 		}
-		_ = json.Unmarshal(raw, &got)
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(sampleConvention())
+		writeJSON(t, w, http.StatusCreated, sampleConvention(t))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -482,6 +580,39 @@ func TestRunCreatePriorityOmittedWhenNotSet(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("runCreate: %v; stderr=%s", err, stderr.String())
+	}
+	body := rawBody.String()
+	if strings.Contains(body, `"priority"`) {
+		t.Errorf("priority key present when --priority not set: %s", body)
+	}
+}
+
+// TestRunCreatePrioritySentOnWireWhenSet pins the inverse: when the
+// operator did pass --priority, the value must reach the wire.
+func TestRunCreatePrioritySentOnWireWhenSet(t *testing.T) {
+	var seen api.ConventionCreate
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&seen); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		writeJSON(t, w, http.StatusCreated, sampleConvention(t))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, _ := newRunCmd(t)
+	err := runCreate(cmd, createOptions{
+		Slug: "x", Kind: "operational", Title: "t", BodyArg: "b",
+		Priority: 42, prioritySet: true,
+		BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runCreate: %v", err)
+	}
+	if seen.Priority == nil || *seen.Priority != 42 {
+		t.Errorf("body Priority: got %+v want pointer to 42", seen.Priority)
 	}
 }
 
@@ -527,9 +658,9 @@ func TestRunEditFlagDrivenHappyPath(t *testing.T) {
 		if !strings.Contains(string(raw), "priority") {
 			t.Errorf("PATCH body missing priority: %s", raw)
 		}
-		conv := sampleConvention()
+		conv := sampleConvention(t)
 		conv.Priority = 20
-		_ = json.NewEncoder(w).Encode(conv)
+		writeJSON(t, w, http.StatusOK, conv)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -563,10 +694,10 @@ func TestRunEditEditorModeHappyPath(t *testing.T) {
 	mux.HandleFunc("/api/v1/conventions/vault-canonical", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			_ = json.NewEncoder(w).Encode(sampleConvention())
+			writeJSON(t, w, http.StatusOK, sampleConvention(t))
 		case http.MethodPatch:
 			raw, _ := io.ReadAll(r.Body)
-			var body updateRequest
+			var body api.ConventionUpdate
 			_ = json.Unmarshal(raw, &body)
 			if body.Body == nil {
 				t.Errorf("PATCH body missing body field: %s", raw)
@@ -576,9 +707,9 @@ func TestRunEditEditorModeHappyPath(t *testing.T) {
 			if body.Title != nil || body.Priority != nil {
 				t.Errorf("PATCH body should only have body field: %+v", body)
 			}
-			conv := sampleConvention()
+			conv := sampleConvention(t)
 			conv.Body = *body.Body
-			_ = json.NewEncoder(w).Encode(conv)
+			writeJSON(t, w, http.StatusOK, conv)
 		default:
 			t.Errorf("unexpected method %s", r.Method)
 		}
@@ -613,7 +744,7 @@ func TestRunEditEditorModeAbortsOnEmptyBody(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/vault-canonical", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			_ = json.NewEncoder(w).Encode(sampleConvention())
+			writeJSON(t, w, http.StatusOK, sampleConvention(t))
 			return
 		}
 		if r.Method == http.MethodPatch {
@@ -653,7 +784,7 @@ func TestRunEditEditorModeAbortsOnUnchangedBody(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/vault-canonical", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			_ = json.NewEncoder(w).Encode(sampleConvention())
+			writeJSON(t, w, http.StatusOK, sampleConvention(t))
 			return
 		}
 		if r.Method == http.MethodPatch {
@@ -692,7 +823,7 @@ func TestRunEditEditorModeAbortsOnEditorFailure(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/vault-canonical", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			_ = json.NewEncoder(w).Encode(sampleConvention())
+			writeJSON(t, w, http.StatusOK, sampleConvention(t))
 			return
 		}
 		if r.Method == http.MethodPatch {
@@ -722,8 +853,7 @@ func TestRunEditEditorModeAbortsOnEditorFailure(t *testing.T) {
 func TestRunEditEditorMode404SurfacesNotFoundFromShowFetch(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/nope", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprint(w, `{"detail":"convention_not_found"}`)
+		writeJSONErr(t, w, http.StatusNotFound, `{"detail":"convention_not_found"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -753,10 +883,10 @@ func TestRunEdit422OverBudgetSurfacedInline(t *testing.T) {
 	mux.HandleFunc("/api/v1/conventions/vault-canonical", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			_ = json.NewEncoder(w).Encode(sampleConvention())
+			writeJSON(t, w, http.StatusOK, sampleConvention(t))
 		case http.MethodPatch:
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			fmt.Fprint(w, `{"detail":"convention body exceeds preamble budget (estimated=900, budget=800)"}`)
+			writeJSONErr(t, w, http.StatusUnprocessableEntity,
+				`{"detail":"convention body exceeds preamble budget (estimated=900, budget=800)"}`)
 		}
 	})
 	srv := httptest.NewServer(mux)
@@ -820,8 +950,7 @@ func TestRunDeleteDeclinedExitsZero(t *testing.T) {
 func TestRunDelete404SurfacesNotFound(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/nope", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprint(w, `{"detail":"convention_not_found"}`)
+		writeJSONErr(t, w, http.StatusNotFound, `{"detail":"convention_not_found"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -839,35 +968,29 @@ func TestRunDelete404SurfacesNotFound(t *testing.T) {
 
 // --- history ---
 
-func TestBuildHistoryPath(t *testing.T) {
-	if got := buildHistoryPath("vault-canonical"); got != "/api/v1/conventions/vault-canonical/history" {
-		t.Fatalf("buildHistoryPath: got %q", got)
-	}
-}
-
 func TestRunHistoryHappyPathRendersDiffs(t *testing.T) {
 	bodyBefore := "Vault is canonical."
-	entries := []HistoryEntry{
+	entries := []api.ConventionHistoryEntry{
 		{
-			ID:           "h2",
-			ConventionID: "11111111-1111-1111-1111-111111111111",
+			Id:           mustUUID(t, "33333333-3333-3333-3333-333333333333"),
+			ConventionId: mustUUID(t, stubID),
 			BodyBefore:   &bodyBefore,
 			BodyAfter:    "Vault is canonical.\nAdded rule.",
 			ActorSub:     "ops-admin",
-			Ts:           "2026-05-25T00:00:00Z",
+			Ts:           time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC),
 		},
 		{
-			ID:           "h1",
-			ConventionID: "11111111-1111-1111-1111-111111111111",
+			Id:           mustUUID(t, "44444444-4444-4444-4444-444444444444"),
+			ConventionId: mustUUID(t, stubID),
 			BodyBefore:   nil,
 			BodyAfter:    "Vault is canonical.",
 			ActorSub:     "ops-admin",
-			Ts:           "2026-05-24T00:00:00Z",
+			Ts:           time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC),
 		},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/vault-canonical/history", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(entries)
+		writeJSON(t, w, http.StatusOK, entries)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -892,19 +1015,26 @@ func TestRunHistoryHappyPathRendersDiffs(t *testing.T) {
 
 func TestRunHistoryLimit(t *testing.T) {
 	bodyBefore := "x"
-	mkEntry := func(id string, ts string) HistoryEntry {
-		return HistoryEntry{
-			ID: id, BodyBefore: &bodyBefore, BodyAfter: "y", Ts: ts, ActorSub: "ops",
+	idFor := func(i int) uuid.UUID {
+		return mustUUID(t, fmt.Sprintf("%08x-0000-0000-0000-000000000000", i))
+	}
+	mkEntry := func(id uuid.UUID, day int) api.ConventionHistoryEntry {
+		return api.ConventionHistoryEntry{
+			Id:         id,
+			BodyBefore: &bodyBefore,
+			BodyAfter:  "y",
+			Ts:         time.Date(2026, 5, day, 0, 0, 0, 0, time.UTC),
+			ActorSub:   "ops",
 		}
 	}
-	entries := []HistoryEntry{
-		mkEntry("h3", "2026-05-26T00:00:00Z"),
-		mkEntry("h2", "2026-05-25T00:00:00Z"),
-		mkEntry("h1", "2026-05-24T00:00:00Z"),
+	entries := []api.ConventionHistoryEntry{
+		mkEntry(idFor(3), 26),
+		mkEntry(idFor(2), 25),
+		mkEntry(idFor(1), 24),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/x/history", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(entries)
+		writeJSON(t, w, http.StatusOK, entries)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -915,10 +1045,10 @@ func TestRunHistoryLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runHistory --limit: %v; stderr=%s", err, stderr.String())
 	}
-	if strings.Contains(stdout.String(), "h1") {
+	if strings.Contains(stdout.String(), idFor(1).String()) {
 		t.Errorf("--limit 2 included beyond-limit row: %q", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "h2") {
+	if !strings.Contains(stdout.String(), idFor(2).String()) {
 		t.Errorf("--limit 2 dropped on-limit row: %q", stdout.String())
 	}
 }
@@ -926,7 +1056,7 @@ func TestRunHistoryLimit(t *testing.T) {
 func TestRunHistoryEmpty(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/x/history", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]HistoryEntry{})
+		writeJSON(t, w, http.StatusOK, []api.ConventionHistoryEntry{})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -955,12 +1085,18 @@ func TestRunHistoryRejectsNegativeLimit(t *testing.T) {
 
 func TestRunHistoryJSON(t *testing.T) {
 	bodyBefore := "x"
-	entries := []HistoryEntry{
-		{ID: "h1", BodyBefore: &bodyBefore, BodyAfter: "y", Ts: "2026-05-24T00:00:00Z", ActorSub: "ops"},
+	entries := []api.ConventionHistoryEntry{
+		{
+			Id:         mustUUID(t, stubID),
+			BodyBefore: &bodyBefore,
+			BodyAfter:  "y",
+			Ts:         time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC),
+			ActorSub:   "ops",
+		},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions/x/history", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(entries)
+		writeJSON(t, w, http.StatusOK, entries)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -971,11 +1107,11 @@ func TestRunHistoryJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runHistory --json: %v", err)
 	}
-	var got []HistoryEntry
+	var got []api.ConventionHistoryEntry
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("decode stdout JSON: %v; raw=%s", err, stdout.String())
 	}
-	if len(got) != 1 || got[0].ID != "h1" {
+	if len(got) != 1 || got[0].Id != mustUUID(t, stubID) {
 		t.Errorf("decoded JSON unexpected: %+v", got)
 	}
 }

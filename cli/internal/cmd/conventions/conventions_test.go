@@ -17,8 +17,10 @@ import (
 )
 
 // seedXDGAndToken seeds a per-test config dir + token store that
-// backplane.Resolve / doAuthedRequest read. Mirrors the same helper in
-// cli/internal/cmd/agent/agent_test.go.
+// backplane.Resolve / newAuthedClient read. Mirrors the same helper
+// in cli/internal/cmd/agent/agent_test.go and the sibling typed-
+// client migrations (T1 #1251, T3 #1261, T4 #1262) so a single test
+// substrate covers every verb tree.
 func seedXDGAndToken(t *testing.T, backplaneURL string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -189,26 +191,6 @@ func TestDecodeDetailStringFallsThroughOnListDetail(t *testing.T) {
 	got := decodeDetailString(raw)
 	if !strings.Contains(got, "string too short") {
 		t.Errorf("list-detail fall-through lost content: %q", got)
-	}
-}
-
-// TestURLPathEscapePreservesUnreserved — slug-shaped strings (the
-// V_SLUG pattern) round-trip without escaping.
-func TestURLPathEscapePreservesUnreserved(t *testing.T) {
-	for _, slug := range []string{"vault-canonical", "rbac.canonical", "secret-handling_v2"} {
-		if urlPathEscape(slug) != slug {
-			t.Errorf("urlPathEscape mutated unreserved slug %q -> %q", slug, urlPathEscape(slug))
-		}
-	}
-}
-
-// TestURLPathEscapeEscapesPathSeparator — defensive escape of an
-// adversarial slug containing `/` so it can't smuggle a path
-// boundary.
-func TestURLPathEscapeEscapesPathSeparator(t *testing.T) {
-	got := urlPathEscape("not/a/slug")
-	if strings.Contains(got, "/") {
-		t.Errorf("urlPathEscape failed to escape `/`: %q", got)
 	}
 }
 

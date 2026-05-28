@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,81 +67,19 @@ const defaultGHRepo = "evoila/meho"
 // can't block the retire-checklist verb indefinitely.
 const ghLookupTimeout = 30 * time.Second
 
-// RetireCriterionResult mirrors the backend CriterionResult one-for-
-// one. Hand-written (rather than oapi-codegen-generated) because the
-// Go regen pass for the new endpoint runs in a follow-up PR; the
-// shape is small and pinned by the matching backend test.
-//
-// `Notes` is a `*string` (rather than `string`) so the JSON
-// round-trip preserves the explicit-null shape the backend schema
-// pins: the Python `str | None = None` field always emits the key as
-// `null` when unset, and the schema-stability test in
-// `test_retrieval_retire.py::test_report_json_shape_is_stable`
-// asserts the full key set on every criterion. Omitempty would drop
-// the field on --json output for null-notes criteria, breaking
-// jq-style consumers that key off the stable shape.
-type RetireCriterionResult struct {
-	Name             string  `json:"name"`
-	Verdict          string  `json:"verdict"`
-	ObservedValue    string  `json:"observed_value"`
-	ThresholdSummary string  `json:"threshold_summary"`
-	Notes            *string `json:"notes"`
-}
-
-// RetireSurfaceChecklist mirrors the backend `SurfaceChecklist` model.
-type RetireSurfaceChecklist struct {
-	Surface  string                  `json:"surface"`
-	Verdict  string                  `json:"verdict"`
-	Criteria []RetireCriterionResult `json:"criteria"`
-}
-
-// RetireChecklistReport mirrors the backend `RetireChecklistReport`.
-// `TenantID` deliberately omits `omitempty`: the backend always emits
-// the key (Pydantic v2 `UUID | None`), and dropping the key on the
-// Go re-marshal would break --json schema-stability consumers the
-// same way `Notes,omitempty` did before #497's fixup.
-type RetireChecklistReport struct {
-	RanAt          string                   `json:"ran_at"`
-	TenantID       *string                  `json:"tenant_id"`
-	Since          string                   `json:"since"`
-	Until          string                   `json:"until"`
-	Surfaces       []RetireSurfaceChecklist `json:"surfaces"`
-	OverallVerdict string                   `json:"overall_verdict"`
-}
-
-// baselineMetricsOverride mirrors the backend
-// `BaselineMetricsOverride` model. Caller-supplied baseline numbers
-// the CLI obtains from a prior local `meho retrieval eval --baseline
-// grep --json` run: the v0.2 backplane has no server-side corpus
-// snapshot, so criterion 4 (MEHO ≥ baseline) only reaches green when
-// the operator passes baseline metrics via this override.
-type baselineMetricsOverride struct {
-	PrecisionAt5 float64 `json:"precision_at_5"`
-	MRR          float64 `json:"mrr"`
-	Coverage     float64 `json:"coverage"`
-	Kind         string  `json:"kind,omitempty"`
-}
-
-// retireRequest is the POST body shape; mirrors the backend
-// `RetireChecklistRequest`. Each map field is a pointer so Go's
-// `omitempty` only suppresses the field when no map is supplied —
-// an empty map would otherwise be serialised as `{}` which the
-// backend treats as "every surface has zero blockers / overrides"
-// (potentially green) rather than the intended "unknown" (yellow).
-type retireRequest struct {
-	Surface           string                              `json:"surface"`
-	BlockerCounts     *map[string]int                     `json:"blocker_counts,omitempty"`
-	BaselineOverrides *map[string]baselineMetricsOverride `json:"baseline_overrides,omitempty"`
-}
-
 // ghIssueLabel is one element of the labels array returned by
-// `gh issue list --json labels`.
+// `gh issue list --json labels`. This type stays hand-typed (not
+// generated) because it describes the `gh` CLI subprocess JSON
+// shape, not a meho backplane API; it has no place in the
+// openapi.json snapshot.
 type ghIssueLabel struct {
 	Name string `json:"name"`
 }
 
 // ghIssue captures the slice of the gh JSON output we need (number
-// for diagnostics, labels for the surface bucket).
+// for diagnostics, labels for the surface bucket). Same posture as
+// ghIssueLabel — describes the `gh` subprocess output, not a
+// backplane API.
 type ghIssue struct {
 	Number int            `json:"number"`
 	Labels []ghIssueLabel `json:"labels"`
@@ -289,7 +226,7 @@ func runRetireChecklist(cmd *cobra.Command, opts retireOptions) error {
 	// matches operator expectations — the baseline data is auxiliary,
 	// the request should still produce a usable verdict on the other
 	// four criteria.
-	var baselineOverrides *map[string]baselineMetricsOverride
+	var baselineOverrides *map[string]api.BaselineMetricsOverride
 	if opts.BaselineFile != "" {
 		overrides, baselineErr := loadBaselineOverrides(opts.BaselineFile)
 		if baselineErr != nil {
@@ -302,12 +239,31 @@ func runRetireChecklist(cmd *cobra.Command, opts retireOptions) error {
 		}
 	}
 
-	report, err := postRetireChecklist(
+	resp, err := postRetireChecklist(
 		cmd.Context(), backplaneURL, opts, blockerCounts, baselineOverrides,
 	)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	// Guard against 200 + missing-content-type leaving JSON200 nil.
+	// printRetireTable's empty-surfaces branch silently emits the
+	// overall verdict line only — without this guard, a malformed
+	// 200 would print an empty checklist and exit 0. Mirrors the
+	// convention in `cli/internal/cmd/status.go:142`.
+	if resp.JSON200 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a retire checklist payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	report := resp.JSON200
 
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), report)
@@ -316,84 +272,57 @@ func runRetireChecklist(cmd *cobra.Command, opts retireOptions) error {
 	return nil
 }
 
+// retireRequestBody assembles the typed POST body for
+// /api/v1/retrieve/retire-checklist. `Surface` is set only when the
+// operator supplied a non-default value (the generated pointer
+// shape's `omitempty` keeps the wire compact). `BlockerCounts` and
+// `BaselineOverrides` flow through unchanged — both are
+// `*map[...]...` on the generated `api.RetireChecklistRequest` so a
+// nil pointer drops the key (Pydantic absence == null) while a
+// non-nil pointer to an empty map serialises as `{}` ("zero
+// blockers everywhere" intent, distinct from the unknown intent).
+func retireRequestBody(
+	opts retireOptions,
+	blockerCounts *map[string]int,
+	baselineOverrides *map[string]api.BaselineMetricsOverride,
+) api.RetireChecklistRequest {
+	body := api.RetireChecklistRequest{
+		BlockerCounts:     blockerCounts,
+		BaselineOverrides: baselineOverrides,
+	}
+	if opts.Surface != "" {
+		surface := api.RetireChecklistRequestSurface(opts.Surface)
+		body.Surface = &surface
+	}
+	return body
+}
+
 // postRetireChecklist calls POST /api/v1/retrieve/retire-checklist
-// with the surface + blocker_counts + baseline_overrides body.
-// Mirrors `postEval`'s 401-retry shape: one transparent refresh +
-// retry on auth failure.
+// with the surface + blocker_counts + baseline_overrides body via
+// the generated typed client. The 401-refresh-retry loop runs
+// through retryOn401.
 func postRetireChecklist(
 	ctx context.Context,
 	backplaneURL string,
 	opts retireOptions,
 	blockerCounts *map[string]int,
-	baselineOverrides *map[string]baselineMetricsOverride,
-) (*RetireChecklistReport, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+	baselineOverrides *map[string]api.BaselineMetricsOverride,
+) (*api.RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
-	}
-
-	body, err := json.Marshal(retireRequest{
-		Surface:           opts.Surface,
-		BlockerCounts:     blockerCounts,
-		BaselineOverrides: baselineOverrides,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal retire request: %w", err)
-	}
-
-	resp, err := postRetireWithBearer(ctx, httpClient, backplaneURL, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close()
-			return nil, rerr
-		}
-		resp.Body.Close()
-		bearer = authed.AccessToken()
-		resp, err = postRetireWithBearer(ctx, httpClient, backplaneURL, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-
-	var out RetireChecklistReport
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode retire response: %w", err)
-	}
-	return &out, nil
-}
-
-func postRetireWithBearer(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(
-		ctx, http.MethodPost,
-		backplaneURL+"/api/v1/retrieve/retire-checklist",
-		bytes.NewReader(body),
+	body := retireRequestBody(opts, blockerCounts, baselineOverrides)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error) {
+			return authed.RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithResponse(
+				ctx, nil, body,
+			)
+		},
+		func(r *api.RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse) int {
+			return r.StatusCode()
+		},
 	)
-	if err != nil {
-		return nil, fmt.Errorf("build retire request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	return client.Do(req)
 }
 
 // lookupBlockerCounts queries `gh issue list` for open issues labeled
@@ -499,19 +428,20 @@ func surfacesFromLabels(labels []ghIssueLabel) []string {
 // surfaces) are simply omitted from the returned map and the backend
 // leaves criterion 4 yellow for those surfaces.
 //
-// The shape this function reads matches `EvalResult` from
-// `eval.go` — same package, so we re-use that type rather than
-// duplicating a parallel struct that could drift.
-func loadBaselineOverrides(path string) (map[string]baselineMetricsOverride, error) {
+// The shape this function reads matches `api.EvalResult` from the
+// generated typed client — same struct the eval verb's
+// `--save-baseline` writes, so re-using it keeps the round-trip
+// tight rather than declaring a parallel struct that could drift.
+func loadBaselineOverrides(path string) (map[string]api.BaselineMetricsOverride, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read baseline file %q: %w", path, err)
 	}
-	var parsed EvalResult
+	var parsed api.EvalResult
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, fmt.Errorf("parse baseline file %q: %w", path, err)
 	}
-	out := make(map[string]baselineMetricsOverride, len(parsed.Surfaces))
+	out := make(map[string]api.BaselineMetricsOverride, len(parsed.Surfaces))
 	for _, s := range parsed.Surfaces {
 		// Skip surfaces whose baseline didn't run — the eval runner
 		// reports `baseline_kind=null` (decoded as `nil` here) for
@@ -522,15 +452,16 @@ func loadBaselineOverrides(path string) (map[string]baselineMetricsOverride, err
 		// instead of yellow, which is the wrong default.
 		if s.BaselineKind == nil ||
 			s.BaselinePrecisionAt5 == nil ||
-			s.BaselineMRR == nil ||
+			s.BaselineMrr == nil ||
 			s.BaselineCoverage == nil {
 			continue
 		}
-		out[s.Surface] = baselineMetricsOverride{
+		kind := *s.BaselineKind
+		out[string(s.Surface)] = api.BaselineMetricsOverride{
 			PrecisionAt5: *s.BaselinePrecisionAt5,
-			MRR:          *s.BaselineMRR,
+			Mrr:          *s.BaselineMrr,
 			Coverage:     *s.BaselineCoverage,
-			Kind:         *s.BaselineKind,
+			Kind:         &kind,
 		}
 	}
 	return out, nil
@@ -540,10 +471,15 @@ func loadBaselineOverrides(path string) (map[string]baselineMetricsOverride, err
 // surface, with a final overall-verdict line. The format is
 // deliberately compact (one line per criterion) so a 4-surface
 // `--surface all` report still fits on a single terminal screen.
-func printRetireTable(w io.Writer, r *RetireChecklistReport) {
-	fmt.Fprintf(w, "Retire checklist (%s) — overall: %s\n", r.RanAt, r.OverallVerdict)
-	if r.TenantID != nil {
-		fmt.Fprintf(w, "tenant: %s\n", *r.TenantID)
+//
+// `RanAt` is a `time.Time` on the generated `api.RetireChecklistReport`;
+// formatted as RFC3339 to preserve the pre-migration shape operators
+// correlate with audit-log rows.
+func printRetireTable(w io.Writer, r *api.RetireChecklistReport) {
+	fmt.Fprintf(w, "Retire checklist (%s) — overall: %s\n",
+		r.RanAt.Format("2006-01-02T15:04:05Z07:00"), r.OverallVerdict)
+	if r.TenantId != nil {
+		fmt.Fprintf(w, "tenant: %s\n", r.TenantId.String())
 	}
 	for _, surface := range r.Surfaces {
 		fmt.Fprintf(w, "\n  %s — %s\n", surface.Surface, surface.Verdict)
@@ -553,7 +489,7 @@ func printRetireTable(w io.Writer, r *RetireChecklistReport) {
 				notes = " (" + *c.Notes + ")"
 			}
 			fmt.Fprintf(w, "    [%s] %-22s  %s  (threshold: %s)%s\n",
-				strings.ToUpper(c.Verdict),
+				strings.ToUpper(string(c.Verdict)),
 				c.Name,
 				c.ObservedValue,
 				c.ThresholdSummary,

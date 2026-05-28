@@ -19,10 +19,20 @@
 //
 // Authentication piggybacks on the token `meho login` wrote — same
 // pattern as `meho agent`, `meho kb`, `meho broadcast`.
+//
+// G0.12-T4 #1262 migrated this package off the sibling-verb pattern
+// of hand-rolled HTTP + hand-typed copies of backend pydantic models.
+// Every verb here drives the generated `api.ClientWithResponses`
+// surface directly: `api.NewAuthedClient` wires the bearer + lazy
+// 401-refresh editor onto the embedded `ClientWithResponses`, and
+// the verbs call the typed `*WithResponse` methods
+// (`ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse` etc.).
+// Consumer-side struct drift — the #1069 root cause Initiative #1118
+// targets — can't recur because we now consume `api.AgentPrincipalRead`
+// and `api.AgentPrincipalListResponse` directly.
 package agentprincipal
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,151 +67,70 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// Entry mirrors the backend AgentPrincipalRead pydantic model.
-type Entry struct {
-	ID                 string `json:"id"`
-	TenantID           string `json:"tenant_id"`
-	Name               string `json:"name"`
-	KeycloakClientID   string `json:"keycloak_client_id"`
-	KeycloakInternalID string `json:"keycloak_internal_id"`
-	OwnerSub           string `json:"owner_sub"`
-	Revoked            bool   `json:"revoked"`
-	CreatedBySub       string `json:"created_by_sub"`
-	CreatedAt          string `json:"created_at"`
-	UpdatedAt          string `json:"updated_at"`
-}
-
-// ListResponse mirrors the AgentPrincipalListResponse envelope.
-type ListResponse struct {
-	Principals []Entry `json:"principals"`
-}
-
-// errMissingAccessToken is the sentinel doAuthedRequest returns when
+// errMissingAccessToken is the sentinel newAuthedClient returns when
 // the stored token row exists but its access_token is empty — a
 // credential-state failure renderRequestError maps to auth_expired
-// with a `meho login` hint. Mirrors the agent package's shape.
+// with a `meho login` hint. Mirrors the agent / approvals packages'
+// shape so an operator sees the same hint across every verb tree.
 var errMissingAccessToken = errors.New("meho: stored token has no access_token")
 
-// doAuthedRequest issues a single authenticated HTTP request against the
-// backplane with bearer injection and one-shot 401-refresh-retry. Returns
-// the raw response body on 2xx, an *httpError on non-2xx, or an error
-// categorised by api.IsTokenNotFound / api.IsNoRefreshToken / generic
-// transport. A 204 yields nil without error (used by the revoke verb).
-func doAuthedRequest(ctx context.Context, backplaneURL, method, path string, body []byte) ([]byte, error) {
+// newAuthedClient builds an api.AuthedClient for the supplied
+// backplane URL and verifies a non-empty bearer is loaded. Centralised
+// so every verb's typed-call path goes through the same
+// "stored-token-loaded + non-empty bearer" gate; the caller forwards
+// any returned error to renderRequestError for category mapping.
+func newAuthedClient(ctx context.Context, backplaneURL string) (*api.AuthedClient, error) {
 	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
 	if err != nil {
 		return nil, err
 	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
+	if authed.AccessToken() == "" {
 		return nil, errMissingAccessToken
 	}
+	return authed, nil
+}
 
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
+// retryOn401 invokes call once, and if the typed response carries a
+// 401, runs a one-shot bearer refresh and re-issues call. Mirrors the
+// behaviour `api.AuthedClient.GetHealth` implements for the
+// /api/v1/health endpoint, generalised so every agent-principal verb
+// runs the same transparent-retry contract.
+//
+// statusOf reads the StatusCode off the typed response envelope (the
+// generated *Response types expose StatusCode() through their embedded
+// *http.Response). A nil response counts as "no retry" — the transport
+// already failed and the caller surfaces err directly.
+func retryOn401[R any](
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*R, error),
+	statusOf func(*R) int,
+) (*R, error) {
+	resp, err := call(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close() //nolint:errcheck
-			return nil, rerr
-		}
-		resp.Body.Close() //nolint:errcheck
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
+	if resp == nil || statusOf(resp) != http.StatusUnauthorized {
+		return resp, nil
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, responseBodyCap+1))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
+	if rerr := authed.Refresh(ctx); rerr != nil {
+		return resp, rerr
 	}
-	if int64(len(raw)) > responseBodyCap {
-		return nil, fmt.Errorf(
-			"response body exceeds %d-byte cap; refusing to decode possibly-truncated JSON",
-			responseBodyCap,
-		)
-	}
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
+	return call(ctx)
 }
 
-// responseBodyCap bounds the response body the CLI will read — 1 MiB is
-// comfortable headroom for any realistic agent-principal record.
-const responseBodyCap int64 = 1 << 20
-
-// httpError carries a non-2xx response so per-verb runners can render the
-// right category.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// sendRequest builds and dispatches a single HTTP request using the
-// supplied bearer token. It does NOT drain the response body — callers
-// are responsible for closing resp.Body.
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	fullURL := backplaneURL + path
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
-}
-
-// detailEnvelope models FastAPI's HTTPException JSON shape.
-type detailEnvelope struct {
-	Detail string `json:"detail"`
-}
-
-// decodeDetailString pulls the “detail“ field out of a FastAPI error
-// body. Returns the raw body string if the body is not valid JSON.
-func decodeDetailString(body string) string {
-	var env detailEnvelope
-	if err := json.Unmarshal([]byte(body), &env); err == nil && env.Detail != "" {
-		return env.Detail
-	}
-	return body
-}
-
-// renderRequestError translates a request error into the right
-// output.StructuredError category. Maps the agent-principals REST surface:
-//
-//   - empty stored bearer → auth_expired.
-//   - 401 (refresh failed / token rejected) → auth_expired.
-//   - 403 → insufficient_role.
-//   - 404 → unexpected (agent_principal_not_found; cross-tenant probes land here).
-//   - 409 → unexpected (agent_principal_already_exists).
-//   - 503 → unexpected (keycloak_admin_not_configured).
-//   - Pure transport errors → unreachable.
-func renderRequestError(cmd *cobra.Command, backplaneURL string, err error, jsonOut bool) error {
+// renderRequestError translates a transport-layer request error into
+// the right output.StructuredError category. Maps the agent-principals
+// REST surface's pre-response failures: missing bearer, no-refresh-
+// token, token-not-found, plus the generic transport-down case.
+// Non-2xx status codes carried in a typed response envelope are
+// classified by renderHTTPStatus instead.
+func renderRequestError(
+	cmd *cobra.Command,
+	backplaneURL string,
+	err error,
+	jsonOut bool,
+) error {
 	if errors.Is(err, errMissingAccessToken) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -229,55 +158,102 @@ func renderRequestError(cmd *cobra.Command, backplaneURL string, err error, json
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
-		switch he.StatusCode {
-		case http.StatusUnauthorized:
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.AuthExpired(fmt.Sprintf(
-					"backplane rejected the stored token; run `meho login %s`",
-					backplaneURL,
-				)),
-				jsonOut,
-			)
-		case http.StatusForbidden:
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.InsufficientRole(decodeDetailString(he.Body)),
-				jsonOut,
-			)
-		case http.StatusNotFound:
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.Unexpected(decodeDetailString(he.Body)),
-				jsonOut,
-			)
-		case http.StatusConflict:
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.Unexpected(decodeDetailString(he.Body)),
-				jsonOut,
-			)
-		case http.StatusServiceUnavailable:
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.Unexpected("keycloak_admin_not_configured: contact your MEHO administrator"),
-				jsonOut,
-			)
-		default:
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
-					backplaneURL, he.StatusCode, he.Body)),
-				jsonOut,
-			)
-		}
-	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,
 	)
 }
 
-func printEntrySummary(w io.Writer, e *Entry) {
-	fmt.Fprintf(w, "  id:                  %s\n", e.ID)
-	fmt.Fprintf(w, "  keycloak_client_id:  %s\n", e.KeycloakClientID)
+// renderHTTPStatus classifies a non-2xx response (or 401 after a
+// failed refresh) carried in the typed envelope into the right
+// StructuredError category. Mirrors the pre-migration `httpError`
+// switch but acts on the (statusCode, body) pair lifted off the
+// generated `*Response.HTTPResponse` + `Body` fields rather than a
+// sentinel value. The mapping preserved across the migration:
+//
+//   - 401 → auth_expired (refresh impossible / token rejected).
+//   - 403 → insufficient_role with the backend's detail string.
+//   - 404 → unexpected with the backend's detail (agent_principal_not_found;
+//     cross-tenant probes land here per the no-existence-leak posture).
+//   - 409 → unexpected with the backend's detail (agent_principal_already_exists).
+//   - 503 → unexpected with the keycloak_admin_not_configured hint
+//     (the constant the backend's auth/keycloak_admin.py raises).
+//   - Other non-2xx → unexpected with the raw body.
+func renderHTTPStatus(
+	cmd *cobra.Command,
+	backplaneURL string,
+	statusCode int,
+	body []byte,
+	jsonOut bool,
+) error {
+	bodyStr := strings.TrimSpace(string(body))
+	switch statusCode {
+	case http.StatusUnauthorized:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.AuthExpired(fmt.Sprintf(
+				"backplane rejected the stored token; run `meho login %s`",
+				backplaneURL,
+			)),
+			jsonOut,
+		)
+	case http.StatusForbidden:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.InsufficientRole(decodeDetailString(bodyStr)),
+			jsonOut,
+		)
+	case http.StatusNotFound:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(decodeDetailString(bodyStr)),
+			jsonOut,
+		)
+	case http.StatusConflict:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(decodeDetailString(bodyStr)),
+			jsonOut,
+		)
+	case http.StatusServiceUnavailable:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("keycloak_admin_not_configured: contact your MEHO administrator"),
+			jsonOut,
+		)
+	default:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
+				backplaneURL, statusCode, bodyStr)),
+			jsonOut,
+		)
+	}
+}
+
+// detailEnvelope models FastAPI's HTTPException JSON shape.
+type detailEnvelope struct {
+	Detail string `json:"detail"`
+}
+
+// decodeDetailString pulls the `detail` field out of a FastAPI error
+// body. Returns the raw body string if the body is not valid JSON or
+// the `detail` field is missing.
+func decodeDetailString(body string) string {
+	var env detailEnvelope
+	if err := json.Unmarshal([]byte(body), &env); err == nil && env.Detail != "" {
+		return env.Detail
+	}
+	return body
+}
+
+// printEntrySummary renders an AgentPrincipalRead as a short
+// operator-facing block. Same shape as the pre-migration renderer
+// (load-bearing for the acceptance criterion that requires byte-
+// identical output across the migration); the only delta is the
+// type the verb threads in (now api.AgentPrincipalRead, no consumer-
+// side duplicate).
+func printEntrySummary(w io.Writer, e *api.AgentPrincipalRead) {
+	if e == nil {
+		return
+	}
+	fmt.Fprintf(w, "  id:                  %s\n", e.Id.String())
+	fmt.Fprintf(w, "  keycloak_client_id:  %s\n", e.KeycloakClientId)
 	fmt.Fprintf(w, "  owner_sub:           %s\n", e.OwnerSub)
 	fmt.Fprintf(w, "  revoked:             %v\n", e.Revoked)
-	fmt.Fprintf(w, "  created_at:          %s\n", e.CreatedAt)
+	fmt.Fprintf(w, "  created_at:          %s\n", e.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
 }

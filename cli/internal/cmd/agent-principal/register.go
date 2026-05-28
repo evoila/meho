@@ -5,20 +5,15 @@ package agentprincipal
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// registerRequest mirrors the backend AgentPrincipalCreate pydantic model.
-type registerRequest struct {
-	Name     string `json:"name"`
-	OwnerSub string `json:"owner_sub,omitempty"`
-}
 
 // newRegisterCmd returns the `meho agent-principal register <name>` command.
 func newRegisterCmd() *cobra.Command {
@@ -52,7 +47,7 @@ func newRegisterCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ownerSub, "owner-sub", "",
 		"OIDC sub of the kill-switch owner (defaults to the caller's sub)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw Entry JSON instead of the human summary")
+		"emit raw AgentPrincipalRead JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -74,13 +69,14 @@ func runRegister(cmd *cobra.Command, opts registerOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	entry, err := postRegister(cmd.Context(), backplaneURL, registerRequest{
-		Name:     opts.Name,
-		OwnerSub: opts.OwnerSub,
-	})
+	resp, err := postRegister(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusCreated {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	entry := resp.JSON201
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}
@@ -89,18 +85,39 @@ func runRegister(cmd *cobra.Command, opts registerOptions) error {
 	return nil
 }
 
-func postRegister(ctx context.Context, backplaneURL string, req registerRequest) (*Entry, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal register request: %w", err)
+// buildRegisterBody maps the verb's options onto the generated
+// AgentPrincipalCreate body. owner_sub is a *string in the
+// generated type (the backend treats null/omitted as "default to
+// the caller's sub"); we send the pointer only when the operator
+// passed --owner-sub so an unset flag leaves the field absent on
+// the wire instead of stamping an explicit empty string.
+func buildRegisterBody(opts registerOptions) api.AgentPrincipalCreate {
+	body := api.AgentPrincipalCreate{Name: opts.Name}
+	if opts.OwnerSub != "" {
+		owner := opts.OwnerSub
+		body.OwnerSub = &owner
 	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/agent-principals", body)
+	return body
+}
+
+func postRegister(
+	ctx context.Context,
+	backplaneURL string,
+	opts registerOptions,
+) (*api.RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode register response: %w", err)
-	}
-	return &out, nil
+	body := buildRegisterBody(opts)
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse, error) {
+			return authed.RegisterAgentPrincipalApiV1AgentPrincipalsPostWithResponse(
+				ctx,
+				&api.RegisterAgentPrincipalApiV1AgentPrincipalsPostParams{},
+				body,
+			)
+		},
+		func(r *api.RegisterAgentPrincipalApiV1AgentPrincipalsPostResponse) int { return r.StatusCode() },
+	)
 }

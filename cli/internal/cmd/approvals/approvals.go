@@ -12,36 +12,73 @@
 //     GET /api/v1/approvals/{id}. Role: operator. Renders proposed_effect
 //     and elicitation_url; --json for the raw envelope.
 //   - `meho approvals approve <id> [--reason TEXT] [--json]` — approve via
-//     POST /api/v1/approvals/{id}/approve. Role: operator. Resumes the
+//     POST /api/v1/approvals/{id}/decide. Role: operator. Resumes the
 //     paused agent run via the T4 path.
 //   - `meho approvals reject <id> [--reason TEXT] [--json]` — reject via
-//     POST /api/v1/approvals/{id}/reject. Role: operator. Aborts the
+//     POST /api/v1/approvals/{id}/decide. Role: operator. Aborts the
 //     paused agent run.
 //
 // Authentication piggybacks on the token meho login wrote — same pattern
 // as `meho agent`, `meho audit`, `meho conventions`.
 //
-// The implementation follows the in-package HTTP helper pattern the sibling
-// verb trees use (a local doAuthedRequest / renderRequestError pair) rather
-// than a shared client package, for the import-cycle reason every sibling
-// cites: each verb tree is grafted onto the root command, so a shared helper
-// imported from cmd/* and from a per-tree package would close the cycle.
+// G0.12-T1 #1251 migrated this package off the sibling-verb pattern of
+// hand-rolled HTTP + hand-typed copies of backend pydantic models.
+// Every verb here drives the generated `api.ClientWithResponses`
+// surface directly: `api.NewAuthedClient` wires the bearer + lazy
+// 401-refresh editor onto the embedded `ClientWithResponses`, and
+// the verbs call the typed `*WithResponse` methods
+// (`ListApprovalsApiV1ApprovalsGetWithResponse` etc.). Consumer-side
+// struct drift — the #1069 root cause — can't recur because we now
+// consume `api.ApprovalRequestView` directly.
 package approvals
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
+
+// httpResponseError carries a non-2xx status from a typed-client
+// `*WithResponse` call up to the verb's renderer. The typed-client
+// surface returns non-2xx responses in-band on the `(*Response, nil)`
+// tuple (transport-layer failures come back on the `(nil, err)`
+// tuple instead) — we lift the HTTP-failure case to an error type so
+// the call sites can use a single `if err != nil` branch and
+// `errors.As` routes the right way (HTTP status → `renderHTTPStatus`,
+// everything else → `renderTransportError`). See `routeRequestError`.
+type httpResponseError struct {
+	statusCode int
+	body       []byte
+}
+
+func (e *httpResponseError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.statusCode, trimmedBody(e.body))
+}
+
+// routeRequestError is the single dispatcher every verb feeds an
+// error from `fetchList` / `fetchDetail` / `postDecision` into. The
+// error is either an `*httpResponseError` (the backplane responded
+// with a non-2xx status) or a transport-layer failure (network,
+// refresh-impossible, etc.); we route the former through
+// `renderHTTPStatus` and the latter through `renderTransportError`.
+func routeRequestError(
+	cmd *cobra.Command,
+	backplaneURL string,
+	err error,
+	jsonOut bool,
+) error {
+	var he *httpResponseError
+	if errors.As(err, &he) {
+		return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, jsonOut)
+	}
+	return renderTransportError(cmd, backplaneURL, err, jsonOut)
+}
 
 // NewRootCmd returns the `meho approvals` parent command. Grafted onto
 // the top-level meho tree by cmd/root.go alongside `meho agent`,
@@ -68,156 +105,36 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// ApprovalSummary mirrors backend ApprovalRequestView for list rendering.
-// (Backend returns the same view shape for list and show; the CLI keeps a
-// trimmed alias for the table view.)
-type ApprovalSummary struct {
-	ID           string  `json:"id"`
-	TenantID     string  `json:"tenant_id"`
-	Status       string  `json:"status"`
-	ConnectorID  string  `json:"connector_id"`
-	OpID         string  `json:"op_id"`
-	PrincipalSub string  `json:"principal_sub"`
-	PrincipalAct *string `json:"principal_act"`
-	CreatedAt    string  `json:"created_at"`
-	ExpiresAt    *string `json:"expires_at"`
-}
-
-// ApprovalDetail mirrors the backend ApprovalRequestView pydantic model
-// returned by GET /api/v1/approvals and GET /api/v1/approvals/{id}.
-type ApprovalDetail struct {
-	ID             string                  `json:"id"`
-	TenantID       string                  `json:"tenant_id"`
-	Status         string                  `json:"status"`
-	RunID          *string                 `json:"run_id"`
-	ConnectorID    string                  `json:"connector_id"`
-	OpID           string                  `json:"op_id"`
-	TargetID       *string                 `json:"target_id"`
-	ParamsHash     string                  `json:"params_hash"`
-	ProposedEffect *map[string]interface{} `json:"proposed_effect"`
-	PrincipalSub   string                  `json:"principal_sub"`
-	PrincipalAct   *string                 `json:"principal_act"`
-	ReviewedBy     *string                 `json:"reviewed_by"`
-	DecidedAt      *string                 `json:"decided_at"`
-	ExpiresAt      *string                 `json:"expires_at"`
-	CreatedAt      string                  `json:"created_at"`
-}
-
-// (ListResponse envelope removed — backend GET /api/v1/approvals returns
-// a plain JSON array of ApprovalSummary, mirroring T4's merged surface.)
-
-// decisionBody is the JSON body for the POST /api/v1/approvals/{id}/decide
-// route (G11.2-T5 operator-decision path; the agent-side /approve route
-// with params + hash-check stays available for the agent's REST resume).
-type decisionBody struct {
-	Decision string `json:"decision"`
-	Reason   string `json:"reason,omitempty"`
-}
-
-// errMissingAccessToken is the sentinel doAuthedRequest returns when the
-// stored token row exists but access_token is empty.
-var errMissingAccessToken = errors.New("meho: stored token has no access_token")
-
-// responseBodyCap bounds the response body the CLI will read.
-const responseBodyCap int64 = 1 << 20 // 1 MiB
-
-// httpError carries a non-2xx response.
-type httpError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Body)
-}
-
-// doAuthedRequest issues an authenticated HTTP request with one-shot
-// 401-refresh-retry. Mirrors the pattern agent / conventions use.
-func doAuthedRequest(
+// newAuthedClient builds an `api.AuthedClient` and surfaces its
+// construction-time errors as the right `output.StructuredError`
+// category (auth_expired when no token was ever stored, else
+// unexpected_response with the underlying error wrapped). Splits the
+// boilerplate every verb here used to duplicate inline.
+func newAuthedClient(
 	ctx context.Context,
-	backplaneURL, method, path string,
-	body []byte,
-) ([]byte, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+	cmd *cobra.Command,
+	backplaneURL string,
+	jsonOut bool,
+) (*api.AuthedClient, error) {
+	client, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
 	if err != nil {
-		return nil, err
+		return nil, renderClientError(cmd, backplaneURL, err, jsonOut)
 	}
-	httpClient := authed.HTTPClient()
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return nil, errMissingAccessToken
-	}
-	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		if rerr := authed.Refresh(ctx); rerr != nil {
-			resp.Body.Close() //nolint:errcheck
-			return nil, rerr
-		}
-		resp.Body.Close() //nolint:errcheck
-		bearer = authed.AccessToken()
-		resp, err = sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)
-		if err != nil {
-			return nil, err
-		}
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, responseBodyCap+1))
-	if readErr != nil {
-		return nil, fmt.Errorf("read response: %w", readErr)
-	}
-	if int64(len(raw)) > responseBodyCap {
-		return nil, fmt.Errorf("response body exceeds %d-byte cap", responseBodyCap)
-	}
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
-	}
-	return raw, nil
+	return client, nil
 }
 
-func sendRequest(
-	ctx context.Context,
-	client *http.Client,
-	base, method, path, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	var reqBody io.Reader
-	if len(body) > 0 {
-		reqBody = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, base+path, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	if len(body) > 0 {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return client.Do(req)
-}
-
-// renderRequestError translates a request error into the right
-// output.StructuredError category. Mirrors conventions / agent shape.
-func renderRequestError(
+// renderClientError maps `api.NewAuthedClient` failures onto the
+// structured-error envelope. `IsTokenNotFound` is the "operator
+// never ran meho login" sentinel and surfaces as auth_expired with a
+// `meho login` hint; anything else is a build-time failure of the
+// authed transport itself (token store unreadable, etc.) and
+// surfaces as unexpected_response so the operator sees the cause.
+func renderClientError(
 	cmd *cobra.Command,
 	backplaneURL string,
 	err error,
 	jsonOut bool,
 ) error {
-	if errors.Is(err, errMissingAccessToken) {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.AuthExpired(fmt.Sprintf(
-				"stored credentials for %s are incomplete; run `meho login %s`",
-				backplaneURL, backplaneURL,
-			)),
-			jsonOut,
-		)
-	}
 	if api.IsTokenNotFound(err) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -227,6 +144,23 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
+	return output.RenderError(cmd.ErrOrStderr(),
+		output.Unexpected(fmt.Sprintf("build authed client for %s: %v", backplaneURL, err)),
+		jsonOut,
+	)
+}
+
+// renderTransportError maps a generated-client call's transport-layer
+// error (network failure, refresh-impossible after a 401) onto the
+// right structured-error category. The typed-client surface returns
+// `(nil, err)` for these; non-2xx HTTP responses arrive as
+// `(*Response, nil)` and are routed through `renderHTTPStatus` instead.
+func renderTransportError(
+	cmd *cobra.Command,
+	backplaneURL string,
+	err error,
+	jsonOut bool,
+) error {
 	if api.IsNoRefreshToken(err) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -236,23 +170,29 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
-	var he *httpError
-	if errors.As(err, &he) {
-		return renderHTTPError(cmd, backplaneURL, he, jsonOut)
-	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,
 	)
 }
 
-func renderHTTPError(
+// renderHTTPStatus maps a non-2xx HTTP status from the typed-client
+// response onto the right structured-error category. Mirrors the
+// pre-migration `renderHTTPError` shape (401→AuthExpired,
+// 403→InsufficientRole, 404→approval_request_not_found, 409/422→
+// Unexpected(body), other non-2xx→Unexpected(HTTP N: body)) but acts
+// on the (StatusCode, Body) pair lifted off the generated
+// `*Response.HTTPResponse` + `Body` fields rather than a sentinel
+// `httpError` value.
+func renderHTTPStatus(
 	cmd *cobra.Command,
 	backplaneURL string,
-	he *httpError,
+	statusCode int,
+	body []byte,
 	jsonOut bool,
 ) error {
-	switch he.StatusCode {
+	bodyStr := trimmedBody(body)
+	switch statusCode {
 	case http.StatusUnauthorized:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -263,7 +203,7 @@ func renderHTTPError(
 		)
 	case http.StatusForbidden:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.InsufficientRole(he.Body),
+			output.InsufficientRole(bodyStr),
 			jsonOut,
 		)
 	case http.StatusNotFound:
@@ -271,20 +211,38 @@ func renderHTTPError(
 			output.Unexpected("approval_request_not_found"),
 			jsonOut,
 		)
-	case http.StatusConflict:
+	case http.StatusConflict, http.StatusUnprocessableEntity:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(he.Body),
-			jsonOut,
-		)
-	case http.StatusUnprocessableEntity:
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(he.Body),
+			output.Unexpected(bodyStr),
 			jsonOut,
 		)
 	default:
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("HTTP %d: %s", he.StatusCode, he.Body)),
+			output.Unexpected(fmt.Sprintf("HTTP %d: %s", statusCode, bodyStr)),
 			jsonOut,
 		)
 	}
+}
+
+// trimmedBody renders a response body for inclusion in an error
+// envelope: trims trailing whitespace, surfaces a placeholder when
+// the backend returned an empty body so the operator-facing string
+// is never just "HTTP 500:".
+func trimmedBody(body []byte) string {
+	s := string(body)
+	// Strip trailing whitespace only — leading whitespace inside a
+	// JSON envelope is legitimate. Same shape as
+	// strings.TrimRightFunc(s, unicode.IsSpace) but no extra import.
+	for len(s) > 0 {
+		last := s[len(s)-1]
+		if last == ' ' || last == '\n' || last == '\r' || last == '\t' {
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
+	if s == "" {
+		return "(empty body)"
+	}
+	return s
 }

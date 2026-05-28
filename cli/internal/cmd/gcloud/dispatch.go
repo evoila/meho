@@ -61,14 +61,6 @@ func renderCallResult(
 	return conn.Render(cmd, opID, r, jsonOut, prettyPrinter)
 }
 
-// printGenericResult renders a CallResult in the generic envelope
-// shape. Retained as a free function (instead of always routing via
-// conn.PrintGeneric) so the per-verb pretty-printers continue
-// referencing the unqualified name.
-func printGenericResult(w io.Writer, opID string, r *CallResult) {
-	conn.PrintGeneric(w, opID, r)
-}
-
 // errRowsKeyAbsent is returned by decodeRowsResult when the result
 // envelope is a well-formed JSON object that carries no `rows` key at
 // all. This is distinct from an empty list (`{"rows": []}`): an absent

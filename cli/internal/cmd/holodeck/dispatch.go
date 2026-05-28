@@ -39,9 +39,6 @@ type (
 	callRequestBody = dispatch.CallRequestBody
 )
 
-// errOpError is the structured-failure sentinel (status error/denied).
-var errOpError = dispatch.ErrOpError
-
 // conn binds this package's pre-baked connector_id to the shared
 // dispatch core. The authed transport (lazy *api.AuthedClient over the
 // generated typed surface) lives inside dispatch.Connector after

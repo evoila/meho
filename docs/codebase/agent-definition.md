@@ -174,9 +174,17 @@ event regardless of transport (REST vs MCP).
 - `mcp/registry.py` — `register_mcp_tool` (auto-discovered at startup
   via `eager_import_mcp_modules`).
 - CLI: `cli/internal/cmd/agent/` (cobra package) + `cli/internal/backplane`
-  (shared backplane resolution) + a local `doAuthedRequest` /
-  `renderRequestError` pair (the import-cycle-avoidance convention every
-  sibling CLI verb tree follows).
+  (shared backplane resolution). The verbs call the generated
+  oapi-codegen typed client (`cli/internal/api/client.gen.go`) via
+  `api.AuthedClient` for bearer injection + one-shot 401-refresh; a
+  small per-package `retryOn401` helper runs the same retry contract
+  per typed endpoint that `AuthedClient.GetHealth` runs for `/health`.
+  The package-local `renderRequestError` / `renderHTTPStatus` pair
+  preserves the agents REST surface's status-code → category mapping
+  (401 → `auth_expired`, 403 → `insufficient_role`, 404 →
+  `agent_not_found`, 409 / 422 → backend detail, etc.). G0.12-T3
+  (#1261, Initiative #1118) flipped the verbs off the per-verb
+  hand-rolled `doAuthedRequest` onto this typed-client transport.
 
 ## Known issues
 

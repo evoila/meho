@@ -6,9 +6,11 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -93,8 +95,12 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	if err := callDelete(cmd.Context(), backplaneURL, opts.Name); err != nil {
+	resp, err := callDelete(cmd.Context(), backplaneURL, opts.Name)
+	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if resp.StatusCode() != http.StatusNoContent {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	result := deleteResult{Name: opts.Name, Status: "deleted"}
 	if opts.JSONOut {
@@ -104,9 +110,15 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 	return nil
 }
 
-func callDelete(ctx context.Context, backplaneURL, name string) error {
-	// doAuthedRequest returns (nil, nil) on a 204; the success signal is
-	// the absence of an error.
-	_, err := doAuthedRequest(ctx, backplaneURL, "DELETE", buildShowPath(name), nil)
-	return err
+func callDelete(ctx context.Context, backplaneURL, name string) (*api.DeleteAgentApiV1AgentsNameDeleteResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.DeleteAgentApiV1AgentsNameDeleteResponse, error) {
+			return authed.DeleteAgentApiV1AgentsNameDeleteWithResponse(ctx, name, nil)
+		},
+		func(r *api.DeleteAgentApiV1AgentsNameDeleteResponse) int { return r.StatusCode() },
+	)
 }

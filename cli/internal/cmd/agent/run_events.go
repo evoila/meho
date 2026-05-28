@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -91,58 +90,60 @@ func runRunEvents(cmd *cobra.Command, opts runEventsOptions) error {
 	return nil
 }
 
-// buildRunEventsPath assembles the SSE POST path. Exposed for unit tests.
-func buildRunEventsPath(name string) string {
-	return "/api/v1/agents/" + url.PathEscape(name) + "/run/events"
-}
-
-// streamRunEvents opens the SSE connection and prints each event frame. The
-// bearer is injected via the shared authed client; a 401 surfaces as an
-// *httpError so renderRequestError maps it to auth_expired. Unlike the
-// broadcast `status --watch` verb, this is a single-shot stream (one run),
-// so there is no reconnect loop — the run ends, the stream ends.
+// streamRunEvents opens the SSE connection and prints each event frame.
+// The endpoint is the streaming variant of the agent-run RPC, so it
+// uses the generated client's non-`*WithResponse` method
+// (RunAgentEventsApiV1AgentsNameRunEventsPost) — that signature returns
+// the raw `*http.Response` so the body stays unbuffered for the SSE
+// scanner. The `*WithResponse` variant would buffer the entire body
+// and break event streaming.
+//
+// 401 retry runs once: a stale bearer triggers a refresh and one
+// re-issue, mirroring api.AuthedClient.GetHealth's contract. The
+// Accept header is overridden via a per-call RequestEditorFn so the
+// SSE response carries the right Content-Type negotiation.
 func streamRunEvents(cmd *cobra.Command, backplaneURL string, opts runEventsOptions) error {
-	body, err := json.Marshal(RunRequest{Input: opts.Input})
-	if err != nil {
-		return fmt.Errorf("encode run-events request: %w", err)
-	}
-	authed, err := api.NewAuthedClient(cmd.Context(), backplaneURL, api.AuthedClientOptions{})
+	authed, err := newAuthedClient(cmd.Context(), backplaneURL)
 	if err != nil {
 		return err
 	}
-	bearer := authed.AccessToken()
-	if bearer == "" {
-		return errMissingAccessToken
+	body := api.AgentRunRequest{Input: opts.Input}
+	editor := func(_ context.Context, req *http.Request) error {
+		req.Header.Set("Accept", "text/event-stream")
+		return nil
 	}
-	resp, err := sendSSERequest(cmd.Context(), authed.HTTPClient(), backplaneURL, opts.Name, bearer, body)
+	resp, err := authed.RunAgentEventsApiV1AgentsNameRunEventsPost(
+		cmd.Context(), opts.Name, nil, body, editor,
+	)
 	if err != nil {
 		return err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		if rerr := authed.Refresh(cmd.Context()); rerr != nil {
+			resp.Body.Close()
+			return rerr
+		}
+		resp.Body.Close()
+		resp, err = authed.RunAgentEventsApiV1AgentsNameRunEventsPost(
+			cmd.Context(), opts.Name, nil, body, editor,
+		)
+		if err != nil {
+			return err
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, responseBodyCap))
-		return &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
+		// Drain an error body into the renderer; cap the read so an
+		// adversarial / oversized error body can't pin the verb.
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, errBodyCap))
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode, raw, opts.JSONOut)
 	}
 	return printSSEStream(cmd.OutOrStdout(), resp.Body, opts.JSONOut)
 }
 
-func sendSSERequest(
-	ctx context.Context,
-	client *http.Client,
-	backplaneURL, name, bearer string,
-	body []byte,
-) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(
-		ctx, "POST", backplaneURL+buildRunEventsPath(name), strings.NewReader(string(body)),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("build run-events request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Content-Type", "application/json")
-	return client.Do(req)
-}
+// errBodyCap bounds the error-body read on a non-2xx SSE handshake.
+// Symmetric with the buffered envelope's 1 MiB ceiling.
+const errBodyCap int64 = 1 << 20
 
 // printSSEStream parses the SSE frames off r and prints one line per event.
 // SSE frames are `event: <kind>` + `data: <json>` separated by a blank

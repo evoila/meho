@@ -88,19 +88,22 @@ func TestDryRun_EmitsJSONEnvelopes(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &env); err != nil {
 			t.Errorf("line is not valid JSON: %q — %v", line, err)
 		}
-		for _, field := range []string{"scope", "slug", "body", "metadata", "source_id"} {
+		// G0.12-T11 migrated the dry-run envelope onto api.RememberBody
+		// (the typed POST body). The required fields match the FastAPI
+		// schema: scope / body / slug / metadata. expires_at and
+		// target_name are present-with-null per the typed JSON encoder
+		// (pointer types with no `omitempty` tag).
+		for _, field := range []string{"scope", "body", "slug", "metadata"} {
 			if _, ok := env[field]; !ok {
 				t.Errorf("dry-run envelope missing field %q", field)
 			}
 		}
-		sid, _ := env["source_id"].(string)
-		if !strings.HasPrefix(sid, "laptop-migration/") {
-			t.Errorf("source_id = %q; want prefix laptop-migration/", sid)
-		}
-		// prefix length check: 17 ("laptop-migration/") + SourceIDPrefix hex chars
-		wantLen := 17 + migrate.SourceIDPrefix
-		if len(sid) != wantLen {
-			t.Errorf("source_id len = %d; want %d", len(sid), wantLen)
+		// source_id is NOT in the wire body — the server computes it
+		// from `(scope, user_sub, target_name, slug)`. The pre-T11 CLI
+		// was sending source_id and being silently rejected by the
+		// backend's frozen extra="forbid" RememberBody schema.
+		if _, ok := env["source_id"]; ok {
+			t.Errorf("dry-run envelope MUST NOT contain source_id; got: %s", line)
 		}
 	}
 }
@@ -200,9 +203,15 @@ func TestNonInteractive_MachineLocalSkipped(t *testing.T) {
 	}
 }
 
-// ── source_id stability ───────────────────────────────────────────────────────
+// ── Wire-body stability ───────────────────────────────────────────────────────
 
-func TestDryRun_SourceIDStable(t *testing.T) {
+// Two dry-runs of the same fixture must emit byte-identical
+// envelopes. The server-side dedup contract (G5.1 upsert by
+// `(tenant_id, source, source_id)` where source_id is server-computed
+// from `(scope, user_sub, target_name, slug)`) is preserved iff the
+// CLI sends the same `(scope, slug, target_name)` triple on every
+// re-run — exactly what equal-bytes on the dry-run envelope asserts.
+func TestDryRun_WireBodyStable(t *testing.T) {
 	dir := t.TempDir()
 	writeFixture(t, dir, "user.md", userFixture)
 
@@ -212,16 +221,12 @@ func TestDryRun_SourceIDStable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("dry-run error: %v", err)
 		}
-		var env map[string]any
-		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &env); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		return env["source_id"].(string)
+		return strings.TrimSpace(out)
 	}
 
-	id1, id2 := run(), run()
-	if id1 != id2 {
-		t.Errorf("source_id is not stable: %q != %q", id1, id2)
+	b1, b2 := run(), run()
+	if b1 != b2 {
+		t.Errorf("dry-run wire body is not stable across reruns:\n  first:  %s\n  second: %s", b1, b2)
 	}
 }
 

@@ -190,12 +190,12 @@ cli/
     │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
     │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
-    │   ├── migrate/           # G5.3 #608–#612 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
+    │   ├── migrate/           # G5.3 #608–#612 — `meho migrate …` laptop-local migration verb tree (Initiative #375). G0.12-T11 #1269 migrated to typed client.
     │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2.
-    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive; real submitFn wired in T5 (#612).
-    │   │   ├── memory_test.go    # --dry-run envelope + source_id, --non-interactive filter, machine-local skip, empty-dir guard.
-    │   │   ├── submit.go         # G5.3-T5 #612 — doSubmit (spinner + POST /api/v1/memory), in-package HTTP helper trio, isTransient retry logic.
-    │   │   └── submit_test.go    # POST body shape, source_id stability, upsert rerun, transient retry, summary line, --mark-migrated.
+    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive. Dry-run envelope is `api.RememberBody` directly (post-T11 #1269; no consumer-side dryRunEnvelope shadow).
+    │   │   ├── memory_test.go    # --dry-run envelope, --non-interactive filter, machine-local skip, empty-dir guard, wire-body stability.
+    │   │   ├── submit.go         # doSubmit + spinner + RememberApiV1MemoryPostWithResponse via api.AuthedClient + retryOn401 generic. G0.12-T11 #1269 dropped the in-package HTTP helper trio (doAuthedRequest/sendRequest/httpError) + the local `source_id`-in-body bug the typed RememberBody schema's `extra="forbid"` would have rejected on a real backend (httptest mock masked it). isTransient retry logic preserved.
+    │   │   └── submit_test.go    # typed RememberBody body shape, same-slug rerun stable, no-source_id-on-wire, transient retry, summary line, --mark-migrated, 201-without-payload nil-guard, 401/403/422 classification, no-backplane → auth_expired.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
     │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).

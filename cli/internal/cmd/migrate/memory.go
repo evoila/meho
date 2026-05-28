@@ -19,16 +19,6 @@ import (
 // the real doSubmit wired in newMemoryCmd.
 type SubmitFn func(plans []migrate.SubmitPlan) error
 
-// dryRunEnvelope is the machine-readable shape emitted by --dry-run
-// (one JSON object per line). Matches the T5 POST body exactly.
-type dryRunEnvelope struct {
-	Scope    string         `json:"scope"`
-	Slug     string         `json:"slug"`
-	Body     string         `json:"body"`
-	Metadata map[string]any `json:"metadata"`
-	SourceID string         `json:"source_id"`
-}
-
 func newMemoryCmd() *cobra.Command {
 	// Real submit fn is wired inside RunE via newMemoryCmdWithSubmit(nil):
 	// a nil submitFn causes RunE to call doSubmit (the real HTTP POST path).
@@ -156,7 +146,20 @@ func newMemoryCmdWithSubmit(submitFn SubmitFn) *cobra.Command {
 }
 
 // runDryRun prints one JSON envelope per migrate-selected file (default
-// plan, no form) and makes no network call.
+// plan, no form) and makes no network call. The envelope is the typed
+// api.RememberBody — same shape postOne sends on the wire after the
+// G0.12-T11 migration to the generated client. Operators reading the
+// dry-run output get an honest preview of the actual request body.
+//
+// Pre-migration the dry-run envelope included a `source_id` field that
+// the legacy hand-rolled body also sent; the backend's frozen
+// `extra="forbid"` RememberBody schema rejects `source_id` (the server
+// computes it from `(scope, user_sub, target_name, slug)`), so the
+// legacy preview was misleading. The migration drops `source_id` from
+// both the wire body and the dry-run envelope. Deduplication semantics
+// are unchanged — the server still computes the same source_id from
+// the same (scope, slug, target_name) triple — the field just never
+// belonged in the operator-supplied body.
 func runDryRun(cmd *cobra.Command, files []migrate.MemoryFile, opts migrate.BuildFormOpts) error {
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetEscapeHTML(false)
@@ -165,17 +168,7 @@ func runDryRun(cmd *cobra.Command, files []migrate.MemoryFile, opts migrate.Buil
 		if plan.Skip {
 			continue
 		}
-		md := plan.File.Metadata
-		if md == nil {
-			md = map[string]any{}
-		}
-		env := dryRunEnvelope{
-			Scope:    plan.Scope,
-			Slug:     plan.Slug,
-			Body:     plan.Body,
-			Metadata: md,
-			SourceID: sourceID(plan),
-		}
+		env := buildRememberBody(plan)
 		if err := enc.Encode(env); err != nil {
 			return err
 		}
@@ -215,13 +208,4 @@ func filterMigrate(plans []migrate.SubmitPlan) []migrate.SubmitPlan {
 		}
 	}
 	return out
-}
-
-// sourceID builds the stable source_id string from a plan's BodySHA256.
-func sourceID(plan migrate.SubmitPlan) string {
-	prefix := plan.File.BodySHA256
-	if len(prefix) > migrate.SourceIDPrefix {
-		prefix = prefix[:migrate.SourceIDPrefix]
-	}
-	return "laptop-migration/" + prefix
 }

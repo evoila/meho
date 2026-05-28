@@ -210,9 +210,15 @@ The `auth_model: shared_service_account` value is the
 — the App is the single machine identity shared across every
 operator that dispatches against this target. The **App-vs-PAT
 discriminator** is **not** on the target row itself; it lives
-**inside the Vault secret payload** (presence of `app_id +
-private_key` selects the App path; presence of `pat` selects the
-PAT path). See
+**inside the Vault secret payload** (presence of all three of
+`app_id` + `private_key` + `installation_id` selects the App
+installation-token path; presence of `token` (and no App fields)
+selects the fine-grained PAT path). G0.16-T2 (#1304) reconciled
+the connector code with this documented contract — before that
+fix the gh-rest connector demanded `auth_model="github-app"` /
+`auth_model="github-pat"` on the target row, neither of which is a
+value the `AuthModel` enum accepts; the post-#1304 connector
+matches the runbook. See
 [§ App-vs-PAT credential picker](#app-vs-pat-credential-picker)
 for the picker rubric and
 [`github-app-credential.md` § Step 5](./github-app-credential.md#step-5--register-the-gh-v3-target-with-meho)
@@ -484,7 +490,7 @@ paths, side by side); this section summarises the operator-facing
 | Rate limit ceiling | 5000/hour per installation; scales with installation count | 5000/hour total across the operator's tools |
 | Org governance | App installation requires org-owner action (one-time) | Operator-account scope; no org coordination needed |
 | Personal-account tie | None — App outlives operator turnover | Operator-leaving invalidates the PAT; org cannot centrally rotate |
-| Vault payload | `app_id` + `private_key` (PEM) | `pat` |
+| Vault payload | `app_id` + `private_key` (PEM) + `installation_id` | `token` |
 
 **Pick the App path** for any production deployment, any deployment
 where an audit-readable agent-vs-operator boundary matters, and any
@@ -507,14 +513,17 @@ personal GitHub account in GitHub's own audit log; that crosses
 the agent-vs-operator boundary every other meho connector
 preserves.
 
-The Vault payload shape — `app_id + private_key` for the App,
-`pat` for the PAT — is the connector-side discriminator. The
-connector's credential loader inspects the secret's fields and
-picks the App code path or the PAT code path accordingly. The
-`auth_model` enum value on the target row stays
-`shared_service_account` in both cases (the App **is** the shared
-service account; the PAT is one too, just owned by a personal
-GitHub account rather than a deployment-owned bot).
+The Vault payload shape — all three of `app_id` + `private_key` +
+`installation_id` for the App, `token` for the PAT — is the
+connector-side discriminator. The connector's credential loader
+inspects the secret's fields and picks the App code path or the
+PAT code path accordingly; a payload that carries neither shape
+fails closed with a typed `github_ambiguous_vault_payload` error
+naming both required field sets so the operator can repair the
+Vault row without guessing. The `auth_model` enum value on the
+target row stays `shared_service_account` in both cases (the App
+**is** the shared service account; the PAT is one too, just owned
+by a personal GitHub account rather than a deployment-owned bot).
 
 ## Approval-queue flow
 

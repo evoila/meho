@@ -222,10 +222,15 @@ Notes on the column choices:
   `shared_service_account`, `per_user`); the App fits
   `shared_service_account` because every operator-driven call from
   this target is attributed in GitHub's own audit log to the App
-  identity. The **credential format** discriminator (`github-app`
-  vs `github-pat`) lives **inside the Vault secret payload**, not on
-  the enum — the connector picks the code path based on which of
-  `app_id + private_key` vs `pat` is present in the secret.
+  identity. The **credential format** discriminator (App-
+  installation vs fine-grained PAT) lives **inside the Vault secret
+  payload**, not on the enum — the connector picks the code path
+  based on which of `app_id` + `private_key` + `installation_id`
+  vs `token` is present in the secret (G0.16-T2 #1304 reconciled
+  the code with this documented contract; pre-#1304 the connector
+  demanded the operator-facing field carry `github-app` /
+  `github-pat`, neither of which is a value the `AuthModel` enum
+  accepts).
 
 Register:
 
@@ -403,19 +408,20 @@ governance allows it.
 
 ```bash
 vault kv put secret/<tenant>/<target>/github-app \
-  pat='ghp_<token-value>'
+  token='ghp_<token-value>'
 ```
 
-Note the field name is `pat`. The presence of `pat` (instead of
-`app_id` + `private_key`) is the connector's credential-format
-discriminator — the credential loader picks the PAT code path when
-the secret contains a `pat` field.
+Note the field name is `token`. The presence of `token` (instead
+of `app_id` + `private_key` + `installation_id`) is the
+connector's credential-format discriminator — the credential
+loader picks the PAT code path when the secret contains a
+`token` field.
 
 Verify without leaking the value:
 
 ```bash
 vault kv get -format=json secret/<tenant>/<target>/github-app \
-  | jq '.data.data | {pat_present: (.pat | length > 0)}'
+  | jq '.data.data | {token_present: (.token | length > 0)}'
 ```
 
 ### Step P3 — Register the target
@@ -443,7 +449,7 @@ Fine-grained PATs expire on a wall-clock date. Rotate ≥1 week
 before the expiry:
 
 1. Mint a new PAT per Step P1 with the same scope set.
-2. `vault kv put secret/<tenant>/<target>/github-app pat='<new>'`.
+2. `vault kv put secret/<tenant>/<target>/github-app token='<new>'`.
 3. The connector picks up the new PAT on its next call — no token
    minting / refresh dance to wait for, unlike the App path.
 

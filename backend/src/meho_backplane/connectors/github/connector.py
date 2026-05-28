@@ -22,20 +22,30 @@ ingested ops dispatchable (T3 #1223) and the first L1 composite
 Auth shape
 ----------
 
-The connector supports two ``target.auth_model`` values, selected at the
-:meth:`auth_headers` boundary:
+The connector boundary accepts ``target.auth_model="shared_service_
+account"`` (or ``None`` for legacy rows). The **upstream credential
+protocol** — App-installation vs PAT — is picked by inspecting the
+Vault payload's field shape, **not** by widening the target enum. This
+mirrors :class:`VmwareRestConnector` (the target carries the identity
+model; the connector reads ``username`` + ``password`` and never
+surfaces a protocol on ``auth_model``). G0.16-T2 (#1304) reconciled
+the contract after a v0.8.0-cycle dogfood caught the original
+auth_model-driven routing rejecting every target with a 422 enum
+violation.
 
-* ``github-app`` — canonical machine-identity path. The connector reads
-  App ID + RSA private key + installation ID from Vault under the
-  operator's identity (G3.9 precedent), mints a 10-minute RS256 JWT, and
-  exchanges it for an installation token via
-  ``POST /app/installations/{id}/access_tokens``. The installation token
-  is cached for 50 minutes (10-minute safety margin before the 1-hour
-  upstream expiry) so a typical operator session of ~50 fingerprint /
-  dispatch calls pays the mint round-trip exactly once.
-* ``github-pat`` — fallback. A fine-grained Personal Access Token reads
-  directly from Vault and passes through as the bearer credential.
-  Documented but not first-class — T6 (#1226) explains the picker.
+* **App installation-token path** — canonical machine-identity. Vault
+  payload carries ``app_id`` + ``private_key`` + ``installation_id``.
+  The connector reads the secret under the operator's identity (G3.9
+  precedent), mints a 10-minute RS256 JWT, and exchanges it for an
+  installation token via
+  ``POST /app/installations/{id}/access_tokens``. The installation
+  token is cached for 50 minutes (10-minute safety margin before the
+  1-hour upstream expiry) so a typical operator session of ~50
+  fingerprint / dispatch calls pays the mint round-trip exactly once.
+* **Fine-grained PAT path** — fallback. Vault payload carries
+  ``token`` (and no App fields). The PAT reads directly from Vault and
+  passes through as the bearer credential. Documented but not
+  first-class.
 
 Per-target cache scoping mirrors vmware-rest: keyed on ``target.name``,
 serialised under a single :class:`asyncio.Lock` so two concurrent
@@ -93,8 +103,7 @@ from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadEr
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.github.session import (
     DEFAULT_GITHUB_API_URL,
-    GITHUB_APP_AUTH_MODEL,
-    GITHUB_PAT_AUTH_MODEL,
+    GitHubAmbiguousVaultPayloadError,
     GitHubAppCredentials,
     GitHubAppNotInstalledError,
     GitHubCredentialError,
@@ -106,11 +115,11 @@ from meho_backplane.connectors.github.session import (
     GitHubTargetLike,
     InstallationToken,
     exchange_jwt_for_installation_token,
-    load_github_app_credentials_from_vault,
-    load_github_pat_credentials_from_vault,
+    load_github_credentials_from_vault,
     mint_github_app_jwt,
 )
 from meho_backplane.connectors.schemas import (
+    AuthModel,
     FingerprintResult,
     OperationResult,
     ProbeResult,
@@ -203,12 +212,18 @@ class GitHubRestConnector(HttpConnector):
     ) -> dict[str, str]:
         """Return ``Authorization: Bearer <token>`` for *target*.
 
-        Selects between the GitHub App and PAT paths by the target's
-        ``auth_model``. Any other value (``shared_service_account``,
-        ``per_user``, ``impersonation``, ``None``, a typo) raises
+        Accepts ``target.auth_model="shared_service_account"`` (or
+        ``None`` for legacy rows that predate the column default).
+        Anything else (``per_user``, ``impersonation``, a typo) raises
         :exc:`NotImplementedError` naming the target and the requested
         mode — the same fail-closed shape :class:`VmwareRestConnector`
         uses at its boundary.
+
+        The **upstream credential protocol** (App-installation vs PAT)
+        is picked downstream of this check, by
+        :func:`load_github_credentials_from_vault` inspecting the
+        Vault payload's field shape — see the module docstring for
+        the rationale (G0.16-T2 reconciliation, #1304).
 
         Raises :class:`VaultCredentialsReadError` when
         ``operator.raw_jwt`` is empty (defence in depth — the loader's
@@ -222,26 +237,19 @@ class GitHubRestConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
-        auth_model = getattr(target, "auth_model", None)
-        if auth_model == GITHUB_APP_AUTH_MODEL:
-            token = await self._installation_token(target, operator)
-            return {
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            }
-        if auth_model == GITHUB_PAT_AUTH_MODEL:
-            pat = await self._pat_token(target, operator)
-            return {
-                "Authorization": f"Bearer {pat}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            }
-        raise NotImplementedError(
-            f"GitHubRestConnector only supports auth_model="
-            f"{GITHUB_APP_AUTH_MODEL!r} or {GITHUB_PAT_AUTH_MODEL!r}; "
-            f"target {target.name!r} requested auth_model={auth_model!r}"
-        )
+        if not _is_acceptable_auth_model(getattr(target, "auth_model", None)):
+            auth_model = getattr(target, "auth_model", None)
+            raise NotImplementedError(
+                f"GitHubRestConnector only supports auth_model="
+                f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
+                f"{target.name!r} requested auth_model={auth_model!r}"
+            )
+        token = await self._auth_token(target, operator)
+        return {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
 
     def _base_url(self, target: GitHubTargetLike) -> str:
         """Return ``https://api.github.com`` (port is ignored for github.com).
@@ -256,93 +264,95 @@ class GitHubRestConnector(HttpConnector):
         return self._BASE_URL
 
     # ------------------------------------------------------------------
-    # GitHub App credential / token plumbing
+    # Credential / token plumbing
     # ------------------------------------------------------------------
 
-    async def _installation_token(
+    async def _auth_token(
         self,
         target: GitHubTargetLike,
         operator: Operator,
     ) -> str:
-        """Return the cached installation token; mint on cold cache.
+        """Return the live bearer token for *target* — App or PAT.
 
-        The lock serialises cold-cache callers; warm-cache reads take
-        the fast path. The 50-minute cache window is bounded by
-        :data:`INSTALLATION_TOKEN_CACHE_SECONDS`.
+        Lock-serialised so cold-cache callers don't double-load the
+        same secret; warm-cache lookups (either the installation-token
+        dict or the PAT dict) bypass the loader entirely. The loader
+        runs only when neither cache holds a live entry, then the
+        returned :class:`GitHubAppCredentials` / :class:`GitHubPATCredentials`
+        instance dispatches into the App-mint path or the PAT
+        passthrough.
+
+        Raises :class:`GitHubAmbiguousVaultPayloadError` (from the
+        loader) when the Vault payload carries neither shape; the four
+        T11 App-path envelopes (``GitHubAppNotInstalledError`` /
+        ``GitHubJWTMintError`` / ``GitHubInstallationTokenMintError``
+        / ``GitHubRateLimitedError``) when the App-mint round-trip
+        itself fails.
+        """
+        async with self._token_lock:
+            now = time.monotonic()
+            cached_app = self._installation_tokens.get(target.name)
+            if cached_app is not None and cached_app.expires_at_monotonic > now:
+                return cached_app.token
+            cached_pat = self._pat_tokens.get(target.name)
+            if cached_pat is not None:
+                return cached_pat
+
+            creds = await self._credentials_loader(target, operator)
+            if isinstance(creds, GitHubAppCredentials):
+                return await self._mint_and_cache_installation_token(target, creds)
+            if isinstance(creds, GitHubPATCredentials):
+                self._pat_tokens[target.name] = creds.token
+                _log.info(
+                    "github_pat_token_loaded",
+                    target=target.name,
+                    host=target.host,
+                )
+                return creds.token
+            raise GitHubCredentialError(
+                f"github_credential_error: loader returned "
+                f"{type(creds).__name__} for target {target.name!r}; "
+                f"expected GitHubAppCredentials or GitHubPATCredentials. "
+                f"This is a loader-configuration bug. See "
+                f"docs/codebase/connectors-github.md."
+            )
+
+    async def _mint_and_cache_installation_token(
+        self,
+        target: GitHubTargetLike,
+        creds: GitHubAppCredentials,
+    ) -> str:
+        """Mint a fresh installation token for *target* and cache it.
+
+        Extracted from :meth:`_auth_token` so the JWT-sign +
+        installation-token-exchange round-trip is one named operation
+        the caller can audit independently. Cache lifetime is
+        :data:`INSTALLATION_TOKEN_CACHE_SECONDS` (50 minutes; 10-minute
+        safety margin before the 1-hour upstream expiry).
 
         Raises :class:`GitHubAppNotInstalledError`,
         :class:`GitHubJWTMintError`,
         :class:`GitHubInstallationTokenMintError`, or
         :class:`GitHubRateLimitedError` per the four T11 envelopes.
         """
-        async with self._token_lock:
-            cached = self._installation_tokens.get(target.name)
-            now = time.monotonic()
-            if cached is not None and cached.expires_at_monotonic > now:
-                return cached.token
-
-            creds = await self._credentials_loader(target, operator)
-            if not isinstance(creds, GitHubAppCredentials):
-                raise GitHubCredentialError(
-                    f"github_credential_error: loader returned "
-                    f"{type(creds).__name__} for target {target.name!r} "
-                    f"with auth_model={GITHUB_APP_AUTH_MODEL!r}; expected "
-                    f"GitHubAppCredentials. This is a loader-configuration "
-                    f"bug. See docs/codebase/connectors-github.md."
-                )
-
-            jwt_token = mint_github_app_jwt(
-                creds.app_id,
-                creds.private_key_pem,
-            )
-            installation = await exchange_jwt_for_installation_token(
-                jwt_token=jwt_token,
-                installation_id=creds.installation_id,
-                api_base_url=self._BASE_URL,
-            )
-            self._installation_tokens[target.name] = installation
-            _log.info(
-                "github_installation_token_minted",
-                target=target.name,
-                host=target.host,
-                installation_id=creds.installation_id,
-                upstream_expires_at=installation.upstream_expires_at,
-            )
-            return installation.token
-
-    async def _pat_token(
-        self,
-        target: GitHubTargetLike,
-        operator: Operator,
-    ) -> str:
-        """Return the cached PAT; read from Vault on cold cache.
-
-        PATs do not expire on MEHO's side (the GitHub-set expiry is
-        opaque to the connector), so cache lifetime is the connector
-        instance lifetime. Operators rotating a PAT must restart the
-        backplane or evict the cache via :meth:`aclose` followed by a
-        fresh dispatch.
-        """
-        async with self._token_lock:
-            cached = self._pat_tokens.get(target.name)
-            if cached is not None:
-                return cached
-            creds = await self._credentials_loader(target, operator)
-            if not isinstance(creds, GitHubPATCredentials):
-                raise GitHubCredentialError(
-                    f"github_credential_error: loader returned "
-                    f"{type(creds).__name__} for target {target.name!r} "
-                    f"with auth_model={GITHUB_PAT_AUTH_MODEL!r}; expected "
-                    f"GitHubPATCredentials. This is a loader-configuration "
-                    f"bug. See docs/codebase/connectors-github.md."
-                )
-            self._pat_tokens[target.name] = creds.token
-            _log.info(
-                "github_pat_token_loaded",
-                target=target.name,
-                host=target.host,
-            )
-            return creds.token
+        jwt_token = mint_github_app_jwt(
+            creds.app_id,
+            creds.private_key_pem,
+        )
+        installation = await exchange_jwt_for_installation_token(
+            jwt_token=jwt_token,
+            installation_id=creds.installation_id,
+            api_base_url=self._BASE_URL,
+        )
+        self._installation_tokens[target.name] = installation
+        _log.info(
+            "github_installation_token_minted",
+            target=target.name,
+            host=target.host,
+            installation_id=creds.installation_id,
+            upstream_expires_at=installation.upstream_expires_at,
+        )
+        return installation.token
 
     # ------------------------------------------------------------------
     # Required Connector ABC methods
@@ -483,24 +493,43 @@ async def _default_loader(
     target: GitHubTargetLike,
     operator: Operator,
 ) -> GitHubAppCredentials | GitHubPATCredentials:
-    """Pick the Vault loader matching ``target.auth_model``.
+    """Single Vault read + payload-shape inspection (App vs PAT).
 
     Used when :class:`GitHubRestConnector` is constructed without an
-    explicit ``credentials_loader``. Raises
-    :exc:`NotImplementedError` for any unsupported ``auth_model`` —
-    same boundary :meth:`GitHubRestConnector.auth_headers` enforces,
-    surfaced earlier here for clarity in error attribution.
+    explicit ``credentials_loader``. Delegates to
+    :func:`load_github_credentials_from_vault` which fetches the
+    Vault payload once and picks the upstream protocol from the
+    field shape — :class:`GitHubAppCredentials` when ``app_id`` +
+    ``private_key`` + ``installation_id`` are all present;
+    :class:`GitHubPATCredentials` when ``token`` is present (and the
+    App fields are not); :class:`GitHubAmbiguousVaultPayloadError`
+    when neither shape matches.
+
+    The target's ``auth_model`` is not inspected here — the boundary
+    that gates per_user / impersonation rows lives on
+    :meth:`GitHubRestConnector.auth_headers`. G0.16-T2 (#1304)
+    reconciled the historical "auth_model-driven routing" with the
+    target-side enum (``shared_service_account`` only).
     """
-    auth_model = getattr(target, "auth_model", None)
-    if auth_model == GITHUB_APP_AUTH_MODEL:
-        return await load_github_app_credentials_from_vault(target, operator)
-    if auth_model == GITHUB_PAT_AUTH_MODEL:
-        return await load_github_pat_credentials_from_vault(target, operator)
-    raise NotImplementedError(
-        f"GitHubRestConnector default loader requires auth_model="
-        f"{GITHUB_APP_AUTH_MODEL!r} or {GITHUB_PAT_AUTH_MODEL!r}; "
-        f"target {target.name!r} requested auth_model={auth_model!r}"
-    )
+    return await load_github_credentials_from_vault(target, operator)
+
+
+def _is_acceptable_auth_model(value: object) -> bool:
+    """Return ``True`` iff *value* is the SHARED_SERVICE_ACCOUNT model or unset.
+
+    Mirrors the predicate :class:`VmwareRestConnector` uses at its
+    boundary (the vmware-rest precedent the G0.16-T2 reconciliation
+    aligned the gh-rest connector with). Accepts the enum member, the
+    equivalent string, and ``None`` (the legacy-row sentinel for
+    targets that predate the column-default backfill). Any other
+    value (``"per_user"``, ``"impersonation"``, a typo, an int) is
+    rejected by the caller.
+    """
+    if value is None:
+        return True
+    if value is AuthModel.SHARED_SERVICE_ACCOUNT:
+        return True
+    return bool(value == AuthModel.SHARED_SERVICE_ACCOUNT.value)
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +652,7 @@ def _fingerprint_from_repo(
 # so a future maintainer who refactors imports doesn't accidentally
 # trim them.
 _ = (
+    GitHubAmbiguousVaultPayloadError,
     GitHubAppNotInstalledError,
     GitHubInstallationTokenMintError,
     GitHubJWTMintError,

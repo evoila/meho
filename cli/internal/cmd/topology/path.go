@@ -5,29 +5,17 @@ package topology
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// Path mirrors the backend TopologyPath Pydantic model
-// (backend/src/meho_backplane/topology/schemas.py). `Nodes` runs from
-// the `from` node (depth 0) to the `to` node (depth == TotalHops)
-// inclusive; `TotalHops == len(Nodes) - 1`. The route returns JSON
-// `null` (HTTP 200) when `to` is unreachable from `from` within
-// max_hops, or either endpoint does not exist in the tenant —
-// unreachability is a valid answer, not an error.
-type Path struct {
-	Nodes     []Node `json:"nodes"`
-	TotalHops int    `json:"total_hops"`
-}
 
 // _maxHopsMax mirrors the API's Query(le=32) ceiling
 // (backend/src/meho_backplane/api/v1/topology.py `_MAX_HOPS_MAX`).
@@ -115,59 +103,98 @@ func runPath(cmd *cobra.Command, opts pathOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	path, err := getPath(cmd.Context(), backplaneURL, opts)
+	path, statusCode, body, err := getPath(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if statusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
+	}
+	// 200 + nil result legitimately means "unreachable" (see getPath
+	// docstring re: literal JSON `null` body). The JSON path emits
+	// `null` so jq consumers see one stable contract; the table path
+	// renders the no-path line via printPath's nil branch.
 	if opts.JSONOut {
-		// `path` is nil on the unreachable / missing-endpoint case;
-		// PrintJSON emits literal `null`, the same shape the API
-		// returns, so a jq consumer sees one stable contract.
 		return output.PrintJSON(cmd.OutOrStdout(), path)
 	}
 	printPath(cmd.OutOrStdout(), opts.From, opts.To, path)
 	return nil
 }
 
-// buildPathQuery assembles the GET /api/v1/topology/path query
-// string. `from` / `to` match the route spec (`?from=A&to=B`); the
-// optional kind pins and max_hops are omitted when unset so the
-// server applies its default. Exposed for unit tests.
-func buildPathQuery(opts pathOptions) string {
-	q := url.Values{}
-	q.Set("from", opts.From)
-	q.Set("to", opts.To)
+// buildPathParams maps the CLI flags onto the generated query-param
+// shape. `From` / `To` are required (the path verb's two positional
+// args); the optional kind pins and max_hops are omitted when unset
+// so the server applies its default.
+func buildPathParams(opts pathOptions) *api.PathApiV1TopologyPathGetParams {
+	params := &api.PathApiV1TopologyPathGetParams{
+		From: opts.From,
+		To:   opts.To,
+	}
 	if opts.MaxHops > 0 {
-		q.Set("max_hops", strconv.Itoa(opts.MaxHops))
+		mh := opts.MaxHops
+		params.MaxHops = &mh
 	}
 	if opts.FromKind != "" {
-		q.Set("from_kind", opts.FromKind)
+		fk := opts.FromKind
+		params.FromKind = &fk
 	}
 	if opts.ToKind != "" {
-		q.Set("to_kind", opts.ToKind)
+		tk := opts.ToKind
+		params.ToKind = &tk
 	}
-	return "/api/v1/topology/path?" + q.Encode()
+	return params
 }
 
-func getPath(ctx context.Context, backplaneURL string, opts pathOptions) (*Path, error) {
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildPathQuery(opts), nil)
+// getPath invokes the path typed call. The route's response_model is
+// `TopologyPath | None`: a literal JSON `null` body is the unreachable
+// answer (the route returns 200 with body `null` rather than 404).
+// oapi-codegen's generated parser populates `JSON200` to a zero-value
+// `*TopologyPath` even for `null` bodies (`json.Unmarshal("null",
+// &dest)` succeeds without touching dest); we explicitly detect the
+// "null" body byte sequence and surface it as a nil result so the
+// caller (printPath / the --json path) sees the unreachable shape
+// unchanged from the pre-migration contract.
+func getPath(
+	ctx context.Context,
+	backplaneURL string,
+	opts pathOptions,
+) (*api.TopologyPath, int, []byte, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	// The route's response_model is `TopologyPath | None`: a literal
-	// JSON `null` is the unreachable answer, decoded here as a nil
-	// *Path (distinct from a decode error).
-	var out *Path
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode path response: %w", err)
+	params := buildPathParams(opts)
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.PathApiV1TopologyPathGetResponse, error) {
+			return authed.PathApiV1TopologyPathGetWithResponse(ctx, params)
+		},
+		func(r *api.PathApiV1TopologyPathGetResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
+		return nil, 0, nil, err
 	}
-	return out, nil
+	if resp.StatusCode() == http.StatusOK && isJSONNull(resp.Body) {
+		return nil, resp.StatusCode(), resp.Body, nil
+	}
+	return resp.JSON200, resp.StatusCode(), resp.Body, nil
+}
+
+// isJSONNull reports whether the body is the literal JSON `null`
+// token, ignoring leading/trailing whitespace. The path route uses
+// this shape to signal unreachability; distinguishing it from a
+// populated TopologyPath envelope cannot be done from the typed
+// `*TopologyPath` alone because `json.Unmarshal("null", &dest)`
+// leaves `dest` as the zero value, and the parser then stamps a
+// non-nil `JSON200` pointing at it.
+func isJSONNull(body []byte) bool {
+	trimmed := strings.TrimSpace(string(body))
+	return trimmed == "null"
 }
 
 // printPath renders the hop chain as `a -> b -> c (N hops)`, or the
 // no-path line when the backend returned null (unreachable, missing
 // endpoint, or cross-tenant — all the same answer).
-func printPath(w io.Writer, from, to string, p *Path) {
+func printPath(w io.Writer, from, to string, p *api.TopologyPath) {
 	if p == nil || len(p.Nodes) == 0 {
 		fmt.Fprintf(w, "no path from %q to %q within the hop budget\n", from, to)
 		return

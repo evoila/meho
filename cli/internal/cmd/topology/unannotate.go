@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -121,8 +123,8 @@ func runUnannotate(cmd *cobra.Command, opts unannotateOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 
-	edgeID := opts.EdgeID
-	if edgeID == "" {
+	edgeIDStr := opts.EdgeID
+	if edgeIDStr == "" {
 		// Tuple form — resolve client-side. The list helper applies the
 		// tenant scope server-side, so a cross-tenant tuple returns an
 		// empty list (rendered as "not found"), never another tenant's
@@ -134,24 +136,24 @@ func runUnannotate(cmd *cobra.Command, opts unannotateOptions) error {
 		if err != nil {
 			return renderUnannotateResolveError(cmd, backplaneURL, err, opts)
 		}
-		edgeID = resolved
-	} else {
-		if _, perr := uuid.Parse(edgeID); perr != nil {
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.Unexpected(fmt.Sprintf(
-					"invalid <edge-id> %q: not a UUID (%v)", edgeID, perr)),
-				opts.JSONOut)
-		}
+		edgeIDStr = resolved
+	}
+	edgeUUID, perr := uuid.Parse(edgeIDStr)
+	if perr != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"invalid <edge-id> %q: not a UUID (%v)", edgeIDStr, perr)),
+			opts.JSONOut)
 	}
 
-	if err := deleteEdge(cmd.Context(), backplaneURL, edgeID); err != nil {
+	if err := deleteEdge(cmd.Context(), backplaneURL, edgeUUID); err != nil {
 		return renderUnannotateDeleteError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(),
-			map[string]string{"deleted": edgeID})
+			map[string]string{"deleted": edgeUUID.String()})
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "deleted edge %s\n", edgeID)
+	fmt.Fprintf(cmd.OutOrStdout(), "deleted edge %s\n", edgeUUID)
 	return nil
 }
 
@@ -174,9 +176,14 @@ func resolveCuratedEdgeID(
 		To:     opts.To,
 		Limit:  2, // 2 is enough to detect ambiguity without dragging back the world.
 	}
-	edges, err := getEdges(ctx, backplaneURL, listOpts)
+	edges, statusCode, body, err := getEdges(ctx, backplaneURL, listOpts)
 	if err != nil {
 		return "", err
+	}
+	if statusCode != http.StatusOK {
+		// Surface a synthetic httpStatusError so the caller can route
+		// to the same renderHTTPStatus path the deleted-edge call uses.
+		return "", &httpStatusError{StatusCode: statusCode, Body: body}
 	}
 	// Filter client-side by endpoint kind when the operator pinned one
 	// — the list route filters by name only.
@@ -197,13 +204,13 @@ func resolveCuratedEdgeID(
 	case 0:
 		return "", &unannotateResolveError{kind: "not_found"}
 	case 1:
-		return edges[0].ID, nil
+		return edges[0].Id.String(), nil
 	default:
 		ids := make([]string, 0, len(edges))
 		for _, e := range edges {
 			ids = append(ids, fmt.Sprintf(
 				"%s (%s/%s --[%s]--> %s/%s)",
-				e.ID, e.From.Kind, e.From.Name, e.Kind, e.To.Kind, e.To.Name))
+				e.Id, e.From.Kind, e.From.Name, e.Kind, e.To.Kind, e.To.Name))
 		}
 		return "", &unannotateResolveError{
 			kind:    "ambiguous",
@@ -226,6 +233,20 @@ func (e *unannotateResolveError) Error() string {
 		return "ambiguous tuple matches multiple edges"
 	}
 	return "no matching curated edge"
+}
+
+// httpStatusError is the bridge for non-2xx responses surfaced from a
+// helper that has no direct cobra context (e.g. resolveCuratedEdgeID).
+// Carries (statusCode, body) so the caller's renderUnannotate* helper
+// can route through the shared renderHTTPStatus / renderUnannotateDeleteError
+// ladder.
+type httpStatusError struct {
+	StatusCode int
+	Body       []byte
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, strings.TrimSpace(string(e.Body)))
 }
 
 func renderUnannotateResolveError(
@@ -252,25 +273,33 @@ func renderUnannotateResolveError(
 				opts.From, opts.Kind, opts.To)),
 			opts.JSONOut)
 	}
+	var he *httpStatusError
+	if errors.As(err, &he) {
+		return renderHTTPStatus(cmd, backplaneURL, he.StatusCode, he.Body, opts.JSONOut)
+	}
 	return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 }
 
 // renderUnannotateDeleteError intercepts the route's 409 auto-edge
 // envelope so the operator sees the server's `detail.message`
 // verbatim — the annotate-over-auto remediation guidance — instead of
-// the raw 409 body the generic renderHTTPError would surface.
+// the raw 409 body the generic renderHTTPStatus would surface.
 func renderUnannotateDeleteError(
 	cmd *cobra.Command,
 	backplaneURL string,
 	err error,
 	jsonOut bool,
 ) error {
-	var he *httpError
-	if errors.As(err, &he) && he.StatusCode == 409 {
-		if msg := formatAutoEdgeConflict(he.Body); msg != "" {
+	var he *httpStatusError
+	if errors.As(err, &he) && he.StatusCode == http.StatusConflict {
+		if msg := formatAutoEdgeConflict(string(he.Body)); msg != "" {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected(msg), jsonOut)
 		}
+		return renderHTTPStatus(cmd, backplaneURL, he.StatusCode, he.Body, jsonOut)
+	}
+	if errors.As(err, &he) {
+		return renderHTTPStatus(cmd, backplaneURL, he.StatusCode, he.Body, jsonOut)
 	}
 	return renderRequestError(cmd, backplaneURL, err, jsonOut)
 }
@@ -306,9 +335,27 @@ func formatAutoEdgeConflict(body string) string {
 	return fmt.Sprintf("cannot delete edge %s: %s", detail.EdgeID, detail.Message)
 }
 
-func deleteEdge(ctx context.Context, backplaneURL, edgeID string) error {
-	// edgeID is UUID-validated above; pathEscape is belt-and-braces.
-	_, err := doAuthedRequest(ctx, backplaneURL,
-		"DELETE", "/api/v1/topology/edges/"+pathEscape(edgeID), nil)
-	return err
+// deleteEdge issues the DELETE call against the generated typed
+// client. The route returns 204 No Content on success (whether the
+// row existed or not — idempotent contract) and 409 + structured
+// detail for an auto-row delete attempt. The caller forwards the
+// returned error to renderUnannotateDeleteError for category mapping.
+func deleteEdge(ctx context.Context, backplaneURL string, edgeID uuid.UUID) error {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return err
+	}
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse, error) {
+			return authed.UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse(ctx, edgeID, nil)
+		},
+		func(r *api.UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode() == http.StatusNoContent {
+		return nil
+	}
+	return &httpStatusError{StatusCode: resp.StatusCode(), Body: resp.Body}
 }

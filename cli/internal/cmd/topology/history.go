@@ -5,15 +5,14 @@ package topology
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
-	"strconv"
+	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -38,7 +37,7 @@ import (
 // forensic reconstruction.
 //
 // Exit codes (shared with the sibling topology verbs via
-// renderRequestError / renderHTTPError):
+// renderRequestError / renderHTTPStatus):
 //   - 0   query returned cleanly (incl. zero-row result).
 //   - 2   auth_expired
 //   - 3   unreachable
@@ -139,9 +138,18 @@ func runHistory(cmd *cobra.Command, opts historyOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
-	result, err := getHistory(cmd.Context(), backplaneURL, opts)
+	result, statusCode, body, err := getHistory(cmd.Context(), backplaneURL, opts)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if statusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
+	}
+	if result == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 200 without a history payload", backplaneURL)),
+			opts.JSONOut)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
@@ -150,90 +158,67 @@ func runHistory(cmd *cobra.Command, opts historyOptions) error {
 	return nil
 }
 
-// buildHistoryPath assembles the GET path + query string for a
-// history call. The anchor name is a path segment (pathEscape keeps
-// a slash/space in an operator-typed name from corrupting the URL);
-// optional filters land as query params only when set so the server
-// applies its defaults for the rest. Duration shorthand (e.g. "24h")
-// is resolved client-side to an absolute ISO-8601 (same parser
-// `timeline.go` uses via resolveDurationOrISO) so the backend's
-// REST router accepts absolute timestamps only -- one parser in one
-// place.
-func buildHistoryPath(opts historyOptions, now time.Time) (string, error) {
-	q := url.Values{}
+// buildHistoryParams assembles the generated query-param shape. The
+// anchor name is a path segment carried by the typed call's second
+// arg, not a param. Optional filters land as pointer fields only when
+// set so the server applies its defaults for the rest. Duration
+// shorthand (e.g. "24h") is resolved client-side to an absolute
+// time.Time the typed param then carries — one parser in one place
+// (the CLI), matching the timeline contract.
+func buildHistoryParams(opts historyOptions, now time.Time) (*api.HistoryRouteApiV1TopologyHistoryNameGetParams, error) {
+	params := &api.HistoryRouteApiV1TopologyHistoryNameGetParams{}
 	if opts.NodeKind != "" {
-		q.Set("kind", opts.NodeKind)
+		k := opts.NodeKind
+		params.Kind = &k
 	}
 	if opts.Since != "" {
-		iso, err := resolveDurationOrISO(opts.Since, now)
+		ts, err := resolveDurationOrISO(opts.Since, now)
 		if err != nil {
-			return "", fmt.Errorf("--since %q: %w", opts.Since, err)
+			return nil, fmt.Errorf("--since %q: %w", opts.Since, err)
 		}
-		q.Set("since", iso)
+		params.Since = &ts
 	}
 	if opts.Until != "" {
-		iso, err := resolveDurationOrISO(opts.Until, now)
+		ts, err := resolveDurationOrISO(opts.Until, now)
 		if err != nil {
-			return "", fmt.Errorf("--until %q: %w", opts.Until, err)
+			return nil, fmt.Errorf("--until %q: %w", opts.Until, err)
 		}
-		q.Set("until", iso)
+		params.Until = &ts
 	}
 	if opts.IncludeEdges {
-		q.Set("include_edges", "true")
+		ie := true
+		params.IncludeEdges = &ie
 	}
 	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+		l := opts.Limit
+		params.Limit = &l
 	}
-	path := "/api/v1/topology/history/" + pathEscape(opts.Name)
-	if encoded := q.Encode(); encoded != "" {
-		path = path + "?" + encoded
-	}
-	return path, nil
+	return params, nil
 }
 
-func getHistory(ctx context.Context, backplaneURL string, opts historyOptions) (*HistoryResult, error) {
-	path, err := buildHistoryPath(opts, time.Now().UTC())
+func getHistory(
+	ctx context.Context,
+	backplaneURL string,
+	opts historyOptions,
+) (*api.TopologyHistoryResult, int, []byte, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", path, nil)
+	params, err := buildHistoryParams(opts, time.Now().UTC())
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	var out HistoryResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode history response: %w", err)
+	resp, err := retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.HistoryRouteApiV1TopologyHistoryNameGetResponse, error) {
+			return authed.HistoryRouteApiV1TopologyHistoryNameGetWithResponse(ctx, opts.Name, params)
+		},
+		func(r *api.HistoryRouteApiV1TopologyHistoryNameGetResponse) int { return r.StatusCode() },
+	)
+	if err != nil {
+		return nil, 0, nil, err
 	}
-	return &out, nil
-}
-
-// HistoryEntry mirrors the backend `TopologyHistoryEntry` Pydantic
-// model (`backend/src/meho_backplane/topology/schemas.py`). Fields
-// are hand-written rather than oapi-codegen-generated for the same
-// reason the audit `Entry` shape is — the topology package stays
-// decoupled from oapi churn, matching the sibling-package convention.
-// `Snapshot` keeps the JSON shape verbatim so `--json` round-trips
-// the backend's payload without CLI loss-of-fidelity (the table
-// view extracts a 1-line summary; the JSON path is what an operator
-// uses for forensic reconstruction).
-type HistoryEntry struct {
-	ValidFrom  string         `json:"valid_from"`
-	HistoryID  int64          `json:"history_id"`
-	Source     string         `json:"source"`
-	ChangeKind string         `json:"change_kind"`
-	ResourceID *string        `json:"resource_id"`
-	Snapshot   map[string]any `json:"snapshot"`
-	AuditID    *string        `json:"audit_id"`
-}
-
-// HistoryResult mirrors the backend `TopologyHistoryResult`.
-// `AnchorNodeID` is the resolved `graph_node.id` and `IncludeEdges`
-// echoes the call-site flag so a re-marshal preserves the Pydantic
-// wire shape.
-type HistoryResult struct {
-	AnchorNodeID string         `json:"anchor_node_id"`
-	IncludeEdges bool           `json:"include_edges"`
-	Rows         []HistoryEntry `json:"rows"`
+	return resp.JSON200, resp.StatusCode(), resp.Body, nil
 }
 
 // printHistoryTable renders the per-resource history page as a
@@ -243,7 +228,7 @@ type HistoryResult struct {
 // the full snapshot (that is the `--json` mode's job, the forensic
 // payload an operator pipes into `jq`). An empty result renders the
 // "no changes" line.
-func printHistoryTable(w io.Writer, root string, r *HistoryResult) {
+func printHistoryTable(w io.Writer, root string, r *api.TopologyHistoryResult) {
 	if r == nil || len(r.Rows) == 0 {
 		fmt.Fprintf(w, "no history rows for %q in this tenant (or window is empty)\n", root)
 		return
@@ -252,15 +237,15 @@ func printHistoryTable(w io.Writer, root string, r *HistoryResult) {
 		"VALID_FROM", "SRC", "CHANGE", "SUMMARY", "AUDIT_ID")
 	for _, row := range r.Rows {
 		fmt.Fprintf(w, "%-22s %-5s %-8s %-38s %s\n",
-			truncate(row.ValidFrom, 22),
+			truncate(row.ValidFrom.UTC().Format(time.RFC3339), 22),
 			row.Source,
 			truncate(row.ChangeKind, 8),
 			truncate(historyRowSummary(row), 38),
-			truncate(strDeref(row.AuditID), 36),
+			truncate(uuidPtrToString(row.AuditId), 36),
 		)
 	}
 	fmt.Fprintf(w, "anchor: %s; include_edges: %t; rows: %d\n",
-		r.AnchorNodeID, r.IncludeEdges, len(r.Rows))
+		r.AnchorNodeId, r.IncludeEdges, len(r.Rows))
 }
 
 // historyRowSummary renders a 1-line description of a history row
@@ -269,15 +254,21 @@ func printHistoryTable(w io.Writer, root string, r *HistoryResult) {
 // "what's new" surveys) and the pre-state for removed (the row that
 // just went away). Falls back to "<change_kind> <source>" when the
 // snapshot is malformed or missing.
-func historyRowSummary(row HistoryEntry) string {
+//
+// `row.Snapshot` is `*map[string]interface{}` in the generated
+// client (Pydantic JSONB rendered as a pointer to a map so absence
+// is representable). Dereference once before the switch / lookup
+// below to keep the field access cheap and readable.
+func historyRowSummary(row api.TopologyHistoryEntry) string {
 	if row.Snapshot == nil {
 		return fmt.Sprintf("%s %s", row.ChangeKind, row.Source)
 	}
+	snap := *row.Snapshot
 	var side any
 	if row.ChangeKind == "removed" {
-		side = row.Snapshot["before"]
+		side = snap["before"]
 	} else {
-		side = row.Snapshot["after"]
+		side = snap["after"]
 	}
 	m, ok := side.(map[string]any)
 	if !ok {

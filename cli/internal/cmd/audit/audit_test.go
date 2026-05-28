@@ -335,14 +335,14 @@ func TestPostQueryReturnsHTTPErrorOnNon2xx(t *testing.T) {
 // the cast above stays readable without dragging the std-lib import
 // into the assertion site.
 func asHTTPResponseError(err error, target **httpResponseError) bool {
-	for cause := err; cause != nil; {
-		if h, ok := cause.(*httpResponseError); ok {
-			*target = h
-			return true
-		}
-		// Stop at the first non-wrap; this skill's errors don't
-		// nest under wrap helpers.
-		break
+	// Stop at the first non-wrap; this skill's errors don't nest
+	// under wrap helpers, so a single type assertion is sufficient.
+	if err == nil {
+		return false
+	}
+	if h, ok := err.(*httpResponseError); ok {
+		*target = h
+		return true
 	}
 	return false
 }

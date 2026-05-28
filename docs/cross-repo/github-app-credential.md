@@ -265,9 +265,34 @@ deleting the App:
    the same page — GitHub retains both until you explicitly remove
    the old one. Leaving the old key active widens the blast radius
    of a leak.
-3. `vault kv put secret/<tenant>/<target>/github-app
-   app_id=<unchanged> private_key=@<new-key.pem>`. The App ID does
-   not change on key rotation.
+3. Rewrite the Vault secret with **all three** App fields — `app_id`
+   and `installation_id` re-supplied unchanged, `private_key` pointed
+   at the new `.pem`:
+
+   ```bash
+   vault kv put secret/<tenant>/<target>/github-app \
+     app_id='<unchanged>' \
+     installation_id='<unchanged>' \
+     private_key=@/path/to/<new-key.pem>
+   ```
+
+   Vault KV-v2 `kv put` creates a new version with **exactly** the
+   fields you supply — it is a replace, not a merge. Omitting
+   `installation_id` (or `app_id`) at rotation drops the field from
+   the new version; the next installation-token mint then surfaces
+   as `github_ambiguous_vault_payload` because the credential loader
+   only picks the App path when **all three** `_GH_APP_FIELDS` are
+   present (see [§ Failure modes](#failure-modes) and the loader
+   contract in
+   [§ Step 4](#step-4--copy-app-id-installation-id-and-private-key-to-vault)).
+   When you genuinely want merge semantics elsewhere (rare for this
+   secret — the field set is intentionally closed) use `vault kv
+   patch` instead; `kv put` always replaces.
+
+   The App ID and installation ID do not change on key rotation — copy
+   them out of the current version (`vault kv get -format=json …`)
+   before writing the new one so you don't have to fish them out of
+   the GitHub UI again.
 4. The connector picks up the new key on its next installation-token
    mint (within at most 1 hour, when the current installation token
    expires). Force a refresh by restarting the backplane pods if you

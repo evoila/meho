@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -22,6 +24,15 @@ import (
 // cleanest renderer until callers grow a need for per-shape
 // specialisation. Same approach `retrieval.EvalResult` takes for
 // `Thresholds`.
+//
+// Kept hand-written rather than generator-backed because the FastAPI
+// surface types this route's response as `dict[str, Any]` and the
+// oapi-codegen generator therefore emits the response as a
+// `*map[string]interface{}` (see PostCallApiV1OperationsCallPostResponse
+// .JSON200 in client.gen.go) — no typed model worth using. Promoting
+// the FastAPI response to a typed model so the generator picks it up
+// is a separate backend Task explicitly out of scope for G0.12-T2
+// #1260 (Initiative #1118 is consumer-side only).
 type CallResult struct {
 	Status     string          `json:"status"`
 	OpID       string          `json:"op_id"`
@@ -29,19 +40,6 @@ type CallResult struct {
 	Error      *string         `json:"error"`
 	Extras     json.RawMessage `json:"extras,omitempty"`
 	DurationMs float64         `json:"duration_ms"`
-}
-
-// callRequestBody mirrors the backend CallOperationBody Pydantic
-// model. Target uses a map[string]any so the empty case (typed
-// handlers that don't need a target) can serialise as `null` rather
-// than an empty struct; the route layer's resolver short-circuits
-// on the missing-name case (raising 400) for the few ops that do
-// need a target.
-type callRequestBody struct {
-	ConnectorID string         `json:"connector_id"`
-	OpID        string         `json:"op_id"`
-	Target      map[string]any `json:"target"`
-	Params      map[string]any `json:"params,omitempty"`
 }
 
 // newCallCmd returns the `meho operation call` command.
@@ -133,7 +131,11 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(err.Error()), opts.JSONOut)
 	}
-	result, err := postCall(cmd.Context(), backplaneURL, opts, params)
+	client, err := newAuthedClient(cmd.Context(), backplaneURL)
+	if err != nil {
+		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	result, err := postCall(cmd.Context(), client, opts, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
@@ -183,33 +185,53 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 // errEvalGate.
 var errOpError = errors.New("operation status not ok")
 
+// postCall constructs the typed CallOperationBody, picks the bare-
+// string target shape via FromCallOperationBodyTarget0 when --target
+// is supplied (the canonical write surface per G0.13-T2 #1132; the
+// CLI never needed the dict-shape fqdn override — that's an MCP-
+// handler use case), and issues the POST through the generated
+// *WithResponse helper. The 401-refresh dance mirrors GetHealth on
+// *api.AuthedClient.
 func postCall(
 	ctx context.Context,
-	backplaneURL string,
+	client operationsAPI,
 	opts callOptions,
 	params map[string]any,
 ) (*CallResult, error) {
-	body := callRequestBody{
-		ConnectorID: opts.ConnectorID,
-		OpID:        opts.OpID,
-		Target:      nil,
+	body := api.CallOperationBody{
+		ConnectorId: opts.ConnectorID,
+		OpId:        opts.OpID,
 	}
 	if opts.TargetName != "" {
-		body.Target = map[string]any{"name": opts.TargetName}
+		var target api.CallOperationBody_Target
+		if err := target.FromCallOperationBodyTarget0(opts.TargetName); err != nil {
+			return nil, fmt.Errorf("encode target: %w", err)
+		}
+		body.Target = &target
 	}
 	if params != nil {
-		body.Params = params
+		p := params
+		body.Params = &p
 	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal call request: %w", err)
-	}
-	respBody, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/operations/call", raw)
+	apiParams := &api.PostCallApiV1OperationsCallPostParams{}
+	resp, err := client.PostCallApiV1OperationsCallPostWithResponse(ctx, apiParams, body)
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode() == http.StatusUnauthorized {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, rerr
+		}
+		resp, err = client.PostCallApiV1OperationsCallPostWithResponse(ctx, apiParams, body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
+	}
 	var out CallResult
-	if err := json.Unmarshal(respBody, &out); err != nil {
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
 		return nil, fmt.Errorf("decode call response: %w", err)
 	}
 	return &out, nil

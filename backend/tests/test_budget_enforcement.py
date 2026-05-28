@@ -182,7 +182,7 @@ async def test_per_identity_kill_switch_via_zero_request_limit() -> None:
     switch case from "budget filled by use".
     """
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await set_limits(
@@ -216,7 +216,7 @@ async def test_per_identity_kill_switch_via_zero_request_limit() -> None:
 async def test_cap_refuses_when_cost_consumed_meets_cost_limit() -> None:
     """Once ``cost_consumed >= cost_limit`` on any window the gate refuses."""
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await set_limits(
@@ -254,7 +254,7 @@ async def test_cap_refuses_when_cost_consumed_meets_cost_limit() -> None:
 async def test_cap_refuses_when_tokens_consumed_meets_token_limit() -> None:
     """The token dimension is enforced on the same all-or-nothing basis."""
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await set_limits(
@@ -297,7 +297,7 @@ async def test_cap_refuses_when_tokens_consumed_meets_token_limit() -> None:
 async def test_threshold_downgrades_investigate_to_summarize() -> None:
     """At threshold the resolver tier walks one rung down the ladder."""
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     # 80% of 1.00 USD = 0.80; spend 0.80 to hit the threshold exactly.
     async with sessionmaker() as session:
@@ -337,7 +337,7 @@ async def test_threshold_downgrades_investigate_to_summarize() -> None:
 async def test_threshold_downgrades_summarize_to_triage() -> None:
     """The ladder's second rung lands on TRIAGE."""
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await set_limits(
@@ -375,7 +375,7 @@ async def test_threshold_downgrades_summarize_to_triage() -> None:
 async def test_triage_at_threshold_runs_unchanged() -> None:
     """TRIAGE has no cheaper rung; the run is allowed unchanged."""
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await set_limits(
@@ -418,7 +418,7 @@ async def test_threshold_does_not_fire_on_request_dimension() -> None:
     branch is tokens + cost only.
     """
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await set_limits(
@@ -465,7 +465,7 @@ async def test_threshold_does_not_fire_on_request_dimension() -> None:
 async def test_cap_breach_takes_precedence_over_threshold() -> None:
     """When a window is over the cap, the gate refuses (doesn't degrade)."""
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await set_limits(
@@ -506,7 +506,7 @@ async def test_cap_breach_takes_precedence_over_threshold() -> None:
 async def test_no_tier_definition_still_refuses_at_cap() -> None:
     """A definition with no tier still runs through the gate; can REFUSE."""
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await set_limits(
@@ -542,7 +542,7 @@ async def test_no_tier_definition_still_refuses_at_cap() -> None:
 async def test_no_tier_definition_at_threshold_runs_unchanged() -> None:
     """No tier = no degradation path; threshold-crossed run still ALLOWs."""
     tenant_id = await _seed_tenant()
-    when = datetime(2026, 5, 27, 14, 0, 0, tzinfo=UTC)
+    when = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await set_limits(

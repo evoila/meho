@@ -47,9 +47,37 @@ Replay
 
 Either of the two replay knobs may be set; ``Last-Event-Id`` header
 takes precedence over the ``since`` query parameter when both are
-present. The default cursor is ``$`` (Valkey's "from now" anchor), so
-a fresh connection yields only events ``XADD``\\ ed after the SSE
-handshake completes.
+present. When neither is provided, a fresh connection emits a
+**backlog prelude** — the last :data:`_BACKLOG_PRELUDE_COUNT`
+entries on the tenant stream are replayed in chronological order
+before the live-tail BLOCK loop takes over. This solves two
+operator-visible bugs that ``$`` alone produces:
+
+1. A fresh ``GET /api/v1/feed`` against a stream with existing
+   entries but no new writes during the test window returns zero
+   bytes for the first ``_HEARTBEAT_INTERVAL_SECONDS`` — ``$``
+   skips backlog AND the heartbeat is 30 s, so curl / EventSource
+   intermediaries time out before seeing any byte. The repro in
+   ``claude-rdc-hetzner-dc#771`` Finding 14 (G0.16-T3, #1305) is
+   exactly this shape: 76+ events on the tenant stream, 0 bytes
+   observed at the SSE consumer over 6-8 s.
+2. The ``/ui/broadcast`` page renders the header "Live activity
+   across tenant X" with an empty event list because the live-tail
+   cursor ignores history. The operator perceives the broadcast
+   feature as broken even when stream writes are succeeding.
+
+The prelude reads via ``XREVRANGE meho:feed:{tenant} + - COUNT N``,
+reverses the result into chronological order, yields each as a
+regular ``event: broadcast`` SSE frame, then advances the cursor
+to the most recent entry id so the subsequent BLOCK loop reads
+strictly past the backlog (no duplicates). When the stream is
+empty the prelude is a no-op and the loop enters BLOCK with
+cursor ``$`` as before.
+
+Subscribers reconnecting with ``Last-Event-Id`` or callers passing
+``since`` skip the prelude — those cursors are explicit
+"resume-from-here" anchors and the caller already knows where
+they left off.
 
 Tenant scoping
 ==============
@@ -169,8 +197,24 @@ _XREAD_COUNT: Final[int] = 20
 #: Initial cursor when the client doesn't provide one. Valkey's ``$``
 #: anchor means "only entries XADD'd after this XREAD call started" —
 #: a fresh connection without ``Last-Event-Id`` / ``since`` gets the
-#: live tail, not a backlog.
+#: live tail. The :func:`_emit_backlog_prelude` helper does an
+#: ``XREVRANGE`` before the BLOCK loop so the operator sees recent
+#: history immediately and the HTTP intermediary buffer flushes on
+#: connection open; see the module docstring's *Replay* section for
+#: why the prelude is gated on a ``$`` cursor (explicit replay anchors
+#: are honoured verbatim).
 _LIVE_TAIL_CURSOR: Final[str] = "$"
+
+#: Number of historical entries replayed on a fresh ``$`` connection
+#: before the BLOCK loop runs. 50 matches the
+#: :mod:`~meho_backplane.mcp.resources.tenant_feed` snapshot ceiling
+#: so the SSE and the MCP-resource snapshot surface the same window
+#: of context on first connection. The cap is intentionally tight —
+#: a busy tenant with 10 000 entries on the stream should not ship
+#: every one of them to a fresh subscriber; an operator who wants the
+#: full history queries the audit log instead. Operators who want
+#: deeper replay pass an explicit ``since`` cursor.
+_BACKLOG_PRELUDE_COUNT: Final[int] = 50
 
 #: Valkey stream entry id shape — ``<ms-timestamp>`` or
 #: ``<ms-timestamp>-<sequence>``. Accepts both forms because the
@@ -494,6 +538,80 @@ def _process_entries(
         yield entry_id, _format_event(entry_id, raw_event_json)
 
 
+async def _emit_backlog_prelude(
+    client: object,
+    *,
+    stream_key: str,
+    op_class: str | None,
+    principal: str | None,
+    target: str | None,
+) -> tuple[list[str], str | None]:
+    """Read up to :data:`_BACKLOG_PRELUDE_COUNT` recent entries; return frames + advance.
+
+    Issues a single ``XREVRANGE stream_key + - COUNT N`` (latest-first)
+    and reverses the result into chronological order so the SSE
+    consumer sees entries in publish order. Each surviving entry is
+    formatted into a regular ``event: broadcast`` frame via the same
+    :func:`_process_entries` helper the live loop uses, so the wire
+    shape is identical between the prelude and live tail — clients
+    can't distinguish "this is replay" from "this is fresh" at the
+    frame level (the entry id distinguishes them at the application
+    level if needed).
+
+    Returns ``(frames, last_entry_id)``:
+
+    * ``frames`` — the SSE frames to yield, post-filter. Empty list
+      when the stream has no entries OR every entry filters out.
+    * ``last_entry_id`` — the Valkey id of the most recent entry
+      *fetched* (NOT *matched*) — ``None`` when the stream is empty.
+      Mirrors the live-loop invariant
+      (:func:`_consume_xread_batch`'s ``new_cursor = items[-1][0]``):
+      advance the cursor past every consumed entry, not just the
+      matched ones, so a busy-but-filtered tenant doesn't re-read
+      the same prelude batch on the first BLOCK iteration.
+
+    A :class:`redis.exceptions.RedisError` during the prelude is the
+    same operator-visible condition as the live loop's first XREAD
+    failure (broadcast pod down, network partition); we let it
+    propagate so the live-loop's ``except RedisError`` arm formats a
+    single ``feed_error`` frame for the subscriber. Catching it here
+    would double-handle the error path.
+
+    :param client: the redis-py asyncio client.
+        Typed as ``object`` because the public surface of
+        :class:`redis.asyncio.Redis` carries methods that mypy can't
+        verify against this module's narrow use (xrevrange takes
+        ``name, max, min, count`` keyword-only or positional depending
+        on version); we trust the runtime + the framework-research
+        introspection over the published stub shape.
+    """
+    # ``xrevrange`` returns ``[(entry_id, fields_dict), ...]`` —
+    # latest-first per the Valkey command contract. ``count`` is
+    # keyword-only on redis-py 7.x; the introspection
+    # (`uv run python -c "import redis.asyncio as r; help(r.Redis.xrevrange)"`)
+    # confirms the signature on the installed wheel.
+    raw_items = await client.xrevrange(  # type: ignore[attr-defined]
+        stream_key,
+        count=_BACKLOG_PRELUDE_COUNT,
+    )
+    if not raw_items:
+        return [], None
+    # XREVRANGE returns latest-first; reverse for chronological emit.
+    items: list[tuple[str, dict[str, str]]] = list(reversed(raw_items))
+    last_entry_id = items[-1][0]
+    frames = [
+        frame
+        for _entry_id, frame in _process_entries(
+            items,
+            op_class=op_class,
+            principal=principal,
+            target=target,
+            stream_key=stream_key,
+        )
+    ]
+    return frames, last_entry_id
+
+
 async def _feed_generator(
     operator: Operator,
     cursor: str,
@@ -501,7 +619,26 @@ async def _feed_generator(
     principal: str | None,
     target: str | None,
 ) -> AsyncIterator[str]:
-    """SSE generator: BLOCK on XREAD, delegate parsing, heartbeat-on-silence.
+    """SSE generator: prelude → BLOCK on XREAD, delegate parsing, heartbeat-on-silence.
+
+    Backlog prelude — when *cursor* is ``$`` (the live-tail default
+    selected by :func:`_resolve_cursor` when neither ``Last-Event-Id``
+    nor ``since`` is provided), the generator first calls
+    :func:`_emit_backlog_prelude` to replay the most recent
+    :data:`_BACKLOG_PRELUDE_COUNT` entries on the stream. This solves
+    the consumer-visible bug surfaced by ``claude-rdc-hetzner-dc#771``
+    Finding 14 (G0.16-T3, #1305): a fresh
+    ``GET /api/v1/feed`` against a tenant with existing entries but
+    no new writes during the test window otherwise returns zero bytes
+    for ``_HEARTBEAT_INTERVAL_SECONDS`` (``$`` skips backlog AND the
+    heartbeat cadence is 30 s), tripping curl / EventSource
+    intermediary timeouts before any byte is observed. The prelude
+    also gives the ``/ui/broadcast`` page a populated initial render
+    instead of a misleading empty list under a "Live activity" header.
+    Subscribers that pass an explicit replay cursor
+    (``Last-Event-Id`` or ``since``) skip the prelude — those cursors
+    are "resume exactly here" anchors and the caller already saw the
+    history.
 
     Heartbeat semantics — ``last_heartbeat`` tracks the wall-clock of
     the **last outbound yield** (event frame or heartbeat), NOT the
@@ -539,6 +676,46 @@ async def _feed_generator(
     last_heartbeat = time.monotonic()
 
     try:
+        # Backlog prelude — only when the caller didn't pin an explicit
+        # replay anchor. ``Last-Event-Id`` / ``since`` are honoured as
+        # "resume exactly here", which is incompatible with a backlog
+        # dump from "+" (would replay events the caller already saw).
+        # See the module docstring's *Replay* section for the full
+        # rationale and the consumer-side repro this addresses.
+        if cursor == _LIVE_TAIL_CURSOR:
+            try:
+                prelude_frames, prelude_last_id = await _emit_backlog_prelude(
+                    client,
+                    stream_key=stream_key,
+                    op_class=op_class,
+                    principal=principal,
+                    target=target,
+                )
+            except RedisError as exc:
+                # Same operator-visible condition as the live-loop's
+                # first XREAD failure (broadcast pod down). Emit one
+                # T11-compliant error frame and break — the connection
+                # closes cleanly and ``EventSource`` reconnects per its
+                # spec semantics, which will re-evaluate Valkey
+                # reachability on the next handshake.
+                yield _log_and_format_broadcast_unavailable(operator, stream_key, exc)
+                return
+            for frame in prelude_frames:
+                yield frame
+            if prelude_last_id is not None:
+                # Advance past every prelude entry — including the ones
+                # that filtered out — so the BLOCK loop reads strictly
+                # past the prelude window. Without this advance, a
+                # fully-filtered prelude would leave cursor at ``$``,
+                # the BLOCK loop would silently re-skip every prelude
+                # entry on its next read (XREAD with id strictly later
+                # than $ never returns older entries, but a busy stream
+                # could still flag this as "we re-fetched and the
+                # filter dropped them again"). Setting the cursor here
+                # makes the intent explicit.
+                cursor = prelude_last_id
+            if prelude_frames:
+                last_heartbeat = time.monotonic()
         while True:
             try:
                 entries = await client.xread(

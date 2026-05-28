@@ -5,33 +5,18 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
-
-// createRequest mirrors the backend ScheduledTriggerCreate pydantic
-// model. The discriminated-union invariant (exactly one of
-// cron_expr / fire_at / event_filter populated) is checked CLI-side
-// before the request lands; the backend's model validator is the
-// ultimate gate.
-type createRequest struct {
-	Kind              string         `json:"kind"`
-	AgentDefinitionID string         `json:"agent_definition_id"`
-	CronExpr          *string        `json:"cron_expr,omitempty"`
-	FireAt            *string        `json:"fire_at,omitempty"`
-	EventFilter       map[string]any `json:"event_filter,omitempty"`
-	Timezone          string         `json:"timezone,omitempty"`
-	Inputs            map[string]any `json:"inputs,omitempty"`
-	IdentitySub       string         `json:"identity_sub,omitempty"`
-	InFlightPolicy    string         `json:"in_flight_policy,omitempty"`
-	TenantID          *string        `json:"tenant_id,omitempty"`
-}
 
 // newCreateCmd returns the `meho scheduler create` command.
 //
@@ -194,60 +179,166 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
 	}
+	// Parse --agent-definition and --tenant CLI-side so malformed
+	// UUIDs surface locally as a clear error rather than after the
+	// server's 422 round-trip. The generated `ScheduledTriggerCreate`
+	// requires `openapi_types.UUID` for both fields.
+	var agentDefID openapi_types.UUID
+	if err := agentDefID.UnmarshalText([]byte(opts.AgentDefinition)); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("--agent-definition is not a valid UUID: %v", err)),
+			opts.JSONOut)
+	}
+	var tenantID *openapi_types.UUID
+	if opts.Tenant != "" {
+		var parsed openapi_types.UUID
+		if err := parsed.UnmarshalText([]byte(opts.Tenant)); err != nil {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf("--tenant is not a valid UUID: %v", err)),
+				opts.JSONOut)
+		}
+		tenantID = &parsed
+	}
+	// Parse --fire-at CLI-side. The generated `ScheduledTriggerCreate.FireAt`
+	// is `*time.Time`; the typed client serialises that as the wire
+	// shape the backend's pydantic `datetime` validator expects (ISO
+	// 8601). Accept either RFC3339 (with timezone) or the
+	// timezone-less form the consumer doc mentions; the backend
+	// rejects naive datetimes with 422 invalid_arguments.
+	var fireAtTime *time.Time
+	if opts.FireAt != "" {
+		parsed, perr := time.Parse(time.RFC3339Nano, opts.FireAt)
+		if perr != nil {
+			// Fall back to the simpler RFC3339 (no nanoseconds) form.
+			parsed2, perr2 := time.Parse(time.RFC3339, opts.FireAt)
+			if perr2 != nil {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected(fmt.Sprintf(
+						"--fire-at must be RFC 3339 (e.g. 2026-01-15T12:00:00Z): %v", perr)),
+					opts.JSONOut)
+			}
+			parsed = parsed2
+		}
+		fireAtTime = &parsed
+	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 
-	req := createRequest{
-		Kind:              opts.Kind,
-		AgentDefinitionID: opts.AgentDefinition,
-		Timezone:          opts.Timezone,
-		Inputs:            inputs,
-		IdentitySub:       opts.IdentitySub,
-		InFlightPolicy:    opts.InFlightPolicy,
-	}
-	if opts.CronExpr != "" {
-		cronCopy := opts.CronExpr
-		req.CronExpr = &cronCopy
-	}
-	if opts.FireAt != "" {
-		fireAtCopy := opts.FireAt
-		req.FireAt = &fireAtCopy
-	}
-	if eventFilter != nil {
-		req.EventFilter = eventFilter
-	}
-	if opts.Tenant != "" {
-		tenantCopy := opts.Tenant
-		req.TenantID = &tenantCopy
-	}
-
-	entry, err := postCreate(cmd.Context(), backplaneURL, req)
+	body := buildCreateBody(opts, agentDefID, tenantID, fireAtTime, eventFilter, inputs)
+	resp, err := postCreate(cmd.Context(), backplaneURL, body)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if resp.StatusCode() != http.StatusCreated {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
+	}
+	// Guard against 201 + missing-content-type leaving JSON201 nil
+	// (oapi-codegen only populates the typed field when the
+	// response advertises `application/json`). Without this guard
+	// a malformed 201 would pass `entry` as nil into
+	// `printTriggerSummary`, which short-circuits — operator sees
+	// the "created" prose with no follow-up summary as if every
+	// field were empty.
+	if resp.JSON201 == nil {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"call %s: HTTP 201 without a created-trigger payload",
+				backplaneURL,
+			)),
+			opts.JSONOut,
+		)
+	}
+	entry := resp.JSON201
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "created %s trigger %s\n", entry.Kind, entry.ID)
+	fmt.Fprintf(cmd.OutOrStdout(), "created %s trigger %s\n", string(entry.Kind), entry.Id.String())
 	printTriggerSummary(cmd.OutOrStdout(), entry)
 	return nil
 }
 
-func postCreate(ctx context.Context, backplaneURL string, req createRequest) (*Trigger, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal scheduler create request: %w", err)
+// buildCreateBody assembles the typed POST body. Pulled out so the
+// wire-shape rendering (kind enum, pointer-or-omit semantics on
+// nullable fields, conditional `tenant_id` for cross-tenant admin)
+// stays unit-testable without spinning up an httptest.Server.
+//
+// Wire-shape note: the generated `api.ScheduledTriggerCreate` types
+// `CronExpr`, `FireAt`, `EventFilter`, `Inputs`, `TenantId` as
+// nullable pointers (no `omitempty` on their JSON tags); the
+// pre-migration `createRequest` carried `,omitempty` and dropped the
+// keys for the nil case. The backend's pydantic validator treats
+// `null` and absent identically for these fields (its model marks
+// them `Optional[X] = None`), so the wire-level switch from "drop"
+// to "explicit null" is behaviour-preserving on the server. The
+// pre-condition pre-check in `runCreate` still rejects forbidden-
+// for-this-kind fields locally so the wire never sends a
+// `cron_expr=null` + `fire_at=<value>` combination the backend's
+// discriminated-union validator would reject as 422.
+func buildCreateBody(
+	opts createOptions,
+	agentDefID openapi_types.UUID,
+	tenantID *openapi_types.UUID,
+	fireAtTime *time.Time,
+	eventFilter map[string]any,
+	inputs map[string]any,
+) api.ScheduledTriggerCreate {
+	body := api.ScheduledTriggerCreate{
+		AgentDefinitionId: agentDefID,
+		Kind:              api.ScheduledTriggerKind(opts.Kind),
 	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST",
-		"/api/v1/scheduler/triggers", body)
+	if opts.CronExpr != "" {
+		cronCopy := opts.CronExpr
+		body.CronExpr = &cronCopy
+	}
+	if fireAtTime != nil {
+		body.FireAt = fireAtTime
+	}
+	if eventFilter != nil {
+		ef := map[string]interface{}(eventFilter)
+		body.EventFilter = &ef
+	}
+	if opts.Timezone != "" {
+		tz := opts.Timezone
+		body.Timezone = &tz
+	}
+	if inputs != nil {
+		in := map[string]interface{}(inputs)
+		body.Inputs = &in
+	}
+	if opts.IdentitySub != "" {
+		sub := opts.IdentitySub
+		body.IdentitySub = &sub
+	}
+	if opts.InFlightPolicy != "" {
+		policy := api.ScheduledTriggerInFlightPolicy(opts.InFlightPolicy)
+		body.InFlightPolicy = &policy
+	}
+	if tenantID != nil {
+		body.TenantId = tenantID
+	}
+	return body
+}
+
+// postCreate calls POST /api/v1/scheduler/triggers via the generated
+// typed client. The 401-refresh-retry loop runs through retryOn401.
+func postCreate(
+	ctx context.Context,
+	backplaneURL string,
+	body api.ScheduledTriggerCreate,
+) (*api.CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	var out Trigger
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode scheduler create response: %w", err)
-	}
-	return &out, nil
+	return retryOn401(
+		ctx,
+		authed,
+		func(ctx context.Context) (*api.CreateTriggerApiV1SchedulerTriggersPostResponse, error) {
+			return authed.CreateTriggerApiV1SchedulerTriggersPostWithResponse(ctx, nil, body)
+		},
+		func(r *api.CreateTriggerApiV1SchedulerTriggersPostResponse) int { return r.StatusCode() },
+	)
 }

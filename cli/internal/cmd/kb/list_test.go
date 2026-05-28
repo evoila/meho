@@ -274,3 +274,73 @@ func TestRunListWiresFilterLimitOffsetOnWire(t *testing.T) {
 		}
 	}
 }
+
+// TestRunListOmitsZeroLimitOffsetOnWire pins the zero-value query-
+// omission contract (m1). `listQueryParams` deliberately omits the
+// `limit` and `offset` keys when the operator didn't pass the
+// flag so the backend's `Query(ge=1, le=500, default=100)` and
+// `Query(ge=0, default=0)` apply server-side. A regression that
+// flipped `if opts.Limit > 0` to `if opts.Limit >= 0` would
+// silently start sending `limit=0`, which the backend's `ge=1`
+// constraint rejects as a 422 — the contract test is the only
+// thing that catches it. Restored after the migration dropped the
+// pre-migration equivalent.
+func TestRunListOmitsZeroLimitOffsetOnWire(t *testing.T) {
+	var seenQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, r *http.Request) {
+		seenQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.KbListResponse{Entries: nil})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	if err := runList(cmd, listOptions{
+		Limit: 0, Offset: 0, BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runList: %v; stderr=%s", err, stderr.String())
+	}
+	for _, forbidden := range []string{"limit=", "offset="} {
+		if strings.Contains(seenQuery, forbidden) {
+			t.Errorf("expected %q absent from query; got %q", forbidden, seenQuery)
+		}
+	}
+}
+
+// TestRunListRejects200WithoutJSONPayload pins the JSON200
+// nil-guard (M6). A 200 with a missing or mistyped Content-Type
+// leaves resp.JSON200 nil; without the guard, printListTable
+// prints "no kb entries registered in this tenant" — actively
+// misleading (conflated with a genuinely-empty tenant). Route to
+// output.Unexpected (exit 4) instead.
+func TestRunListRejects200WithoutJSONPayload(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		// Deliberately omit Content-Type so the generated parser
+		// leaves JSON200 nil.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runList(cmd, listOptions{BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error on 200 without JSON payload")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "HTTP 200 without a kb list payload") {
+		t.Errorf("expected detail mentioning missing payload; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4; got %v", err)
+	}
+}

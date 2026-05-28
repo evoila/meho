@@ -5,12 +5,13 @@ package broadcast
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -97,22 +98,34 @@ func runOverridesSet(cmd *cobra.Command, opts overridesSetOptions) error {
 		)
 	}
 
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 
-	req := CreateRequest{
-		OpIDPattern: opts.OpIDPattern,
-		Detail:      opts.Detail,
+	client, cerr := newAuthedClient(cmd.Context(), cmd, backplaneURL, opts.JSONOut)
+	if cerr != nil {
+		return cerr
+	}
+
+	body := api.BroadcastOverrideCreate{
+		OpIdPattern: opts.OpIDPattern,
+		Detail:      api.BroadcastOverrideCreateDetail(opts.Detail),
 	}
 	if scopeFieldSet {
-		req.ScopeField = &opts.ScopeField
-		req.ScopeValue = &opts.ScopeValue
+		sf := api.BroadcastOverrideCreateScopeField(opts.ScopeField)
+		body.ScopeField = &sf
+		body.ScopeValue = &opts.ScopeValue
 	}
-	entry, err := createOverride(cmd.Context(), backplaneURL, req)
+	entry, err := createOverride(cmd.Context(), client, body)
 	if err != nil {
-		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+		return routeRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if entry == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("backplane returned 2xx but no JSON body decoded against BroadcastOverrideRead"),
+			opts.JSONOut,
+		)
 	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
@@ -121,29 +134,45 @@ func runOverridesSet(cmd *cobra.Command, opts overridesSetOptions) error {
 	return nil
 }
 
-func createOverride(ctx context.Context, backplaneURL string, req CreateRequest) (*Entry, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal broadcast override request: %w", err)
-	}
-	raw, err := doAuthedRequest(ctx, backplaneURL, "POST", "/api/v1/broadcast/overrides", body)
+// createOverride drives the typed-client
+// `CreateOverrideApiV1BroadcastOverridesPost` endpoint with a
+// one-shot 401-retry around the underlying AuthedClient's refresh
+// path. Non-2xx responses come back as `*httpResponseError` so the
+// caller can route them through `renderHTTPStatus`. The generated
+// client serialises `api.BroadcastOverrideCreate` and reads
+// `JSON201` (the route returns 201 Created, not 200 OK).
+func createOverride(
+	ctx context.Context,
+	client *api.AuthedClient,
+	body api.BroadcastOverrideCreate,
+) (*api.BroadcastOverrideRead, error) {
+	params := &api.CreateOverrideApiV1BroadcastOverridesPostParams{}
+	resp, err := client.CreateOverrideApiV1BroadcastOverridesPostWithResponse(ctx, params, body)
 	if err != nil {
 		return nil, err
 	}
-	var out Entry
-	if jerr := json.Unmarshal(raw, &out); jerr != nil {
-		return nil, fmt.Errorf("decode broadcast override response: %w", jerr)
+	if resp.StatusCode() == 401 {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, rerr
+		}
+		resp, err = client.CreateOverrideApiV1BroadcastOverridesPostWithResponse(ctx, params, body)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return &out, nil
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+	}
+	return resp.JSON201, nil
 }
 
-func printOverrideSummary(w io.Writer, e *Entry) {
-	fmt.Fprintf(w, "%-16s %s\n", "id:", e.ID)
-	fmt.Fprintf(w, "%-16s %s\n", "tenant_id:", e.TenantID)
-	fmt.Fprintf(w, "%-16s %s\n", "op_id_pattern:", e.OpIDPattern)
+func printOverrideSummary(w io.Writer, e *api.BroadcastOverrideRead) {
+	fmt.Fprintf(w, "%-16s %s\n", "id:", e.Id.String())
+	fmt.Fprintf(w, "%-16s %s\n", "tenant_id:", e.TenantId.String())
+	fmt.Fprintf(w, "%-16s %s\n", "op_id_pattern:", e.OpIdPattern)
 	fmt.Fprintf(w, "%-16s %s\n", "scope_field:", strDerefOrDash(e.ScopeField))
 	fmt.Fprintf(w, "%-16s %s\n", "scope_value:", strDerefOrDash(e.ScopeValue))
 	fmt.Fprintf(w, "%-16s %s\n", "detail:", e.Detail)
 	fmt.Fprintf(w, "%-16s %s\n", "created_by:", e.CreatedBySub)
-	fmt.Fprintf(w, "%-16s %s\n", "created_at:", e.CreatedAt)
+	fmt.Fprintf(w, "%-16s %s\n", "created_at:", e.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
 }

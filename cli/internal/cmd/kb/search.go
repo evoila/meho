@@ -74,8 +74,8 @@ func newSearchCmd() *cobra.Command {
 }
 
 type searchOptions struct {
-	Query             string
-	Limit             int
+	Query string
+	Limit int
 	// Changed mirrors `cobra.Command.Flags().Changed("limit")` for
 	// runSearch's "operator-supplied 0 is an error; default-0 means
 	// 'use the server default'" gate. Threaded as a field rather

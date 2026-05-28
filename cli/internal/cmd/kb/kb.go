@@ -101,15 +101,35 @@ func NewRootCmd() *cobra.Command {
 // #1118 (T1 #1251 approvals, T4 #1262 agent-principal).
 var errMissingAccessToken = errors.New("meho: stored token has no access_token")
 
+// responseBodyCap bounds the bytes the kb verb tree's transport will
+// read off any backplane response body before surfacing
+// `*http.MaxBytesError`. 1 MiB is generous for every documented kb
+// payload (list pages cap at 500 entries × ~256-byte previews; show
+// returns one entry whose body is itself capped by the substrate's
+// `min_length=1` constraint with no documented upper bound but
+// audited median ~10 KB; ingest returns at most a few hundred
+// counters + error strings). Without the cap, an adversarial or
+// runaway backplane response could OOM the CLI because the generated
+// `Parse*Response` helpers call `io.ReadAll(rsp.Body)` on an
+// unbounded body before constructing the typed envelope. The cap is
+// installed at the transport layer via
+// `api.AuthedClientOptions.ResponseBodyLimit` so it applies
+// uniformly to every typed verb on the same `AuthedClient`.
+const responseBodyCap int64 = 1 << 20
+
 // newAuthedClient builds an api.AuthedClient for the supplied
 // backplane URL and verifies a non-empty bearer is loaded. Centralised
 // so every verb's typed-call path goes through the same
 // "stored-token-loaded + non-empty bearer" gate; the caller forwards
 // any returned error to renderRequestError for category mapping.
 // Mirrors the helper sibling verb-tree migrations (G0.12-T4 #1262)
-// adopted for the same reason.
+// adopted for the same reason. Opts into the transport-layer
+// response-body cap (responseBodyCap) so the generated typed
+// parsers can't be pinned by an unbounded backplane response.
 func newAuthedClient(ctx context.Context, backplaneURL string) (*api.AuthedClient, error) {
-	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
+	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{
+		ResponseBodyLimit: responseBodyCap,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -151,9 +171,19 @@ func retryOn401[R any](
 // renderRequestError translates a transport-layer request error into
 // the right output.StructuredError category. Maps the kb REST
 // surface's pre-response failures: missing bearer, no-refresh-
-// token, token-not-found, plus the generic transport-down case.
-// Non-2xx status codes carried in a typed response envelope are
-// classified by renderHTTPStatus instead.
+// token, token-not-found, body-cap / parse failures bubbling out of
+// the generated `*WithResponse` parsers, plus the generic transport-
+// down case. Non-2xx status codes carried in a typed response
+// envelope are classified by renderHTTPStatus instead.
+//
+// Parse / cap failures route to `output.Unexpected` (exit 4 —
+// `unexpected_response`) rather than `output.Unreachable` (exit 3 —
+// `network_unreachable`). A 1 MiB body cap firing or a JSON decode
+// rejecting a malformed payload is a contract / shape failure on the
+// server side, not a transport-down failure on the operator's side;
+// surfacing it as "unreachable" would send operators chasing a
+// network ghost. The cap is installed by `newAuthedClient` via
+// `api.AuthedClientOptions.ResponseBodyLimit` (responseBodyCap).
 func renderRequestError(
 	cmd *cobra.Command,
 	backplaneURL string,
@@ -184,6 +214,24 @@ func renderRequestError(
 				"stored token rejected and no refresh_token present; run `meho login %s`",
 				backplaneURL,
 			)),
+			jsonOut,
+		)
+	}
+	// Transport-layer body-cap firing (*http.MaxBytesReader returned
+	// from capRoundTripper) and JSON shape failures bubbling out of
+	// the generated parsers are server-side contract failures, not
+	// transport-down failures — surface them as unexpected_response
+	// (exit 4) with the backplane URL so the operator sees the
+	// origin without chasing a network ghost.
+	var maxBytesErr *http.MaxBytesError
+	var syntaxErr *json.SyntaxError
+	var unmarshalErr *json.UnmarshalTypeError
+	if errors.As(err, &maxBytesErr) ||
+		errors.As(err, &syntaxErr) ||
+		errors.As(err, &unmarshalErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 			jsonOut,
 		)
 	}

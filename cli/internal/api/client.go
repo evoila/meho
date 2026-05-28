@@ -69,6 +69,21 @@ type AuthedClientOptions struct {
 	// step on refresh. Tests pass a fake; production code passes
 	// nil so NewAuthedClient routes to auth.FetchDiscoveryFromRealm.
 	RefreshDiscoverer func(ctx context.Context, httpClient *http.Client, issuerURL string) (*auth.DiscoveryDocument, error)
+	// ResponseBodyLimit caps the bytes the underlying transport reads
+	// off `rsp.Body` for every response. Zero (default) means no cap
+	// — back-compat with consumers that haven't opted in. When > 0,
+	// NewAuthedClient wraps the client's transport in a
+	// RoundTripper that re-binds `rsp.Body` to an
+	// `http.MaxBytesReader`-equivalent so the generated
+	// `*WithResponse` parsers (which call `io.ReadAll(rsp.Body)`)
+	// can't be pinned by an adversarial / runaway backplane response.
+	// A read at the cap surfaces as `*http.MaxBytesError`, which
+	// consumer-side `renderRequestError` helpers map to
+	// `output.Unexpected` (exit 4) rather than `output.Unreachable`
+	// (exit 3). 1 MiB is the convention adopted by the kb verb tree
+	// (`cli/internal/cmd/kb/kb.go`); other consumers should pick a
+	// per-package cap matching their largest expected payload.
+	ResponseBodyLimit int64
 }
 
 // NewAuthedClient builds an AuthedClient for the supplied backplane
@@ -99,6 +114,20 @@ func NewAuthedClient(_ context.Context, backplaneURL string, opts AuthedClientOp
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
+	}
+	if opts.ResponseBodyLimit > 0 {
+		// Clone so capping the body cap doesn't mutate the
+		// caller-supplied http.Client (notably
+		// http.DefaultClient, which is process-global). The clone
+		// keeps Timeout / Jar / CheckRedirect intact and only
+		// swaps the Transport for a capped wrapper.
+		clone := *httpClient
+		base := clone.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		clone.Transport = &capRoundTripper{base: base, limit: opts.ResponseBodyLimit}
+		httpClient = &clone
 	}
 
 	discoverer := opts.RefreshDiscoverer
@@ -239,4 +268,42 @@ func (c *AuthedClient) Refresh(ctx context.Context) error {
 // operator must rerun `meho login`).
 func IsNoRefreshToken(err error) bool {
 	return errors.Is(err, errNoRefreshToken)
+}
+
+// capRoundTripper wraps an http.RoundTripper so every response body
+// is re-bound to an http.MaxBytesReader before the typed-client
+// parsers (oapi-codegen's generated `Parse*Response` helpers, which
+// `io.ReadAll(rsp.Body)` to populate `*Response.Body []byte`) get a
+// chance to drain it. Without this, an adversarial or runaway
+// backplane response could OOM the CLI by streaming an unbounded
+// body into ReadAll. The wrapper applies the cap server-wide on the
+// underlying transport so every typed verb on the same AuthedClient
+// inherits it uniformly.
+//
+// Reads at or past `limit` surface as `*http.MaxBytesError` out of
+// the body Reader, which the kb verb's `renderRequestError` (and
+// any future consumer following the same pattern) maps to
+// `output.Unexpected` (exit 4 — `unexpected_response`) rather than
+// `output.Unreachable` (exit 3 — `network_unreachable`). The
+// `*http.MaxBytesError` shape was added in Go 1.19 and is the
+// canonical signal for "transport refused to read past N bytes."
+type capRoundTripper struct {
+	base  http.RoundTripper
+	limit int64
+}
+
+func (c *capRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := c.base.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	if resp.Body != nil && c.limit > 0 {
+		// http.MaxBytesReader returns an io.ReadCloser whose Close
+		// closes the underlying body, so the existing close
+		// discipline on the caller (oapi-codegen's `defer
+		// rsp.Body.Close()` inside every `*WithResponse` method)
+		// still drains the original body cleanly.
+		resp.Body = http.MaxBytesReader(nil, resp.Body, c.limit)
+	}
+	return resp, nil
 }

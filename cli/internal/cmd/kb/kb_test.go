@@ -481,13 +481,103 @@ func TestRenderHTTPStatus422WrapsValidationDetail(t *testing.T) {
 	}
 }
 
-// Note: the pre-migration test suite carried a
-// `TestDoAuthedRequestRejectsOversizedResponse` covering the
-// 1-MiB response-body cap of the package-local HTTP helper. The
-// generated typed client uses oapi-codegen's default response
-// reader instead — there is no per-package cap to test, so the
-// case is dropped. Operators relying on response-size guarantees
-// should inspect the underlying http.Transport's read deadline.
+// TestRunListRejectsOversizedResponse restores the 1-MiB
+// response-body cap coverage on the typed-client surface. The cap
+// is now installed at the transport layer via
+// `api.AuthedClientOptions.ResponseBodyLimit` (wired by
+// `newAuthedClient` in `kb.go` to `responseBodyCap`), which wraps
+// `rsp.Body` in an `http.MaxBytesReader` so the generated
+// `Parse*Response` helpers can't ReadAll an unbounded body. When
+// the cap fires, the resulting `*http.MaxBytesError` bubbles out of
+// the typed call and `renderRequestError` maps it to
+// `output.Unexpected` (exit 4 — `unexpected_response`) rather than
+// `output.Unreachable` (exit 3). Pre-migration this was tested
+// against the package-local `doAuthedRequest` helper; the post-
+// migration test drives the same property end-to-end through
+// `runList` against an httptest server that returns an oversized
+// 200 body.
+func TestRunListRejectsOversizedResponse(t *testing.T) {
+	// One byte over the cap so the MaxBytesReader fires on the
+	// final read (the +1 is the documented overshoot detection
+	// pattern from the net/http source).
+	oversized := strings.Repeat("a", int(responseBodyCap)+1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// The body is not valid JSON, but that doesn't matter — the
+		// MaxBytesReader cap trips before the JSON parser ever sees
+		// the bytes; the error surfaces as *http.MaxBytesError, not
+		// as a JSON syntax error.
+		_, _ = w.Write([]byte(oversized))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runList(cmd, listOptions{BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error on oversized response")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4 (unexpected_response); got %v", err)
+	}
+}
+
+// TestRenderRequestErrorMaxBytesErrorMapsToUnexpected pins the
+// classification branch in `renderRequestError` that routes an
+// `*http.MaxBytesError` to `output.Unexpected` (exit 4) rather
+// than `output.Unreachable` (exit 3). The end-to-end coverage in
+// `TestRunListRejectsOversizedResponse` exercises the full
+// transport-cap → renderRequestError path; this unit test pins the
+// classification ladder directly so a future regression that
+// re-orders the branches surfaces here too.
+func TestRenderRequestErrorMaxBytesErrorMapsToUnexpected(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := renderRequestError(
+		cmd,
+		"https://meho.test",
+		&http.MaxBytesError{Limit: 1024},
+		false,
+	)
+	if err == nil {
+		t.Fatalf("expected non-nil error from renderRequestError")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Errorf("expected ExitCode 4; got %v", err)
+	}
+}
+
+// TestRenderRequestErrorJSONSyntaxErrorMapsToUnexpected pins the
+// classification branch in `renderRequestError` that routes a
+// JSON shape failure (`*json.SyntaxError`) to `output.Unexpected`.
+// The generated `Parse*Response` helpers can surface this when a
+// backplane / proxy returns 2xx with a malformed JSON body — that's
+// a contract failure on the server, not a transport-down failure
+// on the operator.
+func TestRenderRequestErrorJSONSyntaxErrorMapsToUnexpected(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := renderRequestError(
+		cmd,
+		"https://meho.test",
+		&json.SyntaxError{Offset: 12},
+		false,
+	)
+	if err == nil {
+		t.Fatalf("expected non-nil error from renderRequestError")
+	}
+	if !strings.Contains(stderr.String(), "unexpected_response") {
+		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+	}
+}
 
 // TestRetryOn401InvokesRefreshAndReissues drives the retry helper
 // against a mock-style call function: the first invocation returns

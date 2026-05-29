@@ -3090,6 +3090,390 @@
         }
       }
     },
+    "/api/v1/runbooks/templates": {
+      "post": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Draft Template",
+        "description": "Create a new draft template for ``request.slug``.\n\n``tenant_admin`` only -- drafting is a privileged authoring action;\n``operator`` role gets 403 via :func:`require_role`. The slug already\nhaving any version (a live draft, or published / deprecated history)\nsurfaces as 409 ``DuplicateDraftError`` -- the caller wants the edit\nroute (which forks or mutates), not a second v1. A slug that fails\n:data:`~meho_backplane.kb.schemas.SLUG_PATTERN` at the service's\ndefense-in-depth revalidation surfaces as 422; the request model\nalready enforces the pattern, so this is the belt to that\nsuspenders.\n\nBinds ``audit_op_id=\"runbook.draft_template\"`` + ``audit_op_class=\n\"write\"`` + ``audit_slug`` before the service call so a handler\nexception still produces an audit row classified under the canonical\nop id.",
+        "operationId": "draft_template_api_v1_runbooks_templates_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DraftTemplateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftTemplateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "List Templates",
+        "description": "List the latest version of each template slug for the operator's tenant.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a tenant\nid from the query string. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler; ``operator`` and\n``tenant_admin`` both pass.\n\nThe optional ``status`` / ``target_kind`` filters narrow the rows\nconsidered before the latest-per-slug projection; ``limit`` is capped\nat 500. ``status`` is typed as the closed ``draft`` / ``published`` /\n``deprecated`` vocabulary, so an out-of-vocabulary value trips a clean\n422 at FastAPI's query-parameter validation boundary (before the\nhandler body runs) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.schemas.ListTemplatesFilter`\ninternally.\n\nBinds ``audit_op_id=\"runbook.list_templates\"`` + ``audit_op_class=\n\"read\"`` before the service call.",
+        "operationId": "list_templates_api_v1_runbooks_templates_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "draft",
+                "published",
+                "deprecated"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "target_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Target Kind"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunbookTemplateListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runbooks/templates/{slug}": {
+      "get": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Show Template",
+        "description": "Return the full body of one template by slug (latest, or ``version``).\n\n``tenant_admin`` only -- the opacity floor. An ``operator`` gets a\nclean 403 via :func:`require_role`; the post-completion operator\nexception (read the template a run you own is pinned to) lives on the\nrun surface in G12.3, not here.\n\nCross-tenant probes surface as 404 (not 403): the service's\ntenant-scoped query makes another tenant's slug invisible, so\n:class:`TemplateNotFoundError` fires exactly as it would for a\ngenuinely absent slug. The conflation prevents enumerating another\ntenant's templates via status-code differential -- same posture\n:mod:`meho_backplane.api.v1.kb` uses.\n\nBinds ``audit_op_id=\"runbook.show_template\"`` + ``audit_op_class=\n\"read\"`` + ``audit_slug`` before the service call; ``runbook.\nshow_template`` matches no read suffix, so the explicit override is\nload-bearing to keep the broadcast classifier from defaulting to\n``op_class=\"other\"``.",
+        "operationId": "show_template_api_v1_runbooks_templates__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "nullable": true,
+              "title": "Version"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShowTemplateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Edit Template",
+        "description": "Edit a draft in place, or fork a new draft from the latest published.\n\n``tenant_admin`` only. The service picks the path (the caller does\nnot): a live draft is mutated in place (version unchanged,\n``forked_from=null``); a slug whose only versions are published /\ndeprecated forks a new draft at ``max(version)+1`` and reports the\nsource version + its ``in_flight_run_count`` in ``forked_from``. A\nslug with no versions at all surfaces as 404\n:class:`TemplateNotFoundError` (nothing to edit or fork). Cross-tenant\nedits collapse to the same 404 by construction.\n\nThe ``{slug}`` from the path is the operation's subject; it is rebound\nonto the request's ``slug`` so a body that omitted it (or carried a\ndifferent one) cannot retarget the write -- the URL is the single\nsource of truth for which template is edited. A path slug that fails\n:data:`~meho_backplane.kb.schemas.SLUG_PATTERN` surfaces as 422\n:class:`InvalidKbSlugError` -- checked **before** the audit/broadcast\ncontextvars are bound so a rejected slug never fires a write-classified\naudit row (the same posture ``GET /{slug}`` achieves by passing the raw\nslug to the service, which 404s on the unresolved row).\n\nBinds ``audit_op_id=\"runbook.edit_template\"`` + ``audit_op_class=\n\"write\"`` + ``audit_slug`` before the service call.",
+        "operationId": "edit_template_api_v1_runbooks_templates__slug__patch",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunbookTemplateBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EditTemplateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runbooks/templates/{slug}/publish": {
+      "post": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Publish Template",
+        "description": "Promote ``(slug, body.version)`` from draft to published.\n\n``tenant_admin`` only. Idempotent at the service layer: re-publishing\nan already-published version is a no-op. A missing\n``(tenant, slug, version)`` triple surfaces as 404\n:class:`TemplateNotFoundError` (cross-tenant probes collapse here\ntoo); a version that exists but is deprecated surfaces as 400\n:class:`TemplateNotDraftError` (cannot publish a retired version).\n\nA path slug that fails :data:`~meho_backplane.kb.schemas.SLUG_PATTERN`\nsurfaces as 422 :class:`InvalidKbSlugError` -- checked **before** the\naudit/broadcast contextvars are bound so a rejected slug never fires a\nwrite-classified audit row (consistent with ``GET /{slug}``, which\n404s an unresolved slug rather than 500ing).\n\nBinds ``audit_op_id=\"runbook.publish_template\"`` + ``audit_op_class=\n\"write\"`` + ``audit_slug`` + ``audit_version`` before the service\ncall.",
+        "operationId": "publish_template_api_v1_runbooks_templates__slug__publish_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_VersionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishTemplateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runbooks/templates/{slug}/deprecate": {
+      "post": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Deprecate Template",
+        "description": "Retire ``(slug, body.version)`` from published to deprecated.\n\n``tenant_admin`` only. Idempotent at the service layer: re-deprecating\nan already-deprecated version is a no-op. A missing\n``(tenant, slug, version)`` triple surfaces as 404\n:class:`TemplateNotFoundError` (cross-tenant probes collapse here\ntoo); a version that exists but is still a draft surfaces as 400\n:class:`TemplateNotPublishedError` (cannot deprecate something never\npublished).\n\nA path slug that fails :data:`~meho_backplane.kb.schemas.SLUG_PATTERN`\nsurfaces as 422 :class:`InvalidKbSlugError` -- checked **before** the\naudit/broadcast contextvars are bound so a rejected slug never fires a\nwrite-classified audit row (consistent with ``GET /{slug}``, which\n404s an unresolved slug rather than 500ing).\n\nBinds ``audit_op_id=\"runbook.deprecate_template\"`` + ``audit_op_class=\n\"write\"`` + ``audit_slug`` + ``audit_version`` before the service\ncall.",
+        "operationId": "deprecate_template_api_v1_runbooks_templates__slug__deprecate_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_VersionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeprecateTemplateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/memory": {
       "post": {
         "tags": [
@@ -9893,6 +10277,26 @@
         "title": "CatalogListResponse",
         "description": "Wire envelope for ``GET /api/v1/connectors/catalog``.\n\nWrapped in ``catalog`` (not a bare list) so future paging fields can\nland non-breakingly, mirroring the ``GET /`` list shape. Used as the\nroute's ``response_model`` so the OpenAPI contract explicitly types\nthe envelope + entry fields (rather than a free-form object map)."
       },
+      "ConfirmVerify": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "confirm",
+            "title": "Type"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "prompt"
+        ],
+        "title": "ConfirmVerify",
+        "description": "Operator answers a yes/no prompt; only an affirmative advances.\n\nThe minimal verify shape: MEHO shows :attr:`prompt` to the operator\nand gates the step on their answer. No structured result, no\ncomparison -- the human is the oracle."
+      },
       "ConnectorReviewGroup": {
         "properties": {
           "group_key": {
@@ -10543,6 +10947,75 @@
         "title": "DecideResponseBody",
         "description": "Response for a successful operator decision."
       },
+      "DeprecateTemplateResponse": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "status": {
+            "type": "string",
+            "const": "deprecated",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "version",
+          "status"
+        ],
+        "title": "DeprecateTemplateResponse",
+        "description": "Response for ``runbook_deprecate_template`` -- the now-deprecated coordinates."
+      },
+      "DraftTemplateRequest": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z](?:[a-z0-9.\\-]*[a-z0-9])?$",
+            "title": "Slug"
+          },
+          "body": {
+            "$ref": "#/components/schemas/RunbookTemplateBody"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "body"
+        ],
+        "title": "DraftTemplateRequest",
+        "description": "Request body for ``runbook_draft_template`` -- create a new draft.\n\n:attr:`slug` is validated against :data:`SLUG_PATTERN` (the kb slug\ncontract, reused verbatim)."
+      },
+      "DraftTemplateResponse": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "status": {
+            "type": "string",
+            "const": "draft",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "version",
+          "status"
+        ],
+        "title": "DraftTemplateResponse",
+        "description": "Response for ``runbook_draft_template`` -- the created draft's coordinates."
+      },
       "EditGroupBody": {
         "properties": {
           "when_to_use": {
@@ -10599,6 +11072,35 @@
         "type": "object",
         "title": "EditOpBody",
         "description": "PATCH body for ``/api/v1/connectors/{id}/operations/{op_id}``.\n\nPer-op operator overrides. At least one field must be set.\n\n``safety_level`` is the bounded enum from\n:class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`\n(``safe`` / ``caution`` / ``dangerous``); a value outside the set\nis rejected by Pydantic before the service layer sees it.\n\n``is_enabled`` is the per-op override that wins over the group\ncascade (see :meth:`ReviewService.edit_op` for the full\nsemantics). ``requires_approval`` flips the per-op flag that\nforces the dispatcher to write an audit row in\n``status='pending'`` and wait for an operator decision before\nexecuting.\n\n``custom_description`` is the operator's free-form override\nthat the agent surfaces in place of the upstream spec's\n``description`` field; capped at 4096 chars to keep audit-log\npayloads bounded.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` \u2014 same fail-loud posture as every other\npublic v1 request schema."
+      },
+      "EditTemplateResponse": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "status": {
+            "type": "string",
+            "const": "draft",
+            "title": "Status"
+          },
+          "forked_from": {
+            "$ref": "#/components/schemas/ForkInfo",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "version",
+          "status"
+        ],
+        "title": "EditTemplateResponse",
+        "description": "Response for ``runbook_edit_template``.\n\n:attr:`version` equals the input version when editing a draft in\nplace; it is a new version when forking from a published template, in\nwhich case :attr:`forked_from` is populated with the source's\n:class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is\n``None``."
       },
       "EvalRequest": {
         "properties": {
@@ -10715,6 +11217,30 @@
         ],
         "title": "FingerprintResult",
         "description": "Connector fingerprint per consumer-needs L95."
+      },
+      "ForkInfo": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "in_flight_run_count": {
+            "type": "integer",
+            "title": "In Flight Run Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "version",
+          "in_flight_run_count"
+        ],
+        "title": "ForkInfo",
+        "description": "Surfaced by ``runbook_edit_template`` when editing a published template forks.\n\nEditing a *published* template cannot mutate it in place (published\ntemplates are immutable); the edit forks a new draft instead. This\nshape tells the senior what they are forking from -- the source\nversion and how many runs are still pinned to it -- so they can decide\nwhether the fork is the right move."
       },
       "GraphEdgeKind": {
         "type": "string",
@@ -11239,6 +11765,56 @@
         "title": "KbListResponse",
         "description": "Response envelope for ``GET /api/v1/kb``.\n\nWrapped in ``{\"entries\": [...]}`` so a future paging / cursor\nfield can land non-breakingly -- same shape\n:mod:`meho_backplane.api.v1.connectors_ingest` adopted for its\nlist response. Per-entry shape matches :class:`KbEntryPreview`;\nthe body is truncated to a 200-char preview so a casual\n``meho kb list`` does not stream every entry's full body."
       },
+      "ManualStep": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9\\-]{0,63}$",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "type": {
+            "type": "string",
+            "const": "manual",
+            "title": "Type"
+          },
+          "verify": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConfirmVerify"
+              },
+              {
+                "$ref": "#/components/schemas/OperationCallVerify"
+              }
+            ],
+            "title": "Verify",
+            "discriminator": {
+              "propertyName": "type",
+              "mapping": {
+                "confirm": "#/components/schemas/ConfirmVerify",
+                "operation_call": "#/components/schemas/OperationCallVerify"
+              }
+            }
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "body",
+          "type",
+          "verify"
+        ],
+        "title": "ManualStep",
+        "description": "A step the operator performs off-MEHO (SSH, web UI, console).\n\nCarries no operation call -- :attr:`body` is the operator-readable\ninstruction (Markdown; may contain ``${...}`` substitutions) and\n:attr:`verify` gates advance once the operator reports the step done."
+      },
       "MemoryEntry": {
         "properties": {
           "id": {
@@ -11339,6 +11915,99 @@
         ],
         "title": "MemoryScope",
         "description": "One of the five memory scopes from consumer-needs.md \u00a7G5 L137-141.\n\nThe string value is the wire-level identifier (route path segment,\nCLI flag value, MCP tool arg). Each value maps to a single\n``documents.kind`` row prefixed with ``memory-`` --\n:func:`kind_for_scope` is the canonical translation. The mapping is\none-to-one and bijective with :func:`scope_for_kind`, so callers\nnever round-trip through ad-hoc string-prefixing.\n\n``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``\nsemantics for free: ``f\"scope={MemoryScope.USER}\"`` renders as\n``\"scope=user\"`` rather than ``\"scope=MemoryScope.USER\"``, matching\nthe :class:`~meho_backplane.auth.operator.TenantRole` convention."
+      },
+      "OperationCallStep": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9\\-]{0,63}$",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "type": {
+            "type": "string",
+            "const": "operation_call",
+            "title": "Type"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "verify": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConfirmVerify"
+              },
+              {
+                "$ref": "#/components/schemas/OperationCallVerify"
+              }
+            ],
+            "title": "Verify",
+            "discriminator": {
+              "propertyName": "type",
+              "mapping": {
+                "confirm": "#/components/schemas/ConfirmVerify",
+                "operation_call": "#/components/schemas/OperationCallVerify"
+              }
+            }
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "body",
+          "type",
+          "op_id",
+          "params",
+          "verify"
+        ],
+        "title": "OperationCallStep",
+        "description": "A step the agent dispatches via the operation registry.\n\n:attr:`op_id` is the registry operation id (e.g.\n``vmware.composite.vm.create``); :attr:`params` is the call payload,\nwhich may contain ``${...}`` substitutions resolved at advance time.\n:attr:`body` is operator-readable Markdown context (may also contain\nsubstitutions). :attr:`verify` gates advance to the next step."
+      },
+      "OperationCallVerify": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "operation_call",
+            "title": "Type"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "expect": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Expect"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "op_id",
+          "params",
+          "expect"
+        ],
+        "title": "OperationCallVerify",
+        "description": "MEHO dispatches the verify call and matches the result against ``expect``.\n\nThe match is structural-equality + presence only: every key/value in\n:attr:`expect` must be present and equal in the call result. There are\ndeliberately no operators, no JSONPath, and no boolean composition --\nsubstrate minimalism (same call as #1177): determinism over\nexpressivity. :attr:`params` may carry ``${...}`` substitutions\n(allowlisted at publish time); :attr:`expect` may too."
       },
       "OperationDescriptor": {
         "properties": {
@@ -11579,6 +12248,31 @@
         ],
         "title": "PromoteBody",
         "description": "POST body for ``/api/v1/memory/{scope}/{slug}/promote``.\n\nG5.2-T4 (#626) of Initiative #374. Two required-ish fields plus a\ntarget-scope name for the ``user -> user-target`` / ``user-target ->\ntarget`` ladder steps; ``frozen=True`` + ``extra=\"forbid\"`` mirror\n:class:`RememberBody`.\n\n* ``to`` -- the target scope. The route delegates ladder validation\n  to :func:`~meho_backplane.memory.rbac.assert_can_promote`, which\n  raises :class:`InvalidPromotionStepError` on non-ladder pairs (the\n  route maps that to 400).\n* ``move`` -- when ``True``, delete the source row in the same\n  transaction as the target insert (broadens-and-leaves vs.\n  broadens-and-rewires). Default ``False`` per the issue body.\n* ``target_name`` -- required when ``to`` is target-flavoured AND\n  the source scope is not (``user -> user-target``). For\n  ``user-target -> target`` the service inherits ``target_name``\n  from the source row, so the caller may omit it; we still accept\n  it for forward-compat with the CLI verb (T5 #627). Omitted\n  values land as ``None``."
+      },
+      "PublishTemplateResponse": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "status": {
+            "type": "string",
+            "const": "published",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "version",
+          "status"
+        ],
+        "title": "PublishTemplateResponse",
+        "description": "Response for ``runbook_publish_template`` -- the now-published coordinates."
       },
       "QueryResult": {
         "properties": {
@@ -12185,6 +12879,69 @@
         "title": "RetrieveResponse",
         "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
       },
+      "RunbookTemplateBody": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "target_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Kind"
+          },
+          "steps": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/OperationCallStep"
+                },
+                {
+                  "$ref": "#/components/schemas/ManualStep"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "type",
+                "mapping": {
+                  "manual": "#/components/schemas/ManualStep",
+                  "operation_call": "#/components/schemas/OperationCallStep"
+                }
+              }
+            },
+            "type": "array",
+            "title": "Steps"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "description",
+          "steps"
+        ],
+        "title": "RunbookTemplateBody",
+        "description": "The author-facing template shape stored in ``runbook_templates.steps``.\n\nThis is what a template author writes and what the G12.2 service\nlayer (T2) serialises into the ``steps`` JSONB column (alongside the\n``title`` / ``description`` / ``target_kind`` columns it lifts out).\n:attr:`steps` is ordered; each step's verify gates advance to the\nnext at run time.\n\nThe :meth:`_validate_step_ids_unique_and_substitutions_allowlisted`\nvalidator enforces the two template-level invariants the per-step\nmodels cannot see on their own: step-id uniqueness across the\ntemplate, and the ``${...}`` substitution allowlist over every\nstring the template carries."
+      },
+      "RunbookTemplateListResponse": {
+        "properties": {
+          "templates": {
+            "items": {
+              "$ref": "#/components/schemas/TemplateSummary"
+            },
+            "type": "array",
+            "title": "Templates"
+          }
+        },
+        "type": "object",
+        "required": [
+          "templates"
+        ],
+        "title": "RunbookTemplateListResponse",
+        "description": "Response envelope for ``GET /api/v1/runbooks/templates``.\n\nWrapped in ``{\"templates\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- same shape :mod:`meho_backplane.api.v1.kb`\nadopted for its list response. Per-entry shape is the substrate's\n:class:`~meho_backplane.runbooks.schemas.TemplateSummary`."
+      },
       "ScheduledTriggerCreate": {
         "properties": {
           "kind": {
@@ -12404,6 +13161,95 @@
         ],
         "title": "ScheduledTriggerStatus",
         "description": "Closed lifecycle status of a :class:`ScheduledTrigger`.\n\nInitiative #804 (G11.3 Scheduler), Task #822 (T1). The admin\nsurface (T5 #826) walks triggers through this state machine; the\ndispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.\n\nMembers:\n\n* :attr:`ACTIVE` -- the trigger is eligible for dispatch.\n* :attr:`PAUSED` -- the trigger is temporarily disabled by an\n  operator. ``next_fire_at`` is preserved so resuming reactivates\n  without recomputing.\n* :attr:`CANCELLED` -- terminal. The trigger row is retained for\n  audit purposes but never fires again.\n* :attr:`FIRED` -- terminal one-off state. Migration ``0025`` (T2\n  #823) widened the enum so a one-off trigger transitions\n  ``ACTIVE -> FIRED`` after its single dispatch instead of going\n  to ``CANCELLED`` (which carries operator-intent semantics).\n  :class:`ScheduledTrigger` rows in this state are retained for\n  audit (last-fired-at + identity_sub) but never re-dispatched."
+      },
+      "ShowTemplateResponse": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "target_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Kind"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "deprecated"
+            ],
+            "title": "Status"
+          },
+          "steps": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/OperationCallStep"
+                },
+                {
+                  "$ref": "#/components/schemas/ManualStep"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "type",
+                "mapping": {
+                  "manual": "#/components/schemas/ManualStep",
+                  "operation_call": "#/components/schemas/OperationCallStep"
+                }
+              }
+            },
+            "type": "array",
+            "title": "Steps"
+          },
+          "created_by": {
+            "type": "string",
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "edited_by": {
+            "type": "string",
+            "title": "Edited By"
+          },
+          "edited_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Edited At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "version",
+          "title",
+          "description",
+          "target_kind",
+          "status",
+          "steps",
+          "created_by",
+          "created_at",
+          "edited_by",
+          "edited_at"
+        ],
+        "title": "ShowTemplateResponse",
+        "description": "Full template surface returned by ``runbook_show_template``.\n\nThe complete template including the ordered :attr:`steps` and the\nauthorship / timestamp provenance. Mirrors the\n:class:`~meho_backplane.db.models.RunbookTemplate` column set projected\nto wire types."
       },
       "SkippedConnector": {
         "properties": {
@@ -12999,6 +13845,52 @@
         ],
         "title": "TargetsDiscoverResult",
         "description": "Aggregated discover output across every connector for a product.\n\n``discovered`` is the merged candidate list from every connector\nregistered for the requested product; ``skipped`` records the\nconnectors that contributed nothing (clean-but-empty or errored).\nThe verb never auto-creates ``targets`` rows \u2014 the operator reviews\n``discovered`` and runs ``meho targets create`` (Initiative #363:\nauto-registration is v0.2.next)."
+      },
+      "TemplateSummary": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "deprecated"
+            ],
+            "title": "Status"
+          },
+          "target_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Kind"
+          },
+          "edited_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Edited At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "version",
+          "title",
+          "status",
+          "target_kind",
+          "edited_at"
+        ],
+        "title": "TemplateSummary",
+        "description": "Operator-readable summary row surfaced by ``runbook_list_templates``.\n\nThe list-view projection -- enough to identify a template and its\nlifecycle state without loading the full step list (which\n:class:`ShowTemplateResponse` carries)."
       },
       "Thresholds": {
         "properties": {
@@ -13782,6 +14674,21 @@
         ],
         "title": "_SortDirection",
         "description": "Sort direction -- ``asc`` (default) or ``desc``."
+      },
+      "_VersionBody": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "_VersionBody",
+        "description": "Request body for the publish / deprecate routes -- carries ``version`` only.\n\nThe slug is the URL's job (the route's ``{slug}`` path parameter); the\nbody carries just the integer version to act on. ``extra=\"forbid\"``\nrejects a stray ``slug`` in the body at 422 rather than silently\nignoring it -- the URL is the single source of truth for which\ntemplate the operation targets, and a body that smuggled a different\nslug would otherwise be a confused-deputy footgun."
       },
       "_ViewMode": {
         "type": "string",

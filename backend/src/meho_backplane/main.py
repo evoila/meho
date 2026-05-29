@@ -84,6 +84,7 @@ from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
 from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
+from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
@@ -584,6 +585,25 @@ app.include_router(api_v1_connectors_ingest_router)
 # ``kb.delete`` / ``kb.ingest`` -- bound via the ``audit_op_id`` /
 # ``audit_op_class`` contextvar overrides the chassis publisher honours.
 app.include_router(api_v1_kb_router)
+# G12.2-T3 (#1297) -- runbook template REST surface at
+# /api/v1/runbooks/templates*. Six routes (POST / GET / GET /{slug} /
+# PATCH /{slug} / POST /{slug}/publish / POST /{slug}/deprecate) that
+# expose the T2 :class:`RunbookTemplateService` to operators + ops UIs.
+# Tenant-scoped via the JWT's tenant_id claim; cross-tenant probes return
+# 404 (not 403) by the service's tenant filter. ``list`` requires
+# ``operator`` minimum; the other five require ``tenant_admin`` (``show``
+# is admin-only -- the opacity floor; the post-completion operator
+# exception lives on the run surface in G12.3). Typed-exception mapping:
+# TemplateNotFoundError -> 404, TemplateNotDraftError /
+# TemplateNotPublishedError -> 400, DuplicateDraftError -> 409,
+# InvalidKbSlugError -> 422. Audit + broadcast op_ids:
+# ``runbook.draft_template`` / ``runbook.list_templates`` /
+# ``runbook.show_template`` / ``runbook.edit_template`` /
+# ``runbook.publish_template`` / ``runbook.deprecate_template`` -- bound
+# via the ``audit_op_id`` / ``audit_op_class`` contextvar overrides the
+# chassis publisher honours. The MCP tools (T4 #1298) reach the same
+# service over MCP.
+app.include_router(api_v1_runbook_templates_router)
 # G5.1-T2 (#422) -- memory REST surface at /api/v1/memory*.
 # Four routes (POST / GET / GET /{scope}/{slug} / DELETE /{scope}/{slug})
 # that expose the T1 :class:`MemoryService` to operators + agents. Tenant-

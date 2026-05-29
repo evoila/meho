@@ -135,11 +135,18 @@ const (
 	RunsOn           GraphEdgeKind = "runs-on"
 )
 
+// Defines values for IngestJobHandleStatus.
+const (
+	IngestJobHandleStatusFailed    IngestJobHandleStatus = "failed"
+	IngestJobHandleStatusRunning   IngestJobHandleStatus = "running"
+	IngestJobHandleStatusSucceeded IngestJobHandleStatus = "succeeded"
+)
+
 // Defines values for IngestJobStatusResponseStatus.
 const (
-	Failed    IngestJobStatusResponseStatus = "failed"
-	Running   IngestJobStatusResponseStatus = "running"
-	Succeeded IngestJobStatusResponseStatus = "succeeded"
+	IngestJobStatusResponseStatusFailed    IngestJobStatusResponseStatus = "failed"
+	IngestJobStatusResponseStatusRunning   IngestJobStatusResponseStatus = "running"
+	IngestJobStatusResponseStatusSucceeded IngestJobStatusResponseStatus = "succeeded"
 )
 
 // Defines values for MemoryScope.
@@ -2080,6 +2087,30 @@ type HealthResponse struct {
 	Vault VaultStatus `json:"vault"`
 }
 
+// IngestJobHandle Response body for “POST /api/v1/connectors/ingest“ (HTTP 202).
+//
+// Returned when the route fires the pipeline off the request thread
+// (the default; “async=false“ switches to the legacy blocking
+// :class:`IngestResponse` at HTTP 200). Carries the freshly-minted
+// “job_id“, the current “status“ (always “"running"“ here),
+// and a relative “poll_url“ the operator's client can follow to
+// inspect progress.
+//
+// The shape is deliberately small -- two strings + a URL -- because
+// every meaningful field lives on the polling response
+// (:class:`IngestJobStatusResponse`). A handle is what you get back
+// immediately so the request that started the work can return
+// inside the kubelet liveness-probe deadline (escape hatch must
+// not crash the pod, per G0.16-T1 / RDC #771 Finding 20).
+type IngestJobHandle struct {
+	JobId   openapi_types.UUID    `json:"job_id"`
+	PollUrl string                `json:"poll_url"`
+	Status  IngestJobHandleStatus `json:"status"`
+}
+
+// IngestJobHandleStatus defines model for IngestJobHandle.Status.
+type IngestJobHandleStatus string
+
 // IngestJobStatusResponse Response body for “GET /api/v1/connectors/ingest/jobs/{job_id}“.
 //
 // Mirrors the in-memory
@@ -2215,6 +2246,36 @@ type IngestRequest struct {
 	Product      *string       `json:"product"`
 	Specs        *[]SpecSource `json:"specs,omitempty"`
 	Version      *string       `json:"version"`
+}
+
+// IngestResponse Response shape for “POST /api/v1/connectors/ingest“.
+//
+// “ingestion“ is always present. “grouping“ is “None“ for the
+// dry-run path (no DB writes, no LLM call) and for the no-op
+// re-run path (every op already grouped from a prior pass).
+//
+// The response carries no audit_log id explicitly — the chassis
+// audit middleware writes one row per HTTP request with the route
+// path bound, and the service-level helpers
+// (:func:`register_ingested_operations`, :func:`run_llm_grouping`)
+// write their own per-call rows under
+// “meho.connector.llm_grouping“ etc.
+type IngestResponse struct {
+	// Grouping Pydantic projection of
+	// :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
+	//
+	// Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
+	// in the ingest response so the operator sees both counts.
+	Grouping *GroupingResultModel `json:"grouping,omitempty"`
+
+	// Ingestion Pydantic projection of
+	// :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.
+	//
+	// The dataclass lives in :mod:`register_ingested` so the helper
+	// can stay framework-agnostic; this model is the wire-format twin
+	// the routes return. Fields mirror the dataclass one-for-one with
+	// an extra ``connector_id`` echo for round-trip clarity.
+	Ingestion IngestionResultModel `json:"ingestion"`
 }
 
 // IngestionResultModel Pydantic projection of
@@ -17697,7 +17758,8 @@ func (r CatalogEndpointApiV1ConnectorsCatalogGetResponse) StatusCode() int {
 type IngestEndpointApiV1ConnectorsIngestPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *interface{}
+	JSON200      *IngestResponse
+	JSON202      *IngestJobHandle
 	JSON422      *HTTPValidationError
 }
 
@@ -22817,11 +22879,18 @@ func ParseIngestEndpointApiV1ConnectorsIngestPostResponse(rsp *http.Response) (*
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest interface{}
+		var dest IngestResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest IngestJobHandle
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

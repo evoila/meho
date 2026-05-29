@@ -84,6 +84,7 @@ __all__ = [
     "BasicCredentialsTargetLike",
     "VaultCredentialsReadError",
     "load_basic_credentials",
+    "load_vault_secret_data",
 ]
 
 #: KV-v2 mount the consumer convention addresses secrets under. Dev mode
@@ -355,3 +356,55 @@ async def load_basic_credentials(
         fields=list(fields),
     )
     return credentials
+
+
+async def load_vault_secret_data(
+    target: BasicCredentialsTargetLike,
+    operator: Operator,
+    *,
+    mount: str = DEFAULT_KV_MOUNT,
+) -> dict[str, object]:
+    """Read *target*'s KV-v2 secret payload and return the raw data dict.
+
+    Same operator-context Vault read, same fail-closed precondition
+    guards, same structural unwrap as :func:`load_basic_credentials`,
+    but **without** the named-field extraction — the caller is
+    responsible for inspecting the returned dict and surfacing its own
+    structured error when the payload shape is wrong. Used when the
+    connector picks an upstream credential protocol by inspecting
+    which fields the operator stored (e.g. the gh-rest connector's
+    App-vs-PAT discriminator).
+
+    The structured-log event carries only ``target`` / ``host`` and the
+    **set of field names** present — never a credential value. The
+    returned dict is ephemeral in-memory state and must not enter any
+    log event, :class:`OperationResult`, or durable artifact.
+
+    Raises the same two-phase error contract as
+    :func:`load_basic_credentials`: login-phase failures propagate as
+    :class:`~meho_backplane.auth.vault.VaultClientError` subclasses;
+    read-phase precondition / unwrap failures raise
+    :class:`VaultCredentialsReadError`.
+    """
+    path = _resolve_secret_ref(target, operator)
+
+    async with vault_client_for_operator(operator) as client:
+        payload = await asyncio.to_thread(
+            client.secrets.kv.v2.read_secret_version,
+            path=path,
+            mount_point=mount,
+            raise_on_deleted_version=False,
+        )
+
+    secret_data = _structural_unwrap(payload, target_name=target.name)
+
+    # Log only the field-name set (no values). Sorted for a stable log
+    # shape that diff-friendly observability tooling can pattern-match
+    # without re-ordering noise.
+    structlog.get_logger(__name__).info(
+        "vault_secret_data_loaded",
+        target=target.name,
+        host=target.host,
+        fields=sorted(secret_data.keys()),
+    )
+    return secret_data

@@ -3,31 +3,58 @@
 
 """GitHub App + PAT credential loaders for :class:`GitHubRestConnector`.
 
-The connector supports two ``auth_model`` values per the G3.11-T1 task body:
+The connector supports two **upstream credential protocols** —
+selected by inspecting the Vault payload, not by surfacing the protocol
+on the target row's ``auth_model``:
 
-* ``github-app`` — the canonical machine-identity path. The loader reads the
-  App ID + RSA private key (PEM) from Vault under the operator's identity,
-  mints a short-lived (≤10-minute) RS256 JWT signed with the private key, and
-  exchanges that JWT for an **installation token** via
-  ``POST /app/installations/{id}/access_tokens``. The installation token has
-  a 1-hour TTL per GitHub's documentation; the credential cache holds it for
-  up to 50 minutes (10-minute safety margin) before re-minting.
+* **App installation token** — the canonical machine-identity path. The
+  loader reads the App ID + RSA private key (PEM) + installation ID from
+  Vault under the operator's identity, mints a short-lived (≤10-minute)
+  RS256 JWT signed with the private key, and exchanges that JWT for an
+  **installation token** via
+  ``POST /app/installations/{id}/access_tokens``. The installation token
+  has a 1-hour TTL per GitHub's documentation; the credential cache
+  holds it for up to 50 minutes (10-minute safety margin) before
+  re-minting.
 
-* ``github-pat`` — the fallback path for environments where a GitHub App is
-  not viable (e.g. operator-scoped read-only access during a v0.x dogfood).
-  The loader reads a fine-grained Personal Access Token from Vault and
-  returns it directly. PATs are bearer tokens with no on-the-fly minting; the
-  TTL is whatever GitHub's PAT expiry policy enforces (operator-set).
+* **Fine-grained PAT** — the fallback path for environments where a
+  GitHub App is not viable (e.g. operator-scoped read-only access during
+  a v0.x dogfood). The loader reads a fine-grained Personal Access Token
+  from Vault and returns it directly. PATs are bearer tokens with no
+  on-the-fly minting; the TTL is whatever GitHub's PAT expiry policy
+  enforces (operator-set).
 
-Both loaders are injectable callables (the same shape vmware-rest's
-:class:`VsphereSessionLoader` uses) so production deploys, unit tests, and
-the future operator runbook (T6) can substitute alternative resolvers
+Why the target's ``auth_model`` is not the discriminator
+========================================================
+
+The target row carries the **identity model** the backplane uses
+(``shared_service_account`` — the App or PAT is one service identity
+shared across operators). The **upstream credential protocol**
+(App-installation vs PAT) is an implementation detail of *how the
+connector talks to github.com*; surfacing it on ``auth_model`` would
+either widen the operator-facing enum (making operators choose between
+``github-app`` and ``github-pat`` at target-registration time, on a
+value that's redundant with what Vault already holds) or — as G0.16-T2
+caught — fragment the connector boundary against the target schema
+when the two sides disagree. So the connector takes the same shape as
+vmware-rest: the target's ``auth_model`` says "shared service
+account"; the connector inspects the Vault payload to pick the
+protocol.
+
+The two loaders below remain individually exported for
+backwards-compatible test injection; production code routes through
+:func:`load_github_credentials_from_vault` which reads the secret once,
+inspects the field shape, and picks the right loader.
+
+All loaders are injectable callables (the same shape vmware-rest's
+:class:`VsphereSessionLoader` uses) so production deploys, unit tests,
+and the future operator runbook can substitute alternative resolvers
 (e.g. a future GitHub Enterprise Server target with a different App
 installation endpoint).
 
-The four T11-compliant error envelopes for the failure modes named in the
-task body live on :class:`GitHubCredentialError` / its subclasses, each
-carrying a stable ``code`` attribute matching the
+The four T11-compliant error envelopes for the failure modes named in
+the task body live on :class:`GitHubCredentialError` / its subclasses,
+each carrying a stable ``code`` attribute matching the
 ``docs/codebase/error-message-shape.md`` convention (``github_*``).
 """
 
@@ -47,6 +74,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     VaultCredentialsReadError,
     load_basic_credentials,
+    load_vault_secret_data,
 )
 
 __all__ = [
@@ -55,6 +83,7 @@ __all__ = [
     "GITHUB_PAT_AUTH_MODEL",
     "INSTALLATION_TOKEN_CACHE_SECONDS",
     "JWT_TTL_SECONDS",
+    "GitHubAmbiguousVaultPayloadError",
     "GitHubAppCredentials",
     "GitHubAppNotInstalledError",
     "GitHubCredentialError",
@@ -66,6 +95,7 @@ __all__ = [
     "GitHubTargetLike",
     "InstallationToken",
     "load_github_app_credentials_from_vault",
+    "load_github_credentials_from_vault",
     "load_github_pat_credentials_from_vault",
     "mint_github_app_jwt",
 ]
@@ -79,12 +109,18 @@ _log = structlog.get_logger(__name__)
 #: the eventual GHES override a one-line change in the per-target shape.
 DEFAULT_GITHUB_API_URL: Final[str] = "https://api.github.com"
 
-#: ``auth_model`` value selecting the GitHub App credential path. Targets
-#: registered with this model use a Vault-stored App ID + private key.
+#: Internal protocol marker for the GitHub App installation-token path.
+#:
+#: Kept as a module-level constant for tests that wire the connector's
+#: internal credential router and for the few places (composite
+#: pre-flight, error messages) that name the path back to the operator.
+#: **Not** a target ``auth_model`` value any more — see this module's
+#: top-level docstring. The connector boundary now picks between this
+#: protocol and the PAT protocol by inspecting the Vault payload.
 GITHUB_APP_AUTH_MODEL: Final[str] = "github-app"
 
-#: ``auth_model`` value selecting the PAT fallback path. Targets registered
-#: with this model use a Vault-stored fine-grained Personal Access Token.
+#: Internal protocol marker for the fine-grained PAT path. Same
+#: not-a-target-``auth_model`` caveat as :data:`GITHUB_APP_AUTH_MODEL`.
 GITHUB_PAT_AUTH_MODEL: Final[str] = "github-pat"
 
 #: GitHub App JWTs are accepted only when ``exp - iat <= 600`` seconds
@@ -123,9 +159,11 @@ class GitHubTargetLike(Protocol):
 
     Structural Protocol — any concrete ``Target`` in
     :mod:`meho_backplane.targets` that exposes these attributes satisfies
-    it unchanged. ``auth_model`` carries the literal ``"github-app"`` or
-    ``"github-pat"`` selector; :class:`GitHubRestConnector` rejects any
-    other value at the boundary.
+    it unchanged. ``auth_model`` carries the identity-model selector the
+    backplane recognises (``shared_service_account``, or ``None`` for
+    legacy rows). The **upstream credential protocol** (App-installation
+    vs PAT) is picked by inspecting the Vault payload — not by the
+    ``auth_model`` value. See the module docstring for the rationale.
 
     ``host`` carries either ``api.github.com`` (the default, for
     organisation-wide or operator-style ``GET /user/installations``
@@ -205,10 +243,10 @@ GitHubCredentialsLoader = Callable[
 """Async callable resolving ``(target, operator)`` to credentials.
 
 The return type is a union because the connector selects between
-:class:`GitHubAppCredentials` and :class:`GitHubPATCredentials` by the
-target's ``auth_model`` value. Production uses the default loaders below
-(`load_github_app_credentials_from_vault` /
-`load_github_pat_credentials_from_vault`); tests inject stubs.
+:class:`GitHubAppCredentials` and :class:`GitHubPATCredentials` by
+inspecting the Vault payload's field shape. Production uses
+:func:`load_github_credentials_from_vault` (which performs the
+single Vault read + protocol selection); tests inject stubs.
 """
 
 
@@ -269,6 +307,26 @@ class GitHubInstallationTokenMintError(GitHubCredentialError):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+class GitHubAmbiguousVaultPayloadError(GitHubCredentialError):
+    """The Vault secret carries neither a full App field set nor a PAT.
+
+    Raised by :func:`load_github_credentials_from_vault` when the secret
+    payload at ``target.secret_ref`` does not match either of the two
+    documented shapes:
+
+    * App: all of ``app_id``, ``private_key``, ``installation_id``
+      populated;
+    * PAT: ``token`` populated.
+
+    The error message names which fields *were* present (without
+    echoing any value) and which fields *are required* for each
+    protocol, so the operator can correct the Vault payload without
+    a second round-trip through the runbook.
+    """
+
+    code = "github_ambiguous_vault_payload"
 
 
 class GitHubRateLimitedError(GitHubCredentialError):
@@ -397,6 +455,70 @@ async def load_github_pat_credentials_from_vault(
         mount=mount,
     )
     return GitHubPATCredentials(token=creds[_GH_PAT_FIELD])
+
+
+async def load_github_credentials_from_vault(
+    target: GitHubTargetLike,
+    operator: Operator,
+    *,
+    mount: str = DEFAULT_KV_MOUNT,
+) -> GitHubAppCredentials | GitHubPATCredentials:
+    """Read the Vault secret once and pick App vs PAT by which fields it carries.
+
+    Single Vault round-trip — replaces the historical "the target's
+    ``auth_model`` picks which loader runs" routing. The connector
+    boundary now uses the **shape of the Vault payload** as the
+    discriminator:
+
+    * All of ``app_id``, ``private_key``, ``installation_id`` populated
+      → :class:`GitHubAppCredentials` (the App installation path).
+    * ``token`` populated (when the full App field set is not
+      present) → :class:`GitHubPATCredentials` (the PAT fallback path).
+    * Neither set populated → :class:`GitHubAmbiguousVaultPayloadError`
+      with a remediation-bearing message naming the field shape we
+      looked for and which fields were present (no values echoed).
+
+    This matches the operator-runbook documentation in
+    ``docs/cross-repo/github-connector.md`` (the ``auth_model: shared_
+    service_account`` row + Vault-payload discriminator) and aligns the
+    gh-rest target shape with vmware-rest's
+    ``shared_service_account``-on-target / payload-shape-on-Vault split.
+    See G0.16-T2 for the reconciliation history.
+
+    The structured-log event from :func:`load_vault_secret_data` carries
+    the **set of field names** present in the secret, never a value;
+    the App branch coerces each field to ``str`` (mirroring
+    :func:`load_github_app_credentials_from_vault`).
+    """
+    secret_data = await load_vault_secret_data(target, operator, mount=mount)
+    present_fields = set(secret_data.keys())
+
+    app_fields_present = all(field in present_fields for field in _GH_APP_FIELDS)
+    pat_field_present = _GH_PAT_FIELD in present_fields
+
+    if app_fields_present:
+        return GitHubAppCredentials(
+            app_id=str(secret_data["app_id"]),
+            private_key_pem=str(secret_data["private_key"]),
+            installation_id=str(secret_data["installation_id"]),
+        )
+    if pat_field_present:
+        return GitHubPATCredentials(token=str(secret_data[_GH_PAT_FIELD]))
+
+    # Neither shape matches — fail closed with a structured error that
+    # tells the operator exactly which fields to write into Vault.
+    # ``sorted`` so the field list is diff-stable in error messages.
+    raise GitHubAmbiguousVaultPayloadError(
+        "github_ambiguous_vault_payload: Vault secret for target "
+        f"{target.name!r} (secret_ref={target.secret_ref!r}) does not "
+        "carry either credential-protocol shape the gh-rest connector "
+        "supports. For the GitHub App path, populate all of "
+        f"{list(_GH_APP_FIELDS)!r}; for the fine-grained PAT fallback, "
+        f"populate {_GH_PAT_FIELD!r}. Fields present in the secret: "
+        f"{sorted(present_fields)!r}. See docs/cross-repo/github-"
+        "connector.md § 'App-vs-PAT credential picker' for the payload "
+        "shape on each path."
+    )
 
 
 # ---------------------------------------------------------------------------

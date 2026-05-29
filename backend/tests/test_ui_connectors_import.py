@@ -121,7 +121,9 @@ class _FakeConnector(Connector):
     impl_id = _PRODUCT
     supported_version_range = None
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # pragma: no cover
+    async def fingerprint(
+        self, target: Any, operator: Any = None
+    ) -> FingerprintResult:  # pragma: no cover
         return FingerprintResult(
             vendor="FakeVendor",
             product=_PRODUCT,

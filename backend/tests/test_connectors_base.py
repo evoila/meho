@@ -90,7 +90,7 @@ def test_connector_subclass_missing_one_method_raises() -> None:
     class MissingExecute(Connector):
         product = "test"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -104,7 +104,7 @@ def test_concrete_connector_instantiates() -> None:
     class FullConnector(Connector):
         product = "test"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -127,7 +127,7 @@ class _MinimalConnector(Connector):
 
     product = "minimal"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -146,7 +146,7 @@ class _OverridingConnector(Connector):
     supported_version_range = ">=8.5,<10.0"
     priority = 10
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]

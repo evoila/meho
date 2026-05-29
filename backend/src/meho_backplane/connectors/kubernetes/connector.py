@@ -268,21 +268,42 @@ class KubernetesConnector(Connector):
         self._api_clients: dict[str, client.ApiClient] = {}
         self._lock = asyncio.Lock()
 
-    async def fingerprint(self, target: KubernetesTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: KubernetesTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from ``VersionApi.get_code()``.
 
-        The fingerprint path has no acting operator (it runs from
-        :func:`~meho_backplane.connectors.resolver.resolve_connector` and
-        readiness probes); synthesise a system operator with an empty
-        ``raw_jwt`` so the kubeconfig loader's fail-closed guard surfaces
-        a clear error when there's no kubeconfig in the cache yet, rather
-        than silently authenticating as a backplane identity. The
-        :class:`~meho_backplane.connectors.kubernetes.kubeconfig.KubeconfigLoader`
-        contract receives the same ``(target, operator)`` pair the
-        operator-aware dispatch path uses.
+        ``operator`` is the request-scoped operator when the fingerprint
+        runs from an authenticated probe route (the REST
+        ``POST /api/v1/targets/{name}/probe`` route and the UI
+        ``POST /ui/connectors/{name}/probe`` re-probe button both lift
+        an :class:`~meho_backplane.auth.operator.Operator` from the
+        chassis JWT chain and pass it here). Forwarding the operator
+        means the underlying :class:`KubeconfigLoader` reads the
+        per-target kubeconfig under the **same identity** the dispatch
+        path uses — Vault's JWT/OIDC auth method gets a valid Keycloak
+        token and serves the read instead of rejecting it as
+        ``malformed jwt: must have three parts`` (the placeholder JWT
+        the system operator carried).
+
+        ``operator=None`` is reserved for background / system-initiated
+        callers that have no real operator in scope (the readiness probe
+        worker, the K8s topology refresh). In that case the connector
+        synthesises a system operator whose placeholder JWT fails closed
+        at the live Vault loader — preserving the architectural posture
+        that *system-initiated calls cannot perform an operator-context
+        Vault read* (the locked Option A decision in
+        :doc:`docs/architecture/connector-auth.md`).
+
+        G0.16-T4 (#1306) converged this path with the dispatch surface
+        — both now flow the operator through the same
+        :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubeconfig_from_vault`
+        helper. See :doc:`docs/codebase/connectors-kubernetes.md`.
         """
-        operator = synthesise_system_operator()
-        api_client = await self._get_api_client(target, operator)
+        eff_operator = operator if operator is not None else synthesise_system_operator()
+        api_client = await self._get_api_client(target, eff_operator)
         version_api = client.VersionApi(api_client)
         version = await version_api.get_code()
         return FingerprintResult(

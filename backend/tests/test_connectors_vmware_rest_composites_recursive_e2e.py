@@ -195,7 +195,7 @@ class _NoOpVmwareConnector(Connector):
     version = "9.0"
     impl_id = "vmware-rest"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]

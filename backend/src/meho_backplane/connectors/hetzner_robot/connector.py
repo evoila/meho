@@ -279,7 +279,11 @@ class HetznerRobotConnector(HttpConnector):
                 f"Non-JSON response from {path}: {resp.status_code} {resp.text[:200]}"
             ) from exc
 
-    async def fingerprint(self, target: HetznerRobotTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: HetznerRobotTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from ``GET /server``.
 
         Returns ``vendor="hetzner"``, ``product="robot-webservice"``,
@@ -291,7 +295,17 @@ class HetznerRobotConnector(HttpConnector):
         On transport, status, or auth failure, returns a non-reachable
         :class:`FingerprintResult` whose ``extras["error"]`` carries the
         exception class + message.
+
+        ``operator`` exists for ABC signature parity (G0.16-T4 #1306
+        widened the ABC for the affected K8s/vmware/sddc/NSX surface).
+        The Robot Webservice fingerprint still goes through
+        :meth:`_get_robot_json`, which uses a system operator
+        internally — this connector was not in the v0.8.0 dogfood's
+        affected-targets list and is left on the system-context path
+        until a deliberate convergence sweep widens it
+        (adjacent finding from #1306).
         """
+        del operator  # unused here — see docstring
         probed_at = datetime.now(UTC)
         try:
             payload = await self._get_robot_json(target, "/server")

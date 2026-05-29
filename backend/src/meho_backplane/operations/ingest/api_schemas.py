@@ -68,6 +68,8 @@ __all__ = [
     "EditGroupBody",
     "EditOpBody",
     "GroupingResultModel",
+    "IngestJobHandle",
+    "IngestJobStatusResponse",
     "IngestRequest",
     "IngestResponse",
     "IngestionResultModel",
@@ -161,7 +163,7 @@ class IngestRequest(BaseModel):
     and the operator only finds out at review-time.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
     product: str | None = Field(default=None, min_length=1, max_length=64)
     version: str | None = Field(default=None, min_length=1, max_length=64)
@@ -170,6 +172,28 @@ class IngestRequest(BaseModel):
     catalog_entry: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = Field(default=None, max_length=2048)
     dry_run: bool = False
+    #: Background-mode opt-out. ``True`` (default) fires the
+    #: pipeline off the request thread and returns
+    #: :class:`IngestJobHandle` at HTTP 202; ``False`` runs the
+    #: pipeline inline and returns :class:`IngestResponse` at
+    #: HTTP 200 -- the legacy v0.8.x shape kept for callers with
+    #: small specs that still want a blocking response (CI tests,
+    #: ``dry_run=True`` validation runs, ad-hoc shell scripts).
+    #: ``dry_run=True`` ignores this flag and always runs inline --
+    #: the parse-only path is the fast leg per RDC #771 Finding 21
+    #: and never trips the liveness-probe deadline. Aliased to
+    #: ``async`` on the wire (Python reserved word) so the JSON
+    #: field reads naturally, same shape :class:`AgentRunRequest`
+    #: established in G11.1-T4.
+    async_: bool = Field(
+        default=True,
+        alias="async",
+        description=(
+            "Run the pipeline off the request thread (202 + job handle); "
+            "set to false for the legacy blocking response. Ignored when "
+            "dry_run=true."
+        ),
+    )
 
     @model_validator(mode="after")
     def _exactly_one_request_shape(self) -> IngestRequest:
@@ -491,3 +515,83 @@ class EditOpBody(BaseModel):
     safety_level: Literal["safe", "caution", "dangerous"] | None = None
     requires_approval: bool | None = None
     is_enabled: bool | None = None
+
+
+#: Lifecycle of an async ingest job. Mirrors
+#: :data:`~meho_backplane.operations.ingest.jobs.IngestJobStatus` so
+#: the Pydantic projection and the internal dataclass share one
+#: spelling; the route layer projects ``IngestJob`` rows through the
+#: response models defined below.
+IngestJobStatusLiteral = Literal["running", "succeeded", "failed"]
+
+
+class IngestJobHandle(BaseModel):
+    """Response body for ``POST /api/v1/connectors/ingest`` (HTTP 202).
+
+    Returned when the route fires the pipeline off the request thread
+    (the default; ``async=false`` switches to the legacy blocking
+    :class:`IngestResponse` at HTTP 200). Carries the freshly-minted
+    ``job_id``, the current ``status`` (always ``"running"`` here),
+    and a relative ``poll_url`` the operator's client can follow to
+    inspect progress.
+
+    The shape is deliberately small -- two strings + a URL -- because
+    every meaningful field lives on the polling response
+    (:class:`IngestJobStatusResponse`). A handle is what you get back
+    immediately so the request that started the work can return
+    inside the kubelet liveness-probe deadline (escape hatch must
+    not crash the pod, per G0.16-T1 / RDC #771 Finding 20).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    job_id: UUID
+    status: IngestJobStatusLiteral
+    poll_url: str = Field(min_length=1, max_length=2048)
+
+
+class IngestJobStatusResponse(BaseModel):
+    """Response body for ``GET /api/v1/connectors/ingest/jobs/{job_id}``.
+
+    Mirrors the in-memory
+    :class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,
+    projecting it into a Pydantic-typed shape the route returns.
+    Three field clusters:
+
+    * **Identity** -- ``job_id`` + the originator's request descriptors
+      (``catalog_entry`` / ``product`` / ``version`` / ``impl_id`` /
+      ``spec_uris``). Echo so the polling caller doesn't need to
+      correlate against their own state.
+    * **Lifecycle** -- ``status`` + ``started_at`` + optional
+      ``ended_at``. Status moves ``running`` → ``succeeded`` or
+      ``running`` → ``failed`` once.
+    * **Result vs error** -- exactly one of ``ingestion`` (with
+      optional ``grouping``) or ``error`` is populated, keyed on
+      status. ``running`` leaves both ``None`` so polling clients
+      branch on ``status`` rather than checking presence.
+
+    ``error`` is the capped exception message; ``error_class`` is the
+    Python exception class name -- structured enough for agents that
+    want to branch (``VersionMismatchError`` vs
+    ``LlmClientUnavailable``) without parsing prose. The structured
+    422 envelopes the synchronous ingest path used to return (the
+    error-shape convention's classifier + ``detail`` body) are NOT
+    available off the request thread; the polling response is the
+    new error surface for the async path.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    job_id: UUID
+    status: IngestJobStatusLiteral
+    catalog_entry: str | None = None
+    product: str | None = None
+    version: str | None = None
+    impl_id: str | None = None
+    spec_uris: list[str] = Field(default_factory=list)
+    started_at: float
+    ended_at: float | None = None
+    ingestion: IngestionResultModel | None = None
+    grouping: GroupingResultModel | None = None
+    error: str | None = None
+    error_class: str | None = None

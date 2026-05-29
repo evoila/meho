@@ -63,6 +63,7 @@ exercised. Useful for operators validating a spec before committing.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 from typing import Literal
 from uuid import UUID
@@ -731,7 +732,15 @@ class IngestionPipelineService:
         """
         total_ops = 0
         for spec in specs:
-            parsed = parse_openapi(spec.uri, spec_source=spec.uri)
+            # G0.16-T1 (#1303): wrap the synchronous parser in
+            # ``asyncio.to_thread`` so a 7+ MB OpenAPI spec walk does
+            # not block the event loop. ``parse_openapi`` is pure
+            # CPU + I/O on a private file -- it never touches asyncio
+            # state -- so the thread-pool offload is safe without
+            # extra synchronisation. Yielding the loop between specs
+            # lets the request handler return its 202 + handle inside
+            # the kubelet liveness-probe budget.
+            parsed = await asyncio.to_thread(parse_openapi, spec.uri, spec_source=spec.uri)
             total_ops += len(parsed)
         ingestion = IngestionResult(
             inserted_count=total_ops,
@@ -778,7 +787,14 @@ class IngestionPipelineService:
         connector_registered = False
 
         for spec in specs:
-            protos = parse_openapi(spec.uri, spec_source=spec.uri)
+            # G0.16-T1 (#1303): same thread-pool offload as the
+            # dry-run path -- the synchronous parser is the worst
+            # event-loop-blocking offender on real vendor specs
+            # (vmware/9.0 ingest blocked the loop for ~30 s before
+            # this hop). ``register_ingested_operations`` is already
+            # an async coroutine that yields on every DB write so
+            # it doesn't need the same treatment.
+            protos = await asyncio.to_thread(parse_openapi, spec.uri, spec_source=spec.uri)
             partial = await register_ingested_operations(
                 product=product,
                 version=version,

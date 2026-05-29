@@ -295,3 +295,106 @@ async def test_probe_returns_not_ok_on_auth_failure() -> None:
     assert result.reason is not None
     assert "401" in result.reason
     await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# G0.16-T4 (#1306) probe-vs-dispatch convergence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_forwards_route_operator_to_session_loader() -> None:
+    """G0.16-T4 (#1306) probe-vs-dispatch convergence regression for vmware-rest.
+
+    Pre-#1306 the probe route called ``cls().fingerprint(target)``
+    without an operator; the connector synthesised a system operator
+    whose placeholder ``raw_jwt`` ("system:connector-probe-placeholder-
+    jwt") is not a compact-JWS. Vault's JWT/OIDC auth method rejected
+    the placeholder before the per-target Vault read could fire,
+    surfacing as ``vault OIDC malformed jwt: must have three parts``
+    on the v0.8.0 dogfood's ``rdc-vcenter`` probe.
+
+    Post-#1306 the probe route forwards its operator to ``fingerprint``,
+    which threads it to the session loader — the same code path the
+    dispatch surface uses. This test pins:
+
+    1. The session loader receives the route operator (not the
+       system-operator stand-in).
+    2. The forwarded JWT has the compact-JWS shape (≥3 dot-separated
+       parts, the issue body's acceptance criterion 4).
+    """
+    import uuid as _uuid
+
+    from meho_backplane.auth.operator import TenantRole
+
+    captured: list[Operator] = []
+
+    async def _capturing_loader(
+        target: VsphereTargetLike,
+        operator: Operator,
+    ) -> dict[str, str]:
+        captured.append(operator)
+        return {"username": "svc-meho", "password": "stub-password"}
+
+    connector = VmwareRestConnector(session_loader=_capturing_loader)
+    _patch_no_revoke_aclose(connector)
+
+    route_operator = Operator(
+        sub="op-rdc",
+        name="RDC Operator",
+        email=None,
+        raw_jwt="header.payload.signature",
+        tenant_id=_uuid.UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+    async with respx.mock(base_url="https://vcenter-fp.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="session-token-xyz")
+        mock.get("/api/about").respond(200, json=_about_payload())
+        await connector.fingerprint(_TARGET, operator=route_operator)
+
+    assert len(captured) == 1, (
+        "the session loader must run during cold-cache fingerprint; one invocation expected"
+    )
+    fwd_operator = captured[0]
+    assert fwd_operator.sub == route_operator.sub, (
+        "the session loader saw a different identity than the route "
+        "operator forwarded — this is the #1306 divergence"
+    )
+    # Compact-JWS sanity check — the acceptance criterion's literal.
+    jwt_parts = fwd_operator.raw_jwt.split(".")
+    assert len(jwt_parts) >= 3, (
+        f"forwarded JWT does not look like a compact-JWS (got "
+        f"{len(jwt_parts)} parts; expected ≥3) — Vault would reject this "
+        "with ``malformed jwt: must have three parts``"
+    )
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_without_operator_falls_back_to_system_operator() -> None:
+    """``fingerprint(target)`` without ``operator`` retains the system-
+    operator fall-back (the system-call carve-out for readiness probes).
+    """
+    captured: list[Operator] = []
+
+    async def _capturing_loader(
+        target: VsphereTargetLike,
+        operator: Operator,
+    ) -> dict[str, str]:
+        captured.append(operator)
+        return {"username": "svc-meho", "password": "stub-password"}
+
+    connector = VmwareRestConnector(session_loader=_capturing_loader)
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-fp.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="session-token-xyz")
+        mock.get("/api/about").respond(200, json=_about_payload())
+        await connector.fingerprint(_TARGET)
+
+    assert len(captured) == 1
+    assert captured[0].sub == "system:connector-probe", (
+        "the legacy fall-back must synthesise the system operator"
+    )
+    await connector.aclose()

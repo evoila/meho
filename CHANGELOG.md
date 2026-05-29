@@ -90,8 +90,97 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **Catalog field `spec_info_versions_compatible` for label-vs-spec
+  decoupling (G0.16-T5 #1307).** Optional `list[str]` on each
+  `ConnectorSpecEntry`. Entries are either glob shapes (`"1.x"`,
+  `"9.0.x"`) or PEP 440 specifier sets (`">=1.0,<2.0"`, `"~=1.4"`)
+  — any-of semantics across multiple patterns. Documented in
+  [`docs/cross-repo/connector-catalog.md`](docs/cross-repo/connector-catalog.md#label-vs-spec-decoupling-spec_info_versions_compatible).
+  Companion to G0.16-T6 Finding 22 / Task #1312 H for vmware catalog
+  `9.0` vs spec `9.0.0.0` — the new field is available for the
+  vmware variant to adopt if Task #1312 chooses approach (b). (#1307)
+
+### Changed
+
+- `POST /api/v1/connectors/ingest` defaults to `async=true` and returns
+  `202 Accepted` + a job handle on the non-dry-run path; operators poll
+  `GET /api/v1/connectors/ingest/jobs/{job_id}` for completion.
+  Real-world vendor specs (the consumer signal was a 7.55 MB / 1275-op
+  `vmware/9.0.0.0` ingest that blocked the request thread for ~30 s
+  and tripped the kubelet liveness probe → pod restart) no longer
+  crash the backplane pod. `dry_run=true` keeps the synchronous shape
+  (the parse-only leg is the fast path); pass `async=false` for the
+  legacy blocking response on small specs (#1303).
+- `composite_l2_missing` error envelope reworded per the
+  curated-daily-driver vs OpenAPI-escape-hatch framing in
+  [`docs/codebase/api-shape-conventions.md`](docs/codebase/api-shape-conventions.md)
+  §1. The human message names the curation gap first, points at the
+  L1-wrapper request as the recommended path, and presents the
+  `catalog_command` as the escape-hatch recipe rather than the
+  remediation path. The structured `extras` (`error_code`,
+  `missing_op_ids`, `catalog_command`) are unchanged — agents that
+  branch on those fields keep working without migration (#1303).
+
 ### Fixed
 
+- **SSE feed delivers zero bytes despite stream writes (SEV-1, signal
+  draft `sse-feed-delivers-zero-events-despite-stream-writes`)** — a
+  fresh `GET /api/v1/feed` or `/ui/broadcast/stream` connection
+  defaulted to the Valkey `$` live-tail cursor, which combined with
+  the 30 s heartbeat cadence produced 0 bytes for the first 30 s on
+  any tenant with no concurrent writes during the window, and
+  permanently empty `/ui/broadcast` pages for tenants with 76+
+  existing entries on the stream. `_feed_generator` and
+  `_ui_feed_generator` now run a backlog prelude
+  (`XREVRANGE … COUNT 50`) before the BLOCK loop on fresh `$`
+  connections; explicit-replay cursors (`Last-Event-Id`, `since`)
+  skip the prelude. Root cause documented in
+  `docs/codebase/broadcast.md` as the writer → fanout → consumer
+  triage path (#1305 / #1302).
+- **gh-rest connector `auth_model` reconciled with `TargetCreate`
+  enum (G0.16-T2 #1304).** The v0.8.0 dogfood (consumer signal
+  `gh-rest-auth-model-target-vs-connector-mismatch`) caught a
+  SEV-1 mismatch between the target schema's `auth_model` enum
+  (`{impersonation, shared_service_account, per_user}`) and the
+  historical gh-rest connector boundary (which demanded
+  `auth_model="github-app"` or `"github-pat"` — neither a legal
+  enum value). The fix takes Approach B: the connector now
+  inspects the **Vault payload's field shape** to pick the
+  upstream credential protocol — `app_id` + `private_key` +
+  `installation_id` → App installation-token path; `token` →
+  PAT path; neither → typed `github_ambiguous_vault_payload`
+  envelope naming both required field sets so operators can
+  repair the Vault row without guessing. Targets keep
+  `auth_model="shared_service_account"` (the documented runbook
+  shape — `docs/cross-repo/github-connector.md` and the new
+  `load_github_credentials_from_vault` helper match the doc).
+  Mirrors the `vmware-rest-9.0` pattern (target carries the
+  identity model; connector reads the protocol from Vault).
+  Backwards-compatible for the `evoila-bosnia-gh` shape RDC
+  registered against v0.8.0 — the target row already carried
+  `shared_service_account` (the only enum value the operator
+  could pass), so re-deploying the post-#1304 backplane image
+  flips probe + dispatch green without operator action. (#1304)
+- **Connector probe — Vault OIDC fingerprint loader converges with dispatch.**
+  `POST /api/v1/targets/{name}/probe` and `POST /ui/connectors/{name}/probe`
+  now forward the route operator into the resolved connector's
+  `fingerprint()`. The four affected connectors (`k8s-1.x`,
+  `vmware-rest-9.0`, `sddc-rest-9.0`, `nsx-rest-4.2`) thread that
+  operator through the same `vault_client_for_operator(operator)` +
+  per-target Vault loader the dispatch path uses, replacing the
+  synthesised system operator's placeholder JWT that the v0.8.0 dogfood
+  cycle (`claude-rdc-hetzner-dc#771` Finding 4 / signal
+  `probe-fingerprint-vault-oidc-malformed-jwt`) surfaced as
+  `vault OIDC malformed jwt: must have three parts` on every probe of
+  `rke2-infra-k8s`, `rdc-vcenter`, `vcf9-sddc`, and `vcf9-nsx`. The
+  `Connector.fingerprint(target, operator=None)` ABC signature gained
+  an optional `operator` parameter; the legacy `operator=None`
+  fall-back to the system operator stays in place for background
+  callers (readiness probe, K8s topology refresh) that have no real
+  operator in scope, preserving the locked Option A decision's
+  system-call carve-out. (G0.16-T4 #1306)
 - **gh/3 catalog ingest no longer fails `spec_label_mismatch` on the
   live upstream spec (G0.16-T5 #1307).** The catalog row's
   `version="3"` is the product-line label (`v3` as github.com itself
@@ -107,18 +196,6 @@ connector-related release-notes line.
   check. Consumer signal:
   [`claude-rdc-hetzner-dc#771` Finding 18](https://github.com/evoila-bosnia/meho-internal/issues/771).
   (#1307)
-
-### Added
-
-- **Catalog field `spec_info_versions_compatible` for label-vs-spec
-  decoupling (G0.16-T5 #1307).** Optional `list[str]` on each
-  `ConnectorSpecEntry`. Entries are either glob shapes (`"1.x"`,
-  `"9.0.x"`) or PEP 440 specifier sets (`">=1.0,<2.0"`, `"~=1.4"`)
-  — any-of semantics across multiple patterns. Documented in
-  [`docs/cross-repo/connector-catalog.md`](docs/cross-repo/connector-catalog.md#label-vs-spec-decoupling-spec_info_versions_compatible).
-  Companion to G0.16-T6 Finding 22 / Task #1312 H for vmware catalog
-  `9.0` vs spec `9.0.0.0` — the new field is available for the
-  vmware variant to adopt if Task #1312 chooses approach (b). (#1307)
 
 ## [0.8.0] - 2026-05-28
 

@@ -259,7 +259,11 @@ class VcfOperationsConnector(HttpConnector):
             json=json,
         )
 
-    async def fingerprint(self, target: VcfOperationsTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: VcfOperationsTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from ``GET /suite-api/api/versions/current``.
 
         The response payload's ``releaseName`` becomes ``version`` and
@@ -270,11 +274,18 @@ class VcfOperationsConnector(HttpConnector):
         :class:`FingerprintResult` whose ``extras["error"]`` carries the
         exception class + message — same pattern Harbor / SDDC Manager / NSX
         established for transport-failure fingerprinting.
+
+        ``operator`` (optional, G0.16-T4 #1306) is forwarded to the
+        credentials loader so the per-target Vault read happens under
+        the operator's identity, matching the dispatch path. ``None``
+        falls back to a system operator whose placeholder JWT fails
+        closed at the live Vault round-trip.
         """
         probed_at = datetime.now(UTC)
+        eff_operator = operator if operator is not None else synthesise_system_operator()
         try:
             payload = await self._get_json(
-                target, "/suite-api/api/versions/current", operator=synthesise_system_operator()
+                target, "/suite-api/api/versions/current", operator=eff_operator
             )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(

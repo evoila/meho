@@ -4,20 +4,39 @@
 """Network ops -- ``k8s.service.list`` / ``k8s.ingress.list``.
 
 G3.2-T4 (#324) of Initiative #320. Adds the two "what's exposed?"
-read-only ops on top of the T1 / T2 / T5 base substrate:
+read-only ops on top of the T1 / T2 / T5 base substrate. G0.17-T1
+(#1330) converged the request shape onto the workload list ops' base
+(``namespace`` XOR ``all_namespaces`` + ``label_selector``) so the
+operator's "what argocd-labeled services exist cluster-wide?" question
+maps to a single ``{all_namespaces: true, label_selector: '...'}``
+call instead of an N-namespace client-side loop.
 
-* ``k8s.service.list [--namespace X]`` -- ``CoreV1Api.list_namespaced_service``.
-  Returns one row per Service with name / namespace / type / cluster_ip /
-  external_ips / ports / selector. The ``ports`` projection flattens
-  :class:`V1ServicePort` to the operator-visible four-tuple
-  (``name`` / ``port`` / ``target_port`` / ``protocol``).
-* ``k8s.ingress.list [--namespace X]`` -- ``NetworkingV1Api.list_namespaced_ingress``.
-  Returns one row per Ingress with name / namespace / class / hosts /
-  tls_hosts / rules. The ``hosts`` list deduplicates entries across
-  rules (the spec allows the same host on multiple rules with different
-  path sets); ``tls_hosts`` is the union of every ``V1IngressTLS.hosts``
+* ``k8s.service.list [--namespace X | --all-namespaces]
+  [--label-selector ...]`` -- ``CoreV1Api.list_namespaced_service``
+  (per-namespace) / ``CoreV1Api.list_service_for_all_namespaces``
+  (cluster-wide). Returns one row per Service with name / namespace /
+  type / cluster_ip / external_ips / ports / selector. The ``ports``
+  projection flattens :class:`V1ServicePort` to the operator-visible
+  four-tuple (``name`` / ``port`` / ``target_port`` / ``protocol``).
+* ``k8s.ingress.list [--namespace X | --all-namespaces]
+  [--label-selector ...]`` --
+  ``NetworkingV1Api.list_namespaced_ingress`` /
+  ``NetworkingV1Api.list_ingress_for_all_namespaces``. Returns one row
+  per Ingress with name / namespace / class / hosts / tls_hosts /
+  rules. The ``hosts`` list deduplicates entries across rules (the
+  spec allows the same host on multiple rules with different path
+  sets); ``tls_hosts`` is the union of every ``V1IngressTLS.hosts``
   entry so the operator can spot whether the ingress carries a TLS
   certificate without walking the full rule tree.
+
+Server-side ``limit`` / ``_continue`` paging is **deliberately not
+exposed** for these two ops in G0.17-T1 -- service / ingress
+populations are typically O(10) per namespace and the issue's
+acceptance section calls out the paging widening as a follow-up
+candidate. The schema's XOR + label_selector knob is the cross-namespace
+fix Finding 24 motivates; the paging widening is mechanical and can
+land as a sibling task if a future deployment hits a heavy-tenancy
+namespace.
 
 Row-shape helpers (:func:`service_row`, :func:`service_port_row`,
 :func:`ingress_row`, :func:`ingress_rule_row`) are pure functions over
@@ -32,8 +51,10 @@ row projection to the helpers here.
 
 References
 ----------
-* Parent task: G3.2-T4 (#324).
+* Parent task: G3.2-T4 (#324); request-shape parity: G0.17-T1 (#1330).
 * Parent Initiative: G3.2 (#320), kubernetes-asyncio typed connector.
+* Conventions doc: ``docs/codebase/api-shape-conventions.md`` §10
+  (intra-connector list-op request-shape parity).
 * k8s Service API: https://kubernetes.io/docs/reference/kubernetes-api/service-resources/service-v1/
 * k8s Ingress API: https://kubernetes.io/docs/reference/kubernetes-api/service-resources/ingress-v1/
 * ``kubernetes_asyncio.CoreV1Api``:
@@ -47,6 +68,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
+from meho_backplane.connectors.kubernetes.ops_listparams import (
+    ALL_NAMESPACES_PARAM,
+    LABEL_SELECTOR_PARAM,
+    NAMESPACE_PARAM,
+    NAMESPACE_XOR_ALL_NAMESPACES,
+)
 
 if TYPE_CHECKING:
     from kubernetes_asyncio.client.models import (
@@ -208,25 +235,18 @@ def ingress_row(ingress: V1Ingress) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-#: Both list ops accept an optional ``namespace`` (when omitted, the
-#: handler errors -- v0.2 scopes network ops to a single namespace per
-#: call; the parent Initiative's cross-namespace aggregation is a
-#: higher-level concern). The schema's ``minLength``/``pattern`` reject
-#: whitespace-only inputs so the handler doesn't have to.
-_NAMESPACE_PARAM_SCHEMA: dict[str, Any] = {
-    "type": "string",
-    "minLength": 1,
-    "pattern": r"\S",
-    "description": "Namespace to list within.",
-}
-
-
+#: ``k8s.service.list`` parameter schema. Adopts the shared
+#: ``namespace`` XOR ``all_namespaces`` selector + ``label_selector``
+#: (G0.17-T1 #1330). Server-side paging (``limit``/``continue_token``)
+#: is deliberately omitted -- see the module docstring.
 K8S_SERVICE_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "namespace": _NAMESPACE_PARAM_SCHEMA,
+        "namespace": NAMESPACE_PARAM,
+        "all_namespaces": ALL_NAMESPACES_PARAM,
+        "label_selector": LABEL_SELECTOR_PARAM,
     },
-    "required": ["namespace"],
+    "oneOf": NAMESPACE_XOR_ALL_NAMESPACES,
     "additionalProperties": False,
 }
 
@@ -280,19 +300,31 @@ K8S_SERVICE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
 
 K8S_SERVICE_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
-        "Call when the operator asks 'what services are in <namespace>?', "
-        "'what's exposing the argocd UI?', or needs the cluster-internal "
-        "addresses (ClusterIP + port) for a service. Read-only; safe."
+        "Call when the operator asks 'what services are in "
+        "<namespace>?', 'what's exposing the argocd UI?', or needs the "
+        "cluster-internal addresses (ClusterIP + port) for a service. "
+        "Use ``all_namespaces=true`` for cluster-wide listings (e.g. "
+        "'what argocd-labeled services exist across the cluster?'). "
+        "Read-only; safe."
     ),
     "parameter_hints": {
-        "namespace": ("Required. The Kubernetes namespace whose services to list."),
+        "namespace": "Required unless ``all_namespaces`` is true.",
+        "all_namespaces": (
+            "Pass true for cluster-wide listings; mutually exclusive with ``namespace``."
+        ),
+        "label_selector": (
+            "Optional. k8s label-selector syntax (e.g. "
+            "``app=argocd-server``, ``role in (cp,etcd)``)."
+        ),
     },
     "output_shape": (
         "{'rows': [{name, namespace, type, cluster_ip, external_ips, "
         "ports: [{name, port, target_port, protocol}], selector}], "
         "'total': <int>}. ``type`` is the Service type "
         "('ClusterIP' / 'NodePort' / 'LoadBalancer' / 'ExternalName'); "
-        "``cluster_ip`` is the stable in-cluster VIP."
+        "``cluster_ip`` is the stable in-cluster VIP. Each row "
+        "carries its own ``namespace`` so cross-namespace rows under "
+        "``all_namespaces=true`` stay distinguishable."
     ),
 }
 
@@ -300,9 +332,11 @@ K8S_SERVICE_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
 K8S_INGRESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "namespace": _NAMESPACE_PARAM_SCHEMA,
+        "namespace": NAMESPACE_PARAM,
+        "all_namespaces": ALL_NAMESPACES_PARAM,
+        "label_selector": LABEL_SELECTOR_PARAM,
     },
-    "required": ["namespace"],
+    "oneOf": NAMESPACE_XOR_ALL_NAMESPACES,
     "additionalProperties": False,
 }
 
@@ -364,18 +398,26 @@ K8S_INGRESS_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
 
 K8S_INGRESS_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
-        "Call when the operator asks 'what URLs route into <namespace>?', "
-        "'is there a TLS cert on the argocd ingress?', or needs the "
-        "host->service routing table. Read-only; safe."
+        "Call when the operator asks 'what URLs route into "
+        "<namespace>?', 'is there a TLS cert on the argocd ingress?', "
+        "or needs the host->service routing table. Use "
+        "``all_namespaces=true`` for cluster-wide listings (e.g. "
+        "'what hostnames does the cluster serve?'). Read-only; safe."
     ),
     "parameter_hints": {
-        "namespace": ("Required. The Kubernetes namespace whose ingresses to list."),
+        "namespace": "Required unless ``all_namespaces`` is true.",
+        "all_namespaces": (
+            "Pass true for cluster-wide listings; mutually exclusive with ``namespace``."
+        ),
+        "label_selector": ("Optional. k8s label-selector syntax (e.g. ``app=argocd-server``)."),
     },
     "output_shape": (
         "{'rows': [{name, namespace, class, hosts, tls_hosts, "
         "rules: [{host, paths: [{path, path_type, service, port}]}]}], "
         "'total': <int>}. ``hosts`` and ``tls_hosts`` are sorted "
-        "deduplicated lists across the rule set."
+        "deduplicated lists across the rule set. Each row carries "
+        "its own ``namespace`` so cross-namespace rows under "
+        "``all_namespaces=true`` stay distinguishable."
     ),
 }
 
@@ -384,19 +426,25 @@ NETWORK_OPS: tuple[KubernetesOp, ...] = (
     KubernetesOp(
         op_id="k8s.service.list",
         handler_attr="k8s_service_list",
-        summary="List Kubernetes services in a namespace -- type / cluster_ip / ports / selector.",
+        summary=(
+            "List Kubernetes services per-namespace or cluster-wide "
+            "-- type / cluster_ip / ports / selector."
+        ),
         description=(
-            "Calls ``CoreV1Api.list_namespaced_service(namespace)`` and "
-            "projects each Service into {name, namespace, type, "
-            "cluster_ip, external_ips, ports, selector}. ``type`` is the "
-            "Service type ('ClusterIP' / 'NodePort' / 'LoadBalancer' / "
-            "'ExternalName'); ``cluster_ip`` is the stable in-cluster VIP "
-            "(may be 'None' for ExternalName services or headless "
-            "services with selector). ``ports`` flattens each "
-            "``V1ServicePort`` to {name, port, target_port, protocol}; "
-            "``target_port`` may be either an integer or a named-port "
-            "string. ``selector`` is the label map the service uses to "
-            "pick pods. Read-only."
+            "Calls ``CoreV1Api.list_namespaced_service(namespace, ...)`` "
+            "(per-namespace) or "
+            "``CoreV1Api.list_service_for_all_namespaces(...)`` "
+            "(``all_namespaces=true``) and projects each Service into "
+            "{name, namespace, type, cluster_ip, external_ips, ports, "
+            "selector}. ``type`` is the Service type ('ClusterIP' / "
+            "'NodePort' / 'LoadBalancer' / 'ExternalName'); "
+            "``cluster_ip`` is the stable in-cluster VIP (may be 'None' "
+            "for ExternalName services or headless services with "
+            "selector). ``ports`` flattens each ``V1ServicePort`` to "
+            "{name, port, target_port, protocol}; ``target_port`` may "
+            "be either an integer or a named-port string. ``selector`` "
+            "is the label map the service uses to pick pods. "
+            "``label_selector`` is forwarded server-side. Read-only."
         ),
         parameter_schema=K8S_SERVICE_LIST_PARAMETER_SCHEMA,
         response_schema=K8S_SERVICE_LIST_RESPONSE_SCHEMA,
@@ -409,21 +457,28 @@ NETWORK_OPS: tuple[KubernetesOp, ...] = (
     KubernetesOp(
         op_id="k8s.ingress.list",
         handler_attr="k8s_ingress_list",
-        summary="List Kubernetes ingresses in a namespace -- hosts / TLS hosts / routing rules.",
+        summary=(
+            "List Kubernetes ingresses per-namespace or cluster-wide "
+            "-- hosts / TLS hosts / routing rules."
+        ),
         description=(
-            "Calls ``NetworkingV1Api.list_namespaced_ingress(namespace)`` "
-            "and projects each Ingress into {name, namespace, class, "
-            "hosts, tls_hosts, rules}. ``class`` is the "
-            "``ingressClassName`` (e.g. 'nginx', 'traefik'); ``hosts`` "
-            "is the deduplicated sorted union of every rule's host; "
-            "``tls_hosts`` is the union of every TLS entry's hosts list "
-            "(operators use it to spot whether the ingress has TLS "
-            "configured without walking the rule tree). ``rules`` "
-            "flattens each ``V1IngressRule`` to "
+            "Calls "
+            "``NetworkingV1Api.list_namespaced_ingress(namespace, ...)`` "
+            "(per-namespace) or "
+            "``NetworkingV1Api.list_ingress_for_all_namespaces(...)`` "
+            "(``all_namespaces=true``) and projects each Ingress into "
+            "{name, namespace, class, hosts, tls_hosts, rules}. "
+            "``class`` is the ``ingressClassName`` (e.g. 'nginx', "
+            "'traefik'); ``hosts`` is the deduplicated sorted union of "
+            "every rule's host; ``tls_hosts`` is the union of every "
+            "TLS entry's hosts list (operators use it to spot whether "
+            "the ingress has TLS configured without walking the rule "
+            "tree). ``rules`` flattens each ``V1IngressRule`` to "
             "{host, paths: [{path, path_type, service, port}]}; the "
             "backend's IngressServiceBackend wrapper is collapsed to "
             "the flat service+port fields for the operator-facing wire "
-            "shape. Read-only."
+            "shape. ``label_selector`` is forwarded server-side. "
+            "Read-only."
         ),
         parameter_schema=K8S_INGRESS_LIST_PARAMETER_SCHEMA,
         response_schema=K8S_INGRESS_LIST_RESPONSE_SCHEMA,

@@ -150,6 +150,23 @@ connector-related release-notes line.
 
 ### Changed
 
+- **K8s connector list-op request-shape parity — `event` / `service` /
+  `ingress` / `configmap` `.list` adopt the `pod.list` input shape
+  (G0.17-T1 #1330, RDC #771 Finding 24).** Every namespaced list op
+  on the K8s connector now accepts `namespace` XOR `all_namespaces`
+  plus `label_selector`, so the operator's "show me all Warning
+  events cluster-wide" / "what argocd-labeled services exist across
+  the cluster?" question maps to a single
+  `{all_namespaces: true, ...}` call instead of an N-namespace
+  client-side loop. The `all_namespaces=true` path routes through
+  `CoreV1Api.list_X_for_all_namespaces` /
+  `NetworkingV1Api.list_ingress_for_all_namespaces`. Backward-compatible:
+  existing `{namespace: <X>}` calls keep working unchanged. Anchors
+  the new §10 in
+  [`docs/codebase/api-shape-conventions.md`](docs/codebase/api-shape-conventions.md)
+  (intra-connector list-op request-shape parity). Server-side `limit`
+  + `continue_token` paging on service / ingress / configmap deferred
+  as a follow-up.
 - `POST /api/v1/connectors/ingest` defaults to `async=true` and returns
   `202 Accepted` + a job handle on the non-dry-run path; operators poll
   `GET /api/v1/connectors/ingest/jobs/{job_id}` for completion.

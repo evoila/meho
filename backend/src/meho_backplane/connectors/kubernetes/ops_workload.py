@@ -94,6 +94,10 @@ from kubernetes_asyncio import client
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 from meho_backplane.connectors.kubernetes.ops_core import age_seconds
+from meho_backplane.connectors.kubernetes.ops_listparams import (
+    LIST_BASE_PROPERTIES,
+    NAMESPACE_XOR_ALL_NAMESPACES,
+)
 
 if TYPE_CHECKING:
     from kubernetes_asyncio.client.models import (
@@ -786,94 +790,20 @@ async def k8s_deployment_info(
 # ---------------------------------------------------------------------------
 
 
-#: Shared by both list ops: namespace XOR all_namespaces, plus the
-#: standard k8s ``label_selector`` / ``field_selector`` / ``limit`` /
-#: ``continue_token`` filter knobs. The ``oneOf`` clause enforces
-#: exactly-one of the namespace selectors so the operator can't
-#: accidentally pass both (which would be ambiguous about whether
-#: ``all_namespaces`` overrides ``namespace`` or vice-versa).
-_LIST_BASE_PROPERTIES: dict[str, Any] = {
-    "namespace": {
-        "type": "string",
-        "minLength": 1,
-        "description": "Namespace to list in. Required unless ``all_namespaces`` is true.",
-    },
-    "all_namespaces": {
-        "type": "boolean",
-        "default": False,
-        "description": (
-            "List across every namespace the kubeconfig's service "
-            "account can read. Mutually exclusive with ``namespace``."
-        ),
-    },
-    "label_selector": {
-        "type": "string",
-        "minLength": 1,
-        "description": (
-            "Standard k8s label selector (e.g. ``app=argocd-server``, "
-            "``app in (frontend,backend)``). Forwarded server-side."
-        ),
-    },
-    "field_selector": {
-        "type": "string",
-        "minLength": 1,
-        "description": (
-            "Standard k8s field selector (e.g. ``status.phase=Running``, "
-            "``spec.nodeName=node-1``). Forwarded server-side."
-        ),
-    },
-    "limit": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 1000,
-        "description": (
-            "Server-side ``?limit=`` for paginated reads. Combine with "
-            "``continue_token`` from a prior response's ``next_continue`` "
-            "field to walk pages. Capped at 1000 to bound per-call "
-            "payload."
-        ),
-    },
-    "continue_token": {
-        "type": "string",
-        "minLength": 1,
-        "description": (
-            "Server-emitted pagination cursor from a prior list call's "
-            "``next_continue`` field. Pass it back unchanged to fetch the "
-            "next page; passing a stale token (>5..15 min old) returns a "
-            "410 ResourceExpired -- restart the list without it."
-        ),
-    },
-}
-
-
-#: ``oneOf`` clause: exactly one of {namespace, all_namespaces=true}.
-#:
-#: The ``not`` branches encode "the other selector is absent" for the
-#: namespace branch and "all_namespaces is false-or-absent" for the
-#: missing-both branch. Draft 2020-12 evaluates each branch
-#: independently; the combined effect is the operator must supply
-#: exactly one selector.
-_NAMESPACE_XOR_ALL_NAMESPACES: list[dict[str, Any]] = [
-    {
-        "required": ["namespace"],
-        "not": {"required": ["all_namespaces"]},
-    },
-    {
-        "required": ["namespace", "all_namespaces"],
-        "properties": {"all_namespaces": {"const": False}},
-    },
-    {
-        "required": ["all_namespaces"],
-        "properties": {"all_namespaces": {"const": True}},
-        "not": {"required": ["namespace"]},
-    },
-]
-
-
+#: ``k8s.pod.list`` parameter schema. The shared
+#: :data:`~meho_backplane.connectors.kubernetes.ops_listparams.LIST_BASE_PROPERTIES`
+#: + :data:`~meho_backplane.connectors.kubernetes.ops_listparams.NAMESPACE_XOR_ALL_NAMESPACES`
+#: are the reference shape for every list op in this connector
+#: (`docs/codebase/api-shape-conventions.md` §10). Pod / deployment
+#: list adopt the full base; event / service / ingress / configmap
+#: list adopt the subset that maps to their server-side API surface
+#: (e.g. ``k8s.event.list`` keeps the namespace XOR + ``label_selector``
+#: but omits ``continue_token`` -- the omission is documented in
+#: :data:`~meho_backplane.connectors.kubernetes.ops_events.K8S_EVENT_LIST_PAGINATION_HINT`).
 K8S_POD_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": _LIST_BASE_PROPERTIES,
-    "oneOf": _NAMESPACE_XOR_ALL_NAMESPACES,
+    "properties": LIST_BASE_PROPERTIES,
+    "oneOf": NAMESPACE_XOR_ALL_NAMESPACES,
     "additionalProperties": False,
 }
 
@@ -903,8 +833,8 @@ K8S_POD_INFO_PARAMETER_SCHEMA: dict[str, Any] = {
 
 K8S_DEPLOYMENT_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": _LIST_BASE_PROPERTIES,
-    "oneOf": _NAMESPACE_XOR_ALL_NAMESPACES,
+    "properties": LIST_BASE_PROPERTIES,
+    "oneOf": NAMESPACE_XOR_ALL_NAMESPACES,
     "additionalProperties": False,
 }
 

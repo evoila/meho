@@ -149,6 +149,11 @@ from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.targets.resolver import resolve_target
+from meho_backplane.api.v1._envelope import (
+    ENVELOPE_QUERY,
+    EnvelopeVersion,
+    wrap_v2_envelope,
+)
 from meho_backplane.targets.schemas import Target, TargetCreate, TargetSummary, TargetUpdate
 
 __all__ = ["router"]
@@ -480,14 +485,15 @@ def _build_unknown_preferred_impl_detail(
     }
 
 
-@router.get("", response_model=list[TargetSummary])
+@router.get("")
 async def list_targets(
     product: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     cursor: str | None = Query(default=None),
+    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
     session: AsyncSession = Depends(get_session),
-) -> list[TargetSummary]:
+) -> list[TargetSummary] | dict[str, object]:
     """List targets for the requesting tenant.
 
     Results are keyset-paginated by ``name`` (lexicographic order).
@@ -499,6 +505,19 @@ async def list_targets(
     are excluded from the list — the same filter the resolver applies
     so list and dispatch never disagree about which targets are
     visible to the tenant.
+
+    G0.16-T6 Finding A (#1312) — non-breaking shape opt-in. The
+    default response stays the v0.8.0 bare list ``[TargetSummary,
+    ...]``; passing ``?envelope=v2`` returns the unified envelope
+    ``{"items": [...], "next_cursor": <opaque str | null>}`` per
+    ``docs/codebase/api-shape-conventions.md`` §2. The cursor on the
+    v2 envelope is the last-row ``name`` of the page when the page
+    filled to ``limit`` (so a re-issue carries pagination), and
+    ``None`` when the page exhausted the matching set (so callers
+    see "no more pages" without inspecting list length). The opt-in
+    semantics let SDK / CLI / MCP sister surfaces adopt the v2
+    shape at their own cadence; the v0.8.0 default flips after two
+    release cycles per the §2 migration recipe.
     """
     stmt = select(TargetORM).where(
         TargetORM.tenant_id == operator.tenant_id,
@@ -510,7 +529,15 @@ async def list_targets(
         stmt = stmt.where(TargetORM.name > cursor)
     stmt = stmt.order_by(TargetORM.name).limit(limit)
     result = await session.execute(stmt)
-    return [_to_summary(t) for t in result.scalars().all()]
+    rows = list(result.scalars().all())
+    summaries = [_to_summary(t) for t in rows]
+    if envelope is None:
+        return summaries
+    next_cursor = rows[-1].name if len(rows) >= limit else None
+    return wrap_v2_envelope(
+        [s.model_dump(mode="json") for s in summaries],
+        next_cursor=next_cursor,
+    )
 
 
 @router.get("/discover", response_model=TargetsDiscoverResult)

@@ -1210,6 +1210,62 @@ def test_update_target_clear_preferred_impl_id_succeeds(client: TestClient) -> N
 
 
 @pytest.mark.asyncio
+async def test_list_targets_envelope_v2_returns_unified_shape(
+    client: TestClient,
+) -> None:
+    """``?envelope=v2`` returns the §2 unified shape (G0.16-T6 Finding A #1312).
+
+    Default (no ``?envelope=``) stays the v0.8.0 bare list — pinned
+    by the existing test suite. The opt-in returns
+    ``{items, next_cursor}``: items always present,
+    ``next_cursor`` is ``None`` when the page exhausted the
+    matching set, the last-row ``name`` otherwise. The migration
+    is non-breaking by design: the opt-in is a query parameter,
+    not a versioned URL.
+    """
+    tenant = str(uuid.uuid4())
+    for name in ("a-target", "b-target", "c-target"):
+        await _insert_target(
+            tenant_id=uuid.UUID(tenant),
+            name=name,
+            product="kubernetes",
+            host="10.0.0.1",
+        )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        bare = client.get(
+            "/api/v1/targets?limit=2",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
+        )
+        v2_full = client.get(
+            "/api/v1/targets?envelope=v2&limit=2",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
+        )
+        v2_last = client.get(
+            "/api/v1/targets?envelope=v2&limit=2&cursor=b-target",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
+        )
+    # Default shape unchanged — a bare list of 2 rows.
+    assert bare.status_code == 200
+    assert isinstance(bare.json(), list)
+    assert len(bare.json()) == 2
+
+    # v2 envelope — items + next_cursor.
+    assert v2_full.status_code == 200
+    body = v2_full.json()
+    assert isinstance(body, dict)
+    assert [row["name"] for row in body["items"]] == ["a-target", "b-target"]
+    # Page filled to limit → cursor for the next page.
+    assert body["next_cursor"] == "b-target"
+
+    # Last page → cursor is None.
+    body_last = v2_last.json()
+    assert body_last["items"][0]["name"] == "c-target"
+    assert body_last["next_cursor"] is None
+
+
+@pytest.mark.asyncio
 async def test_list_target_field_set_superset_of_detail(client: TestClient) -> None:
     """List rows surface every field the detail endpoint exposes (no masking).
 

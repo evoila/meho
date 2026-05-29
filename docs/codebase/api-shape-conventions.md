@@ -180,6 +180,18 @@ In practice the SEV-4 sweep that motivated this doc will batch the
 migration onto a single connector-doc-versioned bump (v0.10.0?) so
 adopters change every list call at once.
 
+Code reference: G0.16-T6 Finding A (#1312) lands the reference
+adoption on
+[`GET /api/v1/targets`](../../backend/src/meho_backplane/api/v1/targets.py)
+via the shared helper
+[`backend/src/meho_backplane/api/v1/_envelope.py`](../../backend/src/meho_backplane/api/v1/_envelope.py)
+(``EnvelopeVersion`` type, ``ENVELOPE_QUERY`` declaration,
+``wrap_v2_envelope`` builder). The four sister endpoints
+(``conventions`` / ``audit/my-recent`` / ``broadcast/overrides`` /
+``connectors``) plus the CLI / MCP sister-surface forwarding ship
+in a follow-up Task — the helper module is shared so the
+remaining adoptions are 5-line patches per endpoint.
+
 ## 3. Enum vocabulary discipline
 
 **One identifier per concept across every layer that names it.**

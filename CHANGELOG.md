@@ -108,6 +108,17 @@ connector-related release-notes line.
 
 ### Added
 
+- **`GET /api/v1/targets?envelope=v2` opt-in returns the unified
+  list shape (G0.16-T6 Finding A reference adoption #1312).**
+  Pass `?envelope=v2` to receive `{items, next_cursor?}` per
+  `docs/codebase/api-shape-conventions.md` §2; omit to keep the
+  v0.8.0 bare-list default. The shared helper
+  `backend/src/meho_backplane/api/v1/_envelope.py` carries the
+  `EnvelopeVersion` type, the `ENVELOPE_QUERY` declaration, and
+  the `wrap_v2_envelope` builder so the four sister endpoints
+  (`conventions`, `audit/my-recent`, `broadcast/overrides`,
+  `connectors`) can opt in via 5-line patches in a follow-up. CLI
+  and MCP sister-surface forwarding ships in the same follow-up.
 - **Top-level `kind` discriminator on `meho:feed:{tenant_id}`
   entries (G0.16-T6 Finding F #1312).** Every write to the
   per-tenant broadcast stream carries `"kind": "operation"` (audit-

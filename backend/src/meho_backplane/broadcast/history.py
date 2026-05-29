@@ -310,19 +310,28 @@ def parse_entry(
 
     * Audit-driven :class:`BroadcastEvent` -- written by
       :func:`~meho_backplane.broadcast.publisher.publish_event` per
-      audited operation. JSON has no ``event_kind`` field (pre-T2
-      schema).
+      audited operation. Post-G0.16-T6 entries carry
+      ``"kind": "operation"`` on the wire; pre-migration entries
+      omit the field and are inferred as ``"operation"`` (the
+      audit-derived majority shape — pre-migration writes carried
+      ``op_id`` / ``op_class`` / ``payload``, not the
+      announcement-shape ``activity`` / ``phase`` fields).
     * Agent-authored :class:`AgentAnnouncementEvent` -- written by
       :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
       per ``meho.broadcast.announce`` call. JSON carries
-      ``"event_kind": "agent_announcement"``.
+      ``"kind": "agent_announcement"`` (the new top-level discriminator
+      per :doc:`/docs/codebase/api-shape-conventions` §6) and also
+      ``"event_kind": "agent_announcement"`` (backward-compat alias).
 
-    Dispatch is on the ``event_kind`` field: present and matching
-    ``"agent_announcement"`` -> :class:`AgentAnnouncementEvent`,
-    everything else -> :class:`BroadcastEvent` (the default). A
-    one-off pre-parse via :func:`json.loads` reads only the
-    discriminator; the chosen model class re-parses the same JSON
-    via :meth:`pydantic.BaseModel.model_validate_json` so validation
+    Dispatch is on the top-level ``kind`` field first
+    (G0.16-T6 Finding F #1312), falling back to ``event_kind`` for
+    backward compatibility with v0.8.0 stream entries that lack the
+    new field. Present and matching ``"agent_announcement"`` →
+    :class:`AgentAnnouncementEvent`, everything else →
+    :class:`BroadcastEvent` (the operation default). A one-off
+    pre-parse via :func:`json.loads` reads only the discriminator;
+    the chosen model class re-parses the same JSON via
+    :meth:`pydantic.BaseModel.model_validate_json` so validation
     stays full-fidelity.
     """
     raw_event_json = fields.get("event")
@@ -347,9 +356,16 @@ def parse_entry(
             entry_id=entry_id,
         )
         return None
-    event_kind = peek.get("event_kind") if isinstance(peek, dict) else None
+    # G0.16-T6 Finding F (#1312). Prefer the new top-level ``kind``
+    # discriminator; fall back to the historical ``event_kind`` field
+    # for v0.8.0 in-flight stream entries that haven't aged out via
+    # the publisher's ``MAXLEN ~`` trim yet.
+    if isinstance(peek, dict):
+        discriminator = peek.get("kind") or peek.get("event_kind")
+    else:
+        discriminator = None
     model_cls: type[BroadcastEvent] | type[AgentAnnouncementEvent] = (
-        AgentAnnouncementEvent if event_kind == "agent_announcement" else BroadcastEvent
+        AgentAnnouncementEvent if discriminator == "agent_announcement" else BroadcastEvent
     )
     try:
         return model_cls.model_validate_json(raw_event_json)

@@ -108,6 +108,19 @@ connector-related release-notes line.
 
 ### Added
 
+- **Top-level `kind` discriminator on `meho:feed:{tenant_id}`
+  entries (G0.16-T6 Finding F #1312).** Every write to the
+  per-tenant broadcast stream carries `"kind": "operation"` (audit-
+  driven `BroadcastEvent`) or `"kind": "agent_announcement"`
+  (`AgentAnnouncementEvent`) per
+  `docs/codebase/api-shape-conventions.md` §6. Consumers
+  normalize on `kind`; the historical `event_kind` field stays
+  serialised on `AgentAnnouncementEvent` for backward
+  compatibility with v0.8.0 in-flight stream entries, and pre-
+  migration `BroadcastEvent` entries lacking the field on the
+  wire infer `kind="operation"` from the model's attribute
+  default. Closes the "infer from `op_id`-vs-`activity` field
+  presence" anti-pattern RDC #771 Finding 13 catalogued.
 - **Catalog `spec_info_versions_compatible` field
   (G0.16-T6 Finding H #1312).** Connector-spec catalog entries can
   now declare PEP-440-prefix wildcards (e.g. `["9.0.x"]`) that

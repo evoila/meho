@@ -132,17 +132,24 @@ def _window_start_iso(*, retention_hours: int, now: datetime) -> str:
 def _is_audit_event(event: dict[str, Any]) -> bool:
     """Return ``True`` iff *event* is a :class:`BroadcastEvent` (audit-driven).
 
-    The shared helper surfaces both :class:`BroadcastEvent` (audit-driven,
-    no ``event_kind`` field on the wire JSON) and
-    :class:`AgentAnnouncementEvent` (``event_kind == "agent_announcement"``).
-    This route today renders only audit events -- the existing row template
-    binds to audit columns (``op_class`` / ``op_id`` / ``result_status``
-    / ``payload``) that announcements don't carry. Surfacing
-    announcement-shape events through the existing template would render
-    blank cells. Adding announcement rendering is a follow-up that lives
-    on the row template, not this route.
+    G0.16-T6 Finding F (#1312). The discriminator is the top-level
+    ``kind`` field per ``docs/codebase/api-shape-conventions.md`` §6:
+    ``"operation"`` for audit-driven :class:`BroadcastEvent`,
+    ``"agent_announcement"`` for :class:`AgentAnnouncementEvent`.
+    Falls back to the historical ``event_kind`` field for backward
+    compatibility with v0.8.0 stream entries still in the
+    publisher's ``MAXLEN ~`` window.
+
+    This route today renders only audit events -- the existing row
+    template binds to audit columns (``op_class`` / ``op_id`` /
+    ``result_status`` / ``payload``) that announcements don't carry.
+    Surfacing announcement-shape events through the existing
+    template would render blank cells. Adding announcement
+    rendering is a follow-up that lives on the row template, not
+    this route.
     """
-    return event.get("event_kind") != "agent_announcement"
+    discriminator = event.get("kind") or event.get("event_kind")
+    return discriminator != "agent_announcement"
 
 
 async def _fetch_history(

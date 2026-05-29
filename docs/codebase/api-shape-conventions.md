@@ -349,6 +349,23 @@ The migration is similar to §2: add a `kind` field to every
 write, normalize consumers to switch on it, deprecate the
 "infer from fields" path over two release cycles.
 
+Code reference: G0.16-T6 Finding F (#1312) lands the `kind`
+field on both writers:
+
+- [`BroadcastEvent.kind`](../../backend/src/meho_backplane/broadcast/events.py)
+  defaults to `"operation"` (the audit-derived majority shape;
+  pre-migration entries lacking the field on the wire fall back to
+  the same default, so the historical window doesn't need a
+  data-migration sweep).
+- [`AgentAnnouncementEvent.kind`](../../backend/src/meho_backplane/broadcast/agent_events.py)
+  is `Literal["agent_announcement"]`; the historical `event_kind`
+  field stays serialised as a backward-compat alias so v0.8.0
+  in-flight stream entries continue to round-trip.
+- The shared consumer
+  [`broadcast.history.parse_entry`](../../backend/src/meho_backplane/broadcast/history.py)
+  switches on the top-level `kind` first, falling back to
+  `event_kind` for the v0.8.0 shape.
+
 ## 7. Probe ↔ dispatch path agreement
 
 **The probe path and the dispatch path read credentials, resolve

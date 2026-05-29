@@ -540,13 +540,22 @@ async def list_targets(
         stmt = stmt.where(TargetORM.product == product)
     if cursor is not None:
         stmt = stmt.where(TargetORM.name > cursor)
-    stmt = stmt.order_by(TargetORM.name).limit(limit)
+    # G0.16-T6 review-iter-1 M1 (#1312). Over-fetch ``limit + 1`` so the
+    # presence of an extra row directly proves there's another page,
+    # rather than inferring from ``len(rows) >= limit`` (which produces
+    # a false-positive non-null ``next_cursor`` on the terminal page
+    # when the matching set size is an exact multiple of ``limit``).
+    # The bare-list branch slices back to ``limit`` so the v0.8.0 shape
+    # is unchanged.
+    stmt = stmt.order_by(TargetORM.name).limit(limit + 1)
     result = await session.execute(stmt)
-    rows = list(result.scalars().all())
+    fetched = list(result.scalars().all())
+    has_more = len(fetched) > limit
+    rows = fetched[:limit]
     summaries = [_to_summary(t) for t in rows]
     if envelope is None:
         return summaries
-    next_cursor = rows[-1].name if len(rows) >= limit else None
+    next_cursor = rows[-1].name if has_more else None
     return wrap_v2_envelope(
         [s.model_dump(mode="json") for s in summaries],
         next_cursor=next_cursor,

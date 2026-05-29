@@ -1386,6 +1386,47 @@ async def test_list_targets_envelope_v2_returns_unified_shape(
 
 
 @pytest.mark.asyncio
+async def test_list_targets_envelope_v2_exact_limit_terminal_page(
+    client: TestClient,
+) -> None:
+    """``?envelope=v2`` emits ``next_cursor=null`` on an exact-``limit`` terminal page.
+
+    G0.16-T6 review-iter-1 M1 (#1312). The pre-fix shape
+    (``next_cursor = rows[-1].name if len(rows) >= limit``) emitted a
+    non-null cursor when the row count was exactly ``limit`` -- a
+    false-positive that contradicted the §2 contract and forced
+    callers to issue a wasted round-trip per result set whose size
+    divided ``limit`` evenly. The fix over-fetches ``limit + 1`` and
+    infers ``has_more`` from the extra row's existence; this test
+    pins the contract that a page returning *exactly* ``limit`` rows
+    with no further matches gets ``next_cursor=null``.
+
+    Five rows in the tenant; ``limit=5``. The page returns all five
+    items and the cursor is null -- no extra round-trip.
+    """
+    tenant = str(uuid.uuid4())
+    for name in ("a-t", "b-t", "c-t", "d-t", "e-t"):
+        await _insert_target(
+            tenant_id=uuid.UUID(tenant),
+            name=name,
+            product="kubernetes",
+            host="10.0.0.1",
+        )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.get(
+            "/api/v1/targets?envelope=v2&limit=5",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [row["name"] for row in body["items"]] == ["a-t", "b-t", "c-t", "d-t", "e-t"]
+    # Exact-limit terminal page -- no more matches, cursor is null.
+    assert body["next_cursor"] is None
+
+
+@pytest.mark.asyncio
 async def test_list_target_field_set_superset_of_detail(client: TestClient) -> None:
     """List rows surface every field the detail endpoint exposes (no masking).
 

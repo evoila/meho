@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-29
+
 ### Added
 
 - **Catalog field `spec_info_versions_compatible` for label-vs-spec
@@ -215,6 +217,13 @@ connector-related release-notes line.
   matching, so an operator typing either form lands on the same
   connector. The unknown-impl 422 lists both forms in
   `valid_impl_ids` for branchable client recovery.
+- **CLI commands migrated to the generated typed API client (G0.12).**
+  The `agent`, `agent-principal`, `approvals`, `audit`, `broadcast`,
+  `connector`, `conventions`, `kb`, `memory`, `migrate`, `retrieval`,
+  `scheduler`, `targets`, and `topology` command groups — plus the
+  operation verbs — now issue requests through the OpenAPI-generated
+  typed transport instead of hand-rolled HTTP. Internal refactor; no
+  operator-facing flag or output change. (G0.12-T1–T16, #1262–#1277)
 
 ### Fixed
 

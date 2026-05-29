@@ -340,11 +340,13 @@ async def ingest_endpoint(
             resolved=resolved,
             operator=operator,
             catalog_entry=catalog_entry,
+            spec_info_versions_compatible=spec_info_versions_compatible,
         )
     return await _spawn_async_ingest(
         service=service,
         resolved=resolved,
         operator=operator,
+        spec_info_versions_compatible=spec_info_versions_compatible,
     )
 
 
@@ -354,6 +356,7 @@ async def _run_sync_ingest(
     resolved: IngestRequest,
     operator: Operator,
     catalog_entry: str | None,
+    spec_info_versions_compatible: tuple[str, ...] | None,
 ) -> JSONResponse:
     """Run the pipeline inline and return the legacy 200 + IngestResponse.
 
@@ -388,6 +391,7 @@ async def _spawn_async_ingest(
     service: IngestionPipelineService,
     resolved: IngestRequest,
     operator: Operator,
+    spec_info_versions_compatible: tuple[str, ...] | None,
 ) -> JSONResponse:
     """Create a job row, kick the pipeline off the request thread, return 202.
 
@@ -429,6 +433,7 @@ async def _spawn_async_ingest(
             base_url=resolved.base_url,
             tenant_id=operator.tenant_id,
             dry_run=False,
+            spec_info_versions_compatible=spec_info_versions_compatible,
         )
 
     # ``asyncio.create_task`` (not ``BackgroundTasks``) so the work

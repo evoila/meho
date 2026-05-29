@@ -3474,6 +3474,371 @@
         }
       }
     },
+    "/api/v1/runbooks/runs": {
+      "post": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Start Run",
+        "description": "Begin a new run on the latest non-deprecated published template version.\n\nRole floor: ``operator``. The caller is auto-assigned as the run's\nassignee (``run.assigned_to = operator.sub``); the service refuses\nto start a new run for any other principal. Returns\n:class:`CurrentStepResponse` (the opacity-by-construction shape\ncarrying *only* the first step's body, with ``${run.target}`` /\n``${run.params.X}`` substitutions resolved); never a\n:class:`RunCompletedResponse` (a fresh run is not terminal).\n\nTyped-error mapping:\n\n* :class:`DeprecatedTemplateError` -> 400 (every version of the\n  slug is deprecated; the only forward path is publishing a new\n  version).\n* :class:`TemplateNotFoundError` -> 404 (no published or\n  deprecated row exists for this slug in the operator's tenant;\n  cross-tenant probes collapse here too).\n* :class:`MissingParamsError` -> 422 (the template references a\n  ``${run.params.X}`` the request body did not supply; caught at\n  start time so the run row never lands).\n\nBinds ``audit_op_id=\"runbook.start_run\"`` + ``audit_op_class=\n\"write\"`` before the service call so a handler exception still\nproduces an audit row classified under the canonical op id.\n\nThe response type is declared as the broader\n:data:`NextStepResponse` union (rather than\n:class:`CurrentStepResponse` directly) so the OpenAPI schema\ndocuments the *same* response surface as ``next`` -- callers can\nparse both endpoints' bodies through one discriminated-union\ndecoder. The service's start path always returns the\n``current_step`` variant; never the ``completed`` one.",
+        "operationId": "start_run_api_v1_runbooks_runs_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/CurrentStepResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RunCompletedResponse"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "current_step": "#/components/schemas/CurrentStepResponse",
+                      "completed": "#/components/schemas/RunCompletedResponse"
+                    }
+                  },
+                  "title": "Response Start Run Api V1 Runbooks Runs Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "List Runs",
+        "description": "List runs for the operator's tenant, scoped by role.\n\nRole floor: ``operator``. The handler computes\n``caller_is_admin`` from ``operator.tenant_role`` and passes it\nto the service:\n\n* ``caller_is_admin=False`` (operator path) -- the service forces\n  ``assignee=operator.sub`` regardless of what the query string\n  says, so an ``OPERATOR`` only ever sees their own runs even if\n  they try to filter to another assignee. The filter is a\n  *narrow* surface for their own view, never an *escape* into\n  another operator's.\n* ``caller_is_admin=True`` (admin path) -- the filter is honoured\n  as-is, so a ``TENANT_ADMIN`` can pass ``?assignee=<other-sub>``\n  to inspect a junior's runs.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``status`` is typed as the\nclosed ``in_progress`` / ``completed`` / ``abandoned`` vocabulary,\nso an out-of-vocabulary value trips a clean 422 at FastAPI's\nquery-parameter validation boundary (before the handler body\nruns) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.runs_schemas.ListRunsFilter`\ninternally.\n\nBinds ``audit_op_id=\"runbook.list_runs\"`` + ``audit_op_class=\n\"read\"`` before the service call. ``runbook.list_runs`` matches\nno ``.list`` / ``.get`` suffix the broadcast classifier\nrecognises, so the explicit override is load-bearing to keep\nclassification from defaulting to ``op_class=\"other\"`` (same\ngotcha :mod:`meho_backplane.api.v1.runbook_templates`'s\n``list_templates`` documents).",
+        "operationId": "list_runs_api_v1_runbooks_runs_get",
+        "parameters": [
+          {
+            "name": "assignee",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Assignee"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "in_progress",
+                "completed",
+                "abandoned"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "template_slug",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Template Slug"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunbookListRunsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runbooks/runs/{run_id}/next": {
+      "post": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Advance Run",
+        "description": "Advance the run one step, gated by the verify predicate.\n\nRole floor: ``operator``. The service enforces the single-assignee\ninvariant: a caller other than ``run.assigned_to`` -- including a\n``tenant_admin`` -- gets 403 :class:`NotRunAssigneeError`. The\nright way for a senior to take over a junior's run is\n:func:`reassign_run`, not a role-based bypass. The substrate is\nthe verify oracle; the caller's ``last_verified`` claim is\ninformational only and never trusted as a gate.\n\nTyped-error mapping:\n\n* :class:`RunNotFoundError` -> 404 (no run with that id in the\n  caller's tenant; cross-tenant probes collapse here).\n* :class:`NotRunAssigneeError` -> 403 (caller is not the\n  assignee; the right path is :func:`reassign_run`).\n* :class:`RunAlreadyTerminalError` -> 400 (run is already\n  ``completed`` / ``abandoned``).\n* :class:`PreviousStepFailedError` -> 400 (current step is in\n  ``failed`` state; the only forward path is :func:`abort_run`).\n* :class:`PreviousStepNotVerifiedError` -> 400 (engine-side gate:\n  previous step never transitioned to ``verified``).\n* :class:`VerifyResponseRequiredError` -> 422 (the step needs a\n  verify response and the request omitted it).\n* :class:`VerifyResponseMismatchError` -> 422 (the response's\n  shape did not match the step's verify type).\n\nReturns :data:`NextStepResponse` -- discriminated on ``kind``:\na :class:`CurrentStepResponse` carrying the next step's body, or\na :class:`RunCompletedResponse` marker when the previous step was\nthe last one.\n\nBinds ``audit_op_id=\"runbook.next_step\"`` + ``audit_op_class=\n\"write\"`` before the service call. When the step's verify is an\n``operation_call``, the service binds ``run_id_var`` +\n``step_id_var`` (G12.1-T2 #1294) around the dispatched call, so\nthe inner audit row carries the run/step correlation columns\npopulated -- one audit row for the route envelope, one for the\ndispatched verify call.",
+        "operationId": "advance_run_api_v1_runbooks_runs__run_id__next_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NextStepRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/CurrentStepResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RunCompletedResponse"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "current_step": "#/components/schemas/CurrentStepResponse",
+                      "completed": "#/components/schemas/RunCompletedResponse"
+                    }
+                  },
+                  "title": "Response Advance Run Api V1 Runbooks Runs  Run Id  Next Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runbooks/runs/{run_id}/abort": {
+      "post": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Abort Run",
+        "description": "Mark the run ``abandoned`` and write an audit row with the reason.\n\nRole floor: ``operator`` at the gate. The service then permits\ncaller \u2208 ``{run.assigned_to, any TENANT_ADMIN}``; the handler\npasses ``caller_is_admin=True`` when the operator's\n``tenant_role`` is ``TENANT_ADMIN`` so the service widens its\nallowance. Non-assignee non-admin callers get\n:class:`NotRunAssigneeError` from the service -> 403.\n\nTyped-error mapping:\n\n* :class:`RunNotFoundError` -> 404.\n* :class:`NotRunAssigneeError` -> 403 (caller is neither the\n  assignee nor a tenant admin).\n* :class:`RunAlreadyTerminalError` -> 400 (re-aborting a\n  terminal run would invalidate the audit story).\n\nBinds ``audit_op_id=\"runbook.abort_run\"`` + ``audit_op_class=\n\"write\"`` before the service call. The service also writes a\n*direct* audit row (not through the dispatcher) with\n``method=\"DISPATCH\"`` + ``path=\"runbook.abort\"`` carrying the\nabort ``reason`` in ``raw_payload`` -- the route's envelope row\nand the service's direct row are both present; queries can use\neither to find the abort.",
+        "operationId": "abort_run_api_v1_runbooks_runs__run_id__abort_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AbortRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AbortRunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runbooks/runs/{run_id}/reassign": {
+      "post": {
+        "tags": [
+          "runbooks"
+        ],
+        "summary": "Reassign Run",
+        "description": "Transfer ownership of the run to a new assignee.\n\nRole floor: ``tenant_admin``. The route gate is the *only* RBAC\nenforcement on this surface -- the service does no role check\n(it is willing to flip ``assigned_to`` for any caller, by design:\nthe senior taking over is the documented escalation knob from\nInitiative #1198; an operator hitting this route gets 403 at the\ngate before the service is touched).\n\nTyped-error mapping:\n\n* :class:`RunNotFoundError` -> 404 (no run with that id in the\n  admin's tenant; cross-tenant probes collapse here).\n* :class:`RunAlreadyTerminalError` -> 400 (a terminal run has no\n  meaningful next-assignee).\n\nBinds ``audit_op_id=\"runbook.reassign_run\"`` + ``audit_op_class=\n\"write\"`` before the service call so the ownership transfer is\nclassified as a write in the audit log.",
+        "operationId": "reassign_run_api_v1_runbooks_runs__run_id__reassign_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReassignRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReassignRunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/memory": {
       "post": {
         "tags": [
@@ -8582,6 +8947,48 @@
   },
   "components": {
     "schemas": {
+      "AbortRunRequest": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "AbortRunRequest",
+        "description": "Request body for ``runbook_abort`` -- terminate the run mid-flight.\n\n:attr:`reason` is required and non-empty (``Field(min_length=1)``)\nbecause it is persisted to ``audit_log.payload`` for the abort\nevent -- an empty reason would defeat the audit trail that\nInitiative #1198's \"abort-with-audit\" guarantee rests on."
+      },
+      "AbortRunResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "state": {
+            "type": "string",
+            "const": "abandoned",
+            "title": "State",
+            "default": "abandoned"
+          },
+          "abandoned_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Abandoned At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "abandoned_at"
+        ],
+        "title": "AbortRunResponse",
+        "description": "Returned by ``runbook_abort`` -- the terminal-state coordinates."
+      },
       "AgentDefinitionCreate": {
         "properties": {
           "name": {
@@ -10297,6 +10704,31 @@
         "title": "ConfirmVerify",
         "description": "Operator answers a yes/no prompt; only an affirmative advances.\n\nThe minimal verify shape: MEHO shows :attr:`prompt` to the operator\nand gates the step on their answer. No structured result, no\ncomparison -- the human is the oracle."
       },
+      "ConfirmVerifyResponse": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "confirm",
+            "title": "Type"
+          },
+          "answer": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "no",
+              "escalate"
+            ],
+            "title": "Answer"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "answer"
+        ],
+        "title": "ConfirmVerifyResponse",
+        "description": "Operator's answer to a ``confirm``-typed verify step.\n\nOnly :attr:`answer` ``= \"yes\"`` advances the run. ``\"no\"`` transitions\nthe step to ``failed``; ``\"escalate\"`` transitions to ``failed`` with\n``verify_response.escalated=true`` semantics so the senior's review\npath is explicit in the persisted state (per Initiative #1198)."
+      },
       "ConnectorReviewGroup": {
         "properties": {
           "group_key": {
@@ -10844,6 +11276,45 @@
         ],
         "title": "CriterionResult",
         "description": "One row of the per-surface checklist.\n\nFrozen + ``extra=\"forbid\"`` so the structured output is stable for\nthe CLI table renderer and any future dashboard consumer. The\n``observed_value`` + ``threshold_summary`` pair is what the\nhuman-readable table prints verbatim \u2014 keep both short (\u2264 32\nchars each) so the table stays scannable in an 80-column terminal."
+      },
+      "CurrentStepResponse": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "current_step",
+            "title": "Kind",
+            "default": "current_step"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "template_slug": {
+            "type": "string",
+            "title": "Template Slug"
+          },
+          "template_version": {
+            "type": "integer",
+            "title": "Template Version"
+          },
+          "position": {
+            "$ref": "#/components/schemas/StepPosition"
+          },
+          "current_step": {
+            "$ref": "#/components/schemas/StepBody"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "template_slug",
+          "template_version",
+          "position",
+          "current_step"
+        ],
+        "title": "CurrentStepResponse",
+        "description": "Returned by ``runbook_start`` and the non-completion path of ``runbook_next``.\n\nCarries the run coordinates (``run_id`` / ``template_slug`` /\n``template_version``), the structural position hint\n(:class:`StepPosition`), and -- crucially -- exactly one\n:class:`StepBody`: the step the run is *currently on*. No previous\nsteps (already executed), no following steps (the opacity property\nthis Initiative is built around).\n\nTagged with ``kind: Literal[\"current_step\"]`` so the parent\n:data:`NextStepResponse` discriminated union routes payloads on a\nvisible field rather than a callable shape-sniffing discriminator\n(option 1 of the design decision documented at the module docstring\nand the #1300 issue body)."
       },
       "DailyUsageBucket": {
         "properties": {
@@ -11916,6 +12387,39 @@
         "title": "MemoryScope",
         "description": "One of the five memory scopes from consumer-needs.md \u00a7G5 L137-141.\n\nThe string value is the wire-level identifier (route path segment,\nCLI flag value, MCP tool arg). Each value maps to a single\n``documents.kind`` row prefixed with ``memory-`` --\n:func:`kind_for_scope` is the canonical translation. The mapping is\none-to-one and bijective with :func:`scope_for_kind`, so callers\nnever round-trip through ad-hoc string-prefixing.\n\n``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``\nsemantics for free: ``f\"scope={MemoryScope.USER}\"`` renders as\n``\"scope=user\"`` rather than ``\"scope=MemoryScope.USER\"``, matching\nthe :class:`~meho_backplane.auth.operator.TenantRole` convention."
       },
+      "NextStepRequest": {
+        "properties": {
+          "last_verified": {
+            "type": "boolean",
+            "title": "Last Verified"
+          },
+          "verify_response": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConfirmVerifyResponse"
+              },
+              {
+                "$ref": "#/components/schemas/OperationCallVerifyResponse"
+              }
+            ],
+            "discriminator": {
+              "propertyName": "type",
+              "mapping": {
+                "confirm": "#/components/schemas/ConfirmVerifyResponse",
+                "operation_call": "#/components/schemas/OperationCallVerifyResponse"
+              }
+            },
+            "nullable": true,
+            "title": "Verify Response"
+          }
+        },
+        "type": "object",
+        "required": [
+          "last_verified"
+        ],
+        "title": "NextStepRequest",
+        "description": "Request body for ``runbook_next`` -- advance the run.\n\n:attr:`last_verified` is the caller's *claim* that the previous\nstep's verify gate was satisfied. It is **informational only**:\nthe substrate (engine, G12.3-T2) is the verify oracle, and a\nrequest from a caller whose previous-step state is not\n``verified`` returns 400 *regardless* of what\n:attr:`last_verified` says. The field exists so the wire log\ncaptures the caller's belief alongside the substrate's decision\n-- useful for diagnosing a client that thinks it advanced when\nthe substrate did not.\n\n:attr:`verify_response` carries the operator's answer for a\n``confirm`` step or the engine's captured result for an\n``operation_call`` step. ``None`` is valid only on the very first\n``runbook_next`` call (when no prior step exists to verify)."
+      },
       "OperationCallStep": {
         "properties": {
           "id": {
@@ -12008,6 +12512,32 @@
         ],
         "title": "OperationCallVerify",
         "description": "MEHO dispatches the verify call and matches the result against ``expect``.\n\nThe match is structural-equality + presence only: every key/value in\n:attr:`expect` must be present and equal in the call result. There are\ndeliberately no operators, no JSONPath, and no boolean composition --\nsubstrate minimalism (same call as #1177): determinism over\nexpressivity. :attr:`params` may carry ``${...}`` substitutions\n(allowlisted at publish time); :attr:`expect` may too."
+      },
+      "OperationCallVerifyResponse": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "operation_call",
+            "title": "Type"
+          },
+          "matched": {
+            "type": "boolean",
+            "title": "Matched"
+          },
+          "actual": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Actual"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "matched",
+          "actual"
+        ],
+        "title": "OperationCallVerifyResponse",
+        "description": "Captured result of a dispatched ``operation_call`` verify step.\n\nThe engine populates this from ``call_operation()``'s return value;\ncallers do not construct it themselves. Stored in\n``runbook_run_step_states.verify_response`` for later replay /\naudit. :attr:`matched` is ``True`` when the structural-equality +\npresence match against the template-side ``expect`` succeeded;\n:attr:`actual` is the call result, retained verbatim for the\nmismatch-case forensics."
       },
       "OperationDescriptor": {
         "properties": {
@@ -12341,6 +12871,47 @@
         ],
         "title": "QueryResult",
         "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate."
+      },
+      "ReassignRunRequest": {
+        "properties": {
+          "new_assignee": {
+            "type": "string",
+            "minLength": 1,
+            "title": "New Assignee"
+          }
+        },
+        "type": "object",
+        "required": [
+          "new_assignee"
+        ],
+        "title": "ReassignRunRequest",
+        "description": "Request body for ``runbook_reassign`` -- transfer ownership of a run.\n\n:attr:`new_assignee` is the operator subject identifier of the\nnew owner. Non-empty (``Field(min_length=1)``) because the\nreassign path writes to ``runbook_runs.assigned_to`` which is\n``NOT NULL`` at the storage layer and is the predicate for\nevery subsequent ``runbook_next`` ownership check."
+      },
+      "ReassignRunResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "assigned_to": {
+            "type": "string",
+            "title": "Assigned To"
+          },
+          "reassigned_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Reassigned At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "assigned_to",
+          "reassigned_at"
+        ],
+        "title": "ReassignRunResponse",
+        "description": "Returned by ``runbook_reassign`` -- the new ownership coordinates."
       },
       "RefreshResult": {
         "properties": {
@@ -12879,6 +13450,128 @@
         "title": "RetrieveResponse",
         "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
       },
+      "RunCompletedResponse": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "completed",
+            "title": "Kind",
+            "default": "completed"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "state": {
+            "type": "string",
+            "const": "completed",
+            "title": "State",
+            "default": "completed"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "completed_at"
+        ],
+        "title": "RunCompletedResponse",
+        "description": "Returned by ``runbook_next`` when the previous step was the last.\n\nThe terminal-state shape: no step body, just the run coordinates\nand the transition timestamp. The companion abort-side shape is\n:class:`AbortRunResponse`.\n\nThe :attr:`state` and :attr:`kind` literals both carry ``\"completed\"``\nby design: :attr:`kind` is the parent-union discriminator (per the\nexplicit-tag decision documented at the module docstring), while\n:attr:`state` matches the run's storage-level state column\n(``runbook_runs.state``) so the response shape mirrors the row\none-for-one."
+      },
+      "RunSummary": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "template_slug": {
+            "type": "string",
+            "title": "Template Slug"
+          },
+          "template_version": {
+            "type": "integer",
+            "title": "Template Version"
+          },
+          "assigned_to": {
+            "type": "string",
+            "title": "Assigned To"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "in_progress",
+              "completed",
+              "abandoned"
+            ],
+            "title": "State"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Completed At"
+          },
+          "abandoned_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Abandoned At"
+          },
+          "current_step_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Current Step Id"
+          },
+          "position": {
+            "$ref": "#/components/schemas/StepPosition",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "template_slug",
+          "template_version",
+          "assigned_to",
+          "target",
+          "state",
+          "started_at"
+        ],
+        "title": "RunSummary",
+        "description": "List-view projection returned by ``runbook_list_runs``.\n\nRun-level state only: no step contents are exposed. The\nstep-by-step content is opaque-by-construction (only\n``runbook_next`` ever returns a step body, and only one step at a\ntime), so :attr:`current_step_id` is the *id* of the step the\nrun is currently on -- enough for a UI to render \"step 3:\ndrain-node\" -- but not the body.\n\n:attr:`current_step_id` and :attr:`position` are ``None`` for\nruns in terminal state (``completed`` / ``abandoned``); a\nterminal-state run has no \"current\" step.\n\n:attr:`completed_at` and :attr:`abandoned_at` are mutually\nexclusive (and both ``None`` for ``in_progress`` runs); the\ntransition that fired sets the corresponding column on\n``runbook_runs``."
+      },
+      "RunbookListRunsResponse": {
+        "properties": {
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/RunSummary"
+            },
+            "type": "array",
+            "title": "Runs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runs"
+        ],
+        "title": "RunbookListRunsResponse",
+        "description": "Response envelope for ``GET /api/v1/runbooks/runs``.\n\nWrapped in ``{\"runs\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- same shape\n:mod:`meho_backplane.api.v1.runbook_templates` adopted for its\nlist response. Per-entry shape is the substrate's\n:class:`~meho_backplane.runbooks.runs_schemas.RunSummary` (no\nstep body content, only the run-level coordinates)."
+      },
       "RunbookTemplateBody": {
         "properties": {
           "title": {
@@ -13286,6 +13979,139 @@
         ],
         "title": "SpecSource",
         "description": "One spec to ingest under a connector triple.\n\n``uri`` carries the operator's spec identifier. Three forms are\naccepted by the underlying :func:`parse_openapi` resolver:\n\n* Absolute local path \u2014 ``/abs/path/to/spec.yaml``.\n* HTTP(S) URL \u2014 ``https://api.example.com/openapi.yaml``.\n* ``docs:<connector-id>/<file>`` shorthand \u2014 resolves against the\n  consumer's checked-in docs/ directory; CLI / API layers expand\n  this before calling the parser.\n\nWrapped in its own model so future per-spec knobs (auth headers,\ndialect pinning, content-type override) can land without\nreshaping :class:`IngestRequest`. ``extra=\"forbid\"`` rejects\nunknown fields (per the request-schema-strictness rule) so a\ntypo in a nested ``specs[*]`` entry fails 422 at the body parse\ninstead of being silently dropped."
+      },
+      "StartRunRequest": {
+        "properties": {
+          "template_slug": {
+            "type": "string",
+            "title": "Template Slug"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          }
+        },
+        "type": "object",
+        "required": [
+          "template_slug",
+          "target"
+        ],
+        "title": "StartRunRequest",
+        "description": "Request body for ``runbook_start`` -- begin a new run on a template.\n\n:attr:`template_slug` references a *published* runbook template; the\nservice layer (G12.3-T3) resolves it to a pinned ``(slug, version)``\nat start time so later template edits cannot alter this run's step\nlist (per Initiative #1198 deprecation interplay rules).\n:attr:`target` is the run's subject (the host, the cluster, the\ncert thumbprint); :attr:`params` is the substitution context for\n``${run.params.X}`` and may be empty."
+      },
+      "StepBody": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "operation_call",
+              "manual"
+            ],
+            "title": "Type"
+          },
+          "op_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Op Id"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Params"
+          },
+          "verify": {
+            "$ref": "#/components/schemas/StepBodyVerify"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "body",
+          "type",
+          "verify"
+        ],
+        "title": "StepBody",
+        "description": "The opaque-by-construction single-step shape returned by ``runbook_next``.\n\nAll ``${run.target}`` and ``${run.params.X}`` substitutions are\nalready resolved by the engine (G12.3-T2, #1301); the strings here\nare post-substitution and final. This is what the operator / agent\nsees -- *and the only step they see* at this position in the run.\n\nWhat this shape carries:\n\n* :attr:`id` -- the step's id (matches ``runbook_run_step_states.step_id``).\n* :attr:`title` / :attr:`body` -- substituted authoring text.\n* :attr:`type` -- ``\"operation_call\"`` (MEHO dispatches the action) or\n  ``\"manual\"`` (operator performs the step off-MEHO).\n* :attr:`op_id` / :attr:`params` -- populated only for\n  ``operation_call`` steps; the substituted call shape.\n* :attr:`verify` -- the substituted-and-frozen verify gate the\n  caller must respond to on the next ``runbook_next`` call.\n\nWhat this shape **must not** carry, by structural construction\n(regression-tested in ``test_step_body_omits_future_step_fields``):\n\n* The full template's step list.\n* Any reference to step ids other than the current one.\n* The unsubstituted (template) body.\n\nNo discriminated union split between operation-call and manual\nvariants is used here -- ``op_id`` / ``params`` are simply nullable\nby ``type``. The split would buy stronger typing at the cost of an\nextra adapter layer for callers that just want to render the\nbody; the issue spec explicitly chose the flat shape (#1300)."
+      },
+      "StepBodyVerify": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "confirm",
+              "operation_call"
+            ],
+            "title": "Type"
+          },
+          "prompt": {
+            "type": "string",
+            "nullable": true,
+            "title": "Prompt"
+          },
+          "op_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Op Id"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Params"
+          },
+          "expect": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Expect"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "StepBodyVerify",
+        "description": "The verify surface as exposed at *run* time -- substituted-and-frozen.\n\nSame discriminator (``type``) as the template-side\n:class:`~meho_backplane.runbooks.schemas.Verify` union, but every\n``${run.target}`` / ``${run.params.X}`` substitution in\n:attr:`op_id` / :attr:`params` / :attr:`expect` has already been\nresolved by the engine (#1301). This shape is what the operator /\nagent reads to know *what they will be asked* once the step's\naction is performed -- the prompt text (for ``confirm``) or the\nop-call shape and expected result (for ``operation_call``).\n\nFields are nullable by ``type`` (``prompt`` populated only on\n``confirm``; ``op_id`` / ``params`` / ``expect`` populated only on\n``operation_call``). A flat shape with optional fields is used\nrather than a discriminated sub-union because :class:`StepBody`\nalready discriminates at the parent level on ``StepBody.type``;\nnesting a second discriminated union here would force two parse\npaths for one logical decision and complicates JSON-Schema\ngeneration."
+      },
+      "StepPosition": {
+        "properties": {
+          "n": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "N"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "n",
+          "total"
+        ],
+        "title": "StepPosition",
+        "description": "1-indexed position of the current step within the template.\n\n:attr:`n` is the 1-indexed step number; :attr:`total` is the\ntemplate's full step count. Position is the **only** structural\nhint about the template's overall shape that the run surface\nexposes -- operators need to know \"step 3 of 12\" for progress UX,\nbut exposing the count alone is materially different from\nexposing the *contents* of the other steps (which :class:`StepBody`\ndeliberately does not).\n\nInvariants (enforced by :meth:`_validate_n_within_total`):\n\n* ``n >= 1`` (Pydantic ``Field(ge=1)``) -- there is no step 0.\n* ``total >= 1`` (Pydantic ``Field(ge=1)``) -- a runbook has at\n  least one step; an empty template is rejected at publish time\n  anyway (#1295).\n* ``n <= total`` -- you cannot be on step 11 of a 10-step template."
       },
       "SurfaceChecklist": {
         "properties": {

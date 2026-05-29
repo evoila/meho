@@ -84,6 +84,7 @@ from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
 from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
+from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
 from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
@@ -604,6 +605,29 @@ app.include_router(api_v1_kb_router)
 # chassis publisher honours. The MCP tools (T4 #1298) reach the same
 # service over MCP.
 app.include_router(api_v1_runbook_templates_router)
+# G12.3-T5 (#1311) -- runbook run REST surface at /api/v1/runbooks/runs*.
+# Five routes (POST / POST /{run_id}/next / POST /{run_id}/abort /
+# POST /{run_id}/reassign / GET) that expose the T3
+# :class:`RunbookRunService` (#1308) to operators + ops UIs. Tenant-scoped
+# via the JWT's tenant_id claim; cross-tenant probes on someone else's
+# ``run_id`` return 404 by the service's tenant filter (anti-enumeration).
+# ``start`` / ``next`` / ``abort`` / ``list`` require ``operator``
+# minimum; ``reassign`` requires ``tenant_admin``. The single-assignee
+# invariant is enforced at the service layer for ``next`` (a
+# tenant_admin who is not the assignee still gets 403); ``abort``
+# widens the allowance via a ``caller_is_admin`` flag the route
+# computes from ``operator.tenant_role``. Typed-exception mapping:
+# RunNotFoundError / TemplateNotFoundError -> 404, NotRunAssigneeError ->
+# 403, RunAlreadyTerminalError / PreviousStepFailedError /
+# PreviousStepNotVerifiedError / DeprecatedTemplateError -> 400,
+# MissingParamsError / VerifyResponseRequiredError /
+# VerifyResponseMismatchError -> 422. Audit + broadcast op_ids:
+# ``runbook.start_run`` / ``runbook.next_step`` / ``runbook.abort_run`` /
+# ``runbook.reassign_run`` / ``runbook.list_runs`` -- bound via the
+# ``audit_op_id`` / ``audit_op_class`` contextvar overrides the chassis
+# publisher honours. The MCP tools (T6 #1313) reach the same service
+# over MCP.
+app.include_router(api_v1_runbook_runs_router)
 # G5.1-T2 (#422) -- memory REST surface at /api/v1/memory*.
 # Four routes (POST / GET / GET /{scope}/{slug} / DELETE /{scope}/{slug})
 # that expose the T1 :class:`MemoryService` to operators + agents. Tenant-

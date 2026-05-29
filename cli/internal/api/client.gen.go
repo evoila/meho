@@ -70,6 +70,13 @@ const (
 	Medium CandidateHintConfidence = "medium"
 )
 
+// Defines values for ConfirmVerifyResponseAnswer.
+const (
+	Escalate ConfirmVerifyResponseAnswer = "escalate"
+	No       ConfirmVerifyResponseAnswer = "no"
+	Yes      ConfirmVerifyResponseAnswer = "yes"
+)
+
 // Defines values for ConventionKind.
 const (
 	Operational ConventionKind = "operational"
@@ -181,6 +188,13 @@ const (
 	RetireChecklistRequestSurfaceOperations RetireChecklistRequestSurface = "operations"
 )
 
+// Defines values for RunSummaryState.
+const (
+	RunSummaryStateAbandoned  RunSummaryState = "abandoned"
+	RunSummaryStateCompleted  RunSummaryState = "completed"
+	RunSummaryStateInProgress RunSummaryState = "in_progress"
+)
+
 // Defines values for ScheduledTriggerInFlightPolicy.
 const (
 	FailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
@@ -207,6 +221,18 @@ const (
 	ShowTemplateResponseStatusDeprecated ShowTemplateResponseStatus = "deprecated"
 	ShowTemplateResponseStatusDraft      ShowTemplateResponseStatus = "draft"
 	ShowTemplateResponseStatusPublished  ShowTemplateResponseStatus = "published"
+)
+
+// Defines values for StepBodyType.
+const (
+	StepBodyTypeManual        StepBodyType = "manual"
+	StepBodyTypeOperationCall StepBodyType = "operation_call"
+)
+
+// Defines values for StepBodyVerifyType.
+const (
+	StepBodyVerifyTypeConfirm       StepBodyVerifyType = "confirm"
+	StepBodyVerifyTypeOperationCall StepBodyVerifyType = "operation_call"
 )
 
 // Defines values for SurfaceChecklistSurface.
@@ -329,6 +355,13 @@ const (
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceOperations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
 )
 
+// Defines values for ListRunsApiV1RunbooksRunsGetParamsStatus.
+const (
+	ListRunsApiV1RunbooksRunsGetParamsStatusAbandoned  ListRunsApiV1RunbooksRunsGetParamsStatus = "abandoned"
+	ListRunsApiV1RunbooksRunsGetParamsStatusCompleted  ListRunsApiV1RunbooksRunsGetParamsStatus = "completed"
+	ListRunsApiV1RunbooksRunsGetParamsStatusInProgress ListRunsApiV1RunbooksRunsGetParamsStatus = "in_progress"
+)
+
 // Defines values for ListTemplatesApiV1RunbooksTemplatesGetParamsStatus.
 const (
 	Deprecated ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "deprecated"
@@ -350,6 +383,23 @@ const (
 	ListTriggersApiV1SchedulerTriggersGetParamsStatusFired     ListTriggersApiV1SchedulerTriggersGetParamsStatus = "fired"
 	ListTriggersApiV1SchedulerTriggersGetParamsStatusPaused    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "paused"
 )
+
+// AbortRunRequest Request body for “runbook_abort“ -- terminate the run mid-flight.
+//
+// :attr:`reason` is required and non-empty (“Field(min_length=1)“)
+// because it is persisted to “audit_log.payload“ for the abort
+// event -- an empty reason would defeat the audit trail that
+// Initiative #1198's "abort-with-audit" guarantee rests on.
+type AbortRunRequest struct {
+	Reason string `json:"reason"`
+}
+
+// AbortRunResponse Returned by “runbook_abort“ -- the terminal-state coordinates.
+type AbortRunResponse struct {
+	AbandonedAt time.Time          `json:"abandoned_at"`
+	RunId       openapi_types.UUID `json:"run_id"`
+	State       *string            `json:"state,omitempty"`
+}
 
 // AgentDefinitionCreate POST body -- the inputs “create“ consumes. Pydantic v2 strict.
 //
@@ -1448,6 +1498,20 @@ type ConfirmVerify struct {
 	Type   string `json:"type"`
 }
 
+// ConfirmVerifyResponse Operator's answer to a “confirm“-typed verify step.
+//
+// Only :attr:`answer` “= "yes"“ advances the run. “"no"“ transitions
+// the step to “failed“; “"escalate"“ transitions to “failed“ with
+// “verify_response.escalated=true“ semantics so the senior's review
+// path is explicit in the persisted state (per Initiative #1198).
+type ConfirmVerifyResponse struct {
+	Answer ConfirmVerifyResponseAnswer `json:"answer"`
+	Type   string                      `json:"type"`
+}
+
+// ConfirmVerifyResponseAnswer defines model for ConfirmVerifyResponse.Answer.
+type ConfirmVerifyResponseAnswer string
+
 // ConnectorReviewGroup One group within the review payload.
 //
 // Carries the LLM-generated group metadata
@@ -1815,6 +1879,77 @@ type CriterionResultName string
 
 // CriterionResultVerdict defines model for CriterionResult.Verdict.
 type CriterionResultVerdict string
+
+// CurrentStepResponse Returned by “runbook_start“ and the non-completion path of “runbook_next“.
+//
+// Carries the run coordinates (“run_id“ / “template_slug“ /
+// “template_version“), the structural position hint
+// (:class:`StepPosition`), and -- crucially -- exactly one
+// :class:`StepBody`: the step the run is *currently on*. No previous
+// steps (already executed), no following steps (the opacity property
+// this Initiative is built around).
+//
+// Tagged with “kind: Literal["current_step"]“ so the parent
+// :data:`NextStepResponse` discriminated union routes payloads on a
+// visible field rather than a callable shape-sniffing discriminator
+// (option 1 of the design decision documented at the module docstring
+// and the #1300 issue body).
+type CurrentStepResponse struct {
+	// CurrentStep The opaque-by-construction single-step shape returned by ``runbook_next``.
+	//
+	// All ``${run.target}`` and ``${run.params.X}`` substitutions are
+	// already resolved by the engine (G12.3-T2, #1301); the strings here
+	// are post-substitution and final. This is what the operator / agent
+	// sees -- *and the only step they see* at this position in the run.
+	//
+	// What this shape carries:
+	//
+	// * :attr:`id` -- the step's id (matches ``runbook_run_step_states.step_id``).
+	// * :attr:`title` / :attr:`body` -- substituted authoring text.
+	// * :attr:`type` -- ``"operation_call"`` (MEHO dispatches the action) or
+	//   ``"manual"`` (operator performs the step off-MEHO).
+	// * :attr:`op_id` / :attr:`params` -- populated only for
+	//   ``operation_call`` steps; the substituted call shape.
+	// * :attr:`verify` -- the substituted-and-frozen verify gate the
+	//   caller must respond to on the next ``runbook_next`` call.
+	//
+	// What this shape **must not** carry, by structural construction
+	// (regression-tested in ``test_step_body_omits_future_step_fields``):
+	//
+	// * The full template's step list.
+	// * Any reference to step ids other than the current one.
+	// * The unsubstituted (template) body.
+	//
+	// No discriminated union split between operation-call and manual
+	// variants is used here -- ``op_id`` / ``params`` are simply nullable
+	// by ``type``. The split would buy stronger typing at the cost of an
+	// extra adapter layer for callers that just want to render the
+	// body; the issue spec explicitly chose the flat shape (#1300).
+	CurrentStep StepBody `json:"current_step"`
+	Kind        *string  `json:"kind,omitempty"`
+
+	// Position 1-indexed position of the current step within the template.
+	//
+	// :attr:`n` is the 1-indexed step number; :attr:`total` is the
+	// template's full step count. Position is the **only** structural
+	// hint about the template's overall shape that the run surface
+	// exposes -- operators need to know "step 3 of 12" for progress UX,
+	// but exposing the count alone is materially different from
+	// exposing the *contents* of the other steps (which :class:`StepBody`
+	// deliberately does not).
+	//
+	// Invariants (enforced by :meth:`_validate_n_within_total`):
+	//
+	// * ``n >= 1`` (Pydantic ``Field(ge=1)``) -- there is no step 0.
+	// * ``total >= 1`` (Pydantic ``Field(ge=1)``) -- a runbook has at
+	//   least one step; an empty template is rejected at publish time
+	//   anyway (#1295).
+	// * ``n <= total`` -- you cannot be on step 11 of a 10-step template.
+	Position        StepPosition       `json:"position"`
+	RunId           openapi_types.UUID `json:"run_id"`
+	TemplateSlug    string             `json:"template_slug"`
+	TemplateVersion int                `json:"template_version"`
+}
 
 // DailyUsageBucket One “(date, surface)“ row of the usage report.
 //
@@ -2583,6 +2718,32 @@ type MemoryListResponse struct {
 // the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 type MemoryScope string
 
+// NextStepRequest Request body for “runbook_next“ -- advance the run.
+//
+// :attr:`last_verified` is the caller's *claim* that the previous
+// step's verify gate was satisfied. It is **informational only**:
+// the substrate (engine, G12.3-T2) is the verify oracle, and a
+// request from a caller whose previous-step state is not
+// “verified“ returns 400 *regardless* of what
+// :attr:`last_verified` says. The field exists so the wire log
+// captures the caller's belief alongside the substrate's decision
+// -- useful for diagnosing a client that thinks it advanced when
+// the substrate did not.
+//
+// :attr:`verify_response` carries the operator's answer for a
+// “confirm“ step or the engine's captured result for an
+// “operation_call“ step. “None“ is valid only on the very first
+// “runbook_next“ call (when no prior step exists to verify).
+type NextStepRequest struct {
+	LastVerified   bool                            `json:"last_verified"`
+	VerifyResponse *NextStepRequest_VerifyResponse `json:"verify_response"`
+}
+
+// NextStepRequest_VerifyResponse defines model for NextStepRequest.VerifyResponse.
+type NextStepRequest_VerifyResponse struct {
+	union json.RawMessage
+}
+
 // OperationCallStep A step the agent dispatches via the operation registry.
 //
 // :attr:`op_id` is the registry operation id (e.g.
@@ -2618,6 +2779,21 @@ type OperationCallVerify struct {
 	OpId   string                 `json:"op_id"`
 	Params map[string]interface{} `json:"params"`
 	Type   string                 `json:"type"`
+}
+
+// OperationCallVerifyResponse Captured result of a dispatched “operation_call“ verify step.
+//
+// The engine populates this from “call_operation()“'s return value;
+// callers do not construct it themselves. Stored in
+// “runbook_run_step_states.verify_response“ for later replay /
+// audit. :attr:`matched` is “True“ when the structural-equality +
+// presence match against the template-side “expect“ succeeded;
+// :attr:`actual` is the call result, retained verbatim for the
+// mismatch-case forensics.
+type OperationCallVerifyResponse struct {
+	Actual  map[string]interface{} `json:"actual"`
+	Matched bool                   `json:"matched"`
+	Type    string                 `json:"type"`
 }
 
 // OperationDescriptor Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.
@@ -2794,6 +2970,24 @@ type QueryResult struct {
 	PrecisionAt5           float32   `json:"precision_at_5"`
 	Query                  string    `json:"query"`
 	ReciprocalRank         float32   `json:"reciprocal_rank"`
+}
+
+// ReassignRunRequest Request body for “runbook_reassign“ -- transfer ownership of a run.
+//
+// :attr:`new_assignee` is the operator subject identifier of the
+// new owner. Non-empty (“Field(min_length=1)“) because the
+// reassign path writes to “runbook_runs.assigned_to“ which is
+// “NOT NULL“ at the storage layer and is the predicate for
+// every subsequent “runbook_next“ ownership check.
+type ReassignRunRequest struct {
+	NewAssignee string `json:"new_assignee"`
+}
+
+// ReassignRunResponse Returned by “runbook_reassign“ -- the new ownership coordinates.
+type ReassignRunResponse struct {
+	AssignedTo   string             `json:"assigned_to"`
+	ReassignedAt time.Time          `json:"reassigned_at"`
+	RunId        openapi_types.UUID `json:"run_id"`
 }
 
 // RefreshResult Per-target reconcile outcome returned by :func:`refresh_target_topology`.
@@ -3026,6 +3220,89 @@ type RetrieveRequest struct {
 type RetrieveResponse struct {
 	Hits            []RetrievalHit `json:"hits"`
 	QueryDurationMs float32        `json:"query_duration_ms"`
+}
+
+// RunCompletedResponse Returned by “runbook_next“ when the previous step was the last.
+//
+// The terminal-state shape: no step body, just the run coordinates
+// and the transition timestamp. The companion abort-side shape is
+// :class:`AbortRunResponse`.
+//
+// The :attr:`state` and :attr:`kind` literals both carry “"completed"“
+// by design: :attr:`kind` is the parent-union discriminator (per the
+// explicit-tag decision documented at the module docstring), while
+// :attr:`state` matches the run's storage-level state column
+// (“runbook_runs.state“) so the response shape mirrors the row
+// one-for-one.
+type RunCompletedResponse struct {
+	CompletedAt time.Time          `json:"completed_at"`
+	Kind        *string            `json:"kind,omitempty"`
+	RunId       openapi_types.UUID `json:"run_id"`
+	State       *string            `json:"state,omitempty"`
+}
+
+// RunSummary List-view projection returned by “runbook_list_runs“.
+//
+// Run-level state only: no step contents are exposed. The
+// step-by-step content is opaque-by-construction (only
+// “runbook_next“ ever returns a step body, and only one step at a
+// time), so :attr:`current_step_id` is the *id* of the step the
+// run is currently on -- enough for a UI to render "step 3:
+// drain-node" -- but not the body.
+//
+// :attr:`current_step_id` and :attr:`position` are “None“ for
+// runs in terminal state (“completed“ / “abandoned“); a
+// terminal-state run has no "current" step.
+//
+// :attr:`completed_at` and :attr:`abandoned_at` are mutually
+// exclusive (and both “None“ for “in_progress“ runs); the
+// transition that fired sets the corresponding column on
+// “runbook_runs“.
+type RunSummary struct {
+	AbandonedAt   *time.Time `json:"abandoned_at"`
+	AssignedTo    string     `json:"assigned_to"`
+	CompletedAt   *time.Time `json:"completed_at"`
+	CurrentStepId *string    `json:"current_step_id"`
+
+	// Position 1-indexed position of the current step within the template.
+	//
+	// :attr:`n` is the 1-indexed step number; :attr:`total` is the
+	// template's full step count. Position is the **only** structural
+	// hint about the template's overall shape that the run surface
+	// exposes -- operators need to know "step 3 of 12" for progress UX,
+	// but exposing the count alone is materially different from
+	// exposing the *contents* of the other steps (which :class:`StepBody`
+	// deliberately does not).
+	//
+	// Invariants (enforced by :meth:`_validate_n_within_total`):
+	//
+	// * ``n >= 1`` (Pydantic ``Field(ge=1)``) -- there is no step 0.
+	// * ``total >= 1`` (Pydantic ``Field(ge=1)``) -- a runbook has at
+	//   least one step; an empty template is rejected at publish time
+	//   anyway (#1295).
+	// * ``n <= total`` -- you cannot be on step 11 of a 10-step template.
+	Position        *StepPosition      `json:"position,omitempty"`
+	RunId           openapi_types.UUID `json:"run_id"`
+	StartedAt       time.Time          `json:"started_at"`
+	State           RunSummaryState    `json:"state"`
+	Target          string             `json:"target"`
+	TemplateSlug    string             `json:"template_slug"`
+	TemplateVersion int                `json:"template_version"`
+}
+
+// RunSummaryState defines model for RunSummary.State.
+type RunSummaryState string
+
+// RunbookListRunsResponse Response envelope for “GET /api/v1/runbooks/runs“.
+//
+// Wrapped in “{"runs": [...]}“ so a future paging / cursor field
+// can land non-breakingly -- same shape
+// :mod:`meho_backplane.api.v1.runbook_templates` adopted for its
+// list response. Per-entry shape is the substrate's
+// :class:`~meho_backplane.runbooks.runs_schemas.RunSummary` (no
+// step body content, only the run-level coordinates).
+type RunbookListRunsResponse struct {
+	Runs []RunSummary `json:"runs"`
 }
 
 // RunbookTemplateBody The author-facing template shape stored in “runbook_templates.steps“.
@@ -3404,6 +3681,136 @@ type SkippedConnector struct {
 // instead of being silently dropped.
 type SpecSource struct {
 	Uri string `json:"uri"`
+}
+
+// StartRunRequest Request body for “runbook_start“ -- begin a new run on a template.
+//
+// :attr:`template_slug` references a *published* runbook template; the
+// service layer (G12.3-T3) resolves it to a pinned “(slug, version)“
+// at start time so later template edits cannot alter this run's step
+// list (per Initiative #1198 deprecation interplay rules).
+// :attr:`target` is the run's subject (the host, the cluster, the
+// cert thumbprint); :attr:`params` is the substitution context for
+// “${run.params.X}“ and may be empty.
+type StartRunRequest struct {
+	Params       *map[string]interface{} `json:"params,omitempty"`
+	Target       string                  `json:"target"`
+	TemplateSlug string                  `json:"template_slug"`
+}
+
+// StepBody The opaque-by-construction single-step shape returned by “runbook_next“.
+//
+// All “${run.target}“ and “${run.params.X}“ substitutions are
+// already resolved by the engine (G12.3-T2, #1301); the strings here
+// are post-substitution and final. This is what the operator / agent
+// sees -- *and the only step they see* at this position in the run.
+//
+// What this shape carries:
+//
+//   - :attr:`id` -- the step's id (matches “runbook_run_step_states.step_id“).
+//   - :attr:`title` / :attr:`body` -- substituted authoring text.
+//   - :attr:`type` -- “"operation_call"“ (MEHO dispatches the action) or
+//     “"manual"“ (operator performs the step off-MEHO).
+//   - :attr:`op_id` / :attr:`params` -- populated only for
+//     “operation_call“ steps; the substituted call shape.
+//   - :attr:`verify` -- the substituted-and-frozen verify gate the
+//     caller must respond to on the next “runbook_next“ call.
+//
+// What this shape **must not** carry, by structural construction
+// (regression-tested in “test_step_body_omits_future_step_fields“):
+//
+// * The full template's step list.
+// * Any reference to step ids other than the current one.
+// * The unsubstituted (template) body.
+//
+// No discriminated union split between operation-call and manual
+// variants is used here -- “op_id“ / “params“ are simply nullable
+// by “type“. The split would buy stronger typing at the cost of an
+// extra adapter layer for callers that just want to render the
+// body; the issue spec explicitly chose the flat shape (#1300).
+type StepBody struct {
+	Body   string                  `json:"body"`
+	Id     string                  `json:"id"`
+	OpId   *string                 `json:"op_id"`
+	Params *map[string]interface{} `json:"params"`
+	Title  string                  `json:"title"`
+	Type   StepBodyType            `json:"type"`
+
+	// Verify The verify surface as exposed at *run* time -- substituted-and-frozen.
+	//
+	// Same discriminator (``type``) as the template-side
+	// :class:`~meho_backplane.runbooks.schemas.Verify` union, but every
+	// ``${run.target}`` / ``${run.params.X}`` substitution in
+	// :attr:`op_id` / :attr:`params` / :attr:`expect` has already been
+	// resolved by the engine (#1301). This shape is what the operator /
+	// agent reads to know *what they will be asked* once the step's
+	// action is performed -- the prompt text (for ``confirm``) or the
+	// op-call shape and expected result (for ``operation_call``).
+	//
+	// Fields are nullable by ``type`` (``prompt`` populated only on
+	// ``confirm``; ``op_id`` / ``params`` / ``expect`` populated only on
+	// ``operation_call``). A flat shape with optional fields is used
+	// rather than a discriminated sub-union because :class:`StepBody`
+	// already discriminates at the parent level on ``StepBody.type``;
+	// nesting a second discriminated union here would force two parse
+	// paths for one logical decision and complicates JSON-Schema
+	// generation.
+	Verify StepBodyVerify `json:"verify"`
+}
+
+// StepBodyType defines model for StepBody.Type.
+type StepBodyType string
+
+// StepBodyVerify The verify surface as exposed at *run* time -- substituted-and-frozen.
+//
+// Same discriminator (“type“) as the template-side
+// :class:`~meho_backplane.runbooks.schemas.Verify` union, but every
+// “${run.target}“ / “${run.params.X}“ substitution in
+// :attr:`op_id` / :attr:`params` / :attr:`expect` has already been
+// resolved by the engine (#1301). This shape is what the operator /
+// agent reads to know *what they will be asked* once the step's
+// action is performed -- the prompt text (for “confirm“) or the
+// op-call shape and expected result (for “operation_call“).
+//
+// Fields are nullable by “type“ (“prompt“ populated only on
+// “confirm“; “op_id“ / “params“ / “expect“ populated only on
+// “operation_call“). A flat shape with optional fields is used
+// rather than a discriminated sub-union because :class:`StepBody`
+// already discriminates at the parent level on “StepBody.type“;
+// nesting a second discriminated union here would force two parse
+// paths for one logical decision and complicates JSON-Schema
+// generation.
+type StepBodyVerify struct {
+	Expect *map[string]interface{} `json:"expect"`
+	OpId   *string                 `json:"op_id"`
+	Params *map[string]interface{} `json:"params"`
+	Prompt *string                 `json:"prompt"`
+	Type   StepBodyVerifyType      `json:"type"`
+}
+
+// StepBodyVerifyType defines model for StepBodyVerify.Type.
+type StepBodyVerifyType string
+
+// StepPosition 1-indexed position of the current step within the template.
+//
+// :attr:`n` is the 1-indexed step number; :attr:`total` is the
+// template's full step count. Position is the **only** structural
+// hint about the template's overall shape that the run surface
+// exposes -- operators need to know "step 3 of 12" for progress UX,
+// but exposing the count alone is materially different from
+// exposing the *contents* of the other steps (which :class:`StepBody`
+// deliberately does not).
+//
+// Invariants (enforced by :meth:`_validate_n_within_total`):
+//
+//   - “n >= 1“ (Pydantic “Field(ge=1)“) -- there is no step 0.
+//   - “total >= 1“ (Pydantic “Field(ge=1)“) -- a runbook has at
+//     least one step; an empty template is rejected at publish time
+//     anyway (#1295).
+//   - “n <= total“ -- you cannot be on step 11 of a 10-step template.
+type StepPosition struct {
+	N     int `json:"n"`
+	Total int `json:"total"`
 }
 
 // SurfaceChecklist Per-surface checklist: the five criteria + the surface verdict.
@@ -4754,6 +5161,38 @@ type UsageEndpointApiV1RetrieveUsageGetParams struct {
 // UsageEndpointApiV1RetrieveUsageGetParamsSurface defines parameters for UsageEndpointApiV1RetrieveUsageGet.
 type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
+// ListRunsApiV1RunbooksRunsGetParams defines parameters for ListRunsApiV1RunbooksRunsGet.
+type ListRunsApiV1RunbooksRunsGetParams struct {
+	Assignee      *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
+	Status        *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TemplateSlug  *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
+	Limit         *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string                                   `json:"authorization,omitempty"`
+}
+
+// ListRunsApiV1RunbooksRunsGetParamsStatus defines parameters for ListRunsApiV1RunbooksRunsGet.
+type ListRunsApiV1RunbooksRunsGetParamsStatus string
+
+// StartRunApiV1RunbooksRunsPostParams defines parameters for StartRunApiV1RunbooksRunsPost.
+type StartRunApiV1RunbooksRunsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// AbortRunApiV1RunbooksRunsRunIdAbortPostParams defines parameters for AbortRunApiV1RunbooksRunsRunIdAbortPost.
+type AbortRunApiV1RunbooksRunsRunIdAbortPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// AdvanceRunApiV1RunbooksRunsRunIdNextPostParams defines parameters for AdvanceRunApiV1RunbooksRunsRunIdNextPost.
+type AdvanceRunApiV1RunbooksRunsRunIdNextPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ReassignRunApiV1RunbooksRunsRunIdReassignPostParams defines parameters for ReassignRunApiV1RunbooksRunsRunIdReassignPost.
+type ReassignRunApiV1RunbooksRunsRunIdReassignPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListTemplatesApiV1RunbooksTemplatesGetParams defines parameters for ListTemplatesApiV1RunbooksTemplatesGet.
 type ListTemplatesApiV1RunbooksTemplatesGetParams struct {
 	Status        *ListTemplatesApiV1RunbooksTemplatesGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
@@ -5135,6 +5574,18 @@ type EvalEndpointApiV1RetrieveEvalPostJSONRequestBody = EvalRequest
 // RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody defines body for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost for application/json ContentType.
 type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody = RetireChecklistRequest
 
+// StartRunApiV1RunbooksRunsPostJSONRequestBody defines body for StartRunApiV1RunbooksRunsPost for application/json ContentType.
+type StartRunApiV1RunbooksRunsPostJSONRequestBody = StartRunRequest
+
+// AbortRunApiV1RunbooksRunsRunIdAbortPostJSONRequestBody defines body for AbortRunApiV1RunbooksRunsRunIdAbortPost for application/json ContentType.
+type AbortRunApiV1RunbooksRunsRunIdAbortPostJSONRequestBody = AbortRunRequest
+
+// AdvanceRunApiV1RunbooksRunsRunIdNextPostJSONRequestBody defines body for AdvanceRunApiV1RunbooksRunsRunIdNextPost for application/json ContentType.
+type AdvanceRunApiV1RunbooksRunsRunIdNextPostJSONRequestBody = NextStepRequest
+
+// ReassignRunApiV1RunbooksRunsRunIdReassignPostJSONRequestBody defines body for ReassignRunApiV1RunbooksRunsRunIdReassignPost for application/json ContentType.
+type ReassignRunApiV1RunbooksRunsRunIdReassignPostJSONRequestBody = ReassignRunRequest
+
 // DraftTemplateApiV1RunbooksTemplatesPostJSONRequestBody defines body for DraftTemplateApiV1RunbooksTemplatesPost for application/json ContentType.
 type DraftTemplateApiV1RunbooksTemplatesPostJSONRequestBody = DraftTemplateRequest
 
@@ -5449,6 +5900,95 @@ func (t ManualStep_Verify) MarshalJSON() ([]byte, error) {
 }
 
 func (t *ManualStep_Verify) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsConfirmVerifyResponse returns the union data inside the NextStepRequest_VerifyResponse as a ConfirmVerifyResponse
+func (t NextStepRequest_VerifyResponse) AsConfirmVerifyResponse() (ConfirmVerifyResponse, error) {
+	var body ConfirmVerifyResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromConfirmVerifyResponse overwrites any union data inside the NextStepRequest_VerifyResponse as the provided ConfirmVerifyResponse
+func (t *NextStepRequest_VerifyResponse) FromConfirmVerifyResponse(v ConfirmVerifyResponse) error {
+	v.Type = "confirm"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeConfirmVerifyResponse performs a merge with any union data inside the NextStepRequest_VerifyResponse, using the provided ConfirmVerifyResponse
+func (t *NextStepRequest_VerifyResponse) MergeConfirmVerifyResponse(v ConfirmVerifyResponse) error {
+	v.Type = "confirm"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOperationCallVerifyResponse returns the union data inside the NextStepRequest_VerifyResponse as a OperationCallVerifyResponse
+func (t NextStepRequest_VerifyResponse) AsOperationCallVerifyResponse() (OperationCallVerifyResponse, error) {
+	var body OperationCallVerifyResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOperationCallVerifyResponse overwrites any union data inside the NextStepRequest_VerifyResponse as the provided OperationCallVerifyResponse
+func (t *NextStepRequest_VerifyResponse) FromOperationCallVerifyResponse(v OperationCallVerifyResponse) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOperationCallVerifyResponse performs a merge with any union data inside the NextStepRequest_VerifyResponse, using the provided OperationCallVerifyResponse
+func (t *NextStepRequest_VerifyResponse) MergeOperationCallVerifyResponse(v OperationCallVerifyResponse) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t NextStepRequest_VerifyResponse) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"type"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t NextStepRequest_VerifyResponse) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "confirm":
+		return t.AsConfirmVerifyResponse()
+	case "operation_call":
+		return t.AsOperationCallVerifyResponse()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t NextStepRequest_VerifyResponse) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *NextStepRequest_VerifyResponse) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }
@@ -6108,6 +6648,29 @@ type ClientInterface interface {
 
 	// UsageEndpointApiV1RetrieveUsageGet request
 	UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListRunsApiV1RunbooksRunsGet request
+	ListRunsApiV1RunbooksRunsGet(ctx context.Context, params *ListRunsApiV1RunbooksRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// StartRunApiV1RunbooksRunsPostWithBody request with any body
+	StartRunApiV1RunbooksRunsPostWithBody(ctx context.Context, params *StartRunApiV1RunbooksRunsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	StartRunApiV1RunbooksRunsPost(ctx context.Context, params *StartRunApiV1RunbooksRunsPostParams, body StartRunApiV1RunbooksRunsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AbortRunApiV1RunbooksRunsRunIdAbortPostWithBody request with any body
+	AbortRunApiV1RunbooksRunsRunIdAbortPostWithBody(ctx context.Context, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AbortRunApiV1RunbooksRunsRunIdAbortPost(ctx context.Context, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, body AbortRunApiV1RunbooksRunsRunIdAbortPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdvanceRunApiV1RunbooksRunsRunIdNextPostWithBody request with any body
+	AdvanceRunApiV1RunbooksRunsRunIdNextPostWithBody(ctx context.Context, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AdvanceRunApiV1RunbooksRunsRunIdNextPost(ctx context.Context, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, body AdvanceRunApiV1RunbooksRunsRunIdNextPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReassignRunApiV1RunbooksRunsRunIdReassignPostWithBody request with any body
+	ReassignRunApiV1RunbooksRunsRunIdReassignPostWithBody(ctx context.Context, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ReassignRunApiV1RunbooksRunsRunIdReassignPost(ctx context.Context, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, body ReassignRunApiV1RunbooksRunsRunIdReassignPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTemplatesApiV1RunbooksTemplatesGet request
 	ListTemplatesApiV1RunbooksTemplatesGet(ctx context.Context, params *ListTemplatesApiV1RunbooksTemplatesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -7506,6 +8069,114 @@ func (c *Client) RetireChecklistEndpointApiV1RetrieveRetireChecklistPost(ctx con
 
 func (c *Client) UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUsageEndpointApiV1RetrieveUsageGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListRunsApiV1RunbooksRunsGet(ctx context.Context, params *ListRunsApiV1RunbooksRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListRunsApiV1RunbooksRunsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) StartRunApiV1RunbooksRunsPostWithBody(ctx context.Context, params *StartRunApiV1RunbooksRunsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewStartRunApiV1RunbooksRunsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) StartRunApiV1RunbooksRunsPost(ctx context.Context, params *StartRunApiV1RunbooksRunsPostParams, body StartRunApiV1RunbooksRunsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewStartRunApiV1RunbooksRunsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AbortRunApiV1RunbooksRunsRunIdAbortPostWithBody(ctx context.Context, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAbortRunApiV1RunbooksRunsRunIdAbortPostRequestWithBody(c.Server, runId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AbortRunApiV1RunbooksRunsRunIdAbortPost(ctx context.Context, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, body AbortRunApiV1RunbooksRunsRunIdAbortPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAbortRunApiV1RunbooksRunsRunIdAbortPostRequest(c.Server, runId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdvanceRunApiV1RunbooksRunsRunIdNextPostWithBody(ctx context.Context, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdvanceRunApiV1RunbooksRunsRunIdNextPostRequestWithBody(c.Server, runId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdvanceRunApiV1RunbooksRunsRunIdNextPost(ctx context.Context, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, body AdvanceRunApiV1RunbooksRunsRunIdNextPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdvanceRunApiV1RunbooksRunsRunIdNextPostRequest(c.Server, runId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReassignRunApiV1RunbooksRunsRunIdReassignPostWithBody(ctx context.Context, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReassignRunApiV1RunbooksRunsRunIdReassignPostRequestWithBody(c.Server, runId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReassignRunApiV1RunbooksRunsRunIdReassignPost(ctx context.Context, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, body ReassignRunApiV1RunbooksRunsRunIdReassignPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReassignRunApiV1RunbooksRunsRunIdReassignPostRequest(c.Server, runId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -12945,6 +13616,359 @@ func NewUsageEndpointApiV1RetrieveUsageGetRequest(server string, params *UsageEn
 	return req, nil
 }
 
+// NewListRunsApiV1RunbooksRunsGetRequest generates requests for ListRunsApiV1RunbooksRunsGet
+func NewListRunsApiV1RunbooksRunsGetRequest(server string, params *ListRunsApiV1RunbooksRunsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/runs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Assignee != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "assignee", runtime.ParamLocationQuery, *params.Assignee); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TemplateSlug != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "template_slug", runtime.ParamLocationQuery, *params.TemplateSlug); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewStartRunApiV1RunbooksRunsPostRequest calls the generic StartRunApiV1RunbooksRunsPost builder with application/json body
+func NewStartRunApiV1RunbooksRunsPostRequest(server string, params *StartRunApiV1RunbooksRunsPostParams, body StartRunApiV1RunbooksRunsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewStartRunApiV1RunbooksRunsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewStartRunApiV1RunbooksRunsPostRequestWithBody generates requests for StartRunApiV1RunbooksRunsPost with any type of body
+func NewStartRunApiV1RunbooksRunsPostRequestWithBody(server string, params *StartRunApiV1RunbooksRunsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/runs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewAbortRunApiV1RunbooksRunsRunIdAbortPostRequest calls the generic AbortRunApiV1RunbooksRunsRunIdAbortPost builder with application/json body
+func NewAbortRunApiV1RunbooksRunsRunIdAbortPostRequest(server string, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, body AbortRunApiV1RunbooksRunsRunIdAbortPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAbortRunApiV1RunbooksRunsRunIdAbortPostRequestWithBody(server, runId, params, "application/json", bodyReader)
+}
+
+// NewAbortRunApiV1RunbooksRunsRunIdAbortPostRequestWithBody generates requests for AbortRunApiV1RunbooksRunsRunIdAbortPost with any type of body
+func NewAbortRunApiV1RunbooksRunsRunIdAbortPostRequestWithBody(server string, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_id", runtime.ParamLocationPath, runId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/runs/%s/abort", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewAdvanceRunApiV1RunbooksRunsRunIdNextPostRequest calls the generic AdvanceRunApiV1RunbooksRunsRunIdNextPost builder with application/json body
+func NewAdvanceRunApiV1RunbooksRunsRunIdNextPostRequest(server string, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, body AdvanceRunApiV1RunbooksRunsRunIdNextPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAdvanceRunApiV1RunbooksRunsRunIdNextPostRequestWithBody(server, runId, params, "application/json", bodyReader)
+}
+
+// NewAdvanceRunApiV1RunbooksRunsRunIdNextPostRequestWithBody generates requests for AdvanceRunApiV1RunbooksRunsRunIdNextPost with any type of body
+func NewAdvanceRunApiV1RunbooksRunsRunIdNextPostRequestWithBody(server string, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_id", runtime.ParamLocationPath, runId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/runs/%s/next", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewReassignRunApiV1RunbooksRunsRunIdReassignPostRequest calls the generic ReassignRunApiV1RunbooksRunsRunIdReassignPost builder with application/json body
+func NewReassignRunApiV1RunbooksRunsRunIdReassignPostRequest(server string, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, body ReassignRunApiV1RunbooksRunsRunIdReassignPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewReassignRunApiV1RunbooksRunsRunIdReassignPostRequestWithBody(server, runId, params, "application/json", bodyReader)
+}
+
+// NewReassignRunApiV1RunbooksRunsRunIdReassignPostRequestWithBody generates requests for ReassignRunApiV1RunbooksRunsRunIdReassignPost with any type of body
+func NewReassignRunApiV1RunbooksRunsRunIdReassignPostRequestWithBody(server string, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "run_id", runtime.ParamLocationPath, runId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/runs/%s/reassign", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListTemplatesApiV1RunbooksTemplatesGetRequest generates requests for ListTemplatesApiV1RunbooksTemplatesGet
 func NewListTemplatesApiV1RunbooksTemplatesGetRequest(server string, params *ListTemplatesApiV1RunbooksTemplatesGetParams) (*http.Request, error) {
 	var err error
@@ -18001,6 +19025,29 @@ type ClientWithResponsesInterface interface {
 	// UsageEndpointApiV1RetrieveUsageGetWithResponse request
 	UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error)
 
+	// ListRunsApiV1RunbooksRunsGetWithResponse request
+	ListRunsApiV1RunbooksRunsGetWithResponse(ctx context.Context, params *ListRunsApiV1RunbooksRunsGetParams, reqEditors ...RequestEditorFn) (*ListRunsApiV1RunbooksRunsGetResponse, error)
+
+	// StartRunApiV1RunbooksRunsPostWithBodyWithResponse request with any body
+	StartRunApiV1RunbooksRunsPostWithBodyWithResponse(ctx context.Context, params *StartRunApiV1RunbooksRunsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*StartRunApiV1RunbooksRunsPostResponse, error)
+
+	StartRunApiV1RunbooksRunsPostWithResponse(ctx context.Context, params *StartRunApiV1RunbooksRunsPostParams, body StartRunApiV1RunbooksRunsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*StartRunApiV1RunbooksRunsPostResponse, error)
+
+	// AbortRunApiV1RunbooksRunsRunIdAbortPostWithBodyWithResponse request with any body
+	AbortRunApiV1RunbooksRunsRunIdAbortPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AbortRunApiV1RunbooksRunsRunIdAbortPostResponse, error)
+
+	AbortRunApiV1RunbooksRunsRunIdAbortPostWithResponse(ctx context.Context, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, body AbortRunApiV1RunbooksRunsRunIdAbortPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AbortRunApiV1RunbooksRunsRunIdAbortPostResponse, error)
+
+	// AdvanceRunApiV1RunbooksRunsRunIdNextPostWithBodyWithResponse request with any body
+	AdvanceRunApiV1RunbooksRunsRunIdNextPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse, error)
+
+	AdvanceRunApiV1RunbooksRunsRunIdNextPostWithResponse(ctx context.Context, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, body AdvanceRunApiV1RunbooksRunsRunIdNextPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse, error)
+
+	// ReassignRunApiV1RunbooksRunsRunIdReassignPostWithBodyWithResponse request with any body
+	ReassignRunApiV1RunbooksRunsRunIdReassignPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse, error)
+
+	ReassignRunApiV1RunbooksRunsRunIdReassignPostWithResponse(ctx context.Context, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, body ReassignRunApiV1RunbooksRunsRunIdReassignPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse, error)
+
 	// ListTemplatesApiV1RunbooksTemplatesGetWithResponse request
 	ListTemplatesApiV1RunbooksTemplatesGetWithResponse(ctx context.Context, params *ListTemplatesApiV1RunbooksTemplatesGetParams, reqEditors ...RequestEditorFn) (*ListTemplatesApiV1RunbooksTemplatesGetResponse, error)
 
@@ -19838,6 +20885,125 @@ func (r UsageEndpointApiV1RetrieveUsageGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UsageEndpointApiV1RetrieveUsageGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListRunsApiV1RunbooksRunsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunbookListRunsResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListRunsApiV1RunbooksRunsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListRunsApiV1RunbooksRunsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type StartRunApiV1RunbooksRunsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *struct {
+		union json.RawMessage
+	}
+	JSON422 *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r StartRunApiV1RunbooksRunsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r StartRunApiV1RunbooksRunsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type AbortRunApiV1RunbooksRunsRunIdAbortPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AbortRunResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r AbortRunApiV1RunbooksRunsRunIdAbortPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AbortRunApiV1RunbooksRunsRunIdAbortPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *struct {
+		union json.RawMessage
+	}
+	JSON422 *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ReassignRunResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -22389,6 +23555,83 @@ func (c *ClientWithResponses) UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx
 		return nil, err
 	}
 	return ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp)
+}
+
+// ListRunsApiV1RunbooksRunsGetWithResponse request returning *ListRunsApiV1RunbooksRunsGetResponse
+func (c *ClientWithResponses) ListRunsApiV1RunbooksRunsGetWithResponse(ctx context.Context, params *ListRunsApiV1RunbooksRunsGetParams, reqEditors ...RequestEditorFn) (*ListRunsApiV1RunbooksRunsGetResponse, error) {
+	rsp, err := c.ListRunsApiV1RunbooksRunsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListRunsApiV1RunbooksRunsGetResponse(rsp)
+}
+
+// StartRunApiV1RunbooksRunsPostWithBodyWithResponse request with arbitrary body returning *StartRunApiV1RunbooksRunsPostResponse
+func (c *ClientWithResponses) StartRunApiV1RunbooksRunsPostWithBodyWithResponse(ctx context.Context, params *StartRunApiV1RunbooksRunsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*StartRunApiV1RunbooksRunsPostResponse, error) {
+	rsp, err := c.StartRunApiV1RunbooksRunsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseStartRunApiV1RunbooksRunsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) StartRunApiV1RunbooksRunsPostWithResponse(ctx context.Context, params *StartRunApiV1RunbooksRunsPostParams, body StartRunApiV1RunbooksRunsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*StartRunApiV1RunbooksRunsPostResponse, error) {
+	rsp, err := c.StartRunApiV1RunbooksRunsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseStartRunApiV1RunbooksRunsPostResponse(rsp)
+}
+
+// AbortRunApiV1RunbooksRunsRunIdAbortPostWithBodyWithResponse request with arbitrary body returning *AbortRunApiV1RunbooksRunsRunIdAbortPostResponse
+func (c *ClientWithResponses) AbortRunApiV1RunbooksRunsRunIdAbortPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AbortRunApiV1RunbooksRunsRunIdAbortPostResponse, error) {
+	rsp, err := c.AbortRunApiV1RunbooksRunsRunIdAbortPostWithBody(ctx, runId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAbortRunApiV1RunbooksRunsRunIdAbortPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) AbortRunApiV1RunbooksRunsRunIdAbortPostWithResponse(ctx context.Context, runId openapi_types.UUID, params *AbortRunApiV1RunbooksRunsRunIdAbortPostParams, body AbortRunApiV1RunbooksRunsRunIdAbortPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AbortRunApiV1RunbooksRunsRunIdAbortPostResponse, error) {
+	rsp, err := c.AbortRunApiV1RunbooksRunsRunIdAbortPost(ctx, runId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAbortRunApiV1RunbooksRunsRunIdAbortPostResponse(rsp)
+}
+
+// AdvanceRunApiV1RunbooksRunsRunIdNextPostWithBodyWithResponse request with arbitrary body returning *AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse
+func (c *ClientWithResponses) AdvanceRunApiV1RunbooksRunsRunIdNextPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse, error) {
+	rsp, err := c.AdvanceRunApiV1RunbooksRunsRunIdNextPostWithBody(ctx, runId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdvanceRunApiV1RunbooksRunsRunIdNextPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) AdvanceRunApiV1RunbooksRunsRunIdNextPostWithResponse(ctx context.Context, runId openapi_types.UUID, params *AdvanceRunApiV1RunbooksRunsRunIdNextPostParams, body AdvanceRunApiV1RunbooksRunsRunIdNextPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse, error) {
+	rsp, err := c.AdvanceRunApiV1RunbooksRunsRunIdNextPost(ctx, runId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdvanceRunApiV1RunbooksRunsRunIdNextPostResponse(rsp)
+}
+
+// ReassignRunApiV1RunbooksRunsRunIdReassignPostWithBodyWithResponse request with arbitrary body returning *ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse
+func (c *ClientWithResponses) ReassignRunApiV1RunbooksRunsRunIdReassignPostWithBodyWithResponse(ctx context.Context, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse, error) {
+	rsp, err := c.ReassignRunApiV1RunbooksRunsRunIdReassignPostWithBody(ctx, runId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReassignRunApiV1RunbooksRunsRunIdReassignPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ReassignRunApiV1RunbooksRunsRunIdReassignPostWithResponse(ctx context.Context, runId openapi_types.UUID, params *ReassignRunApiV1RunbooksRunsRunIdReassignPostParams, body ReassignRunApiV1RunbooksRunsRunIdReassignPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse, error) {
+	rsp, err := c.ReassignRunApiV1RunbooksRunsRunIdReassignPost(ctx, runId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReassignRunApiV1RunbooksRunsRunIdReassignPostResponse(rsp)
 }
 
 // ListTemplatesApiV1RunbooksTemplatesGetWithResponse request returning *ListTemplatesApiV1RunbooksTemplatesGetResponse
@@ -25466,6 +26709,175 @@ func ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp *http.Response) (*Usage
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest UsageReport
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListRunsApiV1RunbooksRunsGetResponse parses an HTTP response from a ListRunsApiV1RunbooksRunsGetWithResponse call
+func ParseListRunsApiV1RunbooksRunsGetResponse(rsp *http.Response) (*ListRunsApiV1RunbooksRunsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListRunsApiV1RunbooksRunsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunbookListRunsResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseStartRunApiV1RunbooksRunsPostResponse parses an HTTP response from a StartRunApiV1RunbooksRunsPostWithResponse call
+func ParseStartRunApiV1RunbooksRunsPostResponse(rsp *http.Response) (*StartRunApiV1RunbooksRunsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &StartRunApiV1RunbooksRunsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest struct {
+			union json.RawMessage
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAbortRunApiV1RunbooksRunsRunIdAbortPostResponse parses an HTTP response from a AbortRunApiV1RunbooksRunsRunIdAbortPostWithResponse call
+func ParseAbortRunApiV1RunbooksRunsRunIdAbortPostResponse(rsp *http.Response) (*AbortRunApiV1RunbooksRunsRunIdAbortPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AbortRunApiV1RunbooksRunsRunIdAbortPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AbortRunResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdvanceRunApiV1RunbooksRunsRunIdNextPostResponse parses an HTTP response from a AdvanceRunApiV1RunbooksRunsRunIdNextPostWithResponse call
+func ParseAdvanceRunApiV1RunbooksRunsRunIdNextPostResponse(rsp *http.Response) (*AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			union json.RawMessage
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReassignRunApiV1RunbooksRunsRunIdReassignPostResponse parses an HTTP response from a ReassignRunApiV1RunbooksRunsRunIdReassignPostWithResponse call
+func ParseReassignRunApiV1RunbooksRunsRunIdReassignPostResponse(rsp *http.Response) (*ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReassignRunApiV1RunbooksRunsRunIdReassignPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ReassignRunResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

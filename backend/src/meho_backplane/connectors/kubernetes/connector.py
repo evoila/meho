@@ -548,23 +548,36 @@ class KubernetesConnector(Connector):
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """List services in a namespace -- name / type / cluster_ip / ports / selector.
+        """List services per-namespace or cluster-wide.
 
-        Op-id: ``k8s.service.list``. Wraps
-        ``CoreV1Api.list_namespaced_service(namespace)`` and projects
-        each :class:`V1Service` through
+        Op-id: ``k8s.service.list``. Branches on ``all_namespaces``
+        between ``CoreV1Api.list_namespaced_service(namespace, ...)``
+        and ``CoreV1Api.list_service_for_all_namespaces(...)``
+        (G0.17-T1 #1330) and projects each :class:`V1Service` through
         :func:`~meho_backplane.connectors.kubernetes.ops_network.service_row`.
-        The helper is pure so the unit suite pins the wire shape against
-        synthetic fixtures without booting an event loop.
+        The helper is pure so the unit suite pins the wire shape
+        against synthetic fixtures without booting an event loop.
+        Forwards ``label_selector`` verbatim to the API.
 
         ``operator`` is forwarded to :meth:`_get_api_client`; see
         :meth:`about` for the threading rationale.
         """
         from meho_backplane.connectors.kubernetes.ops_network import service_row
 
+        namespace: str | None = params.get("namespace")
+        all_namespaces = bool(params.get("all_namespaces", False))
+        label_selector = params.get("label_selector")
         api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
-        resp = await core_v1.list_namespaced_service(namespace=params["namespace"])
+        kwargs: dict[str, Any] = {}
+        if label_selector:
+            kwargs["label_selector"] = label_selector
+        if all_namespaces:
+            resp = await core_v1.list_service_for_all_namespaces(**kwargs)
+        else:
+            # Schema enforces XOR; ``or ""`` is defensive against a
+            # future schema relaxation.
+            resp = await core_v1.list_namespaced_service(namespace=namespace or "", **kwargs)
         rows = [service_row(s) for s in resp.items]
         return {"rows": rows, "total": len(rows)}
 
@@ -574,21 +587,33 @@ class KubernetesConnector(Connector):
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """List ingresses in a namespace -- class / hosts / TLS hosts / rules.
+        """List ingresses per-namespace or cluster-wide.
 
-        Op-id: ``k8s.ingress.list``. Wraps
-        ``NetworkingV1Api.list_namespaced_ingress(namespace)`` and
-        projects each :class:`V1Ingress` through
+        Op-id: ``k8s.ingress.list``. Branches on ``all_namespaces``
+        between
+        ``NetworkingV1Api.list_namespaced_ingress(namespace, ...)``
+        and ``NetworkingV1Api.list_ingress_for_all_namespaces(...)``
+        (G0.17-T1 #1330) and projects each :class:`V1Ingress` through
         :func:`~meho_backplane.connectors.kubernetes.ops_network.ingress_row`.
+        Forwards ``label_selector`` verbatim to the API.
 
         ``operator`` is forwarded to :meth:`_get_api_client`; see
         :meth:`about` for the threading rationale.
         """
         from meho_backplane.connectors.kubernetes.ops_network import ingress_row
 
+        namespace: str | None = params.get("namespace")
+        all_namespaces = bool(params.get("all_namespaces", False))
+        label_selector = params.get("label_selector")
         api_client = await self._get_api_client(target, operator)
         networking_v1 = client.NetworkingV1Api(api_client)
-        resp = await networking_v1.list_namespaced_ingress(namespace=params["namespace"])
+        kwargs: dict[str, Any] = {}
+        if label_selector:
+            kwargs["label_selector"] = label_selector
+        if all_namespaces:
+            resp = await networking_v1.list_ingress_for_all_namespaces(**kwargs)
+        else:
+            resp = await networking_v1.list_namespaced_ingress(namespace=namespace or "", **kwargs)
         rows = [ingress_row(i) for i in resp.items]
         return {"rows": rows, "total": len(rows)}
 
@@ -598,24 +623,38 @@ class KubernetesConnector(Connector):
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """List configmaps in a namespace -- **keys only, no values**.
+        """List configmaps per-namespace or cluster-wide -- **keys only, no values**.
 
-        Op-id: ``k8s.configmap.list``. Wraps
-        ``CoreV1Api.list_namespaced_config_map(namespace)`` and projects
-        each :class:`V1ConfigMap` through
+        Op-id: ``k8s.configmap.list``. Branches on ``all_namespaces``
+        between
+        ``CoreV1Api.list_namespaced_config_map(namespace, ...)`` and
+        ``CoreV1Api.list_config_map_for_all_namespaces(...)``
+        (G0.17-T1 #1330) and projects each :class:`V1ConfigMap`
+        through
         :func:`~meho_backplane.connectors.kubernetes.ops_config.configmap_list_row`,
         which deliberately omits ``data`` / ``binary_data`` values.
+        The privacy contract holds identically across both paths.
         Operators wanting values call ``k8s.configmap.info`` per
         configmap so the audit row records the targeted read.
+        Forwards ``label_selector`` verbatim to the API.
 
         ``operator`` is forwarded to :meth:`_get_api_client`; see
         :meth:`about` for the threading rationale.
         """
         from meho_backplane.connectors.kubernetes.ops_config import configmap_list_row
 
+        namespace: str | None = params.get("namespace")
+        all_namespaces = bool(params.get("all_namespaces", False))
+        label_selector = params.get("label_selector")
         api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
-        resp = await core_v1.list_namespaced_config_map(namespace=params["namespace"])
+        kwargs: dict[str, Any] = {}
+        if label_selector:
+            kwargs["label_selector"] = label_selector
+        if all_namespaces:
+            resp = await core_v1.list_config_map_for_all_namespaces(**kwargs)
+        else:
+            resp = await core_v1.list_namespaced_config_map(namespace=namespace or "", **kwargs)
         rows = [configmap_list_row(cm) for cm in resp.items]
         return {"rows": rows, "total": len(rows)}
 
@@ -652,12 +691,17 @@ class KubernetesConnector(Connector):
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """List events in a namespace, sorted most-recent-first, truncated to ``limit``.
+        """List events most-recent-first, truncated to ``limit``; per-namespace or cluster-wide.
 
-        Op-id: ``k8s.event.list``. Wraps
-        ``CoreV1Api.list_namespaced_event(namespace, field_selector=..., limit=...)``
-        and projects each :class:`CoreV1Event` through
+        Op-id: ``k8s.event.list``. Branches on ``all_namespaces``
+        between ``CoreV1Api.list_namespaced_event(namespace, ...)``
+        (default) and ``CoreV1Api.list_event_for_all_namespaces(...)``
+        (G0.17-T1 #1330 -- the cluster-wide
+        ``kubectl get events -A`` operator question) and projects each
+        :class:`CoreV1Event` through
         :func:`~meho_backplane.connectors.kubernetes.ops_events.event_row`.
+        Per-row ``namespace`` already flows through ``event_row`` so
+        cross-namespace results stay distinguishable.
 
         The K8s API server returns events in resource-version order
         (creation order), **not** last-seen order, and offers no
@@ -678,9 +722,10 @@ class KubernetesConnector(Connector):
         client-side to the caller's ``limit``. The cap is set in
         :mod:`ops_events` (currently 500) at the same operator-ergonomic
         ceiling the schema's ``maximum`` enforces; above that the
-        operator is better served by a ``field_selector`` than by a
-        bigger result set (the K8s API itself paginates above ~1k
-        items per response in most deployments).
+        operator is better served by a ``field_selector`` /
+        ``label_selector`` than by a bigger result set (the K8s API
+        itself paginates above ~1k items per response in most
+        deployments).
         """
         from meho_backplane.connectors.kubernetes.ops_events import (
             DEFAULT_EVENT_LIMIT,
@@ -689,7 +734,8 @@ class KubernetesConnector(Connector):
             sort_event_rows_recent_first,
         )
 
-        namespace = params["namespace"]
+        namespace: str | None = params.get("namespace")
+        all_namespaces = bool(params.get("all_namespaces", False))
         limit = int(params.get("limit", DEFAULT_EVENT_LIMIT))
         # Defence in depth: the schema's ``maximum`` already enforces
         # the cap. Keep the explicit clamp so a future schema relaxation
@@ -698,6 +744,7 @@ class KubernetesConnector(Connector):
         if limit > MAX_EVENT_LIMIT:
             limit = MAX_EVENT_LIMIT
         field_selector = params.get("field_selector")
+        label_selector = params.get("label_selector")
 
         api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
@@ -705,10 +752,19 @@ class KubernetesConnector(Connector):
         # sort sees the full recency-relevant superset; the caller's
         # ``limit`` truncates after the sort. See the docstring above
         # for the ordering rationale.
-        kwargs: dict[str, Any] = {"namespace": namespace, "limit": MAX_EVENT_LIMIT}
+        kwargs: dict[str, Any] = {"limit": MAX_EVENT_LIMIT}
         if field_selector:
             kwargs["field_selector"] = field_selector
-        resp = await core_v1.list_namespaced_event(**kwargs)
+        if label_selector:
+            kwargs["label_selector"] = label_selector
+        if all_namespaces:
+            resp = await core_v1.list_event_for_all_namespaces(**kwargs)
+        else:
+            # Schema enforces exactly-one-of (namespace, all_namespaces);
+            # the ``or ""`` cast is defensive against a future schema
+            # relaxation that would otherwise crash with a TypeError
+            # from kubernetes_asyncio.
+            resp = await core_v1.list_namespaced_event(namespace=namespace or "", **kwargs)
         rows = [event_row(e) for e in resp.items]
         sorted_rows = sort_event_rows_recent_first(rows)
         truncated = sorted_rows[:limit]

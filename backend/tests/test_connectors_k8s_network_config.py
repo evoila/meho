@@ -1164,3 +1164,312 @@ async def test_k8s_event_list_limit_clamps_at_max() -> None:
         # of how the caller's ``limit`` was clamped -- the clamp
         # affects the post-sort truncation, not the wire request.
         assert kwargs["limit"] == MAX_EVENT_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# G0.17-T1 (#1330): request-shape parity sweep
+#
+# The pod / deployment list ops use a shared ``namespace`` XOR
+# ``all_namespaces`` clause + ``label_selector`` forwarding (covered by
+# ``test_list_schemas_enforce_namespace_xor_all_namespaces`` in
+# ``test_connectors_k8s_workload.py``). G0.17-T1 (#1330) converged the
+# event / service / ingress / configmap list ops onto the same shape;
+# the tests below pin that contract.
+# ---------------------------------------------------------------------------
+
+
+#: The four ops G0.17-T1 (#1330) widened to the shared request shape.
+#: ``test_list_schemas_enforce_namespace_xor_all_namespaces`` in
+#: ``test_connectors_k8s_workload.py`` covers ``k8s.pod.list`` and
+#: ``k8s.deployment.list``; this parametrization extends the parity
+#: contract to the rest of the namespaced list-op family on this
+#: connector.
+_G0_17_T1_LIST_OP_IDS: tuple[str, ...] = (
+    "k8s.event.list",
+    "k8s.service.list",
+    "k8s.ingress.list",
+    "k8s.configmap.list",
+)
+
+
+@pytest.mark.parametrize("op_id", _G0_17_T1_LIST_OP_IDS)
+def test_list_schemas_enforce_namespace_xor_all_namespaces(op_id: str) -> None:
+    """Every G0.17-T1 list op enforces ``namespace`` XOR ``all_namespaces``.
+
+    Mirrors the workload-list test (``test_connectors_k8s_workload.py:
+    test_list_schemas_enforce_namespace_xor_all_namespaces``) but
+    extended to the event / service / ingress / configmap list ops
+    via the shared schema building blocks in :mod:`ops_listparams`.
+    See ``docs/codebase/api-shape-conventions.md`` §10 for the
+    convention.
+    """
+    from jsonschema import Draft202012Validator
+
+    op = next(op for op in KUBERNETES_OPS if op.op_id == op_id)
+    validator = Draft202012Validator(op.parameter_schema)
+    # Valid: namespace alone.
+    assert validator.is_valid({"namespace": "argocd"})
+    # Valid: all_namespaces=true alone.
+    assert validator.is_valid({"all_namespaces": True})
+    # Invalid: neither.
+    assert not validator.is_valid({})
+    # Invalid: both, with all_namespaces=true (conflict).
+    assert not validator.is_valid({"namespace": "argocd", "all_namespaces": True})
+    # Valid: both, with all_namespaces=false (effectively just namespace).
+    assert validator.is_valid({"namespace": "argocd", "all_namespaces": False})
+    # Valid: label_selector forwarded alongside namespace.
+    assert validator.is_valid({"namespace": "argocd", "label_selector": "app=argocd-server"})
+    # Valid: label_selector forwarded alongside all_namespaces.
+    assert validator.is_valid({"all_namespaces": True, "label_selector": "app in (a,b)"})
+
+
+# ---------------------------------------------------------------------------
+# Per-op all_namespaces dispatch tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_k8s_event_list_all_namespaces_uses_for_all_namespaces() -> None:
+    """``all_namespaces=true`` routes through ``list_event_for_all_namespaces``.
+
+    Mirrors ``test_k8s_pod_list_all_namespaces_uses_for_all_namespaces``
+    in ``test_connectors_k8s_workload.py`` for the event op (G0.17-T1
+    #1330).
+    """
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as core_v1_cls,
+    ):
+        list_resp = MagicMock()
+        list_resp.items = []
+        core_v1_cls.return_value.list_event_for_all_namespaces = AsyncMock(return_value=list_resp)
+        core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
+        await connector.k8s_event_list(_make_operator(), _TARGET, {"all_namespaces": True})
+
+    core_v1_cls.return_value.list_event_for_all_namespaces.assert_awaited_once()
+    core_v1_cls.return_value.list_namespaced_event.assert_not_awaited()
+    # Wire still asks for MAX_EVENT_LIMIT on the all-namespaces path.
+    kwargs = core_v1_cls.return_value.list_event_for_all_namespaces.call_args.kwargs
+    assert kwargs["limit"] == MAX_EVENT_LIMIT
+    # No namespace passed on the cluster-wide call.
+    assert "namespace" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_k8s_event_list_label_selector_flows_through() -> None:
+    """``label_selector`` forwards to the API as ``label_selector=...``."""
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as core_v1_cls,
+    ):
+        list_resp = MagicMock()
+        list_resp.items = []
+        core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
+        await connector.k8s_event_list(
+            _make_operator(),
+            _TARGET,
+            {"namespace": "argocd", "label_selector": "app=argocd-server"},
+        )
+    kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
+    assert kwargs["label_selector"] == "app=argocd-server"
+
+
+@pytest.mark.asyncio
+async def test_k8s_service_list_all_namespaces_uses_for_all_namespaces() -> None:
+    """``all_namespaces=true`` routes through ``list_service_for_all_namespaces``."""
+    services = [
+        _make_service(name="svc-1", namespace="argocd"),
+        _make_service(name="svc-2", namespace="kube-system"),
+    ]
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as core_v1_cls,
+    ):
+        list_resp = MagicMock()
+        list_resp.items = services
+        list_resp.metadata = V1ListMeta()
+        core_v1_cls.return_value.list_service_for_all_namespaces = AsyncMock(return_value=list_resp)
+        core_v1_cls.return_value.list_namespaced_service = AsyncMock()
+        result = await connector.k8s_service_list(
+            _make_operator(), _TARGET, {"all_namespaces": True}
+        )
+
+    assert result["total"] == 2
+    core_v1_cls.return_value.list_service_for_all_namespaces.assert_awaited_once()
+    core_v1_cls.return_value.list_namespaced_service.assert_not_awaited()
+    # No namespace kwarg on the cluster-wide call.
+    kwargs = core_v1_cls.return_value.list_service_for_all_namespaces.call_args.kwargs
+    assert "namespace" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_k8s_service_list_label_selector_flows_through() -> None:
+    """``label_selector`` forwards to the API on the per-namespace path."""
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as core_v1_cls,
+    ):
+        list_resp = MagicMock()
+        list_resp.items = []
+        core_v1_cls.return_value.list_namespaced_service = AsyncMock(return_value=list_resp)
+        await connector.k8s_service_list(
+            _make_operator(),
+            _TARGET,
+            {"namespace": "argocd", "label_selector": "app=argocd-server"},
+        )
+    kwargs = core_v1_cls.return_value.list_namespaced_service.call_args.kwargs
+    assert kwargs["label_selector"] == "app=argocd-server"
+    assert kwargs["namespace"] == "argocd"
+
+
+@pytest.mark.asyncio
+async def test_k8s_ingress_list_all_namespaces_uses_for_all_namespaces() -> None:
+    """``all_namespaces=true`` routes through ``list_ingress_for_all_namespaces``."""
+    ingress = _make_ingress(
+        name="ing-1",
+        rules=[
+            V1IngressRule(
+                host="argocd.evba.lab",
+                http=V1HTTPIngressRuleValue(paths=[_http_path()]),
+            )
+        ],
+    )
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.client.NetworkingV1Api"
+        ) as networking_cls,
+    ):
+        list_resp = MagicMock()
+        list_resp.items = [ingress]
+        networking_cls.return_value.list_ingress_for_all_namespaces = AsyncMock(
+            return_value=list_resp
+        )
+        networking_cls.return_value.list_namespaced_ingress = AsyncMock()
+        result = await connector.k8s_ingress_list(
+            _make_operator(), _TARGET, {"all_namespaces": True}
+        )
+
+    assert result["total"] == 1
+    networking_cls.return_value.list_ingress_for_all_namespaces.assert_awaited_once()
+    networking_cls.return_value.list_namespaced_ingress.assert_not_awaited()
+    kwargs = networking_cls.return_value.list_ingress_for_all_namespaces.call_args.kwargs
+    assert "namespace" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_k8s_ingress_list_label_selector_flows_through() -> None:
+    """``label_selector`` forwards to the API on the per-namespace path."""
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.client.NetworkingV1Api"
+        ) as networking_cls,
+    ):
+        list_resp = MagicMock()
+        list_resp.items = []
+        networking_cls.return_value.list_namespaced_ingress = AsyncMock(return_value=list_resp)
+        await connector.k8s_ingress_list(
+            _make_operator(),
+            _TARGET,
+            {"namespace": "argocd", "label_selector": "app=argocd-server"},
+        )
+    kwargs = networking_cls.return_value.list_namespaced_ingress.call_args.kwargs
+    assert kwargs["label_selector"] == "app=argocd-server"
+    assert kwargs["namespace"] == "argocd"
+
+
+@pytest.mark.asyncio
+async def test_k8s_configmap_list_all_namespaces_uses_for_all_namespaces() -> None:
+    """``all_namespaces=true`` routes through ``list_config_map_for_all_namespaces``.
+
+    Privacy contract still holds on the all-namespaces path: keys
+    only, no values. The list_row helper enforces it for both branches.
+    """
+    cms = [
+        _make_configmap(name="cm-1", namespace="argocd", data={"k": "v"}),
+        _make_configmap(name="cm-2", namespace="kube-system", data={"k2": "v2"}),
+    ]
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as core_v1_cls,
+    ):
+        list_resp = MagicMock()
+        list_resp.items = cms
+        core_v1_cls.return_value.list_config_map_for_all_namespaces = AsyncMock(
+            return_value=list_resp
+        )
+        core_v1_cls.return_value.list_namespaced_config_map = AsyncMock()
+        result = await connector.k8s_configmap_list(
+            _make_operator(), _TARGET, {"all_namespaces": True}
+        )
+
+    assert result["total"] == 2
+    core_v1_cls.return_value.list_config_map_for_all_namespaces.assert_awaited_once()
+    core_v1_cls.return_value.list_namespaced_config_map.assert_not_awaited()
+    kwargs = core_v1_cls.return_value.list_config_map_for_all_namespaces.call_args.kwargs
+    assert "namespace" not in kwargs
+    # Privacy contract preserved on the cluster-wide path.
+    for row in result["rows"]:
+        assert "data" not in row
+        assert "binary_data" not in row
+
+
+@pytest.mark.asyncio
+async def test_k8s_configmap_list_label_selector_flows_through() -> None:
+    """``label_selector`` forwards to the API on the per-namespace path."""
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as core_v1_cls,
+    ):
+        list_resp = MagicMock()
+        list_resp.items = []
+        core_v1_cls.return_value.list_namespaced_config_map = AsyncMock(return_value=list_resp)
+        await connector.k8s_configmap_list(
+            _make_operator(),
+            _TARGET,
+            {"namespace": "argocd", "label_selector": "managed-by=helm"},
+        )
+    kwargs = core_v1_cls.return_value.list_namespaced_config_map.call_args.kwargs
+    assert kwargs["label_selector"] == "managed-by=helm"
+    assert kwargs["namespace"] == "argocd"

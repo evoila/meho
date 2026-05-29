@@ -123,7 +123,7 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.kb.schemas import InvalidKbSlugError
+from meho_backplane.kb.schemas import InvalidKbSlugError, validate_slug
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateRequest,
     DeprecateTemplateResponse,
@@ -168,13 +168,6 @@ _RUNBOOK_OP_IDS: Final[dict[str, str]] = {
     "publish": "runbook.publish_template",
     "deprecate": "runbook.deprecate_template",
 }
-
-#: Maximum length of the ``slug`` path parameter accepted by /{slug}
-#: routes. Defence-in-depth: a pathological slug substring in the URL
-#: would never resolve to a row but would still cost a query round trip;
-#: capping at the path-parameter parse stage bounds the cost. Mirrors the
-#: ``_SLUG_MAX_LENGTH`` cap :mod:`meho_backplane.api.v1.kb` applies.
-_SLUG_MAX_LENGTH: Final[int] = 256
 
 
 class RunbookTemplateListResponse(BaseModel):
@@ -358,11 +351,23 @@ async def edit_template(
     The ``{slug}`` from the path is the operation's subject; it is rebound
     onto the request's ``slug`` so a body that omitted it (or carried a
     different one) cannot retarget the write -- the URL is the single
-    source of truth for which template is edited.
+    source of truth for which template is edited. A path slug that fails
+    :data:`~meho_backplane.kb.schemas.SLUG_PATTERN` surfaces as 422
+    :class:`InvalidKbSlugError` -- checked **before** the audit/broadcast
+    contextvars are bound so a rejected slug never fires a write-classified
+    audit row (the same posture ``GET /{slug}`` achieves by passing the raw
+    slug to the service, which 404s on the unresolved row).
 
     Binds ``audit_op_id="runbook.edit_template"`` + ``audit_op_class=
     "write"`` + ``audit_slug`` before the service call.
     """
+    try:
+        validate_slug(slug)
+    except InvalidKbSlugError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUNBOOK_OP_IDS["edit"],
         audit_op_class="write",
@@ -398,10 +403,23 @@ async def publish_template(
     too); a version that exists but is deprecated surfaces as 400
     :class:`TemplateNotDraftError` (cannot publish a retired version).
 
+    A path slug that fails :data:`~meho_backplane.kb.schemas.SLUG_PATTERN`
+    surfaces as 422 :class:`InvalidKbSlugError` -- checked **before** the
+    audit/broadcast contextvars are bound so a rejected slug never fires a
+    write-classified audit row (consistent with ``GET /{slug}``, which
+    404s an unresolved slug rather than 500ing).
+
     Binds ``audit_op_id="runbook.publish_template"`` + ``audit_op_class=
     "write"`` + ``audit_slug`` + ``audit_version`` before the service
     call.
     """
+    try:
+        validate_slug(slug)
+    except InvalidKbSlugError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUNBOOK_OP_IDS["publish"],
         audit_op_class="write",
@@ -440,10 +458,23 @@ async def deprecate_template(
     :class:`TemplateNotPublishedError` (cannot deprecate something never
     published).
 
+    A path slug that fails :data:`~meho_backplane.kb.schemas.SLUG_PATTERN`
+    surfaces as 422 :class:`InvalidKbSlugError` -- checked **before** the
+    audit/broadcast contextvars are bound so a rejected slug never fires a
+    write-classified audit row (consistent with ``GET /{slug}``, which
+    404s an unresolved slug rather than 500ing).
+
     Binds ``audit_op_id="runbook.deprecate_template"`` + ``audit_op_class=
     "write"`` + ``audit_slug`` + ``audit_version`` before the service
     call.
     """
+    try:
+        validate_slug(slug)
+    except InvalidKbSlugError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUNBOOK_OP_IDS["deprecate"],
         audit_op_class="write",

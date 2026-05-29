@@ -752,6 +752,102 @@ def test_deprecate_draft_400(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Malformed path slug on the model-rebuilding routes (regression: #1336 B1)
+#
+# PATCH /{slug}, POST /{slug}/publish, and POST /{slug}/deprecate rebuild a
+# SLUG_PATTERN-validated request model from the raw path param. A malformed
+# slug must surface as 422 (the same status draft/show-by-pattern use), not
+# a 500 from an unhandled in-handler ValidationError -- and the rejection
+# must short-circuit before the service is touched.
+# ---------------------------------------------------------------------------
+
+_MALFORMED_SLUG = "Bad-Caps"  # uppercase -> fails SLUG_PATTERN
+
+
+def test_edit_malformed_slug_422_no_service_call(client: TestClient) -> None:
+    """PATCH on a malformed path slug → 422, service never invoked."""
+    key, token = _admin_token()
+    fake_edit = AsyncMock()
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.update_or_fork", fake_edit),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.patch(
+            f"/api/v1/runbooks/templates/{_MALFORMED_SLUG}",
+            json=_template_body(),
+            headers=_authed(token),
+        )
+    assert response.status_code == 422
+    fake_edit.assert_not_awaited()
+
+
+def test_publish_malformed_slug_422_no_service_call(client: TestClient) -> None:
+    """POST /publish on a malformed path slug → 422, service never invoked."""
+    key, token = _admin_token()
+    fake_publish = AsyncMock()
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.publish", fake_publish),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            f"/api/v1/runbooks/templates/{_MALFORMED_SLUG}/publish",
+            json={"version": 1},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422
+    fake_publish.assert_not_awaited()
+
+
+def test_deprecate_malformed_slug_422_no_service_call(client: TestClient) -> None:
+    """POST /deprecate on a malformed path slug → 422, service never invoked."""
+    key, token = _admin_token()
+    fake_deprecate = AsyncMock()
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.deprecate", fake_deprecate),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            f"/api/v1/runbooks/templates/{_MALFORMED_SLUG}/deprecate",
+            json={"version": 1},
+            headers=_authed(token),
+        )
+    assert response.status_code == 422
+    fake_deprecate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_publish_malformed_slug_no_write_audit_row() -> None:
+    """A rejected malformed slug must not bind the write-classified op_id.
+
+    The 422 fires before ``bind_contextvars``, so the audit row for the
+    rejected request must not carry ``op_id="runbook.publish_template"``
+    / ``op_class="write"`` -- a rejected input never produces a
+    write-classified audit/broadcast side-effect.
+    """
+    key, token = _admin_token()
+    fake_publish = AsyncMock()
+    path = f"/api/v1/runbooks/templates/{_MALFORMED_SLUG}/publish"
+    test_client = TestClient(_build_app())
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.publish", fake_publish),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = test_client.post(path, json={"version": 1}, headers=_authed(token))
+    assert response.status_code == 422
+    fake_publish.assert_not_awaited()
+
+    rows = await _audit_rows_for_path(path)
+    for row in rows:
+        payload = row.payload
+        assert payload.get("op_id") != "runbook.publish_template"
+        assert payload.get("op_class") != "write"
+
+
+# ---------------------------------------------------------------------------
 # Audit op_id binding
 # ---------------------------------------------------------------------------
 

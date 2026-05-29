@@ -60,6 +60,8 @@ from meho_backplane.operations._audit import (
     AgentRunAuditMeta,
     agent_run_audit_meta_var,
     agent_session_id_var,
+    run_id_var,
+    step_id_var,
 )
 from meho_backplane.operations.composite import (
     CompositeL2DependencyMissing,
@@ -116,6 +118,8 @@ __all__ = [
     "register_typed_op_registrar",
     "register_typed_operation",
     "reset_dispatcher_caches",
+    "run_id_var",
     "run_typed_op_registrars",
     "set_default_reducer",
+    "step_id_var",
 ]

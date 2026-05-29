@@ -52,6 +52,8 @@ __all__ = [
     "audit_and_broadcast_safe",
     "parent_audit_id_var",
     "publish_broadcast",
+    "run_id_var",
+    "step_id_var",
     "write_audit_row",
 ]
 
@@ -96,6 +98,42 @@ parent_audit_id_var: ContextVar[uuid.UUID | None] = ContextVar(
 #: agent's full session graph.
 agent_session_id_var: ContextVar[uuid.UUID | None] = ContextVar(
     "agent_session_id",
+    default=None,
+)
+
+
+#: ContextVar carrying the active runbook run's id while a step's
+#: ``operation_call`` (step body OR verify dispatch) fires from the
+#: G12.3 step-execution engine. The engine binds this contextvar
+#: around every ``call_operation(...)`` invocation produced by step
+#: execution; :func:`write_audit_row` reads it into the real
+#: ``audit_log.run_id`` column added by migration ``0034`` (#1292 /
+#: G12.1-T1). Defaulting to ``None`` is correct -- a non-runbook
+#: dispatch (chassis HTTP, MCP tool, agent loop outside a runbook)
+#: has no run.
+#:
+#: Same mechanism as :data:`parent_audit_id_var` and
+#: :data:`agent_session_id_var`: one source-of-truth contextvar
+#: bound at a boundary, read at every audit-write call site that
+#: lives inside the same async task. ``asyncio.create_task``
+#: snapshots the contextvars, so the engine can spawn helpers that
+#: inherit the binding for their whole life.
+run_id_var: ContextVar[uuid.UUID | None] = ContextVar(
+    "run_id",
+    default=None,
+)
+
+
+#: ContextVar carrying the active runbook step's id (the ``id`` field
+#: inside ``runbook_templates.steps[]``) while a step's
+#: ``operation_call`` fires. Bound by the G12.3 engine alongside
+#: :data:`run_id_var`; read by :func:`write_audit_row` into
+#: ``audit_log.step_id``. ``str`` (not UUID) because step ids are
+#: template-author-defined slugs (``revoke-old-cert``,
+#: ``rotate-credentials``), not generated UUIDs. ``None`` outside a
+#: runbook step execution.
+step_id_var: ContextVar[str | None] = ContextVar(
+    "step_id",
     default=None,
 )
 
@@ -275,6 +313,17 @@ def _build_audit_payload(
             # example) through verbatim. JSON-incompatible shapes are
             # the meta producer's responsibility, not this layer's.
             payload["agent_cost"] = str(meta.cost) if isinstance(meta.cost, Decimal) else meta.cost
+    # G12.1-T2 #1294 -- runbook correlation. The run_id / step_id mirrors in
+    # the JSON payload serve the broadcast-event surface (consumers parse
+    # ``payload``); the canonical columns live on ``audit_log.run_id`` /
+    # ``audit_log.step_id`` (migration ``0034`` / G12.1-T1 #1292), written
+    # by :func:`write_audit_row`. ``None`` outside a runbook step execution.
+    run_id = run_id_var.get()
+    if run_id is not None:
+        payload["run_id"] = str(run_id)
+    step_id = step_id_var.get()
+    if step_id is not None:
+        payload["step_id"] = step_id
     # Handler-bound extras last so a handler can intentionally override
     # a default (e.g. a future per-op result_status override); the
     # default keys are documented + load-bearing for audit consumers,
@@ -340,6 +389,18 @@ async def write_audit_row(
     # an agent run (the chassis HTTP / MCP dispatch path), which is
     # the correct value for the nullable column.
     agent_session_id = agent_session_id_var.get()
+    # G12.1-T2 #1294 -- read the runbook correlation contextvars. The
+    # columns (``run_id`` / ``step_id``) are added by migration ``0034``
+    # (G12.1-T1 #1292). We pass them only when the model carries the
+    # columns so this module stays forward-compatible while #1292 is
+    # not yet merged into the base branch.
+    run_id = run_id_var.get()
+    step_id = step_id_var.get()
+    runbook_kwargs: dict[str, Any] = {}
+    if hasattr(AuditLog, "run_id"):
+        runbook_kwargs["run_id"] = run_id
+    if hasattr(AuditLog, "step_id"):
+        runbook_kwargs["step_id"] = step_id
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
@@ -358,6 +419,7 @@ async def write_audit_row(
             payload=payload,
             raw_payload=raw_payload,
             redaction_manifest=redaction_manifest,
+            **runbook_kwargs,
         )
         session.add(row)
         await session.commit()

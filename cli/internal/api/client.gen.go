@@ -3329,16 +3329,53 @@ type TargetCreateProduct string
 
 // TargetSummary Short shape for list endpoints.
 //
-// Omits “notes“, “extras“, and connection-auth details to keep
-// list responses fast and small. The “aliases“ field is included
-// because list consumers (CLI “meho target list“, autocomplete)
-// need it to display secondary names.
+// G0.16-T6 Finding D (#1312) widened this from the previous narrow
+// projection (“id, name, aliases, product, host“) to mirror the
+// detail-endpoint shape's identification + connection-routing
+// fields, including “version“, “port“, “fqdn“, “secret_ref“,
+// “auth_model“, “vpn_required“, “preferred_impl_id“, and the
+// server-managed timestamps. Per
+// “docs/codebase/api-shape-conventions.md“ §5, list endpoints
+// must not silently mask fields the detail endpoint exposes
+// (RDC #771 Finding 8 caught list returning “version=null,
+// secret_ref=null, preferred_impl_id=null“ for targets whose
+// detail endpoint returned actual values; adopters either wrote
+// N+1 calls or accepted silent data masking).
+//
+// The two remaining omissions vs :class:`Target` are deliberate:
+// “notes“ and “extras“. Both are operator-authored free-form
+// blobs that can carry meaningful payload (“extras“ is
+// capability-marker metadata; “notes“ is operator commentary)
+// and shipping them in the list response would inflate the page
+// size for the common "give me the names and routing" question
+// that list consumers ask. The convention doc's escape valve
+// applies: when an N+1 cost on these specifically becomes a real
+// concern, a future “GET /api/v1/targets/summary“ projection
+// endpoint can carry the narrow shape under an explicit name
+// (anti-pattern is silent masking, not documented projection).
+//
+// Frozen so callers can stash instances in request state or
+// structured logs without fear of mutation.
 type TargetSummary struct {
-	Aliases []string           `json:"aliases"`
-	Host    string             `json:"host"`
-	Id      openapi_types.UUID `json:"id"`
-	Name    string             `json:"name"`
-	Product string             `json:"product"`
+	Aliases []string `json:"aliases"`
+
+	// AuthModel Per-target identity model per v0.1-spec L447-454.
+	AuthModel       AuthModel               `json:"auth_model"`
+	CreatedAt       time.Time               `json:"created_at"`
+	DeletedAt       *time.Time              `json:"deleted_at"`
+	Fingerprint     *map[string]interface{} `json:"fingerprint"`
+	Fqdn            *string                 `json:"fqdn"`
+	Host            string                  `json:"host"`
+	Id              openapi_types.UUID      `json:"id"`
+	Name            string                  `json:"name"`
+	Port            *int                    `json:"port"`
+	PreferredImplId *string                 `json:"preferred_impl_id"`
+	Product         string                  `json:"product"`
+	SecretRef       *string                 `json:"secret_ref"`
+	TenantId        openapi_types.UUID      `json:"tenant_id"`
+	UpdatedAt       time.Time               `json:"updated_at"`
+	Version         *string                 `json:"version"`
+	VpnRequired     bool                    `json:"vpn_required"`
 }
 
 // TargetUpdate PATCH /api/v1/targets/{name} body.
@@ -4490,9 +4527,12 @@ type CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams struct {
 
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
-	Product       *string `form:"product,omitempty" json:"product,omitempty"`
-	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
-	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Product *string `form:"product,omitempty" json:"product,omitempty"`
+	Limit   *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor  *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -4531,17 +4571,23 @@ type ProbeTargetApiV1TargetsNameProbePostParams struct {
 
 // DependenciesApiV1TopologyDependenciesNameGetParams defines parameters for DependenciesApiV1TopologyDependenciesNameGet.
 type DependenciesApiV1TopologyDependenciesNameGetParams struct {
-	Depth         *int    `form:"depth,omitempty" json:"depth,omitempty"`
-	Kind          *string `form:"kind,omitempty" json:"kind,omitempty"`
-	KindFilter    *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
+	Depth      *int    `form:"depth,omitempty" json:"depth,omitempty"`
+	Kind       *string `form:"kind,omitempty" json:"kind,omitempty"`
+	KindFilter *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
+
+	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
 // DependentsApiV1TopologyDependentsNameGetParams defines parameters for DependentsApiV1TopologyDependentsNameGet.
 type DependentsApiV1TopologyDependentsNameGetParams struct {
-	Depth         *int    `form:"depth,omitempty" json:"depth,omitempty"`
-	Kind          *string `form:"kind,omitempty" json:"kind,omitempty"`
-	KindFilter    *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
+	Depth      *int    `form:"depth,omitempty" json:"depth,omitempty"`
+	Kind       *string `form:"kind,omitempty" json:"kind,omitempty"`
+	KindFilter *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
+
+	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -12416,6 +12462,22 @@ func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV
 
 		}
 
+		if params.Envelope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -12881,6 +12943,22 @@ func NewDependenciesApiV1TopologyDependenciesNameGetRequest(server string, name 
 
 		}
 
+		if params.Envelope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -12971,6 +13049,22 @@ func NewDependentsApiV1TopologyDependentsNameGetRequest(server string, name stri
 		if params.KindFilter != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind_filter", runtime.ParamLocationQuery, *params.KindFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Envelope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -18580,9 +18674,13 @@ func (r CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse) StatusCode()
 type ListTargetsApiV1TargetsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *[]TargetSummary
-	JSON422      *HTTPValidationError
+	JSON200      *struct {
+		union json.RawMessage
+	}
+	JSON422 *HTTPValidationError
 }
+type ListTargetsApiV1TargetsGet2000 = []TargetSummary
+type ListTargetsApiV1TargetsGet2001 map[string]interface{}
 
 // Status returns HTTPResponse.Status
 func (r ListTargetsApiV1TargetsGetResponse) Status() string {
@@ -18748,9 +18846,13 @@ func (r ProbeTargetApiV1TargetsNameProbePostResponse) StatusCode() int {
 type DependenciesApiV1TopologyDependenciesNameGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *[]TopologyNode
-	JSON422      *HTTPValidationError
+	JSON200      *struct {
+		union json.RawMessage
+	}
+	JSON422 *HTTPValidationError
 }
+type DependenciesApiV1TopologyDependenciesNameGet2000 = []TopologyNode
+type DependenciesApiV1TopologyDependenciesNameGet2001 map[string]interface{}
 
 // Status returns HTTPResponse.Status
 func (r DependenciesApiV1TopologyDependenciesNameGetResponse) Status() string {
@@ -18771,9 +18873,13 @@ func (r DependenciesApiV1TopologyDependenciesNameGetResponse) StatusCode() int {
 type DependentsApiV1TopologyDependentsNameGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *[]TopologyNode
-	JSON422      *HTTPValidationError
+	JSON200      *struct {
+		union json.RawMessage
+	}
+	JSON422 *HTTPValidationError
 }
+type DependentsApiV1TopologyDependentsNameGet2000 = []TopologyNode
+type DependentsApiV1TopologyDependentsNameGet2001 map[string]interface{}
 
 // Status returns HTTPResponse.Status
 func (r DependentsApiV1TopologyDependentsNameGetResponse) Status() string {
@@ -24019,7 +24125,9 @@ func ParseListTargetsApiV1TargetsGetResponse(rsp *http.Response) (*ListTargetsAp
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest []TargetSummary
+		var dest struct {
+			union json.RawMessage
+		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -24256,7 +24364,9 @@ func ParseDependenciesApiV1TopologyDependenciesNameGetResponse(rsp *http.Respons
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest []TopologyNode
+		var dest struct {
+			union json.RawMessage
+		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -24289,7 +24399,9 @@ func ParseDependentsApiV1TopologyDependentsNameGetResponse(rsp *http.Response) (
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest []TopologyNode
+		var dest struct {
+			union json.RawMessage
+		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -54,7 +54,7 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.targets.schemas import TargetSummary
+from meho_backplane.targets.schemas import TargetSummary, project_target_to_summary
 
 __all__ = ["AmbiguousTargetError", "TargetNotFoundError", "resolve_target"]
 
@@ -159,7 +159,7 @@ async def resolve_target(
     if len(exact_hits) == 1:
         target = exact_hits[0]
     elif len(exact_hits) > 1:
-        summaries = [_to_summary(t) for t in exact_hits]
+        summaries = [project_target_to_summary(t) for t in exact_hits]
         _log.warning(
             "ambiguous_exact_name",
             tenant_id=str(tenant_id),
@@ -176,7 +176,7 @@ async def resolve_target(
         if len(alias_hits) == 1:
             target = alias_hits[0]
         elif len(alias_hits) > 1:
-            summaries = [_to_summary(t) for t in alias_hits]
+            summaries = [project_target_to_summary(t) for t in alias_hits]
             _log.warning(
                 "ambiguous_target",
                 tenant_id=str(tenant_id),
@@ -188,7 +188,7 @@ async def resolve_target(
     if target is None:
         # Step 3: near-miss for 404 detail.
         near = await _near_misses(session, tenant_id, query)
-        summaries = [_to_summary(t) for t in near]
+        summaries = [project_target_to_summary(t) for t in near]
         _log.info(
             "target_not_found",
             tenant_id=str(tenant_id),
@@ -284,13 +284,3 @@ async def _near_misses(
         )
     result = await session.execute(stmt)
     return list(result.scalars().all())
-
-
-def _to_summary(t: TargetORM) -> TargetSummary:
-    return TargetSummary(
-        id=t.id,
-        name=t.name,
-        aliases=tuple(t.aliases),
-        product=t.product,
-        host=t.host,
-    )

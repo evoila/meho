@@ -182,6 +182,40 @@ def test_every_requires_connector_class_is_registered(
         assert entry.requires_connector_class in _registered_connectors
 
 
+def test_catalog_product_field_matches_target_create_enum(
+    _registered_connectors: set[str],
+) -> None:
+    """Catalog ``product`` aligns with the registered-product enum (Finding B).
+
+    G0.16-T6 Finding B (#1312). Per
+    ``docs/codebase/api-shape-conventions.md`` §3 (Enum vocabulary
+    discipline), the ``TargetCreate`` enum and the catalog ``product``
+    field must hold identical strings for every product they both
+    name. RDC #771 Finding 6 caught the v0.7-era ``"sddc"`` vs
+    ``"sddc-manager"`` mismatch where the catalog advertised one
+    spelling and the connector class registered the other.
+
+    The test guards the convention structurally: every catalog
+    entry's ``product`` must be present in the
+    ``registered_product_tokens`` set the OpenAPI
+    ``TargetCreate.product`` enum is generated from. A future
+    drift (typo on a new catalog entry, rename on a connector
+    without updating the catalog) trips here at unit-test time
+    instead of surfacing as a 422 on the operator's first POST.
+    """
+    from meho_backplane.connectors.registry import registered_product_tokens
+
+    catalog_products = {entry.product for entry in load_catalog().entries}
+    enum_products = set(registered_product_tokens())
+    missing = catalog_products - enum_products
+    assert missing == set(), (
+        f"catalog declares product(s) {missing!r} that are not in the "
+        "TargetCreate product enum; reconcile the catalog YAML or the "
+        "connector class registration per docs/codebase/"
+        "api-shape-conventions.md §3."
+    )
+
+
 def test_validate_catalog_registry_coverage_passes_for_shipped_catalog(
     _registered_connectors: set[str],
 ) -> None:
@@ -301,6 +335,85 @@ def test_entry_accepts_valid_pep440_spec_info_version() -> None:
 def test_entry_rejects_non_pep440_spec_info_version() -> None:
     with pytest.raises(ValidationError, match="PEP 440"):
         _entry(spec_info_version="not-a-version")
+
+
+# ---------------------------------------------------------------------------
+# (d) spec_info_versions_compatible — G0.16-T6 Finding H (#1312)
+# ---------------------------------------------------------------------------
+
+
+def test_entry_accepts_wildcard_compatibility_specifier() -> None:
+    entry = _entry(spec_info_versions_compatible=["9.0.x"])
+    assert entry.spec_info_versions_compatible == ("9.0.x",)
+
+
+def test_entry_accepts_pep440_specifier_set_compatibility_specifier() -> None:
+    # Under T5 (#1307)'s strict-superset grammar, PEP 440 specifier sets
+    # are accepted alongside glob shapes (any-of semantics across patterns).
+    entry = _entry(spec_info_versions_compatible=[">=9.0,<10.0"])
+    assert entry.spec_info_versions_compatible == (">=9.0,<10.0",)
+
+
+def test_entry_rejects_bad_wildcard_prefix() -> None:
+    with pytest.raises(ValidationError, match=r"neither a glob.*nor a valid PEP 440 specifier set"):
+        _entry(spec_info_versions_compatible=["not-a-version.x"])
+
+
+def test_entry_rejects_lone_dotx_specifier() -> None:
+    with pytest.raises(ValidationError, match=r"neither a glob.*nor a valid PEP 440 specifier set"):
+        _entry(spec_info_versions_compatible=[".x"])
+
+
+def test_entry_rejects_empty_compatibility_list() -> None:
+    with pytest.raises(ValidationError, match="non-empty list"):
+        _entry(spec_info_versions_compatible=[])
+
+
+def test_spec_info_version_matches_wildcard_specifier() -> None:
+    """The release-tuple-prefix wildcard match (G0.16-T6 Finding H #1312).
+
+    Per ``docs/codebase/api-shape-conventions.md`` §9 the wildcard
+    matches anything whose release-tuple starts with the prefix
+    before ``.x``. ``"9.0.x"`` accepts ``9.0``, ``9.0.0``,
+    ``9.0.0.0``, ``9.0.3``; rejects ``9.1.0`` and ``8.0.0.0``.
+    """
+    from meho_backplane.operations.ingest.catalog import (
+        spec_info_version_matches_compatibility_specifier as match,
+    )
+
+    # Wildcard matches.
+    assert match("9.0", "9.0.x")
+    assert match("9.0.0", "9.0.x")
+    assert match("9.0.0.0", "9.0.x")
+    assert match("9.0.3", "9.0.x")
+    # Wildcard rejects.
+    assert not match("9.1.0", "9.0.x")
+    assert not match("8.0.0.0", "9.0.x")
+    # Bare specifier exact / prefix.
+    assert match("9.0.0.0", "9.0")
+    assert match("9.0.0.0", "9.0.0.0")
+    assert not match("9.1.0", "9.0")
+    # Non-PEP-440 spec → ``False`` (not an exception; see helper docstring).
+    assert not match("not-a-version", "9.0.x")
+
+
+def test_shipped_vmware_catalog_declares_9_0_x_compatibility() -> None:
+    """vmware/9.0 catalog entry carries ``spec_info_versions_compatible=("9.0.x",)``.
+
+    G0.16-T6 Finding H (#1312). vSphere ships ``info.version="9.0.0.0"``
+    while the catalog labels the entry ``version="9.0"``; the
+    PEP-440 prefix-match already treats those as "exact" but the
+    explicit declaration documents the divergence per
+    ``docs/codebase/api-shape-conventions.md`` §9 and pairs with
+    T5 (#1307)'s gh-rest entry where the divergence is
+    load-bearing.
+    """
+    vmware = next(
+        entry
+        for entry in load_catalog().entries
+        if (entry.product, entry.version) == ("vmware", "9.0")
+    )
+    assert vmware.spec_info_versions_compatible == ("9.0.x",)
 
 
 # ---------------------------------------------------------------------------
@@ -445,12 +558,6 @@ def test_entry_accepts_no_opt_in() -> None:
     assert _entry().spec_info_versions_compatible is None
 
 
-def test_entry_rejects_empty_compatibility_list() -> None:
-    """An empty list is ambiguous — operators should leave the field unset."""
-    with pytest.raises(ValidationError, match="non-empty list"):
-        _entry(spec_info_versions_compatible=[])
-
-
 @pytest.mark.parametrize(
     "bad_pattern",
     [
@@ -476,11 +583,14 @@ def test_shipped_catalog_gh3_carries_compatibility_opt_in() -> None:
     assert info_version_matches_compatibility("1.1.4", gh.spec_info_versions_compatible)
 
 
-def test_shipped_catalog_non_gh_rows_have_no_opt_in() -> None:
-    """The opt-in is targeted; rows with reconciled label-vs-spec (vmware,
-    nsx, etc.) leave ``spec_info_versions_compatible`` null."""
+def test_shipped_catalog_only_gh_and_vmware_rows_opt_in() -> None:
+    """The opt-in is targeted. ``gh`` opts in to bridge the v3-vs-1.1.4
+    divergence (T5 #1307); ``vmware`` opts in as a belt-and-suspenders
+    declaration over the existing PEP-440 prefix-match (T6 Finding H
+    #1312). All other rows keep ``spec_info_versions_compatible`` null."""
+    expected_opt_in = {"gh", "vmware"}
     for entry in load_catalog().entries:
-        if entry.product == "gh":
+        if entry.product in expected_opt_in:
             continue
         assert entry.spec_info_versions_compatible is None, (
             f"{entry.product}/{entry.version} unexpectedly opts in"

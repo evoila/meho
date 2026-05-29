@@ -63,6 +63,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -141,6 +142,36 @@ func retryOn401[R any](
 	}
 	if rerr := authed.Refresh(ctx); rerr != nil {
 		return resp, rerr
+	}
+	return call(ctx)
+}
+
+// retryHTTPOn401 mirrors retryOn401 but for raw *http.Response calls.
+// Used by verbs that bypass the generated `*WithResponse` parser when
+// the endpoint declares a multi-shape 200 response (envelope=v2
+// rollout) that the parser can't bind — see G0.16-T6 Finding A (#1312)
+// notes in `list.go`'s `getTargets`. The function drains and closes
+// the first response body before re-issuing the call on 401, so the
+// caller always sees a single live response.
+func retryHTTPOn401(
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*http.Response, error),
+) (*http.Response, error) {
+	resp, err := call(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+	// Drain + close the 401 body so the transport can reuse the
+	// connection, then refresh + re-issue.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if rerr := authed.Refresh(ctx); rerr != nil {
+		// Surface the refresh failure; no second call.
+		return nil, rerr
 	}
 	return call(ctx)
 }

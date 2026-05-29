@@ -177,6 +177,29 @@ class BroadcastEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    #: G0.16-T6 Finding F (#1312) discriminator per
+    #: ``docs/codebase/api-shape-conventions.md`` §6. Every entry on
+    #: ``meho:feed:{tenant_id}`` carries a top-level ``kind`` field that
+    #: consumers switch on:
+    #:
+    #: * ``"operation"`` -- audit-driven :class:`BroadcastEvent` (this
+    #:   class), one per audited operation.
+    #: * ``"agent_announcement"`` -- agent-authored
+    #:   :class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`,
+    #:   published via ``meho.broadcast.announce``.
+    #:
+    #: Default value, not :class:`typing.Literal`-pinned, so the
+    #: history-parser's switch-on-``kind`` covers two cases under a
+    #: single read path: (a) post-migration entries XADD'd by the
+    #: current publisher (``kind: "operation"`` written on the wire),
+    #: and (b) pre-migration entries written before this field
+    #: existed -- those entries lack ``kind`` on the wire, and the
+    #: parser infers ``"operation"`` from the absence of
+    #: ``"agent_announcement"``-shape fields. The historical
+    #: ``event_kind`` field on the sibling agent-announcement class
+    #: stays accepted on read as a backward-compatible alias.
+    kind: str = "operation"
+
     event_id: UUID
     ts: datetime
     tenant_id: UUID

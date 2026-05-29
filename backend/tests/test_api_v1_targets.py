@@ -1285,6 +1285,126 @@ def test_create_target_known_preferred_impl_id_succeeds(client: TestClient) -> N
     assert response.json()["preferred_impl_id"] == "k8s"
 
 
+def test_create_target_cross_product_preferred_impl_id_rejected(
+    client: TestClient,
+) -> None:
+    """A ``k8s`` target cannot pin a ``vmware-rest-9.0`` impl (B1 regression).
+
+    G0.16-T6 review-iter-1 B1 (#1312). Before this fix
+    :func:`_registered_impl_ids` built a global allowlist that
+    accepted any impl registered for any product, so a ``k8s``
+    target could pass validation with
+    ``preferred_impl_id="vmware-rest-9.0"`` -- the resolver would
+    then silently ignore the override at dispatch time. That is
+    the exact silent-ignore foot-gun G0.15-T6 (#1215) was created
+    to close.
+
+    The fix scopes the allowlist by ``body.product``. The
+    structured 422 lists only the impl_ids registered **for that
+    product**, so an operator pinning the wrong-product impl
+    sees the actionable set instead of the cross-product noise.
+    """
+    # Register two distinct product/impl pairs. The k8s connector is
+    # the target's product; the vmware-rest impl is the foot-gun.
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _FakeVmwareConnector(Connector):
+        product = "vmware"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    _register_fake_k8s_connector()
+    register_connector_v2(
+        product="vmware", version="9.0", impl_id="vmware-rest", cls=_FakeVmwareConnector
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "cross-product",
+                "product": "k8s",
+                "host": "10.0.0.52",
+                "preferred_impl_id": "vmware-rest-9.0",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "unknown_preferred_impl_id"
+    assert detail["preferred_impl_id"] == "vmware-rest-9.0"
+    # The valid set lists only k8s-product impls, not vmware-rest*.
+    # Both the base ``"k8s"`` and the canonical versioned ``"k8s-1.x"``
+    # form are accepted (Finding C); neither vmware form appears.
+    assert set(detail["valid_impl_ids"]) == {"k8s", "k8s-1.x"}
+    assert "vmware-rest" not in detail["valid_impl_ids"]
+    assert "vmware-rest-9.0" not in detail["valid_impl_ids"]
+
+
+def test_update_target_cross_product_preferred_impl_id_rejected(
+    client: TestClient,
+) -> None:
+    """PATCH cannot pin an impl registered for a different product (B1).
+
+    Same scenario as the POST regression, but at the PATCH boundary
+    and against the effective post-update product so a single
+    request changing both ``product`` and ``preferred_impl_id`` is
+    validated against the new product. Pinning the matching pair
+    succeeds; pinning a cross-product impl returns the structured
+    422 listing only the new product's impls.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _FakeVmwareConnector(Connector):
+        product = "vmware"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    _register_fake_k8s_connector()
+    register_connector_v2(
+        product="vmware", version="9.0", impl_id="vmware-rest", cls=_FakeVmwareConnector
+    )
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.post(
+            "/api/v1/targets",
+            json={"name": "patch-cross", "product": "k8s", "host": "10.0.0.53"},
+            headers=headers,
+        )
+        response = client.patch(
+            "/api/v1/targets/patch-cross",
+            json={"preferred_impl_id": "vmware-rest-9.0"},
+            headers=headers,
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "unknown_preferred_impl_id"
+    assert detail["preferred_impl_id"] == "vmware-rest-9.0"
+    assert "vmware-rest" not in detail["valid_impl_ids"]
+    assert "vmware-rest-9.0" not in detail["valid_impl_ids"]
+
+
 def test_update_target_unknown_preferred_impl_id_returns_422(
     client: TestClient,
 ) -> None:
@@ -1334,6 +1454,177 @@ def test_update_target_clear_preferred_impl_id_succeeds(client: TestClient) -> N
         )
     assert response.status_code == 200
     assert response.json()["preferred_impl_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_targets_envelope_v2_returns_unified_shape(
+    client: TestClient,
+) -> None:
+    """``?envelope=v2`` returns the §2 unified shape (G0.16-T6 Finding A #1312).
+
+    Default (no ``?envelope=``) stays the v0.8.0 bare list — pinned
+    by the existing test suite. The opt-in returns
+    ``{items, next_cursor}``: items always present,
+    ``next_cursor`` is ``None`` when the page exhausted the
+    matching set, the last-row ``name`` otherwise. The migration
+    is non-breaking by design: the opt-in is a query parameter,
+    not a versioned URL.
+    """
+    tenant = str(uuid.uuid4())
+    for name in ("a-target", "b-target", "c-target"):
+        await _insert_target(
+            tenant_id=uuid.UUID(tenant),
+            name=name,
+            product="kubernetes",
+            host="10.0.0.1",
+        )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        bare = client.get(
+            "/api/v1/targets?limit=2",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
+        )
+        v2_full = client.get(
+            "/api/v1/targets?envelope=v2&limit=2",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
+        )
+        v2_last = client.get(
+            "/api/v1/targets?envelope=v2&limit=2&cursor=b-target",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
+        )
+    # Default shape unchanged — a bare list of 2 rows.
+    assert bare.status_code == 200
+    assert isinstance(bare.json(), list)
+    assert len(bare.json()) == 2
+
+    # v2 envelope — items + next_cursor.
+    assert v2_full.status_code == 200
+    body = v2_full.json()
+    assert isinstance(body, dict)
+    assert [row["name"] for row in body["items"]] == ["a-target", "b-target"]
+    # Page filled to limit → cursor for the next page.
+    assert body["next_cursor"] == "b-target"
+
+    # Last page → cursor is None.
+    body_last = v2_last.json()
+    assert body_last["items"][0]["name"] == "c-target"
+    assert body_last["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_targets_envelope_v2_exact_limit_terminal_page(
+    client: TestClient,
+) -> None:
+    """``?envelope=v2`` emits ``next_cursor=null`` on an exact-``limit`` terminal page.
+
+    G0.16-T6 review-iter-1 M1 (#1312). The pre-fix shape
+    (``next_cursor = rows[-1].name if len(rows) >= limit``) emitted a
+    non-null cursor when the row count was exactly ``limit`` -- a
+    false-positive that contradicted the §2 contract and forced
+    callers to issue a wasted round-trip per result set whose size
+    divided ``limit`` evenly. The fix over-fetches ``limit + 1`` and
+    infers ``has_more`` from the extra row's existence; this test
+    pins the contract that a page returning *exactly* ``limit`` rows
+    with no further matches gets ``next_cursor=null``.
+
+    Five rows in the tenant; ``limit=5``. The page returns all five
+    items and the cursor is null -- no extra round-trip.
+    """
+    tenant = str(uuid.uuid4())
+    for name in ("a-t", "b-t", "c-t", "d-t", "e-t"):
+        await _insert_target(
+            tenant_id=uuid.UUID(tenant),
+            name=name,
+            product="kubernetes",
+            host="10.0.0.1",
+        )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        resp = client.get(
+            "/api/v1/targets?envelope=v2&limit=5",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [row["name"] for row in body["items"]] == ["a-t", "b-t", "c-t", "d-t", "e-t"]
+    # Exact-limit terminal page -- no more matches, cursor is null.
+    assert body["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_target_field_set_superset_of_detail(client: TestClient) -> None:
+    """List rows surface every field the detail endpoint exposes (no masking).
+
+    G0.16-T6 Finding D (#1312). Per
+    ``docs/codebase/api-shape-conventions.md`` §5 the list endpoint
+    must not silently null out fields the detail endpoint returns.
+    The v0.8.0 shape masked ``version``, ``secret_ref``, and
+    ``preferred_impl_id`` on list rows; this regression test pins
+    the new contract.
+    """
+    tenant_a = str(uuid.uuid4())
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_a),
+        name="prod-vc-1",
+        product="vsphere",
+        host="vcenter.corp.internal",
+        version="9.0",
+        secret_ref="secret/meho/vc",
+        preferred_impl_id="vmware-rest",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        list_resp = client.get(
+            "/api/v1/targets",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_a)}"},
+        )
+        detail_resp = client.get(
+            "/api/v1/targets/prod-vc-1",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_a)}"},
+        )
+    assert list_resp.status_code == 200
+    assert detail_resp.status_code == 200
+    list_row = next(r for r in list_resp.json() if r["name"] == "prod-vc-1")
+    detail_row = detail_resp.json()
+    # The only fields a list row is allowed to omit are the
+    # operator-authored free-form blobs the convention doc names.
+    allowed_omissions = {"notes", "extras"}
+    masked = {k for k in detail_row if k not in allowed_omissions and k not in list_row}
+    assert masked == set(), f"list silently masks {masked!r} relative to detail"
+    # And the load-bearing routing fields specifically carry the
+    # same non-null value the detail surface returned.
+    for key_name in ("version", "secret_ref", "preferred_impl_id"):
+        assert list_row[key_name] == detail_row[key_name]
+
+
+def test_create_target_versioned_preferred_impl_id_succeeds(client: TestClient) -> None:
+    """POST with the versioned ``preferred_impl_id`` form is accepted.
+
+    G0.16-T6 Finding C (#1312). The canonical form per
+    ``docs/codebase/api-shape-conventions.md`` §3 is versioned
+    (``"impl_id-version"``). Both the base form (``"k8s"``) and the
+    versioned form (``"k8s-1.x"``) must be accepted; the resolver
+    normalizes both to the same connector.
+    """
+    _register_fake_k8s_connector()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "versioned-impl",
+                "product": "k8s",
+                "host": "10.0.0.70",
+                "preferred_impl_id": "k8s-1.x",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["preferred_impl_id"] == "k8s-1.x"
 
 
 # ---------------------------------------------------------------------------

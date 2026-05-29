@@ -173,6 +173,15 @@ class AgentAnnouncementEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    #: G0.16-T6 Finding F (#1312) discriminator per
+    #: ``docs/codebase/api-shape-conventions.md`` §6. Mirrors the
+    #: sibling :attr:`BroadcastEvent.kind` field; consumers normalize
+    #: on this field rather than the historical ``event_kind``. The
+    #: latter is retained for backward compatibility with any
+    #: in-flight stream entries written by the v0.8.0 publisher
+    #: (which only emitted ``event_kind``); the history parser reads
+    #: both forms.
+    kind: Literal["agent_announcement"] = "agent_announcement"
     event_kind: Literal["agent_announcement"] = "agent_announcement"
     tenant_id: UUID
     principal_sub: str

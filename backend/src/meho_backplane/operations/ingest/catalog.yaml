@@ -57,6 +57,20 @@ entries:
       - "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/"
       - "https://developer.broadcom.com/xapis/virtual-infrastructure-json-api/latest/"
     spec_info_version: null
+    # G0.16-T6 Finding H (#1312). vSphere ships its spec under the
+    # explicit-quadruple ``info.version="9.0.0.0"`` form while the
+    # catalog ``version`` is the product-line label ``"9.0"``. The
+    # PEP-440 prefix-match in ``_classify_version_match`` already
+    # treats ``9.0`` ↔ ``9.0.0.0`` as "exact" (release tuple ``(9, 0)``
+    # is a prefix of ``(9, 0, 0, 0)``), so this declaration is
+    # belt-and-suspenders: when an operator pinned both the catalog
+    # label and a slightly different explicit-quadruple variant, the
+    # compatibility hint says "9.0.x" is the band the catalog covers.
+    # Pairs with T5 (#1307)'s gh-rest entry where the divergence is
+    # load-bearing (catalog "3" vs spec "1.1.4"; PEP-440 prefix-match
+    # alone would reject). Per api-shape-conventions.md §9.
+    spec_info_versions_compatible:
+      - "9.0.x"
     sha256: null
     notes: >-
       Generic-ingested. vSphere publishes two specs that merge under one

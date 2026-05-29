@@ -268,6 +268,35 @@ func retryOn401[R any](
 	return call(ctx)
 }
 
+// retryHTTPOn401 mirrors retryOn401 but for raw *http.Response calls.
+// Used by the closure verb that bypasses the generated `*WithResponse`
+// parser when the endpoint declares a multi-shape 200 response
+// (envelope=v2 rollout) that the parser can't bind — see G0.16-T6
+// Finding E (#1312) notes in `closure.go`'s `getClosure`. The function
+// drains and closes the first response body before re-issuing the
+// call on 401, so the caller always sees a single live response.
+func retryHTTPOn401(
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*http.Response, error),
+) (*http.Response, error) {
+	resp, err := call(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+	// Drain + close the 401 body so the transport can reuse the
+	// connection, then refresh + re-issue.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if rerr := authed.Refresh(ctx); rerr != nil {
+		return nil, rerr
+	}
+	return call(ctx)
+}
+
 // renderRequestError translates a transport-layer request error
 // into the right output.StructuredError category. Maps the topology
 // REST surface's pre-response failures: missing bearer, no-refresh-

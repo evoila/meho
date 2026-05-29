@@ -28,8 +28,10 @@ module pins the helper-level contract that wire layer depends on.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
@@ -260,3 +262,89 @@ async def test_stream_key_derived_from_operator_tenant_id_fail_soft() -> None:
     with patch.object(bc, "xrange", new=mock):
         await list_recent_events_fail_soft(op)
     assert mock.await_args.args[0] == f"meho:feed:{_TENANT}"
+
+
+# ---------------------------------------------------------------------------
+# G0.16-T6 Finding F (#1312) — top-level ``kind`` discriminator
+# ---------------------------------------------------------------------------
+
+
+async def test_broadcast_event_serialises_with_kind_operation() -> None:
+    """:class:`BroadcastEvent` writes ``"kind": "operation"`` on the wire (Finding F).
+
+    G0.16-T6 Finding F (#1312). Per
+    ``docs/codebase/api-shape-conventions.md`` §6, audit-driven
+    events carry a top-level ``"kind": "operation"`` discriminator
+    so consumers switch on the field rather than inferring from
+    ``op_id``-vs-``activity`` field presence.
+    """
+    event = _make_event()
+    wire = json.loads(event.model_dump_json())
+    assert wire["kind"] == "operation"
+
+
+async def test_announcement_serialises_with_kind_agent_announcement() -> None:
+    """:class:`AgentAnnouncementEvent` writes ``"kind": "agent_announcement"`` (Finding F)."""
+    from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
+
+    event = AgentAnnouncementEvent(
+        tenant_id=_TENANT,
+        principal_sub="op-1",
+        activity="probing rdc-vcenter",
+        ts=datetime(2026, 5, 25, 10, 0, tzinfo=UTC),
+    )
+    wire = json.loads(event.model_dump_json())
+    assert wire["kind"] == "agent_announcement"
+    # Backward-compat alias still carried.
+    assert wire["event_kind"] == "agent_announcement"
+
+
+async def test_parse_entry_dispatches_on_top_level_kind() -> None:
+    """Parser switches on ``kind`` first, falling back to ``event_kind`` (Finding F)."""
+    from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
+    from meho_backplane.broadcast.history import parse_entry
+
+    ann = AgentAnnouncementEvent(
+        tenant_id=_TENANT,
+        principal_sub="op-1",
+        activity="probing rdc-vcenter",
+        ts=datetime(2026, 5, 25, 10, 0, tzinfo=UTC),
+    )
+    # Post-G0.16-T6 entry: top-level ``kind`` discriminator.
+    entry_id, fields = _xrange_entry_for_ann(ann, "1747800000000-0")
+    parsed = parse_entry(entry_id, fields, stream_key=f"meho:feed:{_TENANT}")
+    assert isinstance(parsed, AgentAnnouncementEvent)
+
+    # Pre-migration entry: only ``event_kind`` on the wire. Carve
+    # it manually so the test exercises the fallback path.
+    legacy_wire = ann.model_dump_json()
+    legacy_obj = json.loads(legacy_wire)
+    legacy_obj.pop("kind")  # simulate v0.8.0 wire shape
+    legacy_fields = {"event": json.dumps(legacy_obj)}
+    legacy_parsed = parse_entry("1747800000001-0", legacy_fields, stream_key=f"meho:feed:{_TENANT}")
+    assert isinstance(legacy_parsed, AgentAnnouncementEvent)
+
+
+async def test_parse_entry_legacy_audit_event_infers_operation() -> None:
+    """Pre-migration audit events (no ``kind``, no ``event_kind``) infer ``operation``.
+
+    Convention §6: existing rows without ``kind`` read as
+    ``kind: "operation"`` (the audit-derived majority shape; the
+    backward-compatible inference for the historical window).
+    """
+    from meho_backplane.broadcast.history import parse_entry
+
+    event = _make_event()
+    wire_obj = json.loads(event.model_dump_json())
+    wire_obj.pop("kind")  # simulate pre-migration entry
+    legacy_fields = {"event": json.dumps(wire_obj)}
+    parsed = parse_entry("1747800000002-0", legacy_fields, stream_key=f"meho:feed:{_TENANT}")
+    assert isinstance(parsed, BroadcastEvent)
+    # Default attribute value provides the ``kind`` the post-migration
+    # parser surfaces back to callers.
+    assert parsed.kind == "operation"
+
+
+def _xrange_entry_for_ann(event: Any, entry_id: str) -> tuple[str, dict[str, str]]:
+    """Mirror of :func:`_xrange_entry` for announcement events."""
+    return entry_id, {"event": event.model_dump_json()}

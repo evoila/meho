@@ -243,6 +243,58 @@ def test_dependents_wraps_find_dependents_and_forwards_params(client: TestClient
     assert fake.call_args.args[1] == "host1"
 
 
+def test_dependents_envelope_v2_returns_kind_nodes_shape(
+    client: TestClient,
+) -> None:
+    """``?envelope=v2`` returns ``{kind, nodes}`` matching MCP (Finding E).
+
+    G0.16-T6 Finding E (#1312). Per
+    ``docs/codebase/api-shape-conventions.md`` §4, REST and MCP
+    sister operations agree on response shape; the convention names
+    migration as REST-toward-MCP. The opt-in shape mirrors the MCP
+    ``query_topology`` tool's response (``{kind: "dependents",
+    nodes: [...]}``); the default keeps the v0.8.0 bare list so no
+    client breaks.
+    """
+    key, token = _token(TenantRole.OPERATOR)
+    nodes = [_make_node("host1", "host", 0), _make_node("vm1", "vm", 1)]
+    fake = AsyncMock(return_value=nodes)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.find_dependents", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/dependents/host1?envelope=v2",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["kind"] == "dependents"
+    assert [n["name"] for n in body["nodes"]] == ["host1", "vm1"]
+
+
+def test_dependencies_envelope_v2_returns_kind_nodes_shape(
+    client: TestClient,
+) -> None:
+    """``?envelope=v2`` on ``/dependencies`` returns ``{kind: "dependencies", nodes}``."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=[_make_node("app", "target", 0)])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.find_dependencies", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/dependencies/app?envelope=v2",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["kind"] == "dependencies"
+    assert [n["name"] for n in body["nodes"]] == ["app"]
+
+
 def test_dependencies_wraps_find_dependencies(client: TestClient) -> None:
     key, token = _token(TenantRole.OPERATOR)
     fake = AsyncMock(return_value=[_make_node("app", "target", 0)])

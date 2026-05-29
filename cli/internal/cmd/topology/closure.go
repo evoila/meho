@@ -5,7 +5,9 @@ package topology
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/spf13/cobra"
@@ -91,13 +93,25 @@ func runClosure(cmd *cobra.Command, opts closureOptions) error {
 	return nil
 }
 
-// getClosure invokes the dependents-or-dependencies typed call against
-// the supplied backplane URL and returns (parsed nodes, status code,
-// raw body, transport-error). The (nodes, statusCode, body) triple is
-// the same shape the kb / memory siblings settled on after their
-// iter-2 fixes: callers branch on statusCode (200 → render `nodes`;
-// non-200 → renderHTTPStatus with the raw body) without re-parsing
-// the envelope.
+// getClosure invokes the dependents-or-dependencies call against the
+// supplied backplane URL and returns (parsed nodes, status code, raw
+// body, transport-error). The (nodes, statusCode, body) triple is the
+// same shape the kb / memory siblings settled on after their iter-2
+// fixes: callers branch on statusCode (200 → render `nodes`; non-200
+// → renderHTTPStatus with the raw body) without re-parsing the
+// envelope.
+//
+// G0.16-T6 Finding E (#1312) — bypasses the generated `*WithResponse`
+// path because the dependents/dependencies endpoints opted into a
+// non-breaking `?envelope=v2` shape; the OpenAPI spec declares two
+// `200` content schemas (bare list by default, `{"kind": ...,
+// "nodes": [...]}` under v2) so oapi-codegen collapses the typed
+// `JSON200` into `struct{union json.RawMessage}` whose discriminator
+// is unexported and whose parser fails json.Unmarshal on any concrete
+// shape. The CLI never sends `envelope=v2` (today's bare-list UX is
+// the operator contract); call the low-level
+// `*ApiV1Topology*NameGet` method (returns *http.Response) and decode
+// the raw body into the default `list[TopologyNode]` shape.
 func getClosure(
 	ctx context.Context,
 	backplaneURL string,
@@ -108,7 +122,7 @@ func getClosure(
 		return nil, 0, nil, err
 	}
 	// Build the typed param once; both branches feed it to the
-	// matching `*WithResponse` method.
+	// matching low-level `*ApiV1Topology*NameGet` method.
 	var depthPtr *int
 	if opts.Depth > 0 {
 		d := opts.Depth
@@ -125,6 +139,8 @@ func getClosure(
 		anchorKindPtr = &k
 	}
 
+	var statusCode int
+	var body []byte
 	switch opts.Verb {
 	case "dependents":
 		params := &api.DependentsApiV1TopologyDependentsNameGetParams{
@@ -132,43 +148,69 @@ func getClosure(
 			KindFilter: kindFilterPtr,
 			Kind:       anchorKindPtr,
 		}
-		resp, err := retryOn401(ctx, authed,
-			func(ctx context.Context) (*api.DependentsApiV1TopologyDependentsNameGetResponse, error) {
-				return authed.DependentsApiV1TopologyDependentsNameGetWithResponse(ctx, opts.Name, params)
-			},
-			func(r *api.DependentsApiV1TopologyDependentsNameGetResponse) int { return r.StatusCode() },
-		)
-		if err != nil {
-			return nil, 0, nil, err
-		}
-		if resp.JSON200 != nil {
-			return *resp.JSON200, resp.StatusCode(), resp.Body, nil
-		}
-		return nil, resp.StatusCode(), resp.Body, nil
+		statusCode, body, err = doClosureCall(ctx, authed,
+			func(ctx context.Context) (*http.Response, error) {
+				return authed.DependentsApiV1TopologyDependentsNameGet(ctx, opts.Name, params)
+			})
 	case "dependencies":
 		params := &api.DependenciesApiV1TopologyDependenciesNameGetParams{
 			Depth:      depthPtr,
 			KindFilter: kindFilterPtr,
 			Kind:       anchorKindPtr,
 		}
-		resp, err := retryOn401(ctx, authed,
-			func(ctx context.Context) (*api.DependenciesApiV1TopologyDependenciesNameGetResponse, error) {
-				return authed.DependenciesApiV1TopologyDependenciesNameGetWithResponse(ctx, opts.Name, params)
-			},
-			func(r *api.DependenciesApiV1TopologyDependenciesNameGetResponse) int { return r.StatusCode() },
-		)
-		if err != nil {
-			return nil, 0, nil, err
-		}
-		if resp.JSON200 != nil {
-			return *resp.JSON200, resp.StatusCode(), resp.Body, nil
-		}
-		return nil, resp.StatusCode(), resp.Body, nil
+		statusCode, body, err = doClosureCall(ctx, authed,
+			func(ctx context.Context) (*http.Response, error) {
+				return authed.DependenciesApiV1TopologyDependenciesNameGet(ctx, opts.Name, params)
+			})
 	default:
 		// Belt-and-braces: callers (newDependents/Dependencies) hard-
 		// code the verb string, so a mismatch is a programmer error.
 		return nil, 0, nil, fmt.Errorf("internal: unknown closure verb %q", opts.Verb)
 	}
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if statusCode != http.StatusOK {
+		// Non-200 — return the raw body so the caller's
+		// renderHTTPStatus path can classify (401/403/404/409/etc.).
+		return nil, statusCode, body, nil
+	}
+	nodes, derr := decodeClosureNodes(body)
+	if derr != nil {
+		return nil, statusCode, body, derr
+	}
+	return nodes, statusCode, body, nil
+}
+
+// doClosureCall runs one closure HTTP call through the
+// `retryHTTPOn401` 401-refresh harness and drains the body into bytes.
+func doClosureCall(
+	ctx context.Context,
+	authed *api.AuthedClient,
+	call func(ctx context.Context) (*http.Response, error),
+) (int, []byte, error) {
+	rsp, err := retryHTTPOn401(ctx, authed, call)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = rsp.Body.Close() }()
+	body, err := io.ReadAll(rsp.Body)
+	if err != nil {
+		return rsp.StatusCode, nil, fmt.Errorf("read closure response body: %w", err)
+	}
+	return rsp.StatusCode, body, nil
+}
+
+// decodeClosureNodes unmarshals the closure response body into the
+// default `list[TopologyNode]` shape. See `getClosure` for the
+// G0.16-T6 Finding E (#1312) context on why the codegen's typed
+// JSON200 path can't deliver this directly.
+func decodeClosureNodes(body []byte) ([]api.TopologyNode, error) {
+	var nodes []api.TopologyNode
+	if err := json.Unmarshal(body, &nodes); err != nil {
+		return nil, fmt.Errorf("decode closure response: %w", err)
+	}
+	return nodes, nil
 }
 
 // addClosureFlags wires the shared flag set onto a dependents/

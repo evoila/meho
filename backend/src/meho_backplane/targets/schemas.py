@@ -30,7 +30,13 @@ The G0.3-T1.5 (#477) amendment added two fields to :class:`Target`:
   ``extra='forbid'`` so clients cannot seed the G0.6 resolver with
   fabricated values.
 * ``preferred_impl_id`` — operator override for the G0.6 resolver's
-  tie-break ladder. Acceptable on both write schemas.
+  tie-break ladder. Acceptable on both write schemas. The canonical
+  form is **versioned** (``"nsx-rest-4.2"``) per
+  ``docs/codebase/api-shape-conventions.md`` §3 (Enum vocabulary
+  discipline); the base form (``"nsx-rest"``) stays accepted on both
+  ``TargetCreate`` and ``TargetUpdate`` for backward compatibility,
+  and the resolver normalizes both to the same connector
+  (G0.16-T6 Finding C #1312).
 
 ``AuthModel`` is imported from :mod:`meho_backplane.connectors.schemas`
 (G0.2-T1) and re-used here so the enum value set stays in one place.
@@ -40,12 +46,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.connectors.schemas import AuthModel
+
+if TYPE_CHECKING:
+    from meho_backplane.db.models import Target as TargetORM
 
 __all__ = [
     "AuthModel",
@@ -53,25 +62,61 @@ __all__ = [
     "TargetCreate",
     "TargetSummary",
     "TargetUpdate",
+    "project_target_to_summary",
 ]
 
 
 class TargetSummary(BaseModel):
     """Short shape for list endpoints.
 
-    Omits ``notes``, ``extras``, and connection-auth details to keep
-    list responses fast and small. The ``aliases`` field is included
-    because list consumers (CLI ``meho target list``, autocomplete)
-    need it to display secondary names.
+    G0.16-T6 Finding D (#1312) widened this from the previous narrow
+    projection (``id, name, aliases, product, host``) to mirror the
+    detail-endpoint shape's identification + connection-routing
+    fields, including ``version``, ``port``, ``fqdn``, ``secret_ref``,
+    ``auth_model``, ``vpn_required``, ``preferred_impl_id``, and the
+    server-managed timestamps. Per
+    ``docs/codebase/api-shape-conventions.md`` §5, list endpoints
+    must not silently mask fields the detail endpoint exposes
+    (RDC #771 Finding 8 caught list returning ``version=null,
+    secret_ref=null, preferred_impl_id=null`` for targets whose
+    detail endpoint returned actual values; adopters either wrote
+    N+1 calls or accepted silent data masking).
+
+    The two remaining omissions vs :class:`Target` are deliberate:
+    ``notes`` and ``extras``. Both are operator-authored free-form
+    blobs that can carry meaningful payload (``extras`` is
+    capability-marker metadata; ``notes`` is operator commentary)
+    and shipping them in the list response would inflate the page
+    size for the common "give me the names and routing" question
+    that list consumers ask. The convention doc's escape valve
+    applies: when an N+1 cost on these specifically becomes a real
+    concern, a future ``GET /api/v1/targets/summary`` projection
+    endpoint can carry the narrow shape under an explicit name
+    (anti-pattern is silent masking, not documented projection).
+
+    Frozen so callers can stash instances in request state or
+    structured logs without fear of mutation.
     """
 
     model_config = ConfigDict(frozen=True)
 
     id: UUID
+    tenant_id: UUID
     name: str
     aliases: tuple[str, ...]
     product: str
+    version: str | None = None
     host: str
+    port: int | None
+    fqdn: str | None
+    secret_ref: str | None
+    auth_model: AuthModel
+    vpn_required: bool
+    fingerprint: Mapping[str, Any] | None
+    preferred_impl_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None = None
 
 
 class Target(BaseModel):
@@ -236,3 +281,49 @@ class TargetUpdate(BaseModel):
     extras: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
+
+
+def project_target_to_summary(t: TargetORM) -> TargetSummary:
+    """Project a :class:`TargetORM` row to the wire :class:`TargetSummary` shape.
+
+    G0.16-T6 review-iter-1 m1 (#1312). Single canonical projection
+    for both the ``GET /api/v1/targets`` list endpoint
+    (:mod:`meho_backplane.api.v1.targets`) and the
+    :func:`~meho_backplane.targets.resolver.resolve_target`
+    near-miss / ambiguity diagnostics
+    (:mod:`meho_backplane.targets.resolver`). The two sites
+    previously held byte-for-byte duplicate ``_to_summary`` helpers;
+    the drift class they invited is exactly what Finding D caught
+    (list silently masking ``version`` / ``secret_ref`` /
+    ``preferred_impl_id`` while detail returned them). One helper,
+    one place to change, no drift.
+
+    Coerces ``aliases`` from the ORM column's mutable ``list[str]``
+    JSON shape to the wire schema's ``tuple[str, ...]`` so the
+    frozen :class:`TargetSummary` instance is genuinely immutable,
+    and wraps the raw ``auth_model`` string in the
+    :class:`~meho_backplane.connectors.schemas.AuthModel` enum so
+    callers get the typed value the schema declares.
+    """
+    return TargetSummary(
+        id=t.id,
+        tenant_id=t.tenant_id,
+        name=t.name,
+        # ORM stores aliases as ``list[str]`` (mutable JSON column);
+        # the response schema declares ``tuple[str, ...]`` for
+        # frozen-model immutability. Coerce at the boundary.
+        aliases=tuple(t.aliases),
+        product=t.product,
+        version=t.version,
+        host=t.host,
+        port=t.port,
+        fqdn=t.fqdn,
+        secret_ref=t.secret_ref,
+        auth_model=AuthModel(t.auth_model),
+        vpn_required=t.vpn_required,
+        fingerprint=t.fingerprint,
+        preferred_impl_id=t.preferred_impl_id,
+        created_at=t.created_at,
+        updated_at=t.updated_at,
+        deleted_at=t.deleted_at,
+    )

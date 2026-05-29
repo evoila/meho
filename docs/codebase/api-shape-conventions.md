@@ -201,6 +201,18 @@ In practice the SEV-4 sweep that motivated this doc will batch the
 migration onto a single connector-doc-versioned bump (v0.10.0?) so
 adopters change every list call at once.
 
+Code reference: G0.16-T6 Finding A (#1312) lands the reference
+adoption on
+[`GET /api/v1/targets`](../../backend/src/meho_backplane/api/v1/targets.py)
+via the shared helper
+[`backend/src/meho_backplane/api/v1/_envelope.py`](../../backend/src/meho_backplane/api/v1/_envelope.py)
+(``EnvelopeVersion`` type, ``ENVELOPE_QUERY`` declaration,
+``wrap_v2_envelope`` builder). The four sister endpoints
+(``conventions`` / ``audit/my-recent`` / ``broadcast/overrides`` /
+``connectors``) plus the CLI / MCP sister-surface forwarding ship
+in a follow-up Task — the helper module is shared so the
+remaining adoptions are 5-line patches per endpoint.
+
 ## 3. Enum vocabulary discipline
 
 **One identifier per concept across every layer that names it.**
@@ -225,6 +237,15 @@ is named:
 - **TargetCreate / TargetUpdate enums** are the canonical source.
   Anywhere else (catalog `product` field, connector source's
   `auth_model`, MCP tool param descriptions, …) must match.
+
+  Code reference: the regression test
+  :func:`test_catalog_product_field_matches_target_create_enum`
+  in
+  [`backend/tests/test_operations_ingest_catalog.py`](../../backend/tests/test_operations_ingest_catalog.py)
+  pins the catalog ↔ enum convergence structurally so a future
+  drift fails at unit-test time rather than surfacing as a 422
+  on the operator's first POST (G0.16-T6 Finding B #1312;
+  closes the residual surface of RDC #771 Finding 6).
 - **Versioned vs base impl-ids** — pick one. The recommendation
   is **versioned** (`nsx-rest-4.2`) because:
   - Versioned is more specific (avoids ambiguity when multiple
@@ -233,6 +254,14 @@ is named:
     "no version specified, pick the best match" cleanly.
   - The release-readiness doc cites connectors by versioned
     impl_id throughout.
+
+  Code reference: `_registered_impl_ids` in
+  [`backend/src/meho_backplane/api/v1/targets.py`](../../backend/src/meho_backplane/api/v1/targets.py)
+  and the `preferred_impl_id` branch of `_run_tie_break_ladder`
+  in [`backend/src/meho_backplane/connectors/resolver.py`](../../backend/src/meho_backplane/connectors/resolver.py)
+  both accept the versioned form alongside the base form
+  (G0.16-T6 Finding C #1312); the resolver normalizes versioned →
+  base before matching candidates.
 - **Connector-protocol vocabulary stays inside the connector.**
   GitHub's "App vs PAT" is a connector-internal concern; the
   TargetCreate enum sees only the identity-model dimension
@@ -275,6 +304,19 @@ When the two diverge, the MCP shape is usually the more
 considered one (more recent, more agent-facing). Migration goes
 REST-toward-MCP, not the other way.
 
+Code reference: G0.16-T6 Finding E (#1312) lands the migration
+on `GET /api/v1/topology/dependents/{name}` and
+`/dependencies/{name}` via the `?envelope=v2` opt-in (shared
+helper from Finding A). Default response stays the v0.8.0 bare
+`list[TopologyNode]` so no client breaks; the opt-in returns
+`{"kind": "dependents", "nodes": [...]}` matching the MCP
+`query_topology` tool's response. The wider topology endpoint
+set (`path` / `edges` / `timeline` / `diff` / `history`) ships
+in a follow-up Task — those endpoints already return typed
+dict envelopes (no bare list) so the v2 opt-in needs an
+endpoint-specific decision on whether to retain the existing
+field names or migrate to the §2 `items` form.
+
 ## 5. List ↔ detail field consistency
 
 **List endpoints return the same fields as their detail siblings.**
@@ -304,6 +346,18 @@ expensive fields:
 Documenting the projection is the convention. Silently
 projecting and surfacing the same shape as detail is the
 anti-pattern.
+
+Code reference: :class:`TargetSummary` in
+[`backend/src/meho_backplane/targets/schemas.py`](../../backend/src/meho_backplane/targets/schemas.py)
+mirrors :class:`Target`'s field set with the two deliberate
+omissions (``notes``, ``extras``) called out as
+operator-authored free-form blobs that inflate the list page
+without serving the common "names + routing" question. The
+regression test
+:func:`test_target_summary_field_set_superset_of_target` pins
+the contract structurally so a future field added to
+:class:`Target` without a matching :class:`TargetSummary`
+update fails CI (G0.16-T6 Finding D #1312).
 
 ## 6. Event-stream discriminators
 
@@ -340,6 +394,23 @@ Consumers switch on `kind`. No nullable-fields convention; no
 The migration is similar to §2: add a `kind` field to every
 write, normalize consumers to switch on it, deprecate the
 "infer from fields" path over two release cycles.
+
+Code reference: G0.16-T6 Finding F (#1312) lands the `kind`
+field on both writers:
+
+- [`BroadcastEvent.kind`](../../backend/src/meho_backplane/broadcast/events.py)
+  defaults to `"operation"` (the audit-derived majority shape;
+  pre-migration entries lacking the field on the wire fall back to
+  the same default, so the historical window doesn't need a
+  data-migration sweep).
+- [`AgentAnnouncementEvent.kind`](../../backend/src/meho_backplane/broadcast/agent_events.py)
+  is `Literal["agent_announcement"]`; the historical `event_kind`
+  field stays serialised as a backward-compat alias so v0.8.0
+  in-flight stream entries continue to round-trip.
+- The shared consumer
+  [`broadcast.history.parse_entry`](../../backend/src/meho_backplane/broadcast/history.py)
+  switches on the top-level `kind` first, falling back to
+  `event_kind` for the v0.8.0 shape.
 
 ## 7. Probe ↔ dispatch path agreement
 
@@ -392,6 +463,20 @@ Two acceptable resolutions when the docs and impl disagree:
 The anti-pattern is "the docs are aspirational; the impl is
 what it is". Both are part of the API surface; they must agree.
 
+Code reference: G0.16-T6 Finding G (#1312) reconciled the
+``since`` parameter across both fronts on resolution (a)
+(extend the impl). The MCP ``meho.broadcast.recent`` parser
+in
+[`backend/src/meho_backplane/broadcast/history.py`](../../backend/src/meho_backplane/broadcast/history.py)
+(``_normalise_since`` + ``_iso8601_to_min_cursor``) already
+accepted ISO; the REST ``GET /api/v1/feed`` cursor validator
+in
+[`backend/src/meho_backplane/api/v1/feed.py`](../../backend/src/meho_backplane/api/v1/feed.py)
+(``_validate_cursor_or_400`` + ``_normalize_iso_to_cursor``)
+joined it on the same dual-acceptance contract — operator
+types a timestamp, both surfaces normalise to a bare-ms Valkey
+cursor under the hood.
+
 A `make check-docs-impl-agreement` CI gate is the long-game
 enforcement here, generated by parsing tool descriptions and
 spinning up a property-based test that exercises the documented
@@ -432,6 +517,19 @@ The choice is per-connector-family because GitHub-shape APIs
 from the spec's documentation version) need (2), while
 VMware-shape APIs (where the catalog version IS the product
 version) work cleanly with (1).
+
+Code reference: the catalog schema field
+``spec_info_versions_compatible`` in
+[`backend/src/meho_backplane/operations/ingest/catalog.py`](../../backend/src/meho_backplane/operations/ingest/catalog.py)
+(plus the
+``spec_info_version_matches_compatibility_specifier`` helper)
+implements resolution (2). The shipped vmware entry adopts
+``spec_info_versions_compatible: ["9.0.x"]`` as a
+belt-and-suspenders declaration over the PEP-440 prefix-match
+that already treats ``"9.0"`` ↔ ``"9.0.0.0"`` as exact
+(G0.16-T6 Finding H #1312); T5 (#1307) carries the
+load-bearing application on the gh-rest entry where the
+divergence (``"3"`` ↔ ``"1.1.4"``) blocks ingest without it.
 
 ## 10. Where the conventions live in code
 

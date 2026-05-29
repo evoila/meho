@@ -59,7 +59,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import respx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport
 
 from meho_backplane.api.v1.feed import _feed_generator
@@ -433,6 +433,35 @@ class TestFeedEndpoint:
         )
         assert response.status_code == 400
         assert response.json()["detail"].startswith("invalid_cursor")
+
+    def test_iso_since_normalises_to_bare_ms_cursor(self) -> None:
+        """ISO-8601 ``since`` round-trips to a numeric Valkey-cursor (Finding G).
+
+        G0.16-T6 Finding G (#1312). Per
+        ``docs/codebase/api-shape-conventions.md`` §8 the SSE feed
+        now accepts the same ISO-8601 shape the MCP
+        ``broadcast.recent`` tool already advertised; the helper
+        normalises a UTC timestamp to a bare-ms cursor consistent
+        with Valkey's stream-id epoch.
+        """
+        from meho_backplane.api.v1.feed import _validate_cursor_or_400
+
+        # 2026-05-25T10:00:00Z → 1779703200000 ms since epoch
+        # (the live timestamp at the instant the operator types it;
+        # round-trippable through ``int(dt.timestamp() * 1000)``).
+        expected_ms = "1779703200000"
+        assert _validate_cursor_or_400("2026-05-25T10:00:00Z") == expected_ms
+        # Naive timestamp treated as UTC, not the worker's local TZ.
+        assert _validate_cursor_or_400("2026-05-25T10:00:00") == expected_ms
+        # TZ-offset preserved through the .timestamp() call.
+        assert _validate_cursor_or_400("2026-05-25T12:00:00+02:00") == expected_ms
+        # Existing forms still accepted unchanged.
+        assert _validate_cursor_or_400("$") == "$"
+        assert _validate_cursor_or_400(f"{expected_ms}-0") == f"{expected_ms}-0"
+        # A bare date (no ``T``) stays rejected — too easy to typo.
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_cursor_or_400("2026-05-25")
+        assert exc_info.value.status_code == 400
 
 
 # ---------------------------------------------------------------------------

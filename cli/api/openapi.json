@@ -409,7 +409,7 @@
           "targets"
         ],
         "summary": "List Targets",
-        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.\n\nSoft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)\nare excluded from the list \u2014 the same filter the resolver applies\nso list and dispatch never disagree about which targets are\nvisible to the tenant.",
+        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.\n\nSoft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)\nare excluded from the list \u2014 the same filter the resolver applies\nso list and dispatch never disagree about which targets are\nvisible to the tenant.\n\nG0.16-T6 Finding A (#1312) \u2014 non-breaking shape opt-in. The\ndefault response stays the v0.8.0 bare list ``[TargetSummary,\n...]``; passing ``?envelope=v2`` returns the unified envelope\n``{\"items\": [...], \"next_cursor\": <opaque str | null>}`` per\n``docs/codebase/api-shape-conventions.md`` \u00a72. The cursor on the\nv2 envelope is the last-row ``name`` of the page when the page\nfilled to ``limit`` (so a re-issue carries pagination), and\n``None`` when the page exhausted the matching set (so callers\nsee \"no more pages\" without inspecting list length). The opt-in\nsemantics let SDK / CLI / MCP sister surfaces adopt the v2\nshape at their own cadence; the v0.8.0 default flips after two\nrelease cycles per the \u00a72 migration recipe.",
         "operationId": "list_targets_api_v1_targets_get",
         "parameters": [
           {
@@ -445,6 +445,19 @@
             }
           },
           {
+            "name": "envelope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "v2",
+              "type": "string",
+              "nullable": true,
+              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "title": "Envelope"
+            },
+            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
+          },
+          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -461,10 +474,18 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TargetSummary"
-                  },
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TargetSummary"
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  ],
                   "title": "Response List Targets Api V1 Targets Get"
                 }
               }
@@ -863,7 +884,7 @@
           "topology"
         ],
         "summary": "Dependents",
-        "description": "Reverse closure: every node that depends on *name*.\n\nWraps :func:`~meho_backplane.topology.query.find_dependents`. The\nroot node is included at depth 0 so a caller can distinguish \"node\nexists but has no dependents\" (one-element list) from \"node does\nnot exist in this tenant\" (empty list).\n\n``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique\nrow; omit it only when *name* is unique across kinds in the tenant.\nA bare *name* that resolves to multiple kinds returns 409\n(``ambiguous_node``) rather than silently merging unrelated\nclosures. ``kind_filter`` restricts the walk to edges of that\n``graph_edge.kind``.",
+        "description": "Reverse closure: every node that depends on *name*.\n\nWraps :func:`~meho_backplane.topology.query.find_dependents`. The\nroot node is included at depth 0 so a caller can distinguish \"node\nexists but has no dependents\" (one-element list) from \"node does\nnot exist in this tenant\" (empty list).\n\n``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique\nrow; omit it only when *name* is unique across kinds in the tenant.\nA bare *name* that resolves to multiple kinds returns 409\n(``ambiguous_node``) rather than silently merging unrelated\nclosures. ``kind_filter`` restricts the walk to edges of that\n``graph_edge.kind``.\n\nG0.16-T6 Finding E (#1312) \u2014 opt-in to the REST\u2194MCP envelope\nagreement per ``docs/codebase/api-shape-conventions.md`` \u00a74.\nDefault response stays the v0.8.0 bare ``list[TopologyNode]`` so\nno client breaks; passing ``?envelope=v2`` returns the\ndiscriminated envelope ``{\"kind\": \"dependents\", \"nodes\": [...]}``\nmatching the MCP ``query_topology`` tool's shape. The convention\ndoc names \"migration is REST-toward-MCP, not the other way\";\nthe v2 opt-in is the migration mechanism.",
         "operationId": "dependents_api_v1_topology_dependents__name__get",
         "parameters": [
           {
@@ -908,6 +929,19 @@
             }
           },
           {
+            "name": "envelope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "v2",
+              "type": "string",
+              "nullable": true,
+              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "title": "Envelope"
+            },
+            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
+          },
+          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -924,10 +958,18 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TopologyNode"
-                  },
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopologyNode"
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  ],
                   "title": "Response Dependents Api V1 Topology Dependents  Name  Get"
                 }
               }
@@ -952,7 +994,7 @@
           "topology"
         ],
         "summary": "Dependencies",
-        "description": "Forward closure: everything *name* depends on.\n\nThe mirror of :func:`dependents` \u2014 same shape, same one-row-per-\nnode closure dedupe, same ``kind`` disambiguation contract, same\ntenant scoping \u2014 walking edges out of the current node rather than\ninto it. Wraps\n:func:`~meho_backplane.topology.query.find_dependencies`.",
+        "description": "Forward closure: everything *name* depends on.\n\nThe mirror of :func:`dependents` \u2014 same shape, same one-row-per-\nnode closure dedupe, same ``kind`` disambiguation contract, same\ntenant scoping \u2014 walking edges out of the current node rather than\ninto it. Wraps\n:func:`~meho_backplane.topology.query.find_dependencies`. Honours\nthe same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)\nreturning ``{\"kind\": \"dependencies\", \"nodes\": [...]}``.",
         "operationId": "dependencies_api_v1_topology_dependencies__name__get",
         "parameters": [
           {
@@ -997,6 +1039,19 @@
             }
           },
           {
+            "name": "envelope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "v2",
+              "type": "string",
+              "nullable": true,
+              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "title": "Envelope"
+            },
+            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
+          },
+          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -1013,10 +1068,18 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TopologyNode"
-                  },
+                  "anyOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TopologyNode"
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  ],
                   "title": "Response Dependencies Api V1 Topology Dependencies  Name  Get"
                 }
               }
@@ -12734,6 +12797,11 @@
             "format": "uuid",
             "title": "Id"
           },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
           "name": {
             "type": "string",
             "title": "Name"
@@ -12749,21 +12817,85 @@
             "type": "string",
             "title": "Product"
           },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Version"
+          },
           "host": {
             "type": "string",
             "title": "Host"
+          },
+          "port": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Port"
+          },
+          "fqdn": {
+            "type": "string",
+            "nullable": true,
+            "title": "Fqdn"
+          },
+          "secret_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "auth_model": {
+            "$ref": "#/components/schemas/AuthModel"
+          },
+          "vpn_required": {
+            "type": "boolean",
+            "title": "Vpn Required"
+          },
+          "fingerprint": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Fingerprint"
+          },
+          "preferred_impl_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Preferred Impl Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Deleted At"
           }
         },
         "type": "object",
         "required": [
           "id",
+          "tenant_id",
           "name",
           "aliases",
           "product",
-          "host"
+          "host",
+          "port",
+          "fqdn",
+          "secret_ref",
+          "auth_model",
+          "vpn_required",
+          "fingerprint",
+          "preferred_impl_id",
+          "created_at",
+          "updated_at"
         ],
         "title": "TargetSummary",
-        "description": "Short shape for list endpoints.\n\nOmits ``notes``, ``extras``, and connection-auth details to keep\nlist responses fast and small. The ``aliases`` field is included\nbecause list consumers (CLI ``meho target list``, autocomplete)\nneed it to display secondary names."
+        "description": "Short shape for list endpoints.\n\nG0.16-T6 Finding D (#1312) widened this from the previous narrow\nprojection (``id, name, aliases, product, host``) to mirror the\ndetail-endpoint shape's identification + connection-routing\nfields, including ``version``, ``port``, ``fqdn``, ``secret_ref``,\n``auth_model``, ``vpn_required``, ``preferred_impl_id``, and the\nserver-managed timestamps. Per\n``docs/codebase/api-shape-conventions.md`` \u00a75, list endpoints\nmust not silently mask fields the detail endpoint exposes\n(RDC #771 Finding 8 caught list returning ``version=null,\nsecret_ref=null, preferred_impl_id=null`` for targets whose\ndetail endpoint returned actual values; adopters either wrote\nN+1 calls or accepted silent data masking).\n\nThe two remaining omissions vs :class:`Target` are deliberate:\n``notes`` and ``extras``. Both are operator-authored free-form\nblobs that can carry meaningful payload (``extras`` is\ncapability-marker metadata; ``notes`` is operator commentary)\nand shipping them in the list response would inflate the page\nsize for the common \"give me the names and routing\" question\nthat list consumers ask. The convention doc's escape valve\napplies: when an N+1 cost on these specifically becomes a real\nconcern, a future ``GET /api/v1/targets/summary`` projection\nendpoint can carry the narrow shape under an explicit name\n(anti-pattern is silent masking, not documented projection).\n\nFrozen so callers can stash instances in request state or\nstructured logs without fear of mutation."
       },
       "TargetUpdate": {
         "properties": {

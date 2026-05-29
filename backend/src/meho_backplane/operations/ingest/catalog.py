@@ -210,6 +210,11 @@ class ConnectorSpecEntry(BaseModel):
     #: ``main``) — orthogonal to the ``v3`` product-line label
     #: github.com calls the API. Without the opt-in, every upstream
     #: bump breaks ingest until an operator hand-edits the catalog.
+    #:
+    #: G0.16-T6 Finding H (#1312) — same field is now used by the
+    #: vmware catalog row to declare its ``"9.0.x"`` band so the
+    #: catalog and explicit-quadruple ingest shapes converge on
+    #: a single ``connector_id``.
     spec_info_versions_compatible: tuple[str, ...] | None = None
     sha256: str | None = Field(default=None, max_length=64)
     notes: str = Field(default="", max_length=2048)
@@ -316,6 +321,57 @@ class CatalogListResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     catalog: tuple[ConnectorSpecEntry, ...]
+
+
+def spec_info_version_matches_compatibility_specifier(
+    info_version: str,
+    specifier: str,
+) -> bool:
+    """Return ``True`` iff *info_version* matches the catalog *specifier*.
+
+    G0.16-T6 Finding H (#1312) — companion to T5 (#1307). The
+    catalog's ``spec_info_versions_compatible`` field declares which
+    spec ``info.version`` strings the validator should accept under a
+    catalog label whose ``version`` doesn't match the spec verbatim
+    (per ``docs/codebase/api-shape-conventions.md`` §9). Two specifier
+    shapes:
+
+    * **Wildcard** (``"9.0.x"``) — release-tuple prefix match on the
+      part before ``.x``. ``"9.0.x"`` matches any spec whose PEP 440
+      release tuple starts with ``(9, 0, ...)`` (so ``9.0``, ``9.0.0``,
+      ``9.0.0.0``, and ``9.0.3`` all match; ``9.1.0`` doesn't).
+    * **Exact / prefix** (``"9.0.3"``) — bare PEP 440 version; matches
+      the spec verbatim or via release-tuple prefix
+      (``Version("9.0.3").release == (9, 0, 3)`` ⊆ a spec
+      ``9.0.3.0``'s release ``(9, 0, 3, 0)``). Same semantics as
+      :func:`_classify_version_match`'s "exact" band for non-wildcard
+      labels.
+
+    Returns ``False`` on PEP-440-unparseable input rather than raising
+    — the catalog validator already enforces the specifier is
+    well-formed at parse time, so any runtime PEP-440 failure here
+    points at the spec, not the catalog, and ``False`` lets the
+    caller fall through to the next specifier (or the structured
+    ``spec_label_mismatch`` envelope).
+    """
+    try:
+        spec_v = Version(info_version)
+    except InvalidVersion:
+        return False
+    if specifier.endswith(".x"):
+        prefix_str = specifier[: -len(".x")]
+        try:
+            prefix_v = Version(prefix_str)
+        except InvalidVersion:
+            return False
+        return spec_v.release[: len(prefix_v.release)] == prefix_v.release
+    try:
+        bare_v = Version(specifier)
+    except InvalidVersion:
+        return False
+    if spec_v == bare_v:
+        return True
+    return spec_v.release[: len(bare_v.release)] == bare_v.release
 
 
 def parse_catalog(raw: str) -> ConnectorSpecCatalog:

@@ -84,15 +84,41 @@ def test_target_is_frozen() -> None:
 
 
 def test_target_summary_is_frozen() -> None:
-    s = TargetSummary(
-        id=uuid.uuid4(),
-        name="prod-k8s",
-        aliases=["k8s"],
-        product="kubernetes",
-        host="10.0.0.1",
-    )
+    s = _make_summary()
     with pytest.raises(ValidationError):
         s.name = "mutated"  # type: ignore[misc]
+
+
+def _make_summary(**overrides: Any) -> TargetSummary:
+    """Helper: construct a :class:`TargetSummary` with sensible defaults.
+
+    G0.16-T6 Finding D (#1312) widened :class:`TargetSummary` to
+    mirror the detail-endpoint shape per
+    ``docs/codebase/api-shape-conventions.md`` §5; the helper carries
+    a fully-populated default so each test names only the fields it
+    asserts on.
+    """
+    defaults: dict[str, Any] = {
+        "id": uuid.uuid4(),
+        "tenant_id": uuid.uuid4(),
+        "name": "prod-k8s",
+        "aliases": ["k8s"],
+        "product": "kubernetes",
+        "version": None,
+        "host": "10.0.0.1",
+        "port": None,
+        "fqdn": None,
+        "secret_ref": None,
+        "auth_model": AuthModel.SHARED_SERVICE_ACCOUNT,
+        "vpn_required": False,
+        "fingerprint": None,
+        "preferred_impl_id": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+        "deleted_at": None,
+    }
+    defaults.update(overrides)
+    return TargetSummary(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +159,35 @@ def test_target_round_trip_lossless() -> None:
 
 
 def test_target_summary_round_trip_lossless() -> None:
-    s = TargetSummary(
-        id=uuid.uuid4(),
+    s = _make_summary(
         name="rdc-vcenter",
         aliases=["vcenter"],
         product="vsphere",
         host="vcenter.corp.internal",
     )
     assert TargetSummary.model_validate(s.model_dump()) == s
+
+
+def test_target_summary_field_set_superset_of_target() -> None:
+    """List-row field set ⊇ detail field set (G0.16-T6 Finding D #1312).
+
+    Per ``docs/codebase/api-shape-conventions.md`` §5 the list
+    endpoint must not silently mask fields the detail endpoint
+    exposes. The two deliberately-omitted fields are ``notes`` and
+    ``extras`` (operator-authored blobs that can carry meaningful
+    payload but inflate the list page for the common
+    "names + routing" question). Every other detail field must
+    appear on :class:`TargetSummary`.
+    """
+    target_fields = set(Target.model_fields)
+    summary_fields = set(TargetSummary.model_fields)
+    deliberately_omitted = {"notes", "extras"}
+    silently_masked = target_fields - summary_fields - deliberately_omitted
+    assert silently_masked == set(), (
+        f"TargetSummary silently masks {silently_masked!r} relative to "
+        "Target; widen the projection or document the omission as a "
+        "summary-shape decision per api-shape-conventions.md §5."
+    )
 
 
 def test_target_round_trip_with_empty_aliases() -> None:

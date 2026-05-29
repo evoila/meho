@@ -101,6 +101,52 @@ connector-related release-notes line.
   Companion to G0.16-T6 Finding 22 / Task #1312 H for vmware catalog
   `9.0` vs spec `9.0.0.0` — the new field is available for the
   vmware variant to adopt if Task #1312 chooses approach (b). (#1307)
+- **`?envelope=v2` opt-in on the REST topology dependents /
+  dependencies endpoints (G0.16-T6 Finding E #1312).** Passing
+  `?envelope=v2` returns `{"kind": "dependents", "nodes": [...]}`
+  or `{"kind": "dependencies", "nodes": [...]}` matching the MCP
+  `query_topology` tool's response shape per
+  `docs/codebase/api-shape-conventions.md` §4 (migration goes
+  REST-toward-MCP). Default response stays the v0.8.0 bare
+  `list[TopologyNode]` so no client breaks. The wider topology
+  endpoint set (`path` / `edges` / `timeline` / `diff` /
+  `history`) ships in a follow-up Task — those endpoints already
+  return typed dict envelopes that need endpoint-specific
+  migration decisions.
+- **`GET /api/v1/targets?envelope=v2` opt-in returns the unified
+  list shape (G0.16-T6 Finding A reference adoption #1312).**
+  Pass `?envelope=v2` to receive `{items, next_cursor?}` per
+  `docs/codebase/api-shape-conventions.md` §2; omit to keep the
+  v0.8.0 bare-list default. The shared helper
+  `backend/src/meho_backplane/api/v1/_envelope.py` carries the
+  `EnvelopeVersion` type, the `ENVELOPE_QUERY` declaration, and
+  the `wrap_v2_envelope` builder so the four sister endpoints
+  (`conventions`, `audit/my-recent`, `broadcast/overrides`,
+  `connectors`) can opt in via 5-line patches in a follow-up. CLI
+  and MCP sister-surface forwarding ships in the same follow-up.
+- **Top-level `kind` discriminator on `meho:feed:{tenant_id}`
+  entries (G0.16-T6 Finding F #1312).** Every write to the
+  per-tenant broadcast stream carries `"kind": "operation"` (audit-
+  driven `BroadcastEvent`) or `"kind": "agent_announcement"`
+  (`AgentAnnouncementEvent`) per
+  `docs/codebase/api-shape-conventions.md` §6. Consumers
+  normalize on `kind`; the historical `event_kind` field stays
+  serialised on `AgentAnnouncementEvent` for backward
+  compatibility with v0.8.0 in-flight stream entries, and pre-
+  migration `BroadcastEvent` entries lacking the field on the
+  wire infer `kind="operation"` from the model's attribute
+  default. Closes the "infer from `op_id`-vs-`activity` field
+  presence" anti-pattern RDC #771 Finding 13 catalogued.
+- **vmware catalog row adopts `spec_info_versions_compatible:
+  ["9.0.x"]` (G0.16-T6 Finding H #1312).** Builds on the
+  catalog field shipped via T5 (#1307). The shipped vmware
+  entry now declares the band as a belt-and-suspenders
+  declaration over the existing PEP-440 prefix-match
+  (vmware `9.0` ↔ spec `9.0.0.0` already classifies as
+  "exact"). Pairs with T5 which carries the load-bearing
+  application for the gh-rest entry where the divergence
+  (`"3"` ↔ `"1.1.4"`) blocks ingest without an explicit
+  compatibility hint.
 
 ### Changed
 
@@ -122,6 +168,36 @@ connector-related release-notes line.
   remediation path. The structured `extras` (`error_code`,
   `missing_op_ids`, `catalog_command`) are unchanged — agents that
   branch on those fields keep working without migration (#1303).
+- **`GET /api/v1/feed?since=` accepts ISO-8601 timestamps
+  (G0.16-T6 Finding G #1312).** The SSE feed now mirrors the MCP
+  `broadcast.recent` tool's documented contract: operators can
+  pass `?since=2026-05-25T10:00:00Z` and let the route normalise
+  to a bare-ms Valkey cursor, instead of having to look up the
+  Valkey-id of the entry at that instant. Pre-existing Valkey-id
+  forms (`1779177600000-0`, `$`) stay accepted unchanged. Closes
+  the docs↔impl-disagreement RDC #771 Finding 15 catalogued per
+  `docs/codebase/api-shape-conventions.md` §8 (resolution (a),
+  extend the impl). Bare dates (no `T`) stay rejected as
+  likely-typos.
+- **Catalog ↔ TargetCreate enum reconciliation locked in
+  structurally (G0.16-T6 Finding B #1312).** RDC #771 Finding 6
+  caught the v0.7-era `"sddc"` vs `"sddc-manager"` catalog-vs-enum
+  mismatch; subsequent connector renames had already converged
+  the catalog to `"sddc-manager"`. The verification regression
+  test added in
+  `backend/tests/test_operations_ingest_catalog.py` keeps the
+  alignment locked in: a future catalog typo or connector rename
+  without the matching counterpart edit fails CI rather than
+  surfacing as a 422 on the operator's first POST.
+- **`preferred_impl_id` accepts the versioned form on both POST and
+  PATCH (G0.16-T6 Finding C #1312).** `TargetCreate` and `TargetUpdate`
+  validators now treat the canonical `"impl_id-version"` shape
+  (e.g. `"nsx-rest-4.2"`) as a valid alternative to the base
+  `"nsx-rest"` form, matching `docs/codebase/api-shape-conventions.md`
+  §3. The resolver normalizes versioned → base before tie-break
+  matching, so an operator typing either form lands on the same
+  connector. The unknown-impl 422 lists both forms in
+  `valid_impl_ids` for branchable client recovery.
 
 ### Fixed
 
@@ -196,6 +272,19 @@ connector-related release-notes line.
   check. Consumer signal:
   [`claude-rdc-hetzner-dc#771` Finding 18](https://github.com/evoila-bosnia/meho-internal/issues/771).
   (#1307)
+- **`GET /api/v1/targets` no longer silently masks detail fields
+  (G0.16-T6 Finding D #1312).** `TargetSummary` widened to mirror
+  the detail-endpoint shape per
+  `docs/codebase/api-shape-conventions.md` §5: list rows now
+  surface `version`, `tenant_id`, `port`, `fqdn`, `secret_ref`,
+  `auth_model`, `vpn_required`, `fingerprint`, `preferred_impl_id`,
+  and the `created_at` / `updated_at` / `deleted_at` timestamps.
+  The two deliberate omissions (`notes`, `extras`) are operator
+  free-form blobs documented in `TargetSummary`'s docstring. A
+  structural regression test in
+  `tests/test_targets_schemas.py` keeps the contract pinned so a
+  future field added to `Target` without the matching summary
+  update fails CI.
 
 ## [0.8.0] - 2026-05-28
 

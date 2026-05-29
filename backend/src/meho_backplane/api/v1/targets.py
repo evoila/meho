@@ -138,6 +138,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1._envelope import (
+    ENVELOPE_QUERY,
+    EnvelopeVersion,
+    wrap_v2_envelope,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.base import Connector
@@ -149,7 +154,13 @@ from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.targets.resolver import resolve_target
-from meho_backplane.targets.schemas import Target, TargetCreate, TargetSummary, TargetUpdate
+from meho_backplane.targets.schemas import (
+    Target,
+    TargetCreate,
+    TargetSummary,
+    TargetUpdate,
+    project_target_to_summary,
+)
 
 __all__ = ["router"]
 
@@ -274,17 +285,14 @@ class TargetsDiscoverResult(BaseModel):
     skipped: list[SkippedConnector]
 
 
-def _to_summary(t: TargetORM) -> TargetSummary:
-    return TargetSummary(
-        id=t.id,
-        name=t.name,
-        # ORM stores aliases as ``list[str]`` (mutable JSON column);
-        # the response schema declares ``tuple[str, ...]`` for
-        # frozen-model immutability. Coerce at the boundary.
-        aliases=tuple(t.aliases),
-        product=t.product,
-        host=t.host,
-    )
+# G0.16-T6 review-iter-1 m1 (#1312). The ORM→TargetSummary projection
+# was previously duplicated byte-for-byte on this module and on
+# :mod:`meho_backplane.targets.resolver`; the duplication was the
+# drift class that produced Finding D (list silently masking version
+# / secret_ref / preferred_impl_id while detail returned them).
+# Single canonical helper now lives at
+# :func:`meho_backplane.targets.schemas.project_target_to_summary`;
+# both sites import + call it directly.
 
 
 def _build_unknown_product_detail(
@@ -371,8 +379,8 @@ def _registered_products() -> set[str]:
     return {product for (product, _version, _impl_id) in all_connectors_v2() if product}
 
 
-def _registered_impl_ids() -> set[str]:
-    """Return the set of impl_ids advertised by registered connector classes.
+def _registered_impl_ids(product: str) -> set[str]:
+    """Return the impl_ids advertised by connectors registered for *product*.
 
     G0.15-T6 (#1215). The v0.7.0 dogfood (RDC #753, signal 6) caught a
     UX foot-gun where PATCH accepted any string for ``preferred_impl_id``
@@ -386,6 +394,16 @@ def _registered_impl_ids() -> set[str]:
     at write time that the resolver would give if it surfaced the
     silent-ignore.
 
+    G0.16-T6 review-iter-1 B1 (#1312). The set is **product-scoped**.
+    A global allowlist (the pre-B1 shape) accepted any impl_id
+    registered for *any* product, so a ``k8s`` target could pass
+    validation with ``preferred_impl_id="vmware-rest-9.0"`` and the
+    resolver would silently ignore it at dispatch time -- the exact
+    foot-gun G0.15-T6 (#1215) was created to close. The filter is
+    consulted at both POST (``body.product``) and PATCH (the
+    effective patched product, post-update) so the validator and the
+    resolver see the same impl set for the same target.
+
     Read from the v2 registry snapshot (which subsumes v1 entries as
     ``(product, "", "")``); the empty-string placeholder is excluded
     because a bare ``""`` impl_id has no addressable meaning at the
@@ -394,8 +412,32 @@ def _registered_impl_ids() -> set[str]:
     ``None``, not the empty string). Returned as a fresh ``set`` so
     callers can mutate / sort without affecting the underlying
     registry.
+
+    G0.16-T6 Finding C (#1312). The set includes BOTH the base
+    ``impl_id`` (``"nsx-rest"``) AND the versioned form
+    ``"{impl_id}-{version}"`` (``"nsx-rest-4.2"``) for every triple
+    with a non-empty ``version``. The versioned form is the canonical
+    shape per ``docs/codebase/api-shape-conventions.md`` §3 because
+    it's more specific (disambiguates when multiple connector versions
+    ship in one release) and it matches the ``connector_id`` string
+    the dispatcher's ``parse_connector_id`` round-trips through. The
+    base form stays accepted so existing operators / fixtures that
+    pin ``preferred_impl_id="nsx-rest"`` aren't broken. The resolver
+    (:func:`meho_backplane.connectors.resolver._run_tie_break_ladder`)
+    normalizes both forms to the base ``impl_id`` before matching
+    candidates, so picking either form selects the same connector
+    when only one version is registered.
     """
-    return {impl_id for (_product, _version, impl_id) in all_connectors_v2() if impl_id}
+    scoped = [
+        (reg_product, version, impl_id)
+        for (reg_product, version, impl_id) in all_connectors_v2()
+        if reg_product == product
+    ]
+    base_ids = {impl_id for (_p, _version, impl_id) in scoped if impl_id}
+    versioned_ids = {
+        f"{impl_id}-{version}" for (_p, version, impl_id) in scoped if impl_id and version
+    }
+    return base_ids | versioned_ids
 
 
 def _build_unknown_preferred_impl_detail(
@@ -411,6 +453,13 @@ def _build_unknown_preferred_impl_detail(
     remediation step. The 422 status (vs 404) matches the rest of the
     targets surface: a body field carried a value the server cannot
     honour, so the request was unprocessable.
+
+    G0.16-T6 Finding C (#1312). ``valid_impl_ids`` carries BOTH the
+    base ``impl_id`` and the canonical versioned
+    ``"{impl_id}-{version}"`` form per
+    ``docs/codebase/api-shape-conventions.md`` §3, so an operator
+    typing either shape gets the same actionable diagnostic listing
+    both alternatives.
     """
     return {
         "kind": "unknown_preferred_impl_id",
@@ -419,22 +468,27 @@ def _build_unknown_preferred_impl_detail(
         "message": (
             f"preferred_impl_id={preferred_impl_id!r} is not registered; "
             f"pick one of {valid_impl_ids!r} or register a connector for "
-            f"it before retrying. The resolver silently ignores unknown "
-            f"impl_id overrides; this 422 surfaces the foot-gun at write "
-            f"time. See docs/codebase/error-message-shape.md for the "
-            f"convention."
+            f"it before retrying. The canonical form is versioned "
+            f"(e.g. 'nsx-rest-4.2'); the base form ('nsx-rest') stays "
+            f"accepted for backward compatibility. The resolver silently "
+            f"ignores unknown impl_id overrides; this 422 surfaces the "
+            f"foot-gun at write time. See "
+            f"docs/codebase/error-message-shape.md for the convention "
+            f"and docs/codebase/api-shape-conventions.md §3 for the "
+            f"versioned-vs-base impl-id discipline."
         ),
     }
 
 
-@router.get("", response_model=list[TargetSummary])
+@router.get("")
 async def list_targets(
     product: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     cursor: str | None = Query(default=None),
+    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
     session: AsyncSession = Depends(get_session),
-) -> list[TargetSummary]:
+) -> list[TargetSummary] | dict[str, object]:
     """List targets for the requesting tenant.
 
     Results are keyset-paginated by ``name`` (lexicographic order).
@@ -446,6 +500,19 @@ async def list_targets(
     are excluded from the list — the same filter the resolver applies
     so list and dispatch never disagree about which targets are
     visible to the tenant.
+
+    G0.16-T6 Finding A (#1312) — non-breaking shape opt-in. The
+    default response stays the v0.8.0 bare list ``[TargetSummary,
+    ...]``; passing ``?envelope=v2`` returns the unified envelope
+    ``{"items": [...], "next_cursor": <opaque str | null>}`` per
+    ``docs/codebase/api-shape-conventions.md`` §2. The cursor on the
+    v2 envelope is the last-row ``name`` of the page when the page
+    filled to ``limit`` (so a re-issue carries pagination), and
+    ``None`` when the page exhausted the matching set (so callers
+    see "no more pages" without inspecting list length). The opt-in
+    semantics let SDK / CLI / MCP sister surfaces adopt the v2
+    shape at their own cadence; the v0.8.0 default flips after two
+    release cycles per the §2 migration recipe.
     """
     stmt = select(TargetORM).where(
         TargetORM.tenant_id == operator.tenant_id,
@@ -455,9 +522,26 @@ async def list_targets(
         stmt = stmt.where(TargetORM.product == product)
     if cursor is not None:
         stmt = stmt.where(TargetORM.name > cursor)
-    stmt = stmt.order_by(TargetORM.name).limit(limit)
+    # G0.16-T6 review-iter-1 M1 (#1312). Over-fetch ``limit + 1`` so the
+    # presence of an extra row directly proves there's another page,
+    # rather than inferring from ``len(rows) >= limit`` (which produces
+    # a false-positive non-null ``next_cursor`` on the terminal page
+    # when the matching set size is an exact multiple of ``limit``).
+    # The bare-list branch slices back to ``limit`` so the v0.8.0 shape
+    # is unchanged.
+    stmt = stmt.order_by(TargetORM.name).limit(limit + 1)
     result = await session.execute(stmt)
-    return [_to_summary(t) for t in result.scalars().all()]
+    fetched = list(result.scalars().all())
+    has_more = len(fetched) > limit
+    rows = fetched[:limit]
+    summaries = [project_target_to_summary(t) for t in rows]
+    if envelope is None:
+        return summaries
+    next_cursor = rows[-1].name if has_more else None
+    return wrap_v2_envelope(
+        [s.model_dump(mode="json") for s in summaries],
+        next_cursor=next_cursor,
+    )
 
 
 @router.get("/discover", response_model=TargetsDiscoverResult)
@@ -720,11 +804,17 @@ async def create_target(
     # registered impl set so the resolver-silently-ignores-unknown-id
     # foot-gun surfaces at write time. ``None`` is the absent / cleared
     # state and is always valid; a non-``None`` value must match an
-    # impl_id registered in the v2 connector registry. ``valid_impl_ids``
-    # is empty when the registry is empty (test isolation / pre-lifespan
-    # state); we skip validation in that case for parity with the
-    # ``product`` validator above.
-    valid_impl_ids = sorted(_registered_impl_ids())
+    # impl_id registered in the v2 connector registry **for the
+    # target's product** (G0.16-T6 review-iter-1 B1 #1312 -- a
+    # cross-product allowlist let a ``k8s`` target pin
+    # ``vmware-rest-9.0`` and the resolver would silently ignore it
+    # at dispatch). ``valid_impl_ids`` is empty when no connector is
+    # registered for the product (test isolation / pre-lifespan
+    # state, or a not-yet-registered product); we skip validation in
+    # that case for parity with the ``product`` validator above --
+    # the operator already saw a structured 422 from the product
+    # check if their product is unknown to the registry.
+    valid_impl_ids = sorted(_registered_impl_ids(body.product))
     if (
         body.preferred_impl_id is not None
         and valid_impl_ids
@@ -840,11 +930,17 @@ async def update_target(
     # G0.15-T6 (#1215). Same impl_id rejection as on POST. ``None`` is
     # the explicit-clear state and is always valid (operator wants to
     # remove the override); a non-``None`` value must match a
-    # registered impl_id. Skip when the registry is empty (test
-    # isolation / pre-lifespan).
+    # registered impl_id **for the target's product** (G0.16-T6
+    # review-iter-1 B1 #1312). When the PATCH also changes ``product``,
+    # the new product is the relevant scope -- the validator must
+    # agree with the post-update row state, otherwise a single PATCH
+    # could land an impl_id that the resolver will silently ignore at
+    # the next dispatch. Skip when no connector is registered for the
+    # effective product (test isolation / pre-lifespan).
     new_preferred = updates.get("preferred_impl_id")
     if new_preferred is not None:
-        valid_impl_ids = sorted(_registered_impl_ids())
+        effective_product = new_product if new_product is not None else t.product
+        valid_impl_ids = sorted(_registered_impl_ids(effective_product))
         if valid_impl_ids and new_preferred not in valid_impl_ids:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

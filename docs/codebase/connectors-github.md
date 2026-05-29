@@ -121,48 +121,55 @@ by `kubernetes/__init__.py`) so an unfingerprinted `(product="gh",
 version=None)` target resolves via the wildcard tie-break while a
 fingerprinted target resolves via the versioned entry.
 
-### Auth — GitHub App path (`auth_model="github-app"`)
+### Auth — boundary (target `auth_model`) and protocol routing
+
+The target row carries `auth_model="shared_service_account"` (or
+`None` for legacy rows). The connector boundary accepts that and
+rejects every other identity model (`per_user`, `impersonation`)
+with `NotImplementedError`, the same shape `VmwareRestConnector`
+uses. The **upstream credential protocol** — App-installation vs
+PAT — is picked one layer down by inspecting the Vault payload's
+field shape; G0.16-T2 (#1304) reconciled this with the connector
+code after the v0.8.0 dogfood caught the original `auth_model`-
+driven routing rejecting every legal target.
 
 ```
 auth_headers(target, operator)
   └── reject empty operator.raw_jwt (defence in depth)
-  └── _installation_token(target, operator)
+  └── reject auth_model ∉ {shared_service_account, None}
+        → NotImplementedError naming target + bad value
+  └── _auth_token(target, operator)
         └── lock
-        └── cache hit (expires_at_monotonic > now) → return cached
+        └── cache hit (installation or PAT) → return cached
         └── credentials_loader(target, operator)
-              └── (default) load_basic_credentials with
-                  fields=("app_id", "private_key", "installation_id")
-                  → operator-context Vault KV-v2 read
-        └── mint_github_app_jwt(app_id, private_key_pem)
-              → 540-second RS256 JWT (10-min cap minus skew margin)
-        └── exchange_jwt_for_installation_token(jwt, installation_id)
-              → POST /app/installations/{id}/access_tokens
-              → 201 → InstallationToken with monotonic expiry
-        └── cache, return token
+              └── (default) load_github_credentials_from_vault
+                    └── load_vault_secret_data (single KV-v2 read)
+                    └── inspect fields:
+                         {app_id, private_key, installation_id} present
+                            → GitHubAppCredentials
+                         {token} present (and no App fields)
+                            → GitHubPATCredentials
+                         neither
+                            → GitHubAmbiguousVaultPayloadError
+        └── isinstance(creds, GitHubAppCredentials):
+              → _mint_and_cache_installation_token
+                  → mint_github_app_jwt(app_id, private_key_pem)
+                      → 540-second RS256 JWT (10-min cap minus skew)
+                  → exchange_jwt_for_installation_token(jwt, install_id)
+                      → POST /app/installations/{id}/access_tokens
+                      → InstallationToken with monotonic expiry
+                  → cache, return token
+        └── isinstance(creds, GitHubPATCredentials):
+              → cache, return token (no JWT, no mint, no exchange)
   └── return {"Authorization": "Bearer <token>", ...}
 ```
 
-The 50-minute cache window means a typical operator session of ~50
-dispatch calls pays the JWT/installation-token round-trip exactly once
-per target. The mint endpoint is hit again only on the next cold cache
-(after restart / `aclose`, or after the 50-minute window expires).
-
-### Auth — PAT fallback (`auth_model="github-pat"`)
-
-```
-auth_headers(target, operator)
-  └── reject empty operator.raw_jwt
-  └── _pat_token(target, operator)
-        └── lock + cache fast-path (PATs cache for connector lifetime)
-        └── credentials_loader(target, operator)
-              └── (default) load_basic_credentials with fields=("token",)
-        └── cache the token, return
-  └── return {"Authorization": "Bearer <token>", ...}
-```
-
-No JWT, no mint, no exchange. PAT TTL is whatever GitHub's PAT-expiry
-policy enforces (operator-set in the GitHub UI); MEHO does not re-read
-until restart or `aclose`.
+The App-path 50-minute cache window means a typical operator
+session of ~50 dispatch calls pays the JWT/installation-token
+round-trip exactly once per target. The PAT-path cache lives for
+the connector instance lifetime — operator-managed expiry, no
+MEHO-side refresh dance. Re-reads only on cold cache (restart /
+`aclose`, or the App-path window expiring).
 
 ### Fingerprint
 
@@ -198,7 +205,14 @@ wiring.
   `_request_json` / `_get_json` / `_post_json` helpers.
 - **`load_basic_credentials`** (`connectors/_shared/vault_creds.py`) —
   shared operator-context Vault KV-v2 read with the no-secret-in-logs
-  discipline and the two-phase error contract.
+  discipline and the two-phase error contract. Used by the
+  individual App / PAT loaders kept for backwards-compatible test
+  injection.
+- **`load_vault_secret_data`** (`connectors/_shared/vault_creds.py`) —
+  the same Vault read primitive, but returning the raw KV-v2 data
+  dict without named-field extraction. Used by
+  `load_github_credentials_from_vault` for the single-read +
+  payload-shape inspection pattern G0.16-T2 (#1304) introduced.
 - **`synthesise_system_operator`** (`connectors/_shared/system_operator.py`)
   — non-empty placeholder JWT for the fingerprint / probe paths that
   pre-date a real operator.

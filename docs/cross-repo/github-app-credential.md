@@ -128,15 +128,16 @@ account that will own the App):
    will only see the explicitly listed repos.
 4. **Install.** GitHub confirms with the App's installation page.
    The URL carries the **Installation ID** in the path
-   (`/settings/installations/<installation_id>`); the connector
-   discovers the installation automatically via
-   `GET /app/installations` so you do not need to record this number,
-   but it is useful to keep alongside the App ID for forensic
-   purposes.
+   (`/settings/installations/<installation_id>`) — **record this
+   integer**; you will write it into Vault in Step 4 alongside the
+   App ID and the private key. The connector's Vault-payload
+   discriminator (G0.16-T2 #1304) requires all three fields
+   (`app_id`, `private_key`, `installation_id`); a two-field payload
+   surfaces as `github_ambiguous_vault_payload` at first call.
 
-### Step 4 — Copy App ID + private key to Vault
+### Step 4 — Copy App ID, installation ID, and private key to Vault
 
-The credential pair lands under a Vault path the per-target Vault
+The credential triple lands under a Vault path the per-target Vault
 read policy grants the operator. The recommended layout (matches the
 existing per-target conventions and works with the credential-loader
 path the connector ships in T1):
@@ -146,12 +147,17 @@ path the connector ships in T1):
 #
 # The target row's `secret_ref` column points to this exact path
 # (KV-v2 path string, no `/data/` infix in the API form). The
-# connector reads two fields from the secret: `app_id` (the small
-# integer shown on the App settings page) and `private_key` (the
-# entire .pem file contents, including the BEGIN / END lines and
-# every newline).
+# connector reads three fields from the secret: `app_id` (the small
+# integer shown on the App settings page), `installation_id` (the
+# integer from the `/settings/installations/<id>` URL recorded in
+# Step 3), and `private_key` (the entire .pem file contents,
+# including the BEGIN / END lines and every newline). All three are
+# required — a two-field payload surfaces as
+# `github_ambiguous_vault_payload` at first call (see
+# [§ Failure modes](#failure-modes)).
 vault kv put secret/<tenant>/<target>/github-app \
   app_id='123456' \
+  installation_id='987654321' \
   private_key=@/path/to/meho-prod.2026-05-27.private-key.pem
 ```
 
@@ -170,10 +176,11 @@ Substitute the placeholders:
 Verify the secret landed without leaking the value:
 
 ```bash
-# Expected: app_id     <small-integer>
-#           private_key  <hash>
+# Expected: app_id           <small-integer>
+#           installation_id  <integer>
+#           private_key      <hash>
 vault kv get -format=json secret/<tenant>/<target>/github-app \
-  | jq '.data.data | {app_id, private_key_present: (.private_key | length > 0)}'
+  | jq '.data.data | {app_id, installation_id, private_key_present: (.private_key | length > 0)}'
 ```
 
 The `private_key | length > 0` check confirms the value is non-empty
@@ -222,10 +229,15 @@ Notes on the column choices:
   `shared_service_account`, `per_user`); the App fits
   `shared_service_account` because every operator-driven call from
   this target is attributed in GitHub's own audit log to the App
-  identity. The **credential format** discriminator (`github-app`
-  vs `github-pat`) lives **inside the Vault secret payload**, not on
-  the enum — the connector picks the code path based on which of
-  `app_id + private_key` vs `pat` is present in the secret.
+  identity. The **credential format** discriminator (App-
+  installation vs fine-grained PAT) lives **inside the Vault secret
+  payload**, not on the enum — the connector picks the code path
+  based on which of `app_id` + `private_key` + `installation_id`
+  vs `token` is present in the secret (G0.16-T2 #1304 reconciled
+  the code with this documented contract; pre-#1304 the connector
+  demanded the operator-facing field carry `github-app` /
+  `github-pat`, neither of which is a value the `AuthModel` enum
+  accepts).
 
 Register:
 
@@ -253,9 +265,34 @@ deleting the App:
    the same page — GitHub retains both until you explicitly remove
    the old one. Leaving the old key active widens the blast radius
    of a leak.
-3. `vault kv put secret/<tenant>/<target>/github-app
-   app_id=<unchanged> private_key=@<new-key.pem>`. The App ID does
-   not change on key rotation.
+3. Rewrite the Vault secret with **all three** App fields — `app_id`
+   and `installation_id` re-supplied unchanged, `private_key` pointed
+   at the new `.pem`:
+
+   ```bash
+   vault kv put secret/<tenant>/<target>/github-app \
+     app_id='<unchanged>' \
+     installation_id='<unchanged>' \
+     private_key=@/path/to/<new-key.pem>
+   ```
+
+   Vault KV-v2 `kv put` creates a new version with **exactly** the
+   fields you supply — it is a replace, not a merge. Omitting
+   `installation_id` (or `app_id`) at rotation drops the field from
+   the new version; the next installation-token mint then surfaces
+   as `github_ambiguous_vault_payload` because the credential loader
+   only picks the App path when **all three** `_GH_APP_FIELDS` are
+   present (see [§ Failure modes](#failure-modes) and the loader
+   contract in
+   [§ Step 4](#step-4--copy-app-id-installation-id-and-private-key-to-vault)).
+   When you genuinely want merge semantics elsewhere (rare for this
+   secret — the field set is intentionally closed) use `vault kv
+   patch` instead; `kv put` always replaces.
+
+   The App ID and installation ID do not change on key rotation — copy
+   them out of the current version (`vault kv get -format=json …`)
+   before writing the new one so you don't have to fish them out of
+   the GitHub UI again.
 4. The connector picks up the new key on its next installation-token
    mint (within at most 1 hour, when the current installation token
    expires). Force a refresh by restarting the backplane pods if you
@@ -324,11 +361,15 @@ lands the full catalogue.
 ## Vault custody
 
 The Vault path the connector reads is
-`secret/<tenant>/<target>/github-app`, KV-v2, two fields:
+`secret/<tenant>/<target>/github-app`, KV-v2, three fields (all
+required — the connector's Vault-payload discriminator picks the
+App branch only when **all three** App fields are present; see
+[`github-connector.md`](./github-connector.md) § "App-vs-PAT credential picker"):
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `app_id` | small integer (as string) | GitHub-assigned ID shown on the App settings page |
+| `installation_id` | integer (as string) | From the `/settings/installations/<id>` URL recorded in Step 3 — the specific install of this App on the target org / repos |
 | `private_key` | multi-line string | Entire `.pem` file contents — BEGIN line, body, END line, every newline preserved |
 
 The per-target Vault read precedent applies
@@ -403,19 +444,20 @@ governance allows it.
 
 ```bash
 vault kv put secret/<tenant>/<target>/github-app \
-  pat='ghp_<token-value>'
+  token='ghp_<token-value>'
 ```
 
-Note the field name is `pat`. The presence of `pat` (instead of
-`app_id` + `private_key`) is the connector's credential-format
-discriminator — the credential loader picks the PAT code path when
-the secret contains a `pat` field.
+Note the field name is `token`. The presence of `token` (instead
+of `app_id` + `private_key` + `installation_id`) is the
+connector's credential-format discriminator — the credential
+loader picks the PAT code path when the secret contains a
+`token` field.
 
 Verify without leaking the value:
 
 ```bash
 vault kv get -format=json secret/<tenant>/<target>/github-app \
-  | jq '.data.data | {pat_present: (.pat | length > 0)}'
+  | jq '.data.data | {token_present: (.token | length > 0)}'
 ```
 
 ### Step P3 — Register the target
@@ -443,7 +485,7 @@ Fine-grained PATs expire on a wall-clock date. Rotate ≥1 week
 before the expiry:
 
 1. Mint a new PAT per Step P1 with the same scope set.
-2. `vault kv put secret/<tenant>/<target>/github-app pat='<new>'`.
+2. `vault kv put secret/<tenant>/<target>/github-app token='<new>'`.
 3. The connector picks up the new PAT on its next call — no token
    minting / refresh dance to wait for, unlike the App path.
 

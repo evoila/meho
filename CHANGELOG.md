@@ -106,6 +106,30 @@ connector-related release-notes line.
   skip the prelude. Root cause documented in
   `docs/codebase/broadcast.md` as the writer → fanout → consumer
   triage path (#1305 / #1302).
+- **gh-rest connector `auth_model` reconciled with `TargetCreate`
+  enum (G0.16-T2 #1304).** The v0.8.0 dogfood (consumer signal
+  `gh-rest-auth-model-target-vs-connector-mismatch`) caught a
+  SEV-1 mismatch between the target schema's `auth_model` enum
+  (`{impersonation, shared_service_account, per_user}`) and the
+  historical gh-rest connector boundary (which demanded
+  `auth_model="github-app"` or `"github-pat"` — neither a legal
+  enum value). The fix takes Approach B: the connector now
+  inspects the **Vault payload's field shape** to pick the
+  upstream credential protocol — `app_id` + `private_key` +
+  `installation_id` → App installation-token path; `token` →
+  PAT path; neither → typed `github_ambiguous_vault_payload`
+  envelope naming both required field sets so operators can
+  repair the Vault row without guessing. Targets keep
+  `auth_model="shared_service_account"` (the documented runbook
+  shape — `docs/cross-repo/github-connector.md` and the new
+  `load_github_credentials_from_vault` helper match the doc).
+  Mirrors the `vmware-rest-9.0` pattern (target carries the
+  identity model; connector reads the protocol from Vault).
+  Backwards-compatible for the `evoila-bosnia-gh` shape RDC
+  registered against v0.8.0 — the target row already carried
+  `shared_service_account` (the only enum value the operator
+  could pass), so re-deploying the post-#1304 backplane image
+  flips probe + dispatch green without operator action. (#1304)
 
 ## [0.8.0] - 2026-05-28
 

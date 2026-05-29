@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Connector probe — Vault OIDC fingerprint loader converges with dispatch.**
+  `POST /api/v1/targets/{name}/probe` and `POST /ui/connectors/{name}/probe`
+  now forward the route operator into the resolved connector's
+  `fingerprint()`. The four affected connectors (`k8s-1.x`,
+  `vmware-rest-9.0`, `sddc-rest-9.0`, `nsx-rest-4.2`) thread that
+  operator through the same `vault_client_for_operator(operator)` +
+  per-target Vault loader the dispatch path uses, replacing the
+  synthesised system operator's placeholder JWT that the v0.8.0 dogfood
+  cycle (`claude-rdc-hetzner-dc#771` Finding 4 / signal
+  `probe-fingerprint-vault-oidc-malformed-jwt`) surfaced as
+  `vault OIDC malformed jwt: must have three parts` on every probe of
+  `rke2-infra-k8s`, `rdc-vcenter`, `vcf9-sddc`, and `vcf9-nsx`. The
+  `Connector.fingerprint(target, operator=None)` ABC signature gained
+  an optional `operator` parameter; the legacy `operator=None`
+  fall-back to the system operator stays in place for background
+  callers (readiness probe, K8s topology refresh) that have no real
+  operator in scope, preserving the locked Option A decision's
+  system-call carve-out. (G0.16-T4 #1306)
+
 ## [0.8.0] - 2026-05-28
 
 **MVP7 — consolidated post-v0.7 release.** v0.8.0 collapses what

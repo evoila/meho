@@ -348,7 +348,11 @@ class GitHubRestConnector(HttpConnector):
     # Required Connector ABC methods
     # ------------------------------------------------------------------
 
-    async def fingerprint(self, target: GitHubTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: GitHubTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Probe GitHub to return installation metadata for *target*.
 
         Two shapes by ``target.host``:
@@ -363,10 +367,12 @@ class GitHubRestConnector(HttpConnector):
           ``GET /repos/{owner}/{repo}`` returns the repo's metadata for
           a targeted-repo fingerprint.
 
-        The fingerprint path synthesises a system operator (empty
-        ``raw_jwt`` placeholder) so the wire format is exercised but
-        the live Vault read still fails closed — same shape
-        :meth:`VmwareRestConnector.fingerprint` uses.
+        ``operator`` (optional, G0.16-T4 #1306) is forwarded to the
+        credentials loader so the per-target Vault read happens under
+        the operator's identity, matching the dispatch path. ``None``
+        falls back to a system operator whose placeholder JWT fails
+        closed at the live Vault round-trip (the wire format is still
+        exercised; the system-call carve-out holds).
 
         Transport / credential failures land as
         ``reachable=False`` with ``extras['error']`` carrying the
@@ -376,7 +382,7 @@ class GitHubRestConnector(HttpConnector):
         surfaced separately under ``extras['error_code']``.
         """
         probed_at = datetime.now(UTC)
-        operator = synthesise_system_operator()
+        eff_operator = operator if operator is not None else synthesise_system_operator()
         repo_path = _extract_repo_path(target.host)
         if repo_path is None:
             probe_method = "GET /user/installations"
@@ -386,7 +392,7 @@ class GitHubRestConnector(HttpConnector):
             path = f"/repos/{repo_path}"
 
         try:
-            payload = await self._get_json(target, path, operator=operator)
+            payload = await self._get_json(target, path, operator=eff_operator)
         except GitHubCredentialError as exc:
             return FingerprintResult(
                 vendor="github",

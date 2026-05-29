@@ -73,7 +73,7 @@ class _ConcreteHttpConnector(HttpConnector):
     async def auth_headers(self, target: Any, operator: Operator) -> dict[str, str]:
         return {"Authorization": f"Bearer {operator.raw_jwt}"}
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -104,7 +104,7 @@ def test_http_connector_subclass_missing_auth_headers_works() -> None:
     class _MissingAuth(HttpConnector):
         product = "test"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]

@@ -352,7 +352,11 @@ class NsxConnector(HttpConnector):
                 ) from exc
             raise
 
-    async def fingerprint(self, target: NsxTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: NsxTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from ``GET /api/v1/node``.
 
         The session is fetched lazily by :meth:`auth_headers` (called
@@ -368,11 +372,22 @@ class NsxConnector(HttpConnector):
         operator's first ``meho connector fingerprint`` against an
         unreachable NSX gets a structured response rather than a
         stack trace.
+
+        ``operator`` (optional) is the request-scoped operator forwarded
+        from the probe routes. When provided, the session credentials
+        loader reads the per-target Vault secret under that identity --
+        the same code path the dispatch surface uses. ``None`` falls
+        back to a system operator whose placeholder JWT fails closed
+        at the live Vault round-trip. G0.16-T4 (#1306) converged probe
+        + dispatch on this signature; pre-fix the probe path hard-coded
+        the placeholder JWT and surfaced as the v0.8.0 dogfood's
+        ``malformed jwt: must have three parts`` finding on ``vcf9-nsx``.
         """
         probed_at = datetime.now(UTC)
+        eff_operator = operator if operator is not None else synthesise_system_operator()
         try:
             payload = await self._get_json_with_session_retry(
-                target, "/api/v1/node", operator=synthesise_system_operator()
+                target, "/api/v1/node", operator=eff_operator
             )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(

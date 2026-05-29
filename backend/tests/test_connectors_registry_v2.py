@@ -37,7 +37,7 @@ from meho_backplane.connectors.registry import clear_registry, registered_produc
 class _FakeConnector(Connector):
     product = "fake"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]

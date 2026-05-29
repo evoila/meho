@@ -378,7 +378,7 @@ class _FixedFingerprintConnector(Connector):
     async def probe(self, target: Any) -> ProbeResult:  # pragma: no cover
         raise NotImplementedError
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         return FingerprintResult(
             vendor="hashicorp",
             product="vault",
@@ -404,7 +404,7 @@ class _RaisingConnector(Connector):
     async def probe(self, target: Any) -> ProbeResult:  # pragma: no cover
         raise NotImplementedError
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise RuntimeError("connector simulated failure")
 
     async def execute(  # pragma: no cover  # type: ignore[override]

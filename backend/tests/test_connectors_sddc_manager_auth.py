@@ -572,3 +572,100 @@ async def test_aclose_with_no_cached_credentials_is_a_noop() -> None:
     await connector.aclose()
     assert connector._clients == {}
     assert connector._creds_cache == {}
+
+
+# ---------------------------------------------------------------------------
+# G0.16-T4 (#1306) probe-vs-dispatch convergence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_forwards_route_operator_to_credentials_loader() -> None:
+    """G0.16-T4 (#1306) probe-vs-dispatch convergence regression for sddc-manager.
+
+    Pre-#1306 the probe route called ``cls().fingerprint(target)``
+    without an operator; the connector synthesised a system operator
+    whose placeholder ``raw_jwt`` is not a compact-JWS. Vault's
+    JWT/OIDC auth method rejected it before the per-target read,
+    surfacing as ``vault OIDC malformed jwt: must have three parts``
+    on the v0.8.0 dogfood's ``vcf9-sddc`` probe.
+
+    Post-#1306 the probe route forwards its operator — the same code
+    path the dispatch surface uses. Test pins:
+    1. The credentials loader receives the route operator.
+    2. The forwarded JWT has the compact-JWS shape (≥3 dot-separated
+       parts).
+    """
+    captured: list[Operator] = []
+
+    async def _capturing_loader(
+        _target: SddcTargetLike,
+        operator: Operator,
+    ) -> dict[str, str]:
+        captured.append(operator)
+        return {"username": "svc-meho", "password": "stub-password"}
+
+    connector = SddcManagerConnector(credentials_loader=_capturing_loader)
+
+    route_operator = Operator(
+        sub="op-rdc",
+        name="RDC Operator",
+        email=None,
+        raw_jwt="header.payload.signature",
+        tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.get("/v1/sddc-managers").respond(
+            200,
+            json={
+                "elements": [
+                    {
+                        "id": "sddc-uuid-1",
+                        "fqdn": "sddc-a.test.invalid",
+                        "version": "9.0.0.0-24276214",
+                        "build": "24276214",
+                        "domain": {"id": "domain-uuid-1", "name": "MGMT"},
+                    }
+                ],
+                "pageMetadata": {"pageNumber": 1, "pageSize": 10, "totalElements": 1},
+            },
+        )
+        await connector.fingerprint(_TARGET_A, operator=route_operator)
+
+    assert len(captured) == 1
+    fwd = captured[0]
+    assert fwd.sub == route_operator.sub
+    assert len(fwd.raw_jwt.split(".")) >= 3, (
+        "forwarded JWT must look like a compact-JWS so Vault accepts it"
+    )
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_without_operator_falls_back_to_system_operator() -> None:
+    """``fingerprint(target)`` without ``operator`` synthesises the
+    system operator (the system-call carve-out).
+    """
+    captured: list[Operator] = []
+
+    async def _capturing_loader(
+        _target: SddcTargetLike,
+        operator: Operator,
+    ) -> dict[str, str]:
+        captured.append(operator)
+        return {"username": "svc-meho", "password": "stub-password"}
+
+    connector = SddcManagerConnector(credentials_loader=_capturing_loader)
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.get("/v1/sddc-managers").respond(
+            200,
+            json={"elements": [], "pageMetadata": {}},
+        )
+        await connector.fingerprint(_TARGET_A)
+
+    assert len(captured) == 1
+    assert captured[0].sub == SYSTEM_OPERATOR_SUB
+    await connector.aclose()

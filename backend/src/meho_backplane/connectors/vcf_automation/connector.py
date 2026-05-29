@@ -468,7 +468,11 @@ class VcfAutomationConnector(HttpConnector):
     # fingerprint / probe -- unauthenticated per-plane version endpoints
     # ------------------------------------------------------------------
 
-    async def fingerprint(self, target: VcfAutomationTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: VcfAutomationTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Build the canonical fingerprint from per-plane unauthenticated probes.
 
         Both unauthenticated probes must succeed for ``reachable=True``
@@ -479,7 +483,12 @@ class VcfAutomationConnector(HttpConnector):
         at ``_http_client`` construction and reported as the
         structured failure too. See module docstring for the per-plane
         probe-endpoint rationale.
+
+        ``operator`` exists for ABC parity (G0.16-T4 #1306) — VCF
+        Automation's per-plane version probes are unauthenticated, so
+        the route operator plays no role here.
         """
+        del operator  # unused — unauthenticated probes, no Vault read
         probed_at = datetime.now(UTC)
         probe_method = f"GET {PROVIDER_VERSION_PATH} + GET {TENANT_VERSION_PATH}"
         try:

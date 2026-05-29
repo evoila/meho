@@ -136,7 +136,16 @@ async def _do_probe(
             status_code=409,
         )
     assert cls is not None  # narrow for mypy; resolver contract guarantees this
-    fp = await cls().fingerprint(target)
+    # Forward the route operator so the connector's fingerprint reads
+    # per-target Vault credentials under the operator's identity, the
+    # same code path the dispatch surface uses. G0.16-T4 (#1306)
+    # converged probe + dispatch on this signature; pre-fix the UI
+    # re-probe path passed nothing (so the connector synthesised a
+    # system operator with a placeholder JWT) and Vault rejected the
+    # JWT/OIDC login as ``malformed jwt: must have three parts`` on
+    # the four connectors whose fingerprint authenticates via Vault
+    # (k8s-1.x, vmware-rest-9.0, sddc-rest-9.0, nsx-rest-4.2).
+    fp = await cls().fingerprint(target, operator=operator)
     # ``model_dump(mode='json')`` produces a JSONB-safe dict; plain
     # ``model_dump()`` would leak Python-native types into the JSON
     # column. Mirror the REST route's write shape exactly.

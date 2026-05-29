@@ -739,3 +739,160 @@ def test_parse_kubeconfig_yaml_normalises_parser_errors_to_value_error(
     """``yaml.YAMLError`` (parser/scanner) is re-raised as ``ValueError``."""
     with pytest.raises(ValueError, match="failed to parse"):
         parse_kubeconfig_yaml(broken_yaml)
+
+
+# ---------------------------------------------------------------------------
+# G0.16-T4 (#1306) probe-vs-dispatch convergence
+# ---------------------------------------------------------------------------
+
+
+def test_fingerprint_with_route_operator_forwards_to_kubeconfig_loader() -> None:
+    """``fingerprint(target, operator=<route op>)`` forwards the operator
+    to the injected ``KubeconfigLoader`` verbatim — back-to-back with a
+    dispatch-style call, both legs see the same identity.
+
+    The v0.8.0 dogfood cycle (#1302 + ``claude-rdc-hetzner-dc#771``)
+    surfaced ``vault OIDC malformed jwt: must have three parts`` on
+    probe for K8s targets while dispatch worked. The bug: probe
+    hard-coded the synthesised system operator (placeholder JWT) on
+    the way into :func:`load_kubeconfig_from_vault`; dispatch passed
+    the real route operator. Vault rejected the placeholder before the
+    Vault KV-v2 read could fire.
+
+    This test pins the convergence shape: when the probe route forwards
+    its operator (the post-#1306 wiring), the kubeconfig loader sees
+    that exact operator — not the system-operator stand-in — and the
+    forwarded JWT has the compact-JWS shape (≥3 dot-separated parts,
+    the issue body's acceptance criterion 4).
+
+    The companion legacy carve-out — ``operator=None`` falling back to
+    a system operator — is covered by
+    :func:`test_fingerprint_without_operator_still_synthesises_system_operator`.
+    """
+    captured: list[Operator] = []
+    stub_kubeconfig = _stub_kubeconfig_dict()
+
+    async def _capturing_loader(
+        target: KubernetesTargetLike,
+        operator: Operator,
+    ) -> dict[str, Any]:
+        captured.append(operator)
+        return stub_kubeconfig
+
+    connector = KubernetesConnector(kubeconfig_loader=_capturing_loader)
+
+    # The probe-route operator that the REST + UI routes lift via
+    # ``resolve_operator_or_403`` / ``require_operator``. Real
+    # production tokens land here as compact-JWS strings; we use a
+    # synthetic three-part stand-in so the assertion is deterministic
+    # without minting a real Keycloak token.
+    route_operator = _make_operator(raw_jwt="header.payload.signature")
+
+    fake_version = MagicMock()
+    fake_version.git_version = "v1.31.4+rke2r1"
+    fake_version.major = "1"
+    fake_version.minor = "31"
+    fake_version.build_date = "2026-02-14T18:01:25Z"
+    fake_version.platform = "linux/amd64"
+    fake_version.go_version = "go1.22.10"
+    fake_version.git_commit = "abc"
+    fake_version.git_tree_state = "clean"
+
+    async def _run() -> None:
+        with (
+            patch(
+                "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+                new=AsyncMock(return_value=MagicMock()),
+            ),
+            patch(
+                "meho_backplane.connectors.kubernetes.connector.client.VersionApi"
+            ) as mock_version_api,
+        ):
+            mock_version_api.return_value.get_code = AsyncMock(return_value=fake_version)
+            # Probe-style call (the post-#1306 wiring: the route forwards
+            # its operator). Asserts the kubeconfig loader sees the route
+            # operator's exact identity.
+            await connector.fingerprint(_TARGET_A, operator=route_operator)
+            # Dispatch-style call (the operator-aware path that always
+            # worked) for back-to-back comparison.
+            await connector.about(route_operator, _TARGET_B, params={})
+
+    asyncio.run(_run())
+
+    # The kubeconfig loader was invoked for each distinct target's
+    # cold-cache path. Both call sites flowed the same identity — the
+    # convergence point #1306 promises.
+    assert len(captured) == 2, (
+        f"expected two cold-cache loader invocations (one per target); got {len(captured)}"
+    )
+    for invocation_operator in captured:
+        assert invocation_operator.sub == route_operator.sub, (
+            "the kubeconfig loader saw a different identity than the route operator; "
+            "this is the #1306 divergence — probe and dispatch must converge on the "
+            "same operator"
+        )
+        # Acceptance criterion 4: compact-JWS sanity check on the
+        # forwarded token. A real JWT has three dot-separated parts;
+        # the pre-#1306 placeholder had zero.
+        assert len(invocation_operator.raw_jwt.split(".")) >= 3, (
+            f"forwarded JWT does not look like a compact-JWS (got "
+            f"{len(invocation_operator.raw_jwt.split('.'))} parts; expected ≥3) — "
+            "Vault would reject this with ``malformed jwt: must have three parts``"
+        )
+
+
+def test_fingerprint_without_operator_still_synthesises_system_operator() -> None:
+    """``fingerprint(target)`` without ``operator`` keeps the legacy
+    system-operator fall-back, preserving the architectural posture
+    that *system-initiated calls cannot perform an operator-context
+    Vault read* (the locked Option A decision).
+
+    The fall-back's purpose is the readiness probe / topology refresh
+    worker that has no real operator in scope; routing a real operator
+    through every existing call site is out of scope for #1306. The
+    fall-back identity is the system-operator stand-in whose sub is
+    ``"system:connector-probe"`` (its non-empty placeholder JWT still
+    fails closed at the live Vault round-trip).
+    """
+    captured: list[Operator] = []
+
+    async def _capturing_loader(
+        target: KubernetesTargetLike,
+        operator: Operator,
+    ) -> dict[str, Any]:
+        captured.append(operator)
+        return _stub_kubeconfig_dict()
+
+    connector = KubernetesConnector(kubeconfig_loader=_capturing_loader)
+
+    fake_version = MagicMock()
+    fake_version.git_version = "v1.31.4+rke2r1"
+    fake_version.major = "1"
+    fake_version.minor = "31"
+    fake_version.build_date = "2026-02-14T18:01:25Z"
+    fake_version.platform = "linux/amd64"
+    fake_version.go_version = "go1.22.10"
+    fake_version.git_commit = "abc"
+    fake_version.git_tree_state = "clean"
+
+    async def _run() -> None:
+        with (
+            patch(
+                "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+                new=AsyncMock(return_value=MagicMock()),
+            ),
+            patch(
+                "meho_backplane.connectors.kubernetes.connector.client.VersionApi"
+            ) as mock_version_api,
+        ):
+            mock_version_api.return_value.get_code = AsyncMock(return_value=fake_version)
+            # No ``operator=`` kwarg → legacy fall-back.
+            await connector.fingerprint(_TARGET_A)
+
+    asyncio.run(_run())
+    assert len(captured) == 1
+    assert captured[0].sub == "system:connector-probe", (
+        "the legacy fall-back must synthesise the system operator (sub="
+        "'system:connector-probe') — the #1306 widening preserved this "
+        "carve-out for callers that have no real operator in scope"
+    )

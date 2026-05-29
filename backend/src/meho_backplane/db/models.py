@@ -4365,7 +4365,7 @@ class RunbookTemplate(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
-    steps: Mapped[dict[str, object]] = mapped_column(
+    steps: Mapped[list[dict[str, object]]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,
         default=list,

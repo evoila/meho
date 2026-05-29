@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **SSE feed delivers zero bytes despite stream writes (SEV-1, signal
+  draft `sse-feed-delivers-zero-events-despite-stream-writes`)** — a
+  fresh `GET /api/v1/feed` or `/ui/broadcast/stream` connection
+  defaulted to the Valkey `$` live-tail cursor, which combined with
+  the 30 s heartbeat cadence produced 0 bytes for the first 30 s on
+  any tenant with no concurrent writes during the window, and
+  permanently empty `/ui/broadcast` pages for tenants with 76+
+  existing entries on the stream. `_feed_generator` and
+  `_ui_feed_generator` now run a backlog prelude
+  (`XREVRANGE … COUNT 50`) before the BLOCK loop on fresh `$`
+  connections; explicit-replay cursors (`Last-Event-Id`, `since`)
+  skip the prelude. Root cause documented in
+  `docs/codebase/broadcast.md` as the writer → fanout → consumer
+  triage path (#1305 / #1302).
+
 ## [0.8.0] - 2026-05-28
 
 **MVP7 — consolidated post-v0.7 release.** v0.8.0 collapses what

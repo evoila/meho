@@ -108,6 +108,17 @@ connector-related release-notes line.
 
 ### Changed
 
+- **`GET /api/v1/feed?since=` accepts ISO-8601 timestamps
+  (G0.16-T6 Finding G #1312).** The SSE feed now mirrors the MCP
+  `broadcast.recent` tool's documented contract: operators can
+  pass `?since=2026-05-25T10:00:00Z` and let the route normalise
+  to a bare-ms Valkey cursor, instead of having to look up the
+  Valkey-id of the entry at that instant. Pre-existing Valkey-id
+  forms (`1779177600000-0`, `$`) stay accepted unchanged. Closes
+  the docs↔impl-disagreement RDC #771 Finding 15 catalogued per
+  `docs/codebase/api-shape-conventions.md` §8 (resolution (a),
+  extend the impl). Bare dates (no `T`) stay rejected as
+  likely-typos.
 - **Catalog ↔ TargetCreate enum reconciliation locked in
   structurally (G0.16-T6 Finding B #1312).** RDC #771 Finding 6
   caught the v0.7-era `"sddc"` vs `"sddc-manager"` catalog-vs-enum

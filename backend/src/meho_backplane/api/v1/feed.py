@@ -117,6 +117,7 @@ import json
 import re
 import time
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from typing import Final
 
 import structlog
@@ -226,6 +227,18 @@ def _validate_cursor_or_400(cursor: str) -> str:
 
     * ``"$"`` — Valkey's "live tail" anchor.
     * ``"<int>"`` or ``"<int>-<int>"`` — Valkey stream id forms.
+    * **ISO-8601 timestamp** (``"2026-05-25T10:00:00Z"``,
+      ``"2026-05-25T10:00:00+02:00"``) — normalised to a bare-ms
+      Valkey cursor via :func:`_normalize_iso_to_cursor` so the
+      operator can type a timestamp instead of hunting for the
+      Valkey-id of the entry at that instant. G0.16-T6 Finding G
+      (#1312) — closes the docs↔impl-disagreement RDC #771 Finding
+      15 catalogued (the MCP ``broadcast.recent`` description
+      promised ISO; the SSE feed and the original MCP parser
+      rejected it). The MCP side already accepts ISO via
+      :mod:`meho_backplane.broadcast.history`; this commit
+      converges the SSE entry point on the same dual-acceptance
+      contract per ``docs/codebase/api-shape-conventions.md`` §8.
 
     Rejects everything else with ``HTTPException(400)``. The detail
     string deliberately doesn't echo the input — operator-controlled
@@ -234,10 +247,50 @@ def _validate_cursor_or_400(cursor: str) -> str:
     """
     if cursor == _LIVE_TAIL_CURSOR or _VALKEY_STREAM_ID_RE.fullmatch(cursor):
         return cursor
+    iso_cursor = _normalize_iso_to_cursor(cursor)
+    if iso_cursor is not None:
+        return iso_cursor
     raise HTTPException(
         status_code=400,
-        detail="invalid_cursor: expected Valkey stream id (e.g. '1715600000000-0') or '$'",
+        detail=(
+            "invalid_cursor: expected Valkey stream id "
+            "(e.g. '1715600000000-0'), an ISO-8601 timestamp "
+            "(e.g. '2026-05-25T10:00:00Z'), or '$'"
+        ),
     )
+
+
+def _normalize_iso_to_cursor(raw: str) -> str | None:
+    """Convert an ISO-8601 timestamp to a bare-ms Valkey cursor, or ``None``.
+
+    Tight ISO discriminant first: any cursor accepted by
+    :data:`_VALKEY_STREAM_ID_RE` is two integers joined by ``-``
+    (one digit, no ``T`` / ``:`` / ``+`` / ``Z``), so anything
+    carrying a structural ISO marker can't collide with a Valkey id.
+    The ``T`` check avoids the case where ``datetime.fromisoformat``
+    happily parses a bare date (``"2026-05-25"``) — the SSE feed
+    operator wants instant-precision; a bare date is more likely a
+    typo than a deliberate cursor.
+
+    Returns ``None`` (not an exception) on any parse failure so the
+    caller can fall through to the structured 400 with the full
+    "expected Valkey id OR ISO" message. Raising mid-helper would
+    skip the ``Last-Event-Id``-vs-``since`` distinction the caller
+    already encodes in its 400 phrasing.
+    """
+    if "T" not in raw:
+        return None
+    iso_normalised = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(iso_normalised)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        # Treat a naive timestamp as UTC explicitly; otherwise the
+        # ``.timestamp()`` call below would interpret it in the
+        # worker's local TZ and shift the window by hours.
+        parsed = parsed.replace(tzinfo=UTC)
+    return str(int(parsed.timestamp() * 1000))
 
 
 def _stream_key(operator: Operator) -> str:

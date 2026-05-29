@@ -1158,6 +1158,126 @@ def test_create_target_known_preferred_impl_id_succeeds(client: TestClient) -> N
     assert response.json()["preferred_impl_id"] == "k8s"
 
 
+def test_create_target_cross_product_preferred_impl_id_rejected(
+    client: TestClient,
+) -> None:
+    """A ``k8s`` target cannot pin a ``vmware-rest-9.0`` impl (B1 regression).
+
+    G0.16-T6 review-iter-1 B1 (#1312). Before this fix
+    :func:`_registered_impl_ids` built a global allowlist that
+    accepted any impl registered for any product, so a ``k8s``
+    target could pass validation with
+    ``preferred_impl_id="vmware-rest-9.0"`` -- the resolver would
+    then silently ignore the override at dispatch time. That is
+    the exact silent-ignore foot-gun G0.15-T6 (#1215) was created
+    to close.
+
+    The fix scopes the allowlist by ``body.product``. The
+    structured 422 lists only the impl_ids registered **for that
+    product**, so an operator pinning the wrong-product impl
+    sees the actionable set instead of the cross-product noise.
+    """
+    # Register two distinct product/impl pairs. The k8s connector is
+    # the target's product; the vmware-rest impl is the foot-gun.
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _FakeVmwareConnector(Connector):
+        product = "vmware"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    _register_fake_k8s_connector()
+    register_connector_v2(
+        product="vmware", version="9.0", impl_id="vmware-rest", cls=_FakeVmwareConnector
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "cross-product",
+                "product": "k8s",
+                "host": "10.0.0.52",
+                "preferred_impl_id": "vmware-rest-9.0",
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "unknown_preferred_impl_id"
+    assert detail["preferred_impl_id"] == "vmware-rest-9.0"
+    # The valid set lists only k8s-product impls, not vmware-rest*.
+    # Both the base ``"k8s"`` and the canonical versioned ``"k8s-1.x"``
+    # form are accepted (Finding C); neither vmware form appears.
+    assert set(detail["valid_impl_ids"]) == {"k8s", "k8s-1.x"}
+    assert "vmware-rest" not in detail["valid_impl_ids"]
+    assert "vmware-rest-9.0" not in detail["valid_impl_ids"]
+
+
+def test_update_target_cross_product_preferred_impl_id_rejected(
+    client: TestClient,
+) -> None:
+    """PATCH cannot pin an impl registered for a different product (B1).
+
+    Same scenario as the POST regression, but at the PATCH boundary
+    and against the effective post-update product so a single
+    request changing both ``product`` and ``preferred_impl_id`` is
+    validated against the new product. Pinning the matching pair
+    succeeds; pinning a cross-product impl returns the structured
+    422 listing only the new product's impls.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    class _FakeVmwareConnector(Connector):
+        product = "vmware"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    _register_fake_k8s_connector()
+    register_connector_v2(
+        product="vmware", version="9.0", impl_id="vmware-rest", cls=_FakeVmwareConnector
+    )
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_admin_token(key)}"}
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        client.post(
+            "/api/v1/targets",
+            json={"name": "patch-cross", "product": "k8s", "host": "10.0.0.53"},
+            headers=headers,
+        )
+        response = client.patch(
+            "/api/v1/targets/patch-cross",
+            json={"preferred_impl_id": "vmware-rest-9.0"},
+            headers=headers,
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["kind"] == "unknown_preferred_impl_id"
+    assert detail["preferred_impl_id"] == "vmware-rest-9.0"
+    assert "vmware-rest" not in detail["valid_impl_ids"]
+    assert "vmware-rest-9.0" not in detail["valid_impl_ids"]
+
+
 def test_update_target_unknown_preferred_impl_id_returns_422(
     client: TestClient,
 ) -> None:

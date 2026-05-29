@@ -397,8 +397,8 @@ def _registered_products() -> set[str]:
     return {product for (product, _version, _impl_id) in all_connectors_v2() if product}
 
 
-def _registered_impl_ids() -> set[str]:
-    """Return the set of impl_ids advertised by registered connector classes.
+def _registered_impl_ids(product: str) -> set[str]:
+    """Return the impl_ids advertised by connectors registered for *product*.
 
     G0.15-T6 (#1215). The v0.7.0 dogfood (RDC #753, signal 6) caught a
     UX foot-gun where PATCH accepted any string for ``preferred_impl_id``
@@ -412,6 +412,16 @@ def _registered_impl_ids() -> set[str]:
     at write time that the resolver would give if it surfaced the
     silent-ignore.
 
+    G0.16-T6 review-iter-1 B1 (#1312). The set is **product-scoped**.
+    A global allowlist (the pre-B1 shape) accepted any impl_id
+    registered for *any* product, so a ``k8s`` target could pass
+    validation with ``preferred_impl_id="vmware-rest-9.0"`` and the
+    resolver would silently ignore it at dispatch time -- the exact
+    foot-gun G0.15-T6 (#1215) was created to close. The filter is
+    consulted at both POST (``body.product``) and PATCH (the
+    effective patched product, post-update) so the validator and the
+    resolver see the same impl set for the same target.
+
     Read from the v2 registry snapshot (which subsumes v1 entries as
     ``(product, "", "")``); the empty-string placeholder is excluded
     because a bare ``""`` impl_id has no addressable meaning at the
@@ -421,7 +431,7 @@ def _registered_impl_ids() -> set[str]:
     callers can mutate / sort without affecting the underlying
     registry.
 
-    G0.16-T6 Finding C (#1312). The set now includes BOTH the base
+    G0.16-T6 Finding C (#1312). The set includes BOTH the base
     ``impl_id`` (``"nsx-rest"``) AND the versioned form
     ``"{impl_id}-{version}"`` (``"nsx-rest-4.2"``) for every triple
     with a non-empty ``version``. The versioned form is the canonical
@@ -436,11 +446,14 @@ def _registered_impl_ids() -> set[str]:
     candidates, so picking either form selects the same connector
     when only one version is registered.
     """
-    base_ids = {impl_id for (_product, _version, impl_id) in all_connectors_v2() if impl_id}
+    scoped = [
+        (reg_product, version, impl_id)
+        for (reg_product, version, impl_id) in all_connectors_v2()
+        if reg_product == product
+    ]
+    base_ids = {impl_id for (_p, _version, impl_id) in scoped if impl_id}
     versioned_ids = {
-        f"{impl_id}-{version}"
-        for (_product, version, impl_id) in all_connectors_v2()
-        if impl_id and version
+        f"{impl_id}-{version}" for (_p, version, impl_id) in scoped if impl_id and version
     }
     return base_ids | versioned_ids
 
@@ -787,11 +800,17 @@ async def create_target(
     # registered impl set so the resolver-silently-ignores-unknown-id
     # foot-gun surfaces at write time. ``None`` is the absent / cleared
     # state and is always valid; a non-``None`` value must match an
-    # impl_id registered in the v2 connector registry. ``valid_impl_ids``
-    # is empty when the registry is empty (test isolation / pre-lifespan
-    # state); we skip validation in that case for parity with the
-    # ``product`` validator above.
-    valid_impl_ids = sorted(_registered_impl_ids())
+    # impl_id registered in the v2 connector registry **for the
+    # target's product** (G0.16-T6 review-iter-1 B1 #1312 -- a
+    # cross-product allowlist let a ``k8s`` target pin
+    # ``vmware-rest-9.0`` and the resolver would silently ignore it
+    # at dispatch). ``valid_impl_ids`` is empty when no connector is
+    # registered for the product (test isolation / pre-lifespan
+    # state, or a not-yet-registered product); we skip validation in
+    # that case for parity with the ``product`` validator above --
+    # the operator already saw a structured 422 from the product
+    # check if their product is unknown to the registry.
+    valid_impl_ids = sorted(_registered_impl_ids(body.product))
     if (
         body.preferred_impl_id is not None
         and valid_impl_ids
@@ -907,11 +926,17 @@ async def update_target(
     # G0.15-T6 (#1215). Same impl_id rejection as on POST. ``None`` is
     # the explicit-clear state and is always valid (operator wants to
     # remove the override); a non-``None`` value must match a
-    # registered impl_id. Skip when the registry is empty (test
-    # isolation / pre-lifespan).
+    # registered impl_id **for the target's product** (G0.16-T6
+    # review-iter-1 B1 #1312). When the PATCH also changes ``product``,
+    # the new product is the relevant scope -- the validator must
+    # agree with the post-update row state, otherwise a single PATCH
+    # could land an impl_id that the resolver will silently ignore at
+    # the next dispatch. Skip when no connector is registered for the
+    # effective product (test isolation / pre-lifespan).
     new_preferred = updates.get("preferred_impl_id")
     if new_preferred is not None:
-        valid_impl_ids = sorted(_registered_impl_ids())
+        effective_product = new_product if new_product is not None else t.product
+        valid_impl_ids = sorted(_registered_impl_ids(effective_product))
         if valid_impl_ids and new_preferred not in valid_impl_ids:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

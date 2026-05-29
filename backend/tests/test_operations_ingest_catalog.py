@@ -355,16 +355,12 @@ def test_entry_accepts_pep440_specifier_set_compatibility_specifier() -> None:
 
 
 def test_entry_rejects_bad_wildcard_prefix() -> None:
-    with pytest.raises(
-        ValidationError, match=r"neither a glob.*nor a valid PEP 440 specifier set"
-    ):
+    with pytest.raises(ValidationError, match=r"neither a glob.*nor a valid PEP 440 specifier set"):
         _entry(spec_info_versions_compatible=["not-a-version.x"])
 
 
 def test_entry_rejects_lone_dotx_specifier() -> None:
-    with pytest.raises(
-        ValidationError, match=r"neither a glob.*nor a valid PEP 440 specifier set"
-    ):
+    with pytest.raises(ValidationError, match=r"neither a glob.*nor a valid PEP 440 specifier set"):
         _entry(spec_info_versions_compatible=[".x"])
 
 

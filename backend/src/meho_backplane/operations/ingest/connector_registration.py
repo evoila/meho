@@ -146,14 +146,23 @@ class GenericRestConnector(HttpConnector):
             "Initiative work adds auth_headers() per target.auth_model"
         )
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: Any,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Return an unreachable placeholder fingerprint.
 
         The auto-shim cannot probe the upstream API (no auth, no
         per-product reachability heuristic) so it reports the target
         as unreachable with a stable ``probe_method`` value the
         operator-facing CLI / API can render verbatim.
+
+        ``operator`` exists for ABC parity (G0.16-T4 #1306) — the
+        auto-shim never reaches Vault, so the route operator plays no
+        role here.
         """
+        del operator  # unused — placeholder fingerprint, no Vault read
         return FingerprintResult(
             vendor=self.product,
             product=self.product,

@@ -90,24 +90,17 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Fixed
-
-- **`GET /api/v1/targets` no longer silently masks detail fields
-  (G0.16-T6 Finding D #1312).** `TargetSummary` widened to mirror
-  the detail-endpoint shape per
-  `docs/codebase/api-shape-conventions.md` §5: list rows now
-  surface `version`, `tenant_id`, `port`, `fqdn`, `secret_ref`,
-  `auth_model`, `vpn_required`, `fingerprint`, `preferred_impl_id`,
-  and the `created_at` / `updated_at` / `deleted_at` timestamps.
-  The two deliberate omissions (`notes`, `extras`) are operator
-  free-form blobs documented in `TargetSummary`'s docstring. A
-  structural regression test in
-  `tests/test_targets_schemas.py` keeps the contract pinned so a
-  future field added to `Target` without the matching summary
-  update fails CI.
-
 ### Added
 
+- **Catalog field `spec_info_versions_compatible` for label-vs-spec
+  decoupling (G0.16-T5 #1307).** Optional `list[str]` on each
+  `ConnectorSpecEntry`. Entries are either glob shapes (`"1.x"`,
+  `"9.0.x"`) or PEP 440 specifier sets (`">=1.0,<2.0"`, `"~=1.4"`)
+  — any-of semantics across multiple patterns. Documented in
+  [`docs/cross-repo/connector-catalog.md`](docs/cross-repo/connector-catalog.md#label-vs-spec-decoupling-spec_info_versions_compatible).
+  Companion to G0.16-T6 Finding 22 / Task #1312 H for vmware catalog
+  `9.0` vs spec `9.0.0.0` — the new field is available for the
+  vmware variant to adopt if Task #1312 chooses approach (b). (#1307)
 - **`?envelope=v2` opt-in on the REST topology dependents /
   dependencies endpoints (G0.16-T6 Finding E #1312).** Passing
   `?envelope=v2` returns `{"kind": "dependents", "nodes": [...]}`
@@ -144,22 +137,37 @@ connector-related release-notes line.
   wire infer `kind="operation"` from the model's attribute
   default. Closes the "infer from `op_id`-vs-`activity` field
   presence" anti-pattern RDC #771 Finding 13 catalogued.
-- **Catalog `spec_info_versions_compatible` field
-  (G0.16-T6 Finding H #1312).** Connector-spec catalog entries can
-  now declare PEP-440-prefix wildcards (e.g. `["9.0.x"]`) that
-  document which spec `info.version` strings the validator must
-  accept under the catalog's product-line `version` label, per
-  `docs/codebase/api-shape-conventions.md` §9. The shipped vmware
-  entry adopts `spec_info_versions_compatible: ["9.0.x"]` as a
-  belt-and-suspenders declaration over the existing PEP-440
-  prefix-match (vmware `9.0` ↔ spec `9.0.0.0` already classifies
-  as "exact"). Pairs with T5 (#1307) which carries the
-  load-bearing application for the gh-rest entry where the
-  divergence (`"3"` ↔ `"1.1.4"`) blocks ingest without an explicit
+- **vmware catalog row adopts `spec_info_versions_compatible:
+  ["9.0.x"]` (G0.16-T6 Finding H #1312).** Builds on the
+  catalog field shipped via T5 (#1307). The shipped vmware
+  entry now declares the band as a belt-and-suspenders
+  declaration over the existing PEP-440 prefix-match
+  (vmware `9.0` ↔ spec `9.0.0.0` already classifies as
+  "exact"). Pairs with T5 which carries the load-bearing
+  application for the gh-rest entry where the divergence
+  (`"3"` ↔ `"1.1.4"`) blocks ingest without an explicit
   compatibility hint.
 
 ### Changed
 
+- `POST /api/v1/connectors/ingest` defaults to `async=true` and returns
+  `202 Accepted` + a job handle on the non-dry-run path; operators poll
+  `GET /api/v1/connectors/ingest/jobs/{job_id}` for completion.
+  Real-world vendor specs (the consumer signal was a 7.55 MB / 1275-op
+  `vmware/9.0.0.0` ingest that blocked the request thread for ~30 s
+  and tripped the kubelet liveness probe → pod restart) no longer
+  crash the backplane pod. `dry_run=true` keeps the synchronous shape
+  (the parse-only leg is the fast path); pass `async=false` for the
+  legacy blocking response on small specs (#1303).
+- `composite_l2_missing` error envelope reworded per the
+  curated-daily-driver vs OpenAPI-escape-hatch framing in
+  [`docs/codebase/api-shape-conventions.md`](docs/codebase/api-shape-conventions.md)
+  §1. The human message names the curation gap first, points at the
+  L1-wrapper request as the recommended path, and presents the
+  `catalog_command` as the escape-hatch recipe rather than the
+  remediation path. The structured `extras` (`error_code`,
+  `missing_op_ids`, `catalog_command`) are unchanged — agents that
+  branch on those fields keep working without migration (#1303).
 - **`GET /api/v1/feed?since=` accepts ISO-8601 timestamps
   (G0.16-T6 Finding G #1312).** The SSE feed now mirrors the MCP
   `broadcast.recent` tool's documented contract: operators can
@@ -190,6 +198,93 @@ connector-related release-notes line.
   matching, so an operator typing either form lands on the same
   connector. The unknown-impl 422 lists both forms in
   `valid_impl_ids` for branchable client recovery.
+
+### Fixed
+
+- **SSE feed delivers zero bytes despite stream writes (SEV-1, signal
+  draft `sse-feed-delivers-zero-events-despite-stream-writes`)** — a
+  fresh `GET /api/v1/feed` or `/ui/broadcast/stream` connection
+  defaulted to the Valkey `$` live-tail cursor, which combined with
+  the 30 s heartbeat cadence produced 0 bytes for the first 30 s on
+  any tenant with no concurrent writes during the window, and
+  permanently empty `/ui/broadcast` pages for tenants with 76+
+  existing entries on the stream. `_feed_generator` and
+  `_ui_feed_generator` now run a backlog prelude
+  (`XREVRANGE … COUNT 50`) before the BLOCK loop on fresh `$`
+  connections; explicit-replay cursors (`Last-Event-Id`, `since`)
+  skip the prelude. Root cause documented in
+  `docs/codebase/broadcast.md` as the writer → fanout → consumer
+  triage path (#1305 / #1302).
+- **gh-rest connector `auth_model` reconciled with `TargetCreate`
+  enum (G0.16-T2 #1304).** The v0.8.0 dogfood (consumer signal
+  `gh-rest-auth-model-target-vs-connector-mismatch`) caught a
+  SEV-1 mismatch between the target schema's `auth_model` enum
+  (`{impersonation, shared_service_account, per_user}`) and the
+  historical gh-rest connector boundary (which demanded
+  `auth_model="github-app"` or `"github-pat"` — neither a legal
+  enum value). The fix takes Approach B: the connector now
+  inspects the **Vault payload's field shape** to pick the
+  upstream credential protocol — `app_id` + `private_key` +
+  `installation_id` → App installation-token path; `token` →
+  PAT path; neither → typed `github_ambiguous_vault_payload`
+  envelope naming both required field sets so operators can
+  repair the Vault row without guessing. Targets keep
+  `auth_model="shared_service_account"` (the documented runbook
+  shape — `docs/cross-repo/github-connector.md` and the new
+  `load_github_credentials_from_vault` helper match the doc).
+  Mirrors the `vmware-rest-9.0` pattern (target carries the
+  identity model; connector reads the protocol from Vault).
+  Backwards-compatible for the `evoila-bosnia-gh` shape RDC
+  registered against v0.8.0 — the target row already carried
+  `shared_service_account` (the only enum value the operator
+  could pass), so re-deploying the post-#1304 backplane image
+  flips probe + dispatch green without operator action. (#1304)
+- **Connector probe — Vault OIDC fingerprint loader converges with dispatch.**
+  `POST /api/v1/targets/{name}/probe` and `POST /ui/connectors/{name}/probe`
+  now forward the route operator into the resolved connector's
+  `fingerprint()`. The four affected connectors (`k8s-1.x`,
+  `vmware-rest-9.0`, `sddc-rest-9.0`, `nsx-rest-4.2`) thread that
+  operator through the same `vault_client_for_operator(operator)` +
+  per-target Vault loader the dispatch path uses, replacing the
+  synthesised system operator's placeholder JWT that the v0.8.0 dogfood
+  cycle (`claude-rdc-hetzner-dc#771` Finding 4 / signal
+  `probe-fingerprint-vault-oidc-malformed-jwt`) surfaced as
+  `vault OIDC malformed jwt: must have three parts` on every probe of
+  `rke2-infra-k8s`, `rdc-vcenter`, `vcf9-sddc`, and `vcf9-nsx`. The
+  `Connector.fingerprint(target, operator=None)` ABC signature gained
+  an optional `operator` parameter; the legacy `operator=None`
+  fall-back to the system operator stays in place for background
+  callers (readiness probe, K8s topology refresh) that have no real
+  operator in scope, preserving the locked Option A decision's
+  system-call carve-out. (G0.16-T4 #1306)
+- **gh/3 catalog ingest no longer fails `spec_label_mismatch` on the
+  live upstream spec (G0.16-T5 #1307).** The catalog row's
+  `version="3"` is the product-line label (`v3` as github.com itself
+  calls it); the upstream OpenAPI description's `info.version` is
+  `1.1.4` and grows on every spec edit. Pre-fix the ingest
+  validator's verbatim/major-band cross-check refused the pair as
+  incompatible majors. The catalog now declares an opt-in
+  `spec_info_versions_compatible: ["1.x.x"]` range; the validator
+  widens to accept any `info.version` inside the declared band, so
+  `1.1.4 → 1.1.5 → 1.2.0` upstream bumps ingest cleanly without a
+  catalog edit. The opt-in is per-row — vmware-style catalogs whose
+  `version` IS the spec's `info.version` keep the historical strict
+  check. Consumer signal:
+  [`claude-rdc-hetzner-dc#771` Finding 18](https://github.com/evoila-bosnia/meho-internal/issues/771).
+  (#1307)
+- **`GET /api/v1/targets` no longer silently masks detail fields
+  (G0.16-T6 Finding D #1312).** `TargetSummary` widened to mirror
+  the detail-endpoint shape per
+  `docs/codebase/api-shape-conventions.md` §5: list rows now
+  surface `version`, `tenant_id`, `port`, `fqdn`, `secret_ref`,
+  `auth_model`, `vpn_required`, `fingerprint`, `preferred_impl_id`,
+  and the `created_at` / `updated_at` / `deleted_at` timestamps.
+  The two deliberate omissions (`notes`, `extras`) are operator
+  free-form blobs documented in `TargetSummary`'s docstring. A
+  structural regression test in
+  `tests/test_targets_schemas.py` keeps the contract pinned so a
+  future field added to `Target` without the matching summary
+  update fails CI.
 
 ## [0.8.0] - 2026-05-28
 

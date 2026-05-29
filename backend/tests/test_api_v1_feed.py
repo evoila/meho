@@ -100,6 +100,42 @@ def _isolated_broadcast_client() -> Iterator[None]:
     reset_broadcast_client_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def _empty_backlog_prelude_by_default(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Default the backlog prelude's ``XREVRANGE`` to "no entries".
+
+    G0.16-T3 (#1305) added a backlog prelude that runs whenever the
+    generator's cursor is ``$``. Most pre-existing tests in this
+    module instantiate ``_feed_generator(..., cursor="$")`` and only
+    mock ``xread`` — they never wanted the prelude path to fire and
+    have no fixture to handle ``xrevrange``. Patching
+    ``redis.asyncio.Redis.xrevrange`` at the class level (rather than
+    on a single instance returned by
+    :func:`get_broadcast_client`) covers both the prelude-path tests
+    that share the client cache and the cases where individual tests
+    swap the cached client; defaulting to "stream is empty"
+    preserves the legacy assertions byte-for-byte.
+
+    Tests that exercise the prelude branch
+    (``TestFeedBacklogPrelude``) override this within their body via
+    :func:`patch.object` against the active client; the inner
+    instance-level patch wins over the outer class-level patch for
+    the duration of the test's ``with`` block, and the autouse
+    monkeypatch is restored on teardown either way.
+
+    The real-Valkey ``TestFeedIntegration`` class (Docker-gated)
+    explicitly opts out via its own monkeypatch undo — see that
+    class's ``valkey_url`` fixture.
+    """
+    import redis.asyncio as redis
+
+    async def _empty(*_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr(redis.Redis, "xrevrange", _empty, raising=True)
+    yield
+
+
 @pytest.fixture
 def _feed_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Pin chassis env vars so ``get_settings`` succeeds + JWT verification works.
@@ -871,6 +907,333 @@ class TestFeedGenerator:
         )
         assert decoded["code"] == "broadcast_subsystem_unavailable"
         assert "TimeoutError" in decoded["message"]
+
+
+# ---------------------------------------------------------------------------
+# Backlog prelude (G0.16-T3 #1305 — SSE feed delivers zero bytes fix)
+# ---------------------------------------------------------------------------
+
+
+def _idle_xread_mock() -> AsyncMock:
+    """An ``xread`` mock that yields to the event loop, returns ``None`` forever.
+
+    Used by :class:`TestFeedBacklogPrelude` to assert prelude /
+    BLOCK-loop interactions without the generator spinning
+    uncancellably. ``AsyncMock(return_value=None)`` returns
+    synchronously, so a generator's ``while True: await xread(...)``
+    would never suspend and the test's ``asyncio.timeout``
+    surrounding ``_collect_n_frames`` could never preempt the loop
+    (the runner core stays pinned until pytest declares the worker
+    lost). The ``asyncio.sleep`` yield point is what makes the
+    cancellation contract observable inside the same task tree.
+    Mirrors the side-effect dance inside :func:`_xread_returning`.
+    """
+
+    async def _side_effect(*_a: object, **_k: object) -> None:
+        await asyncio.sleep(0.01)
+        return None
+
+    return AsyncMock(side_effect=_side_effect)
+
+
+class TestFeedBacklogPrelude:
+    """``_emit_backlog_prelude`` + the ``$``-cursor entry path on ``_feed_generator``.
+
+    These tests pin the v0.8.0 → v0.9.0 fix for
+    ``claude-rdc-hetzner-dc#771`` Finding 14: a fresh
+    ``GET /api/v1/feed`` against a tenant with existing entries on
+    the stream must surface those entries within bounded latency.
+    Pre-fix, the generator's ``$`` cursor unconditionally skipped
+    backlog AND the 30 s heartbeat cadence meant ``curl`` saw 0
+    bytes inside its default 8 s timeout.
+    """
+
+    async def test_fresh_dollar_connection_replays_backlog_chronologically(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """``cursor="$"`` → prelude yields backlog before BLOCK starts.
+
+        Mirrors the consumer repro: the stream has 3 entries, the
+        operator opens an SSE connection, the first three SSE frames
+        carry those events in chronological order. The XREVRANGE
+        result comes in reverse order from Valkey; the prelude
+        helper is responsible for the reversal, so the assertion is
+        on the frame order, not the XREVRANGE input order.
+        """
+        events = [
+            _make_event(op_id="audit.first"),
+            _make_event(op_id="audit.second"),
+            _make_event(op_id="audit.third"),
+        ]
+        # XREVRANGE returns latest-first by entry id: the largest id
+        # comes first. ``audit.third`` was published last so it
+        # carries the largest id (``...002``); ``audit.first`` the
+        # smallest (``...000``). The prelude helper reverses this
+        # back into chronological order for the SSE consumer.
+        xrevrange_items = [
+            ("1715600000002-0", {"event": events[2].model_dump_json()}),
+            ("1715600000001-0", {"event": events[1].model_dump_json()}),
+            ("1715600000000-0", {"event": events[0].model_dump_json()}),
+        ]
+        broadcast_client = get_broadcast_client()
+        # Idle XREAD with a yield point — see :func:`_idle_xread_mock`'s
+        # docstring for the cancellation rationale (a bare
+        # ``AsyncMock(return_value=None)`` pins the runner core).
+        idle_xread = _idle_xread_mock()
+        prelude = AsyncMock(return_value=xrevrange_items)
+        with (
+            patch.object(broadcast_client, "xrevrange", new=prelude),
+            patch.object(broadcast_client, "xread", new=idle_xread),
+        ):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            frames = await _collect_n_frames(gen, n=3, timeout=2.0)
+
+        assert prelude.await_count == 1
+        # XREVRANGE called with the tenant stream key + the prelude
+        # cap. redis-py 7.x exposes ``count`` as a keyword-only arg.
+        call = prelude.await_args_list[0]
+        assert call.args[0] == f"meho:feed:{_TENANT_A}"
+        assert call.kwargs.get("count") == 50
+        assert len(frames) == 3
+        op_ids = [
+            json.loads(
+                next(line for line in frame.split("\n") if line.startswith("data: "))[
+                    len("data: ") :
+                ]
+            )["op_id"]
+            for frame in frames
+        ]
+        assert op_ids == ["audit.first", "audit.second", "audit.third"]
+        for frame in frames:
+            # The prelude reuses ``_format_event`` so frames are
+            # indistinguishable from live-tail frames at the wire
+            # level — same prefix, same id line shape.
+            assert frame.startswith("event: broadcast\n")
+            assert "\nid: " in frame
+
+    async def test_prelude_advances_block_cursor_past_replayed_entries(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """After prelude, BLOCK loop reads from the last replayed entry id, not ``$``.
+
+        Without this advance, the BLOCK loop's first XREAD would
+        observe an XADD made between the prelude and the BLOCK
+        landing as "new", but the prelude already shipped earlier
+        entries past which the cursor should now sit. The assertion
+        is that the BLOCK loop's first XREAD argument carries the
+        last-replayed entry id as the cursor, not ``$``.
+        """
+        event = _make_event()
+        xrevrange_items = [
+            ("1715600000005-0", {"event": event.model_dump_json()}),
+        ]
+        broadcast_client = get_broadcast_client()
+        idle_xread = _idle_xread_mock()
+        prelude = AsyncMock(return_value=xrevrange_items)
+        with (
+            patch.object(broadcast_client, "xrevrange", new=prelude),
+            patch.object(broadcast_client, "xread", new=idle_xread),
+        ):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            # Consume the prelude frame AND let the generator land
+            # in the BLOCK loop's first XREAD await before the
+            # timeout fires. Asking for n=2 reaches the BLOCK loop
+            # because the prelude yields exactly 1 frame; the
+            # ``async for`` then suspends on ``client.xread`` until
+            # the timeout cancels the iteration.
+            await _collect_n_frames(gen, n=2, timeout=0.3)
+
+        assert idle_xread.await_count >= 1
+        first_xread_streams = idle_xread.await_args_list[0].args[0]
+        assert first_xread_streams == {f"meho:feed:{_TENANT_A}": "1715600000005-0"}
+
+    async def test_empty_stream_prelude_is_noop_and_block_runs_from_dollar(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """No history on stream → prelude yields zero frames, BLOCK reads from ``$``.
+
+        A fresh tenant whose stream is empty should fall through to
+        the live-tail behaviour pre-#1305 — no prelude frames, BLOCK
+        loop's first XREAD uses ``$``.
+        """
+        broadcast_client = get_broadcast_client()
+        # Empty xrevrange = empty stream.
+        prelude = AsyncMock(return_value=[])
+        idle_xread = _idle_xread_mock()
+        with (
+            patch.object(broadcast_client, "xrevrange", new=prelude),
+            patch.object(broadcast_client, "xread", new=idle_xread),
+        ):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            # n>0 + low timeout so the generator actually runs the
+            # prelude (yielding nothing because the stream is empty)
+            # and lands in the BLOCK loop's first XREAD, which we
+            # then cancel via the timeout. ``n=0`` short-circuits
+            # through ``aclose`` without ever entering the generator.
+            frames = await _collect_n_frames(gen, n=1, timeout=0.3)
+
+        assert frames == []
+        assert prelude.await_count == 1
+        assert idle_xread.await_count >= 1
+        # No prelude advance → BLOCK loop cursor stays ``$``.
+        assert idle_xread.await_args_list[0].args[0] == {f"meho:feed:{_TENANT_A}": "$"}
+
+    async def test_explicit_since_cursor_skips_prelude(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """``cursor != "$"`` → prelude is bypassed; only BLOCK loop runs.
+
+        Subscribers passing ``Last-Event-Id`` (after a reconnect) or
+        ``since`` (explicit replay) pinned an anchor. Replaying from
+        ``+`` would re-deliver entries the caller already saw —
+        ``EventSource`` would show duplicates and the operator
+        couldn't trust the cursor handshake. The prelude must skip
+        on any non-``$`` cursor.
+        """
+        broadcast_client = get_broadcast_client()
+        prelude = AsyncMock(return_value=[])
+        idle_xread = _idle_xread_mock()
+        with (
+            patch.object(broadcast_client, "xrevrange", new=prelude),
+            patch.object(broadcast_client, "xread", new=idle_xread),
+        ):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="1715600000000-0",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            # See the empty-stream test for why n=1 (not 0) is the
+            # right driver — ``_collect_n_frames`` short-circuits on
+            # ``n<=0`` before the generator runs.
+            await _collect_n_frames(gen, n=1, timeout=0.3)
+
+        assert prelude.await_count == 0
+        assert idle_xread.await_count >= 1
+        assert idle_xread.await_args_list[0].args[0] == {
+            f"meho:feed:{_TENANT_A}": "1715600000000-0"
+        }
+
+    async def test_prelude_applies_op_class_filter(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """Prelude entries that fail ``op_class`` filter are dropped just like live-tail.
+
+        Same ``_process_entries`` helper as the live loop, so
+        op_class / principal / target filters work identically.
+        """
+        read_event = _make_event(op_class="read", op_id="vsphere.vm.list")
+        write_event = _make_event(op_class="write", op_id="vsphere.vm.create")
+        # XREVRANGE returns latest-first; published order is read then write.
+        xrevrange_items = [
+            ("1715600000001-0", {"event": write_event.model_dump_json()}),
+            ("1715600000000-0", {"event": read_event.model_dump_json()}),
+        ]
+        broadcast_client = get_broadcast_client()
+        prelude = AsyncMock(return_value=xrevrange_items)
+        idle_xread = _idle_xread_mock()
+        with (
+            patch.object(broadcast_client, "xrevrange", new=prelude),
+            patch.object(broadcast_client, "xread", new=idle_xread),
+        ):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class="read",
+                principal=None,
+                target=None,
+            )
+            # n=2 reaches the BLOCK loop's first XREAD (only one
+            # frame survives the filter, so the second iteration
+            # suspends on xread until the timeout).
+            frames = await _collect_n_frames(gen, n=2, timeout=0.5)
+
+        assert len(frames) == 1
+        data = json.loads(
+            next(line for line in frames[0].split("\n") if line.startswith("data: "))[
+                len("data: ") :
+            ]
+        )
+        assert data["op_class"] == "read"
+        # Cursor advance is past the latest *fetched* (write) entry,
+        # not past the matched (read) entry — mirrors the live-loop
+        # busy-but-filtered invariant.
+        first_xread_streams = idle_xread.await_args_list[0].args[0]
+        assert first_xread_streams == {f"meho:feed:{_TENANT_A}": "1715600000001-0"}
+
+    async def test_prelude_redis_error_emits_feed_error_then_closes(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """Transport-down on the prelude XREVRANGE → SSE error frame, clean close.
+
+        Same operator-visible condition as a BLOCK-loop XREAD
+        failure (broadcast pod down on a fresh deploy, post-rollout
+        connection refused). The prelude is the FIRST Valkey call
+        on a fresh ``$`` connection, so the prelude path must also
+        emit the T11-compliant ``event: feed_error`` frame rather
+        than propagating the exception (which would land as a bare
+        connection drop on the SSE consumer, since
+        ``http.response.start`` was sent on the StreamingResponse's
+        first byte).
+        """
+        import redis.exceptions as redis_exc
+
+        broadcast_client = get_broadcast_client()
+        prelude = AsyncMock(side_effect=redis_exc.ConnectionError("connection refused"))
+        idle_xread = _idle_xread_mock()
+        with (
+            patch.object(broadcast_client, "xrevrange", new=prelude),
+            patch.object(broadcast_client, "xread", new=idle_xread),
+        ):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            frames: list[str] = []
+            async for chunk in gen:
+                frames.append(chunk)
+
+        assert len(frames) == 1
+        assert frames[0].startswith("event: feed_error\n")
+        data = json.loads(
+            next(line for line in frames[0].split("\n") if line.startswith("data: "))[
+                len("data: ") :
+            ]
+        )
+        assert data["code"] == "broadcast_subsystem_unavailable"
+        assert "ConnectionError" in data["message"]
+        # The BLOCK loop is never reached after the prelude's error
+        # frame because the prelude path ``return``s; xread must not
+        # have been called.
+        assert idle_xread.await_count == 0
 
 
 # ---------------------------------------------------------------------------

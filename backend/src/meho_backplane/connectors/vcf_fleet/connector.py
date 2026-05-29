@@ -233,7 +233,11 @@ class VcfFleetConnector(HttpConnector):
         creds = await self._creds.get(target, operator)
         return {"Authorization": basic_auth_header(creds["username"], creds["password"])}
 
-    async def fingerprint(self, target: VcfFleetTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: VcfFleetTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from the wrapper-verified probe call.
 
         Fleet's first-party diagnostic endpoints return HTTP 500 in 9.0
@@ -257,11 +261,18 @@ class VcfFleetConnector(HttpConnector):
         whose ``extras["error"]`` carries the exception class +
         message — same pattern Harbor / NSX / SDDC Manager / VCF
         Automation use.
+
+        ``operator`` (optional, G0.16-T4 #1306) is forwarded to the
+        credentials loader so the per-target Vault read happens under
+        the operator's identity, matching the dispatch path. ``None``
+        falls back to a system operator whose placeholder JWT fails
+        closed at the live Vault round-trip.
         """
         probed_at = datetime.now(UTC)
+        eff_operator = operator if operator is not None else synthesise_system_operator()
         try:
             client = await self._http_client(target)
-            headers = await self.auth_headers(target, synthesise_system_operator())
+            headers = await self.auth_headers(target, eff_operator)
             resp = await client.get(
                 _FLEET_PROBE_PATH,
                 headers={"Accept": "application/json", **headers},

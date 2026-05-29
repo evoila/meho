@@ -52,6 +52,7 @@ from typing import Any
 import asyncssh
 import structlog
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.pfsense.ops import PFSENSE_OPS
 from meho_backplane.connectors.schemas import (
@@ -233,7 +234,11 @@ class PfSenseConnector(SshConnector):
             f"private key in the target's Vault secret under ssh_private_key."
         )
 
-    async def fingerprint(self, target: Target) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: Target,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Read ``/etc/version`` -- canonical pfSense fingerprint.
 
         Runs a single ``_run_command`` call against ``cat /etc/version``.
@@ -250,7 +255,12 @@ class PfSenseConnector(SshConnector):
 
         ``probe_method="ssh: cat /etc/version"`` mirrors the bind9
         sibling's ``probe_method="ssh: named -v"`` convention.
+
+        ``operator`` exists for ABC parity (G0.16-T4 #1306) — pfSense
+        authenticates via SSH key, not Vault OIDC, so the route operator
+        plays no role here.
         """
+        del operator  # unused — SSH key auth, no Vault credential read
         probed_at = datetime.now(UTC)
 
         try:

@@ -438,7 +438,7 @@ class _FakeConnector(Connector):
     impl_id = "fakeprod"
     supported_version_range = None
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:
         return FingerprintResult(
             vendor="FakeVendor",
             product="fakeprod",
@@ -826,7 +826,9 @@ def test_detail_renders_ambiguous_connector_alert_when_resolver_returns_ambiguou
         impl_id = "fakeprod-alt"
         supported_version_range = None
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # pragma: no cover
+        async def fingerprint(
+            self, target: Any, operator: Any = None
+        ) -> FingerprintResult:  # pragma: no cover
             raise NotImplementedError
 
         async def probe(self, target: Any) -> Any:  # pragma: no cover
@@ -944,7 +946,9 @@ def test_detail_no_connector_missing_fingerprint_surfaces_reprobe_hint() -> None
         # case.
         supported_version_range = ">=1.0"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # pragma: no cover
+        async def fingerprint(
+            self, target: Any, operator: Any = None
+        ) -> FingerprintResult:  # pragma: no cover
             raise NotImplementedError
 
         async def probe(self, target: Any) -> Any:  # pragma: no cover

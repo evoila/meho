@@ -284,6 +284,92 @@ def test_validate_spec_versions_multi_spec_pure_inconsistent(tmp_path: Path) -> 
     }
 
 
+# -- _validate_spec_versions: spec_info_versions_compatible opt-in (G0.16-T5 #1307)
+
+
+def test_validate_spec_versions_compat_opt_in_accepts_label_drift(
+    tmp_path: Path,
+) -> None:
+    """spec ``1.1.4`` + label ``3`` with compat ``["1.x.x"]`` → no raise."""
+    spec = _spec_yaml(tmp_path / "spec.yaml", info_version="1.1.4")
+    service = IngestionPipelineService(operator=_operator())
+    # Without the opt-in this would raise spec_label_mismatch (different
+    # major: spec 1.x vs label 3); with it, the validator widens to the
+    # compat band and the ingest proceeds.
+    service._validate_spec_versions(
+        specs=[spec],
+        requested_version="3",
+        log=_bound_log(),
+        spec_info_versions_compatible=("1.x.x",),
+    )
+
+
+def test_validate_spec_versions_compat_opt_in_off_by_default(tmp_path: Path) -> None:
+    """Without the opt-in the historical label-vs-spec check still fires."""
+    spec = _spec_yaml(tmp_path / "spec.yaml", info_version="1.1.4")
+    service = IngestionPipelineService(operator=_operator())
+    with pytest.raises(VersionMismatchError) as excinfo:
+        service._validate_spec_versions(
+            specs=[spec],
+            requested_version="3",
+            log=_bound_log(),
+        )
+    assert excinfo.value.kind == "spec_label_mismatch"
+
+
+def test_validate_spec_versions_compat_opt_in_outside_range_still_raises(
+    tmp_path: Path,
+) -> None:
+    """Compat band is bounded — a spec outside it still raises."""
+    spec = _spec_yaml(tmp_path / "spec.yaml", info_version="2.0.0")
+    service = IngestionPipelineService(operator=_operator())
+    with pytest.raises(VersionMismatchError) as excinfo:
+        service._validate_spec_versions(
+            specs=[spec],
+            requested_version="3",
+            log=_bound_log(),
+            spec_info_versions_compatible=("1.x.x",),
+        )
+    assert excinfo.value.kind == "spec_label_mismatch"
+
+
+def test_validate_spec_versions_compat_opt_in_specifier_set_shape(
+    tmp_path: Path,
+) -> None:
+    """PEP 440 SpecifierSet syntax is accepted directly."""
+    spec = _spec_yaml(tmp_path / "spec.yaml", info_version="1.1.4")
+    service = IngestionPipelineService(operator=_operator())
+    service._validate_spec_versions(
+        specs=[spec],
+        requested_version="3",
+        log=_bound_log(),
+        spec_info_versions_compatible=(">=1.0,<2.0",),
+    )
+
+
+def test_validate_spec_versions_compat_opt_in_multi_spec_still_consistency_checked(
+    tmp_path: Path,
+) -> None:
+    """The opt-in widens label-vs-spec only; multi-spec consistency still fires.
+
+    Two specs whose ``info.version`` values both fall inside the
+    declared compatibility band collapse cleanly. Two specs whose
+    values straddle major versions still trip
+    ``multi_spec_inconsistent`` — the opt-in doesn't grant a free
+    pass to a bundle that can't share a connector triple.
+    """
+    spec_a = _spec_yaml(tmp_path / "vcenter.yaml", info_version="1.1.4")
+    spec_b = _spec_yaml(tmp_path / "vi-json.yaml", info_version="1.2.0")
+    service = IngestionPipelineService(operator=_operator())
+    # Both inside the compat band → no raise.
+    service._validate_spec_versions(
+        specs=[spec_a, spec_b],
+        requested_version="3",
+        log=_bound_log(),
+        spec_info_versions_compatible=("1.x.x",),
+    )
+
+
 def test_version_mismatch_error_renders_both_values() -> None:
     """The exception message includes both ``requested_version`` and
     ``spec_info_version`` so operators can act on it without

@@ -164,7 +164,7 @@ class _NoOpVaultConnector(Connector):
 
     product = "vault"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:
         from datetime import UTC, datetime
 
         return FingerprintResult(

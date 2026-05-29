@@ -419,7 +419,11 @@ class VmwareRestConnector(HttpConnector):
             )
             return token
 
-    async def fingerprint(self, target: VsphereTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: VsphereTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from ``GET /api/about``.
 
         The session token is fetched lazily by :meth:`auth_headers`
@@ -431,15 +435,27 @@ class VmwareRestConnector(HttpConnector):
         ``fingerprint()`` so the operator's first ``meho connector
         fingerprint`` call against an unreachable vCenter gets a
         structured response rather than a stack trace.
+
+        ``operator`` (optional) is the request-scoped operator forwarded
+        from the probe routes. When provided, the underlying
+        :class:`VsphereSessionLoader` reads the per-target Vault secret
+        under that identity — the same code path the dispatch surface
+        uses. ``None`` falls back to a system operator whose placeholder
+        JWT is rejected by the live Vault loader, preserving the
+        fail-closed system-call carve-out. G0.16-T4 (#1306) converged
+        probe + dispatch on this signature; pre-fix the probe path
+        hard-coded the placeholder JWT and surfaced as the v0.8.0
+        dogfood's ``malformed jwt: must have three parts`` finding.
         """
         probed_at = datetime.now(UTC)
-        # The fingerprint probe is system-initiated — there is no real
-        # operator on this path. Synthesise a system operator (empty
-        # raw_jwt) for the auth surface; ``GET /api/about`` is reached
-        # pre-session via _get_json. See _shared.system_operator.
-        operator = synthesise_system_operator()
+        # Forward the route operator when present; fall back to the
+        # system operator for background callers. The session loader's
+        # fail-closed guard rejects the placeholder JWT at the live
+        # Vault round-trip, so the system-call carve-out still holds
+        # when no real operator is in scope.
+        eff_operator = operator if operator is not None else synthesise_system_operator()
         try:
-            payload = await self._get_json(target, "/api/about", operator=operator)
+            payload = await self._get_json(target, "/api/about", operator=eff_operator)
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             # RuntimeError catches the session-establish failures from
             # :meth:`_session_token` so an unauthenticatable target

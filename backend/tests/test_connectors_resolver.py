@@ -80,7 +80,7 @@ def _fingerprint(version: str | None = None) -> _FakeFingerprint:
 class _BaseFakeConnector(Connector):
     product = "vmware"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -118,7 +118,7 @@ class _VmwareHighPriority(_BaseFakeConnector):
 class _VaultConnector(Connector):
     product = "vault"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -457,7 +457,7 @@ def test_resolve_versioned_beats_wildcard_for_unfingerprinted_target() -> None:
         product = "k8s"
         # No supported_version_range — mirrors KubernetesConnector.
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -492,7 +492,7 @@ def test_resolve_versioned_beats_wildcard_for_fingerprinted_target() -> None:
     class _K8sConnector(Connector):
         product = "k8s"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -524,7 +524,7 @@ def test_resolve_preferred_impl_id_still_works_with_wildcard_demotion() -> None:
     class _K8sConnector(Connector):
         product = "k8s"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -560,7 +560,7 @@ def test_resolve_wildcard_only_still_resolves_when_no_versioned_entry() -> None:
     class _V1OnlyConnector(Connector):
         product = "legacy-v1"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -588,7 +588,7 @@ def test_resolve_multiple_versioned_with_wildcard_still_disambiguates() -> None:
     class _K8sConnector(Connector):
         product = "k8s"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -635,7 +635,7 @@ def test_resolve_versioned_beats_wildcard_emits_log_with_reason(
     class _K8sConnector(Connector):
         product = "k8s"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -736,7 +736,7 @@ def test_resolve_v1_class_without_range_matches_unfingerprinted_target() -> None
         product = "rangeless"
         # supported_version_range defaults to None (G0.6-T3).
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -1042,7 +1042,7 @@ class _GitHubLikeConnector(Connector):
 
     product = "gh"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]

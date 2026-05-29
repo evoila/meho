@@ -711,7 +711,20 @@ async def probe_target(
     # label is None ⇒ cls is set (contract of resolve_connector_or_label).
     assert cls is not None
     try:
-        fp = await cls().fingerprint(t)
+        # Forward the route operator so the connector's fingerprint reads
+        # per-target Vault credentials under the operator's identity, the
+        # same code path the dispatch surface uses. G0.16-T4 (#1306)
+        # converged probe + dispatch on this signature; pre-fix the
+        # probe path passed nothing (so the connector synthesised a
+        # system operator with a placeholder JWT) and Vault rejected
+        # the JWT/OIDC login as ``malformed jwt: must have three
+        # parts`` on the four connectors whose fingerprint authenticates
+        # via Vault (k8s-1.x, vmware-rest-9.0, sddc-rest-9.0,
+        # nsx-rest-4.2). The wider ABC widening (with
+        # ``operator: Operator | None = None``) keeps this call
+        # backwards-compatible: connectors whose fingerprint does not
+        # touch Vault accept the parameter and ignore it.
+        fp = await cls().fingerprint(t, operator=operator)
     except Exception as exc:
         # G0.15-T1 #1210: a connector that raises mid-fingerprint used
         # to bubble past the route and surface as FastAPI's bare 500

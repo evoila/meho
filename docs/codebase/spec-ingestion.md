@@ -405,6 +405,26 @@ the major version surface as `VersionMismatchError` with
 `kind="multi_spec_inconsistent"`. Specs missing `info.version`
 entirely skip the check (older spec dialects keep ingesting).
 
+**Catalog-driven opt-in: `spec_info_versions_compatible` (G0.16-T5
+#1307).** Some catalog rows carry a `version` label that is
+semantically distinct from the spec's `info.version` (the GitHub
+REST catalog row's `version="3"` is the product-line label
+github.com calls the API; the live OpenAPI spec's `info.version`
+is `1.1.4`, regenerated daily on `rest-api-description/main`). For
+these rows the catalog declares a compatibility range
+(`spec_info_versions_compatible: ["1.x.x"]`); the catalog-entry
+resolver in `api/v1/connectors_ingest.py` passes it through to
+`IngestionPipelineService.ingest(spec_info_versions_compatible=...)`,
+which forwards it to `_validate_spec_versions`. Per-spec
+classification then bypasses the verbatim/major-band check for any
+spec whose `info.version` matches a pattern in the range, emitting
+`connector_ingest_version_label_decoupled` so the audit trail still
+records the decision. The explicit-quadruple shape doesn't carry
+the catalog row and therefore can't opt in — operators using it
+implicitly accept the historical strict check. See
+[`docs/cross-repo/connector-catalog.md`](../cross-repo/connector-catalog.md#label-vs-spec-decoupling-spec_info_versions_compatible)
+for the field definition and pattern syntax.
+
 ### Shared error-envelope builders (`ingest/error_envelopes.py`)
 
 The REST route at `POST /api/v1/connectors/ingest` and the MCP
@@ -782,8 +802,78 @@ pulled in. The parser tolerates partial / underspecified docs and
 relies on T4's review queue to surface ambiguities to a human before
 operations go live.
 
+## Async ingest mode (G0.16-T1 / #1303)
+
+`POST /api/v1/connectors/ingest` defaults to `async=true`: the route
+fires the pipeline off the request thread via `asyncio.create_task`
+and returns `202 Accepted` + a job handle:
+
+```json
+{
+  "job_id": "0c4b7e8f-...",
+  "status": "running",
+  "poll_url": "/api/v1/connectors/ingest/jobs/0c4b7e8f-..."
+}
+```
+
+Operators poll the handle for completion:
+
+```text
+GET /api/v1/connectors/ingest/jobs/{job_id}
+→ 200 + IngestJobStatusResponse
+```
+
+The polling response carries the originating request descriptors,
+lifecycle timestamps, and -- on completion -- one of:
+
+* `status="succeeded"` + populated `ingestion` (+ optional `grouping`)
+* `status="failed"` + `error_class` + capped `error` message
+
+`status="running"` leaves both clusters `None`. Clients branch on
+`status` rather than checking presence.
+
+**Why async by default.** The OpenAPI ingest path is the escape
+hatch per [api-shape-conventions.md §1](api-shape-conventions.md) --
+operators reach for it when the curated daily-driver doesn't cover
+what they need and they're willing to handle vendor-shape responses.
+Real-world vendor specs are large: `vmware/9.0.0.0` is 7.55 MB / 1275
+typed REST ops, and a synchronous ingest call blocks the event loop
+for ~30 s in the register + LLM-grouping phases -- past the kubelet
+liveness probe deadline (default 25 s). RDC #771 Finding 20 caught
+the pod restart in production; G0.16-T1 (#1303) replaced the
+synchronous default with the 202 + job-handle shape so an operator
+reaching for the escape hatch doesn't kill the pod.
+
+**`dry_run=true` stays synchronous.** The parse-only leg is the
+fast path (~30 s walltime for the same vmware spec, but with no DB
+or LLM hops and steady event-loop yields between operations). It
+returns the legacy `IngestResponse` at 200 with `grouping=None`.
+
+**`async=false` keeps the legacy blocking shape.** Small-spec
+callers (CI tests with ≤ 100-op fixtures, ad-hoc shell scripts, the
+v0.8.x clients that pre-date the async shape) opt into the
+synchronous path by setting `async=false` in the request body. The
+domain-error → HTTP-status mapping documented at the route
+(`UpstreamNotSpecError` → 422, `VersionMismatchError` → 422,
+`LlmClientUnavailable` → 503, etc.) is only available on this path;
+the async path surfaces those failures via `error_class` on the
+polling response instead.
+
+**Job storage is process-local.** The `IngestJobRegistry` keeps
+in-memory rows in an `OrderedDict` behind an `asyncio.Lock`,
+bounded at 256 terminal jobs (oldest evicted first; live jobs
+exempt). A pod restart blows the registry away on purpose -- a job
+whose pod died was never going to finish. Durable cross-restart
+jobs are a v0.9 follow-up (the same migration that lands
+operator-cancellable jobs).
+
 ## Known issues
 
+* **Async-mode jobs don't survive pod restart.** The G0.16-T1
+  `IngestJobRegistry` lives in process memory. A pod restart
+  during a long-running ingest leaves the operator's client
+  polling 404 on a job that won't resume. v0.9 follow-up: persist
+  job rows in Postgres and resume on pod startup.
 * **Parameter name + location collision.** When an op has two params
   with the same `name` in different `in` locations (e.g. `cluster` as
   path **and** as query), the flat-object representation loses one.
@@ -826,6 +916,10 @@ operations go live.
 * Issue #741 — G0.9-T9 `UncoveredVersionLabel` pre-flight.
 * Issue #777 — G0.9.1-T5 shared error-envelope builders + MCP `-32602`
   mapping for `VersionMismatchError` / `UncoveredVersionLabel`.
+* Issue #1303 — G0.16-T1 async ingest mode (202 + job handle, in-memory
+  `IngestJobRegistry`). The "Async ingest mode" section above is the
+  authoritative shape; the issue body carries the consumer-side
+  pod-restart repro.
 * Initiative #389 — G0.7 spec-ingestion pipeline.
 * Initiative #772 — G0.9.1 v0.3.2 dogfood hardening (the rollup that
   parents #777).

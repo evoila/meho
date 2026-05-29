@@ -109,15 +109,17 @@ tests inject a stub. The default factory raises
 
 from __future__ import annotations
 
+import asyncio
 from json import JSONDecodeError
 from typing import Annotated
+from uuid import UUID
 
 import httpx
 import structlog
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
@@ -130,6 +132,10 @@ from meho_backplane.operations.ingest import (
     EditOpBody,
     IngestionPipelineResult,
     IngestionPipelineService,
+    IngestJob,
+    IngestJobHandle,
+    IngestJobNotFoundError,
+    IngestJobStatusResponse,
     IngestRequest,
     IngestResponse,
     InvalidSchemaError,
@@ -152,10 +158,16 @@ from meho_backplane.operations.ingest import (
     build_upstream_not_spec_detail,
     build_version_mismatch_detail,
     default_llm_client_factory,
+    get_job_registry,
     list_ingested_connectors,
     load_catalog,
+    run_ingest_job,
 )
-from meho_backplane.operations.ingest.api_schemas import ConnectorStatusFilter
+from meho_backplane.operations.ingest.api_schemas import (
+    ConnectorStatusFilter,
+    GroupingResultModel,
+    IngestionResultModel,
+)
 
 __all__ = [
     "router",
@@ -213,7 +225,42 @@ def _get_llm_client_factory() -> LlmClientFactory:
     return _llm_client_factory
 
 
-@router.post("/ingest", response_model=IngestResponse)
+@router.post(
+    "/ingest",
+    # Both response shapes declared explicitly so FastAPI's autogen
+    # OpenAPI surfaces them and the regen'd Go CLI sees typed
+    # ``api.IngestResponse`` (200, sync legacy) and
+    # ``api.IngestJobHandle`` (202, async default). Without this map
+    # the route returns a bare ``JSONResponse`` and the spec emits a
+    # generic ``application/json`` body, which causes oapi-codegen to
+    # drop ``IngestResponse`` entirely -- the failure mode that
+    # surfaced as ``undefined: api.IngestResponse`` golangci-lint
+    # errors in ``cli/internal/cmd/connector/{ingest.go,connector_test.go}``
+    # after the async/job-handle shape landed. Mirrors the
+    # ``DELETE /api/v1/targets/{name}`` 409 declaration in
+    # ``api/v1/targets.py`` -- explicit ``responses`` map even when
+    # the handler returns ``JSONResponse`` directly.
+    responses={
+        200: {
+            "model": IngestResponse,
+            "description": (
+                "Sync legacy path (``async=false`` or ``dry_run=true``)"
+                " -- pipeline ran inline; body is the full"
+                " :class:`IngestResponse` (``ingestion`` + optional"
+                " ``grouping``)."
+            ),
+        },
+        202: {
+            "model": IngestJobHandle,
+            "description": (
+                "Async default (``async=true``) -- pipeline running"
+                " off the request thread; body is an"
+                " :class:`IngestJobHandle` with the ``job_id`` to"
+                " poll via ``GET /api/v1/connectors/ingest/jobs/{job_id}``."
+            ),
+        },
+    },
+)
 async def ingest_endpoint(
     body: IngestRequest,
     operator: Operator = _require_admin,
@@ -221,14 +268,35 @@ async def ingest_endpoint(
         LlmClientFactory,
         Depends(_get_llm_client_factory),
     ] = default_llm_client_factory,
-) -> IngestResponse:
+) -> JSONResponse:
     """Run the full ingestion pipeline (T1 → T2 → T3) for one connector.
 
-    ``dry_run=true`` parses every spec but writes nothing; the
-    response carries the parser's ``inserted_count`` projection and
-    ``grouping=None``. The real path runs the parse → register_
-    ingested → run_llm_grouping pipeline serially and returns the
-    aggregated counts + grouping result.
+    Async (default; ``async=true``) fires the pipeline off the request
+    thread via :func:`asyncio.create_task` and returns
+    :class:`IngestJobHandle` at HTTP 202; the operator polls
+    ``GET /api/v1/connectors/ingest/jobs/{job_id}`` for completion.
+    This is the only mode that survives real-world vendor specs
+    without tripping the kubelet liveness probe -- the
+    ``vmware/9.0.0.0`` spec at 7.5 MB / 1275 ops blocks the event
+    loop for ~30 s in the register + LLM-grouping phases, past
+    the 25 s liveness deadline. The 202 + job-id shape is the
+    "escape hatch must not crash the pod" answer G0.16-T1 closes.
+
+    Sync (legacy; ``async=false``) runs the pipeline inline and
+    returns :class:`IngestResponse` at HTTP 200. Kept for small-spec
+    callers (CI tests with ≤ 100-op fixtures, ad-hoc shell scripts,
+    the v0.8.x clients that pre-date the async shape). Will not
+    survive real-world specs and is documented as such in
+    ``docs/codebase/spec-ingestion.md`` and
+    ``docs/codebase/api-shape-conventions.md`` §1.
+
+    ``dry_run=true`` parses every spec but writes nothing and is
+    always synchronous (the parse-only path is the fast leg per
+    RDC #771 Finding 21 -- 30 s for the same spec, but with no DB
+    or LLM hops and steady event-loop yields, well clear of the
+    probe deadline in practice). ``async`` is ignored on the dry-run
+    path; the response carries the parser's ``inserted_count``
+    projection and ``grouping=None``.
 
     The body accepts two mutually-exclusive request shapes (see
     :class:`IngestRequest`):
@@ -261,30 +329,261 @@ async def ingest_endpoint(
     # quadruple body with ``catalog_entry=None``, so we have to snapshot
     # before resolution.
     catalog_entry = body.catalog_entry
-    resolved = _resolve_catalog_entry_if_set(body)
+    resolved, spec_info_versions_compatible = _resolve_catalog_entry_if_set(body)
     service = IngestionPipelineService(
         operator=operator,
         llm_client_factory=llm_client_factory,
     )
+    if body.dry_run or not body.async_:
+        return await _run_sync_ingest(
+            service=service,
+            resolved=resolved,
+            operator=operator,
+            catalog_entry=catalog_entry,
+            spec_info_versions_compatible=spec_info_versions_compatible,
+        )
+    return await _spawn_async_ingest(
+        service=service,
+        resolved=resolved,
+        operator=operator,
+        spec_info_versions_compatible=spec_info_versions_compatible,
+    )
+
+
+async def _run_sync_ingest(
+    *,
+    service: IngestionPipelineService,
+    resolved: IngestRequest,
+    operator: Operator,
+    catalog_entry: str | None,
+    spec_info_versions_compatible: tuple[str, ...] | None,
+) -> JSONResponse:
+    """Run the pipeline inline and return the legacy 200 + IngestResponse.
+
+    Used for ``dry_run=true`` (parse-only fast path) and for explicit
+    ``async=false`` requests (small-spec callers that want the
+    blocking shape). The dry-run + sync paths share the inline
+    response: the route maps domain errors onto HTTPException at
+    the request boundary so the v0.8.x error contract carries
+    forward to clients that haven't migrated to the async polling
+    shape. ``dry_run`` ignores ``async`` because the parse-only leg
+    is the fast path that never trips the liveness deadline;
+    honouring async there would force a polling round-trip on
+    operators who just want a quick spec validation.
+    """
     result = await _run_ingest_with_http_mapping(
         service=service,
         body=resolved,
         operator=operator,
         catalog_entry=catalog_entry,
+        spec_info_versions_compatible=spec_info_versions_compatible,
     )
     ingestion_model, grouping_model = result.to_api_models()
-    return IngestResponse(ingestion=ingestion_model, grouping=grouping_model)
+    response_body = IngestResponse(ingestion=ingestion_model, grouping=grouping_model)
+    return JSONResponse(
+        content=response_body.model_dump(mode="json"),
+        status_code=http_status.HTTP_200_OK,
+    )
 
 
-def _resolve_catalog_entry_if_set(body: IngestRequest) -> IngestRequest:
+async def _spawn_async_ingest(
+    *,
+    service: IngestionPipelineService,
+    resolved: IngestRequest,
+    operator: Operator,
+    spec_info_versions_compatible: tuple[str, ...] | None,
+) -> JSONResponse:
+    """Create a job row, kick the pipeline off the request thread, return 202.
+
+    Extracted from :func:`ingest_endpoint` so the body of the route
+    stays focused on the dry-run vs sync vs async dispatch. The
+    helper is also load-bearing for tests that want to drive the
+    async path without re-implementing the 202 envelope.
+
+    The closure passed to :func:`run_ingest_job` re-asserts the
+    post-resolution invariants the synchronous path's
+    ``_run_ingest_with_http_mapping`` asserts -- the resolved body
+    is already in explicit-quadruple shape, but the asserts inside
+    the closure guard against a future refactor that bypasses
+    :func:`_resolve_catalog_entry_if_set`.
+    """
+    assert resolved.product is not None, "post-resolution invariant: product must be set"
+    assert resolved.version is not None, "post-resolution invariant: version must be set"
+    assert resolved.impl_id is not None, "post-resolution invariant: impl_id must be set"
+    registry = get_job_registry()
+    job = await registry.create(
+        operator_sub=operator.sub,
+        tenant_id=operator.tenant_id,
+        catalog_entry=None,  # resolved body always has catalog_entry=None
+        product=resolved.product,
+        version=resolved.version,
+        impl_id=resolved.impl_id,
+        spec_uris=[spec.uri for spec in resolved.specs],
+    )
+
+    async def _pipeline_call() -> IngestionPipelineResult:
+        # Re-bind locals so the closure doesn't depend on the
+        # enclosing scope's mutable references after Phase 10 of
+        # /auto-implement-issue cleans up.
+        return await service.ingest(
+            product=resolved.product,  # type: ignore[arg-type]
+            version=resolved.version,  # type: ignore[arg-type]
+            impl_id=resolved.impl_id,  # type: ignore[arg-type]
+            specs=resolved.specs,
+            base_url=resolved.base_url,
+            tenant_id=operator.tenant_id,
+            dry_run=False,
+            spec_info_versions_compatible=spec_info_versions_compatible,
+        )
+
+    # ``asyncio.create_task`` (not ``BackgroundTasks``) so the work
+    # survives the response close -- the FastAPI ``BackgroundTasks``
+    # path runs *after* response send but still inside the request
+    # lifecycle, which would mean operators with slow clients pay
+    # for the long-running pass on the upstream HTTP connection.
+    # The bare task is intentional and parallels every other
+    # background-worker spawn in the backplane (memory expiry,
+    # agent reaper, scheduler loop -- see
+    # ``meho_backplane.main._BackgroundTasks``).
+    task = asyncio.create_task(
+        run_ingest_job(job.job_id, pipeline_call=_pipeline_call),
+        name=f"ingest-job-{job.job_id}",
+    )
+    # Stash a strong reference inside the registry so a future
+    # cancel-this-job verb can find the task. Eviction frees the
+    # reference along with the IngestJob row.
+    _track_background_task(job.job_id, task)
+
+    handle = IngestJobHandle(
+        job_id=job.job_id,
+        status=job.status,
+        poll_url=f"/api/v1/connectors/ingest/jobs/{job.job_id}",
+    )
+    return JSONResponse(
+        content=handle.model_dump(mode="json"),
+        status_code=http_status.HTTP_202_ACCEPTED,
+    )
+
+
+#: Strong references to in-flight background tasks. Python's
+#: :func:`asyncio.create_task` does not retain its tasks; without an
+#: external reference the garbage collector can drop the task
+#: mid-execution. Indexed by job id so callers can locate the task
+#: for cancellation. Cleared by :func:`_track_background_task`'s
+#: completion callback so a steady stream of ingests doesn't grow
+#: the map unbounded.
+_background_tasks: dict[UUID, asyncio.Task[None]] = {}
+
+
+def _track_background_task(job_id: UUID, task: asyncio.Task[None]) -> None:
+    """Hold a strong reference to *task* until it completes.
+
+    See :data:`_background_tasks` for the rationale -- bare
+    :func:`asyncio.create_task` tasks can be GC'd mid-execution if no
+    code retains a reference. The completion callback runs on the
+    same loop the task ran on and removes the reference; missing
+    keys (eviction race, double-completion) are tolerated.
+    """
+    _background_tasks[job_id] = task
+    task.add_done_callback(lambda _t: _background_tasks.pop(job_id, None))
+
+
+@router.get(
+    "/ingest/jobs/{job_id}",
+    response_model=IngestJobStatusResponse,
+)
+async def get_ingest_job_endpoint(
+    job_id: UUID,
+    operator: Operator = _require_admin,
+) -> IngestJobStatusResponse:
+    """Poll the durable status of an async ingest job.
+
+    Companion to the async path of :func:`ingest_endpoint`. Reads
+    the in-memory :class:`~meho_backplane.operations.ingest.IngestJob`
+    row by id, projects it into :class:`IngestJobStatusResponse`,
+    and returns it.
+
+    Tenant-isolation gate: a non-admin operator probing a built-in
+    (``tenant_id is None``) job, or an operator probing another
+    tenant's job, sees the same 404 a missing id returns. The
+    ``tenant_admin`` role lifts the built-in gate (so admins can
+    inspect global ingests they kicked off).
+
+    Process-local storage: jobs evaporate on pod restart, and a
+    polling client that hits a freshly-restarted pod will see 404
+    for a job_id the prior pod was running. The operator-facing
+    workflow accepts that trade -- a job whose pod died had its
+    pipeline interrupted and would not have completed regardless.
+    Durable cross-restart jobs are tracked under v0.9.
+    """
+    registry = get_job_registry()
+    try:
+        job = await registry.get(
+            job_id,
+            tenant_id=operator.tenant_id,
+            is_tenant_admin=operator.tenant_role is TenantRole.TENANT_ADMIN,
+        )
+    except IngestJobNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="ingest_job_not_found",
+        ) from exc
+    return _job_to_response(job)
+
+
+def _job_to_response(job: IngestJob) -> IngestJobStatusResponse:
+    """Project an :class:`IngestJob` into its Pydantic response shape.
+
+    Extracted so the route handler stays narrow and the projection
+    can be unit-tested without spinning up an HTTP client. The
+    branches mirror the lifecycle of the dataclass: a terminal
+    success populates ``ingestion`` (+ optional ``grouping``);
+    a terminal failure populates ``error`` + ``error_class``;
+    ``running`` leaves both clusters ``None`` so clients branch
+    on ``status`` instead of presence-checking.
+    """
+    ingestion_model: IngestionResultModel | None = None
+    grouping_model: GroupingResultModel | None = None
+    if job.status == "succeeded" and job.result is not None:
+        ingestion_model, grouping_model = job.result.to_api_models()
+    return IngestJobStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        catalog_entry=job.catalog_entry,
+        product=job.product,
+        version=job.version,
+        impl_id=job.impl_id,
+        spec_uris=list(job.spec_uris),
+        started_at=job.started_at,
+        ended_at=job.ended_at,
+        ingestion=ingestion_model,
+        grouping=grouping_model,
+        error=job.error,
+        error_class=job.error_class,
+    )
+
+
+def _resolve_catalog_entry_if_set(
+    body: IngestRequest,
+) -> tuple[IngestRequest, tuple[str, ...] | None]:
     """Resolve ``body.catalog_entry`` against the packaged catalog.
 
-    Returns a new :class:`IngestRequest` in the explicit-quadruple
-    shape so the rest of the ingest pipeline doesn't need to branch
-    on which shape the caller used. The catalog-driven shape is
+    Returns a tuple of (a) a new :class:`IngestRequest` in the
+    explicit-quadruple shape so the rest of the ingest pipeline
+    doesn't need to branch on which shape the caller used and (b) the
+    catalog row's
+    :attr:`~meho_backplane.operations.ingest.catalog.ConnectorSpecEntry.spec_info_versions_compatible`
+    list, or ``None`` when the row has no opt-in / the caller used
+    the explicit-quadruple shape. The catalog-driven shape is
     G0.14-T9 (#1150): REST-native clients ship
     ``{"catalog_entry": "vmware/9.0"}`` and the server resolves the
     triple + spec sources from the package-data catalog.
+
+    The compatibility list flows back as a separate return rather
+    than being inlined onto the body so the explicit-quadruple shape
+    (which the validator on :class:`IngestRequest` rejects mixed
+    bodies for) stays a pure ``(product, version, impl_id, specs)``
+    object. The route hands it directly to the pipeline service.
 
     Raises :class:`HTTPException` (422) with structured detail bodies
     per the T11 error-shape convention
@@ -302,11 +601,12 @@ def _resolve_catalog_entry_if_set(body: IngestRequest) -> IngestRequest:
       ``catalog_entry_templated_upstream``. The operator must supply
       the concrete spec via the explicit-quadruple shape.
 
-    A body with ``catalog_entry=None`` is returned verbatim — the
-    explicit-quadruple shape doesn't need resolution.
+    A body with ``catalog_entry=None`` is returned verbatim with a
+    ``None`` compatibility list — the explicit-quadruple shape
+    doesn't carry the catalog row.
     """
     if body.catalog_entry is None:
-        return body
+        return body, None
     catalog_entry = body.catalog_entry
     product, version = _parse_catalog_entry(catalog_entry)
     catalog = load_catalog()
@@ -324,14 +624,17 @@ def _resolve_catalog_entry_if_set(body: IngestRequest) -> IngestRequest:
     # shape so the downstream pipeline can stay unchanged. The
     # validator on IngestRequest still passes because catalog_entry
     # is unset in the round-tripped object.
-    return body.model_copy(
-        update={
-            "catalog_entry": None,
-            "product": entry.product,
-            "version": entry.version,
-            "impl_id": entry.impl_id,
-            "specs": [SpecSource(uri=uri) for uri in (entry.upstream or ())],
-        },
+    return (
+        body.model_copy(
+            update={
+                "catalog_entry": None,
+                "product": entry.product,
+                "version": entry.version,
+                "impl_id": entry.impl_id,
+                "specs": [SpecSource(uri=uri) for uri in (entry.upstream or ())],
+            },
+        ),
+        entry.spec_info_versions_compatible,
     )
 
 
@@ -451,6 +754,7 @@ async def _run_ingest_with_http_mapping(
     body: IngestRequest,
     operator: Operator,
     catalog_entry: str | None = None,
+    spec_info_versions_compatible: tuple[str, ...] | None = None,
 ) -> IngestionPipelineResult:
     """Drive :meth:`IngestionPipelineService.ingest` and map domain errors to HTTP.
 
@@ -468,6 +772,14 @@ async def _run_ingest_with_http_mapping(
     the 422 envelope can include the catalog reference
     (G0.15-T2 / #1211). The full exception-to-status table is the
     load-bearing contract documented at the top of the module.
+
+    ``spec_info_versions_compatible`` is the catalog row's opt-in
+    label-vs-spec compatibility range (G0.16-T5 #1307); ``None`` when
+    the row has no opt-in or the caller used the explicit-quadruple
+    shape. Forwarded verbatim to
+    :meth:`IngestionPipelineService.ingest` so the cross-check inside
+    ``_validate_spec_versions`` can widen the verbatim/major-band
+    comparison.
     """
     assert body.product is not None, "post-resolution invariant: product must be set"
     assert body.version is not None, "post-resolution invariant: version must be set"
@@ -481,6 +793,7 @@ async def _run_ingest_with_http_mapping(
             base_url=body.base_url,
             tenant_id=operator.tenant_id,
             dry_run=body.dry_run,
+            spec_info_versions_compatible=spec_info_versions_compatible,
         )
     except LlmClientUnavailable as exc:
         raise HTTPException(http_status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc

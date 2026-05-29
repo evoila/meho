@@ -302,7 +302,7 @@ async def test_probe_ambiguous_connector_returns_409(client: TestClient) -> None
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -314,7 +314,7 @@ async def test_probe_ambiguous_connector_returns_409(client: TestClient) -> None
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -379,7 +379,7 @@ async def test_probe_resolves_v2_only_registration(client: TestClient) -> None:
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             return fp
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -444,7 +444,7 @@ async def test_probe_invokes_connector(client: TestClient) -> None:
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             return fingerprint
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -473,6 +473,133 @@ async def test_probe_invokes_connector(client: TestClient) -> None:
     assert body["version"] == "1.15.0"
     assert body["reachable"] is True
     assert body["probe_method"] == "sys-health"
+
+
+@pytest.mark.asyncio
+async def test_probe_forwards_operator_jwt_with_three_part_token(
+    client: TestClient,
+) -> None:
+    """G0.16-T4 (#1306) probe-vs-dispatch convergence regression.
+
+    The v0.8.0 dogfood cycle surfaced a ``vault OIDC malformed jwt: must
+    have three parts`` error on probe for four connectors
+    (``k8s-1.x``, ``vmware-rest-9.0``, ``sddc-rest-9.0``,
+    ``nsx-rest-4.2``). Dispatch worked on the same targets; the bug was
+    the probe route synthesised a system operator carrying a placeholder
+    ``raw_jwt`` (``"system:connector-probe-placeholder-jwt"``) that is
+    not a real compact-JWS token, and Vault's JWT/OIDC auth method
+    rejected it before the credential read could land.
+
+    The fix routes the **route operator** through the connector's
+    ``fingerprint`` method on the REST probe route (the same shape the
+    dispatch path uses), so the connector's Vault credentials loader
+    sees the same real JWT both surfaces use.
+
+    This test pins the contract:
+
+    1. The route operator's JWT is forwarded to the connector's
+       ``fingerprint`` method.
+    2. The forwarded JWT has the compact-JWS shape (≥3 dot-separated
+       parts) — the literal sanity check the issue body specifies as
+       acceptance criterion 4 (".. the regression test asserts the
+       probe path's outbound token has ≥3 dot-separated parts (compact-
+       JWS sanity check)").
+    3. The forwarded operator is **not** the system-operator
+       placeholder (whose ``raw_jwt`` lacks dots and would be rejected
+       by Vault).
+
+    A future regression that drops the ``operator`` kwarg on the route
+    side, or removes the ``operator`` parameter from a connector's
+    ``fingerprint`` signature, fails this test directly. The four
+    affected connectors stay protected by their own typed unit suites.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    captured: dict[str, Any] = {}
+
+    class _OperatorCapturingConnector(Connector):
+        product = "operator-capture-probe"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(
+            self,
+            target: Any,
+            operator: Any = None,
+        ) -> FingerprintResult:  # type: ignore[override]
+            captured["operator"] = operator
+            return FingerprintResult(
+                vendor="test",
+                product="operator-capture-probe",
+                version="1.0",
+                reachable=True,
+                probed_at=datetime.now(UTC),
+                probe_method="captured",
+            )
+
+        async def execute(
+            self,
+            target: Any,
+            op_id: str,
+            params: dict[str, Any],
+        ) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector_v2(
+        product="operator-capture-probe",
+        version="1.0",
+        impl_id="default",
+        cls=_OperatorCapturingConnector,
+    )
+
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="rke2-infra-k8s",
+        product="operator-capture-probe",
+        host="capture.test",
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets/rke2-infra-k8s/probe",
+            headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
+        )
+    assert response.status_code == 200
+
+    # The route operator was forwarded — not None, not the
+    # synthesised system operator with the placeholder JWT.
+    fwd_operator = captured["operator"]
+    assert fwd_operator is not None, (
+        "the route must forward the operator to connector.fingerprint; "
+        "received None means the probe route is back to the pre-#1306 "
+        "shape that synthesised a system operator with a placeholder JWT"
+    )
+
+    # Acceptance criterion 4 (literal): the outbound token has ≥3
+    # dot-separated parts. A real compact-JWS has exactly three; the
+    # pre-fix placeholder ``"system:connector-probe-placeholder-jwt"``
+    # has zero dots and trips this assertion.
+    jwt_parts = fwd_operator.raw_jwt.split(".")
+    assert len(jwt_parts) >= 3, (
+        "forwarded operator.raw_jwt does not look like a compact-JWS "
+        f"(got {len(jwt_parts)} dot-separated parts; expected ≥3). "
+        "This is the literal v0.8.0 ``malformed jwt: must have three "
+        "parts`` failure mode — Vault would reject this token before "
+        "the per-target credential read could land."
+    )
+
+    # And the forwarded operator is decidedly NOT the system-operator
+    # placeholder, whose sub is the greppable sentinel.
+    assert fwd_operator.sub != "system:connector-probe", (
+        "the route forwarded the system-operator stand-in instead of "
+        "the request operator — this is the exact regression #1306 "
+        "fixes"
+    )
 
 
 @pytest.mark.asyncio
@@ -511,7 +638,7 @@ async def test_probe_fingerprint_exception_returns_structured_500(
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise RuntimeError("kubeconfig credential load failed: secret/meho/k8s not found")
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -585,7 +712,7 @@ async def test_probe_fingerprint_exception_caps_message_length(
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise RuntimeError(huge_message)
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -737,7 +864,7 @@ def _register_fake_k8s_connector() -> None:
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -892,7 +1019,7 @@ def test_create_target_unknown_product_lists_all_valid(client: TestClient) -> No
         async def probe(self, target: Any) -> ProbeResult:
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -1933,7 +2060,7 @@ def test_patch_product_unknown_returns_422(client: TestClient) -> None:
         async def probe(self, target: Any) -> _ProbeResult:  # type: ignore[override]
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -1981,7 +2108,7 @@ def test_patch_product_valid_succeeds(client: TestClient) -> None:
         async def probe(self, target: Any) -> _ProbeResult:  # type: ignore[override]
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
@@ -1993,7 +2120,7 @@ def test_patch_product_valid_succeeds(client: TestClient) -> None:
         async def probe(self, target: Any) -> _ProbeResult:  # type: ignore[override]
             raise NotImplementedError
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]

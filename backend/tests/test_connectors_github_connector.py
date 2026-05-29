@@ -11,10 +11,13 @@ Coverage:
 * **Installation-token caching** — a second :meth:`fingerprint` call
   within the 50-minute window does NOT re-mint the JWT or call the
   installation-token endpoint (the acceptance-criteria assertion).
-* **PAT fallback** — ``auth_model="github-pat"`` reads a Vault-stored
-  token and skips the JWT exchange entirely.
-* **Auth-model gating** — ``auth_model`` other than the two supported
-  values raises :exc:`NotImplementedError` at :meth:`auth_headers`.
+* **PAT fallback** — a ``GitHubPATCredentials`` loader return (chosen
+  by the Vault-payload-shape discriminator G0.16-T2 #1304 introduced)
+  reads a Vault-stored token and skips the JWT exchange entirely.
+* **Auth-model gating** — ``target.auth_model`` accepts
+  ``shared_service_account`` (and ``None`` for legacy rows); anything
+  else (``per_user``, ``impersonation``) raises
+  :exc:`NotImplementedError` at :meth:`auth_headers`.
 * **Fingerprint shape** — the ``GET /user/installations`` and
   ``GET /repos/{owner}/{repo}`` paths populate the documented
   ``extras`` fields.
@@ -42,8 +45,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.github import (
     DEFAULT_GITHUB_API_URL,
-    GITHUB_APP_AUTH_MODEL,
-    GITHUB_PAT_AUTH_MODEL,
     GitHubAppCredentials,
     GitHubPATCredentials,
     GitHubRestConnector,
@@ -53,6 +54,7 @@ from meho_backplane.connectors.registry import (
     all_connectors,
     all_connectors_v2,
 )
+from meho_backplane.connectors.schemas import AuthModel
 
 
 def _generate_rsa_pem() -> str:
@@ -79,13 +81,19 @@ def _make_operator(raw_jwt: str = "op.test.jwt") -> Operator:
 
 @dataclass(frozen=True)
 class _FakeTarget:
-    """Structural :class:`GitHubTargetLike` for the test seam."""
+    """Structural :class:`GitHubTargetLike` for the test seam.
+
+    ``auth_model`` defaults to :data:`AuthModel.SHARED_SERVICE_ACCOUNT`'s
+    string value — the only model the gh-rest connector accepts at
+    its boundary after G0.16-T2 (#1304). The App-vs-PAT discriminator
+    lives in the injected loader's return type, not on the target.
+    """
 
     name: str
     host: str = "api.github.com"
     port: int | None = None
     secret_ref: str | None = "targets/github/test"
-    auth_model: str | None = GITHUB_APP_AUTH_MODEL
+    auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
 
 
 @pytest.fixture
@@ -220,14 +228,19 @@ async def test_second_fingerprint_does_not_remint_within_cache_window(
 
 @respx.mock
 async def test_pat_fallback_path_skips_jwt_exchange_entirely() -> None:
-    """``auth_model="github-pat"`` reads a PAT and never calls the mint endpoint."""
+    """A ``GitHubPATCredentials`` loader return reads a PAT and never calls the mint endpoint.
+
+    The target keeps ``auth_model="shared_service_account"`` — the
+    App-vs-PAT discriminator is the loader's return *type*, not the
+    target row's enum (G0.16-T2 #1304 reconciliation).
+    """
 
     async def loader(target: GitHubTargetLike, op: Operator) -> GitHubPATCredentials:
         del target, op
         return GitHubPATCredentials(token="ghp_pat_redacted")
 
     conn = GitHubRestConnector(credentials_loader=loader)
-    target = _FakeTarget(name="github-pat-target", auth_model=GITHUB_PAT_AUTH_MODEL)
+    target = _FakeTarget(name="github-pat-target")
 
     # If the connector accidentally tried to mint, this absence would
     # raise an unmocked-route error from respx.
@@ -257,21 +270,95 @@ async def test_auth_headers_rejects_unsupported_auth_model(
     app_creds: GitHubAppCredentials,
     operator: Operator,
 ) -> None:
-    """``auth_model="shared_service_account"`` raises :exc:`NotImplementedError`."""
+    """``auth_model="per_user"`` raises :exc:`NotImplementedError`.
+
+    Mirrors the vmware-rest rejection shape: the gh-rest connector
+    only supports the ``shared_service_account`` identity model
+    (G0.16-T2 #1304). The App-vs-PAT discriminator is in the Vault
+    payload, not the target enum, so the error message names
+    ``shared_service_account`` (the accepted target value) rather
+    than the historical protocol markers.
+    """
 
     async def loader(target: GitHubTargetLike, op: Operator) -> GitHubAppCredentials:
         del target, op
         return app_creds
 
     conn = GitHubRestConnector(credentials_loader=loader)
-    target = _FakeTarget(name="bad", auth_model="shared_service_account")
+    target = _FakeTarget(name="bad", auth_model="per_user")
     with pytest.raises(NotImplementedError) as excinfo:
         await conn.auth_headers(target, operator)
     msg = str(excinfo.value)
     assert "'bad'" in msg
-    assert "shared_service_account" in msg
-    assert "'github-app'" in msg
-    assert "'github-pat'" in msg
+    assert "per_user" in msg
+    assert "'shared_service_account'" in msg
+
+
+async def test_auth_headers_accepts_shared_service_account(
+    app_creds: GitHubAppCredentials,
+    operator: Operator,
+) -> None:
+    """``auth_model="shared_service_account"`` flows through to the loader.
+
+    This is the headline G0.16-T2 (#1304) acceptance — the target
+    shape RDC's ``evoila-bosnia-gh`` registers (App credentials in
+    Vault + ``shared_service_account`` on the row) now reaches the
+    loader instead of bouncing off the connector boundary with the
+    historical ``NotImplementedError``.
+    """
+
+    async def loader(target: GitHubTargetLike, op: Operator) -> GitHubAppCredentials:
+        del target, op
+        return app_creds
+
+    conn = GitHubRestConnector(credentials_loader=loader)
+    target = _FakeTarget(
+        name="evoila-bosnia-gh",
+        auth_model=AuthModel.SHARED_SERVICE_ACCOUNT.value,
+    )
+    with respx.mock:
+        respx.post(
+            f"{DEFAULT_GITHUB_API_URL}/app/installations/42/access_tokens",
+        ).mock(
+            return_value=httpx.Response(
+                201, json={"token": "ghs_live", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        )
+        headers = await conn.auth_headers(target, operator)
+    assert headers["Authorization"] == "Bearer ghs_live"
+    assert headers["Accept"] == "application/vnd.github+json"
+
+
+async def test_auth_headers_accepts_legacy_none_auth_model(
+    app_creds: GitHubAppCredentials,
+    operator: Operator,
+) -> None:
+    """``auth_model=None`` is accepted as the legacy-row sentinel.
+
+    Mirrors :class:`VmwareRestConnector`'s contract — pre-G0.3 rows
+    whose ``auth_model`` column has not yet been populated still
+    resolve cleanly. The column default is
+    ``shared_service_account`` from G0.3 onward; the ``None`` carve-
+    out preserves backwards-compatibility for fixtures and
+    hand-constructed :class:`Target` instances in tests.
+    """
+
+    async def loader(target: GitHubTargetLike, op: Operator) -> GitHubAppCredentials:
+        del target, op
+        return app_creds
+
+    conn = GitHubRestConnector(credentials_loader=loader)
+    target = _FakeTarget(name="legacy-row", auth_model=None)
+    with respx.mock:
+        respx.post(
+            f"{DEFAULT_GITHUB_API_URL}/app/installations/42/access_tokens",
+        ).mock(
+            return_value=httpx.Response(
+                201, json={"token": "ghs_legacy", "expires_at": "2099-01-01T00:00:00Z"}
+            )
+        )
+        headers = await conn.auth_headers(target, operator)
+    assert headers["Authorization"] == "Bearer ghs_legacy"
 
 
 async def test_auth_headers_rejects_empty_operator_jwt(
@@ -458,22 +545,40 @@ async def test_execute_returns_unknown_op_until_catalog_lands(
 
 
 # ---------------------------------------------------------------------------
-# Loader-shape mismatch (auth_model vs returned credentials class)
+# Loader-shape mismatch — returning neither App nor PAT credentials
 # ---------------------------------------------------------------------------
 
 
-async def test_loader_returning_wrong_credentials_class_for_app_raises_t11(
+async def test_loader_returning_unknown_credentials_class_raises_t11(
     operator: Operator,
 ) -> None:
-    """A PAT-credentials object returned for an App target raises the base envelope."""
+    """A loader returning neither App nor PAT credentials raises the base envelope.
+
+    After G0.16-T2 (#1304) the App-vs-PAT path is picked by the
+    returned credentials class type (not by ``target.auth_model``), so
+    "loader returned a PAT for an App target" is no longer a wrong-
+    shape — it's the PAT path. What *is* still wrong-shape is a
+    loader that returns something that's neither :class:`GitHub
+    AppCredentials` nor :class:`GitHubPATCredentials` — a loader-
+    configuration bug surfaced via the base ``github_credential_
+    error`` T11 envelope.
+    """
     from meho_backplane.connectors.github import GitHubCredentialError
 
-    async def loader(target: GitHubTargetLike, op: Operator) -> GitHubPATCredentials:
-        del target, op
-        return GitHubPATCredentials(token="ghp_x")
+    class _UnknownCreds:
+        """Stand-in for a misconfigured custom loader return value."""
 
-    conn = GitHubRestConnector(credentials_loader=loader)
-    target = _FakeTarget(name="any", auth_model=GITHUB_APP_AUTH_MODEL)
+    async def loader(target: GitHubTargetLike, op: Operator) -> object:
+        del target, op
+        return _UnknownCreds()
+
+    # The loader's annotated return type intentionally lies about its
+    # shape (``object`` rather than the union) so this regression test
+    # exercises the connector's runtime defence even when the test seam
+    # accepts a type-checker-evading stub.
+    conn = GitHubRestConnector(credentials_loader=loader)  # type: ignore[arg-type]
+    target = _FakeTarget(name="any")
     with pytest.raises(GitHubCredentialError) as excinfo:
         await conn.auth_headers(target, operator)
     assert excinfo.value.code == "github_credential_error"
+    assert "_UnknownCreds" in str(excinfo.value)

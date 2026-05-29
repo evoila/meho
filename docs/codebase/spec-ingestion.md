@@ -405,6 +405,26 @@ the major version surface as `VersionMismatchError` with
 `kind="multi_spec_inconsistent"`. Specs missing `info.version`
 entirely skip the check (older spec dialects keep ingesting).
 
+**Catalog-driven opt-in: `spec_info_versions_compatible` (G0.16-T5
+#1307).** Some catalog rows carry a `version` label that is
+semantically distinct from the spec's `info.version` (the GitHub
+REST catalog row's `version="3"` is the product-line label
+github.com calls the API; the live OpenAPI spec's `info.version`
+is `1.1.4`, regenerated daily on `rest-api-description/main`). For
+these rows the catalog declares a compatibility range
+(`spec_info_versions_compatible: ["1.x.x"]`); the catalog-entry
+resolver in `api/v1/connectors_ingest.py` passes it through to
+`IngestionPipelineService.ingest(spec_info_versions_compatible=...)`,
+which forwards it to `_validate_spec_versions`. Per-spec
+classification then bypasses the verbatim/major-band check for any
+spec whose `info.version` matches a pattern in the range, emitting
+`connector_ingest_version_label_decoupled` so the audit trail still
+records the decision. The explicit-quadruple shape doesn't carry
+the catalog row and therefore can't opt in — operators using it
+implicitly accept the historical strict check. See
+[`docs/cross-repo/connector-catalog.md`](../cross-repo/connector-catalog.md#label-vs-spec-decoupling-spec_info_versions_compatible)
+for the field definition and pattern syntax.
+
 ### Shared error-envelope builders (`ingest/error_envelopes.py`)
 
 The REST route at `POST /api/v1/connectors/ingest` and the MCP

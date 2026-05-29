@@ -261,7 +261,7 @@ async def ingest_endpoint(
     # quadruple body with ``catalog_entry=None``, so we have to snapshot
     # before resolution.
     catalog_entry = body.catalog_entry
-    resolved = _resolve_catalog_entry_if_set(body)
+    resolved, spec_info_versions_compatible = _resolve_catalog_entry_if_set(body)
     service = IngestionPipelineService(
         operator=operator,
         llm_client_factory=llm_client_factory,
@@ -271,20 +271,33 @@ async def ingest_endpoint(
         body=resolved,
         operator=operator,
         catalog_entry=catalog_entry,
+        spec_info_versions_compatible=spec_info_versions_compatible,
     )
     ingestion_model, grouping_model = result.to_api_models()
     return IngestResponse(ingestion=ingestion_model, grouping=grouping_model)
 
 
-def _resolve_catalog_entry_if_set(body: IngestRequest) -> IngestRequest:
+def _resolve_catalog_entry_if_set(
+    body: IngestRequest,
+) -> tuple[IngestRequest, tuple[str, ...] | None]:
     """Resolve ``body.catalog_entry`` against the packaged catalog.
 
-    Returns a new :class:`IngestRequest` in the explicit-quadruple
-    shape so the rest of the ingest pipeline doesn't need to branch
-    on which shape the caller used. The catalog-driven shape is
+    Returns a tuple of (a) a new :class:`IngestRequest` in the
+    explicit-quadruple shape so the rest of the ingest pipeline
+    doesn't need to branch on which shape the caller used and (b) the
+    catalog row's
+    :attr:`~meho_backplane.operations.ingest.catalog.ConnectorSpecEntry.spec_info_versions_compatible`
+    list, or ``None`` when the row has no opt-in / the caller used
+    the explicit-quadruple shape. The catalog-driven shape is
     G0.14-T9 (#1150): REST-native clients ship
     ``{"catalog_entry": "vmware/9.0"}`` and the server resolves the
     triple + spec sources from the package-data catalog.
+
+    The compatibility list flows back as a separate return rather
+    than being inlined onto the body so the explicit-quadruple shape
+    (which the validator on :class:`IngestRequest` rejects mixed
+    bodies for) stays a pure ``(product, version, impl_id, specs)``
+    object. The route hands it directly to the pipeline service.
 
     Raises :class:`HTTPException` (422) with structured detail bodies
     per the T11 error-shape convention
@@ -302,11 +315,12 @@ def _resolve_catalog_entry_if_set(body: IngestRequest) -> IngestRequest:
       ``catalog_entry_templated_upstream``. The operator must supply
       the concrete spec via the explicit-quadruple shape.
 
-    A body with ``catalog_entry=None`` is returned verbatim — the
-    explicit-quadruple shape doesn't need resolution.
+    A body with ``catalog_entry=None`` is returned verbatim with a
+    ``None`` compatibility list — the explicit-quadruple shape
+    doesn't carry the catalog row.
     """
     if body.catalog_entry is None:
-        return body
+        return body, None
     catalog_entry = body.catalog_entry
     product, version = _parse_catalog_entry(catalog_entry)
     catalog = load_catalog()
@@ -324,14 +338,17 @@ def _resolve_catalog_entry_if_set(body: IngestRequest) -> IngestRequest:
     # shape so the downstream pipeline can stay unchanged. The
     # validator on IngestRequest still passes because catalog_entry
     # is unset in the round-tripped object.
-    return body.model_copy(
-        update={
-            "catalog_entry": None,
-            "product": entry.product,
-            "version": entry.version,
-            "impl_id": entry.impl_id,
-            "specs": [SpecSource(uri=uri) for uri in (entry.upstream or ())],
-        },
+    return (
+        body.model_copy(
+            update={
+                "catalog_entry": None,
+                "product": entry.product,
+                "version": entry.version,
+                "impl_id": entry.impl_id,
+                "specs": [SpecSource(uri=uri) for uri in (entry.upstream or ())],
+            },
+        ),
+        entry.spec_info_versions_compatible,
     )
 
 
@@ -451,6 +468,7 @@ async def _run_ingest_with_http_mapping(
     body: IngestRequest,
     operator: Operator,
     catalog_entry: str | None = None,
+    spec_info_versions_compatible: tuple[str, ...] | None = None,
 ) -> IngestionPipelineResult:
     """Drive :meth:`IngestionPipelineService.ingest` and map domain errors to HTTP.
 
@@ -468,6 +486,14 @@ async def _run_ingest_with_http_mapping(
     the 422 envelope can include the catalog reference
     (G0.15-T2 / #1211). The full exception-to-status table is the
     load-bearing contract documented at the top of the module.
+
+    ``spec_info_versions_compatible`` is the catalog row's opt-in
+    label-vs-spec compatibility range (G0.16-T5 #1307); ``None`` when
+    the row has no opt-in or the caller used the explicit-quadruple
+    shape. Forwarded verbatim to
+    :meth:`IngestionPipelineService.ingest` so the cross-check inside
+    ``_validate_spec_versions`` can widen the verbatim/major-band
+    comparison.
     """
     assert body.product is not None, "post-resolution invariant: product must be set"
     assert body.version is not None, "post-resolution invariant: version must be set"
@@ -481,6 +507,7 @@ async def _run_ingest_with_http_mapping(
             base_url=body.base_url,
             tenant_id=operator.tenant_id,
             dry_run=body.dry_run,
+            spec_info_versions_compatible=spec_info_versions_compatible,
         )
     except LlmClientUnavailable as exc:
         raise HTTPException(http_status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc

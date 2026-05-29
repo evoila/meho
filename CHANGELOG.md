@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- `POST /api/v1/connectors/ingest` defaults to `async=true` and returns
+  `202 Accepted` + a job handle on the non-dry-run path; operators poll
+  `GET /api/v1/connectors/ingest/jobs/{job_id}` for completion.
+  Real-world vendor specs (the consumer signal was a 7.55 MB / 1275-op
+  `vmware/9.0.0.0` ingest that blocked the request thread for ~30 s
+  and tripped the kubelet liveness probe → pod restart) no longer
+  crash the backplane pod. `dry_run=true` keeps the synchronous shape
+  (the parse-only leg is the fast path); pass `async=false` for the
+  legacy blocking response on small specs (#1303).
+- `composite_l2_missing` error envelope reworded per the
+  curated-daily-driver vs OpenAPI-escape-hatch framing in
+  [`docs/codebase/api-shape-conventions.md`](docs/codebase/api-shape-conventions.md)
+  §1. The human message names the curation gap first, points at the
+  L1-wrapper request as the recommended path, and presents the
+  `catalog_command` as the escape-hatch recipe rather than the
+  remediation path. The structured `extras` (`error_code`,
+  `missing_op_ids`, `catalog_command`) are unchanged — agents that
+  branch on those fields keep working without migration (#1303).
+
 ### Fixed
 
 - **SSE feed delivers zero bytes despite stream writes (SEV-1, signal

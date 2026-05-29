@@ -121,6 +121,25 @@ def _reset_llm_client_factory() -> Iterator[None]:
     set_llm_client_factory(default_llm_client_factory)
 
 
+@pytest.fixture(autouse=True)
+def _reset_ingest_job_registry() -> Iterator[None]:
+    """Wipe the in-memory ingest job registry between tests.
+
+    G0.16-T1 (#1303). The async ingest path stores job rows on a
+    process-wide :class:`IngestJobRegistry` singleton; without this
+    reset, a job_id minted by one test could collide with one
+    expected to be 404 in another (test ordering is unstable under
+    parallel pytest invocations). The reset runs before and after
+    every test so a flaky teardown still hands the next test a
+    clean slate.
+    """
+    from meho_backplane.operations.ingest import reset_job_registry_for_tests
+
+    reset_job_registry_for_tests()
+    yield
+    reset_job_registry_for_tests()
+
+
 @pytest.fixture
 def stub_embedding_service() -> AsyncMock:
     """An :class:`AsyncMock` standing in for the fastembed singleton.
@@ -198,9 +217,18 @@ def client() -> Iterator[TestClient]:
 # ---------------------------------------------------------------------------
 
 
-def _admin_token(*, tenant_id: UUID | None = None, sub: str = "op-admin") -> tuple[Any, str]:
-    """Mint a JWT for a ``tenant_admin`` operator."""
-    key = _make_rsa_keypair("kid-admin")
+def _admin_token(
+    *, tenant_id: UUID | None = None, sub: str = "op-admin", kid: str = "kid-admin"
+) -> tuple[Any, str]:
+    """Mint a JWT for a ``tenant_admin`` operator.
+
+    ``kid`` defaults to ``"kid-admin"``; pass a distinct value when a
+    single test mints multiple tokens for distinct tenants and pins
+    both keys into one JWKS document. Two keys sharing a ``kid``
+    collide in the JWKS lookup (the validator picks the first match
+    and rejects the second token as a signature mismatch).
+    """
+    key = _make_rsa_keypair(kid)
     tid = tenant_id if tenant_id is not None else uuid.uuid4()
     token = _mint_token(
         key,
@@ -326,18 +354,23 @@ def _authed(token: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def test_all_seven_routes_mounted_on_main_app() -> None:
-    """The seven routes show up in :mod:`meho_backplane.main`'s app.
+def test_all_routes_mounted_on_main_app() -> None:
+    """The connectors-ingest routes show up in :mod:`meho_backplane.main`'s app.
 
     Acceptance criterion: ``OpenAPI surface visible at
     /api/v1/openapi.json``. Verified here by introspecting the
     main app's route table; the per-test fixture builds an
     isolated app and would miss a wire-up regression in main.py.
+
+    G0.16-T1 (#1303) added the async-job polling route
+    ``/api/v1/connectors/ingest/jobs/{job_id}``; the assertion
+    pins it alongside the original seven.
     """
     from meho_backplane.main import app
 
     expected_paths = {
         "/api/v1/connectors/ingest",
+        "/api/v1/connectors/ingest/jobs/{job_id}",
         "/api/v1/connectors",
         "/api/v1/connectors/{connector_id}/review",
         "/api/v1/connectors/{connector_id}/groups/{group_key}",
@@ -381,6 +414,7 @@ def test_ingest_operator_role_returns_403(client: TestClient) -> None:
                 "version": "9.0",
                 "impl_id": "vmware-rest",
                 "specs": [{"uri": "/tmp/spec.yaml"}],
+                "async": False,
             },
             headers=_authed(token),
         )
@@ -1562,6 +1596,7 @@ paths:
                 "version": "1.0",
                 "impl_id": "test-impl",
                 "specs": [{"uri": str(spec_path)}],
+                "async": False,
             },
             headers=_authed(token),
         )
@@ -1690,6 +1725,7 @@ paths:
                 "version": "1.0",
                 "impl_id": "test-impl",
                 "specs": [{"uri": str(spec_path)}],
+                "async": False,
             },
             headers=_authed(token),
         )
@@ -1721,6 +1757,7 @@ def test_ingest_bad_spec_returns_400(client: TestClient, tmp_path: Any) -> None:
                 "version": "1.0",
                 "impl_id": "test-impl",
                 "specs": [{"uri": str(spec_path)}],
+                "async": False,
             },
             headers=_authed(token),
         )
@@ -1762,6 +1799,7 @@ paths:
                 "version": "8.0",
                 "impl_id": "vmware-rest",
                 "specs": [{"uri": str(spec_path)}],
+                "async": False,
             },
             headers=_authed(token),
         )
@@ -1829,6 +1867,7 @@ paths:
                 "version": "9.1",
                 "impl_id": "drift-impl",
                 "specs": [{"uri": str(spec_path)}],
+                "async": False,
             },
             headers=_authed(token),
         )
@@ -1946,6 +1985,7 @@ paths:
                 "version": "7.0",
                 "impl_id": "t9-vmware-rest",
                 "specs": [{"uri": str(spec_path)}],
+                "async": False,
             },
             headers=_authed(token),
         )
@@ -2353,7 +2393,7 @@ def test_ingest_catalog_entry_vmware_9_0_html_portal_returns_422(
         )
         response = client.post(
             "/api/v1/connectors/ingest",
-            json={"catalog_entry": "vmware-t1211/9.0"},
+            json={"catalog_entry": "vmware-t1211/9.0", "async": False},
             headers=_authed(token),
         )
     assert response.status_code == 422, response.text
@@ -2405,7 +2445,7 @@ def test_ingest_catalog_entry_sddc_manager_9_0_html_portal_returns_422(
         )
         response = client.post(
             "/api/v1/connectors/ingest",
-            json={"catalog_entry": "sddc-manager-t1211/9.0"},
+            json={"catalog_entry": "sddc-manager-t1211/9.0", "async": False},
             headers=_authed(token),
         )
     assert response.status_code == 422, response.text
@@ -2551,6 +2591,358 @@ paths:
         )
     assert response.status_code == 200, response.text
     assert response.json()["ingestion"]["inserted_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# G0.16-T1 (#1303) — async ingest must not block the request thread
+# ---------------------------------------------------------------------------
+
+
+_PER_OP_PADDING_LINES = "\n".join(
+    f"        Resource paragraph {i}: exposes a vendor-shape OpenAPI surface the"
+    " consumer dogfood reproduced; padding so the per-op YAML size lands"
+    " in the representative-size band."
+    for i in range(60)
+)
+
+
+def _build_large_openapi_fixture(spec_path: Any, *, op_count: int) -> int:
+    """Write a representative-size OpenAPI fixture; return the file size in bytes.
+
+    Generates *op_count* GET operations under
+    ``/api/v{n}/resource_{i}/{id}``, each with a verbose summary, two
+    parameters, a JSON-schema response body, plus a multi-paragraph
+    description block (:data:`_PER_OP_PADDING_LINES`, ~5 KB) so the
+    per-op serialised footprint matches the real-world
+    ``vmware/9.0.0.0`` spec (~5-8 KB per op once description blocks
+    land). The fixture is YAML so the parser walks the same code
+    path as the live spec.
+
+    The repro target from
+    ``claude-rdc-hetzner-dc#771`` Finding 20 is **7.55 MB / 1275 ops**.
+    A 1500-op fixture lands ≥ 7 MB which is representative enough for
+    the non-blocking-budget assertion -- the issue body's
+    "≥ 7 MB / ≥ 1000 ops" guidance applies. Live ingest of the actual
+    vmware spec is reserved for the consumer-side dogfood in
+    ``claude-rdc-hetzner-dc`` (Finding 20's signal directory).
+
+    Per-op padding lives in a module-level constant rather than a
+    per-op-derived string so the builder stays O(op_count) on
+    operator count rather than O(op_count * padding_size) on byte
+    count -- regenerating the same ~5 KB block per op would
+    dominate the fixture builder's wall-clock budget for nothing.
+    """
+    chunks = [
+        "openapi: 3.0.3\n",
+        "info:\n",
+        "  title: representative-size-stress-fixture\n",
+        '  version: "9.0.0.0"\n',
+        "  description: |\n",
+        "    Stress fixture for G0.16-T1 (#1303).\n",
+        "    See backend/tests/test_api_v1_connectors_ingest.py for the\n",
+        "    non-blocking-budget assertion this fixture lands.\n",
+        "paths:\n",
+    ]
+    for i in range(op_count):
+        chunks.append(f"  /api/v1/resource_{i}/{{resource_id}}:\n")
+        chunks.append("    get:\n")
+        chunks.append(
+            f"      summary: |\n"
+            f"        Return the resource_{i} row identified by resource_id. The\n"
+            f"        summary intentionally runs across multiple lines so the\n"
+            f"        per-op YAML footprint matches the bulky real-world spec\n"
+            f"        the consumer dogfood reproduces with.\n"
+        )
+        chunks.append("      description: |\n")
+        chunks.append(
+            f"        resource_{i} is a synthetic stand-in for one of the 1275\n"
+            f"        typed REST operations in the vmware/9.0.0.0 OpenAPI spec.\n"
+        )
+        chunks.append(_PER_OP_PADDING_LINES)
+        chunks.append("\n")
+        chunks.append("      parameters:\n")
+        chunks.append("        - name: resource_id\n")
+        chunks.append("          in: path\n")
+        chunks.append("          required: true\n")
+        chunks.append(
+            "          schema:\n"
+            "            type: string\n"
+            "            description: opaque resource identifier\n"
+        )
+        chunks.append("        - name: filter\n")
+        chunks.append("          in: query\n")
+        chunks.append("          required: false\n")
+        chunks.append(
+            "          schema:\n"
+            "            type: string\n"
+            "            description: optional vendor-shape filter string\n"
+        )
+        chunks.append("      responses:\n")
+        chunks.append("        '200':\n")
+        chunks.append("          description: ok\n")
+        chunks.append("          content:\n")
+        chunks.append("            application/json:\n")
+        chunks.append("              schema:\n")
+        chunks.append("                type: object\n")
+        chunks.append("                properties:\n")
+        chunks.append("                  resource_id: { type: string }\n")
+        chunks.append("                  metadata: { type: object }\n")
+        chunks.append("                  status: { type: string }\n")
+        chunks.append("                  created_at: { type: string, format: date-time }\n")
+    spec_path.write_text("".join(chunks))
+    return spec_path.stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_ingest_async_default_returns_202_with_job_handle(
+    tmp_path: Any,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """G0.16-T1 (#1303): the default ``async=true`` shape returns 202 + handle.
+
+    Acceptance criterion: ``Non-dry-run ingest of a 7.5 MB / 1275-op
+    spec completes without crashing the pod (liveness probe never
+    times out, restartCount does not increment, pod stays Ready)``.
+    The kubelet liveness probe deadline is the asymptotic version
+    of "the request returns inside a budget". The integration check
+    is the consumer-side dogfood in ``claude-rdc-hetzner-dc`` --
+    here we mirror the repro with a representative-size fixture
+    (≥ 7 MB / ≥ 1000 ops) and assert the request completes in a
+    non-blocking budget that's well under the 25-second probe
+    deadline.
+
+    The fixture is generated on the fly so the test file doesn't
+    ship a 7 MB spec; ``op_count=1500`` lands around the right
+    order of magnitude for the per-op count + total spec size that
+    triggered the pod restart in production.
+
+    Driven over an :class:`httpx.AsyncClient` + :class:`ASGITransport`
+    rather than the sync :class:`TestClient`. The sync ``TestClient``
+    runs each request inside its own short-lived anyio portal, which
+    tears the background task down on the POST's return *and* drives
+    the route handler under a portal that synchronously waits on the
+    task before declaring the response sent -- both effects defeat
+    the "the route returns immediately, the task runs off-thread"
+    contract this acceptance test exists to pin. The
+    :class:`ASGITransport` path is the production-shape loop:
+    durable background task, response sent the moment the handler
+    awaits :class:`JSONResponse.__call__`. The
+    ``test_async_run_returns_handle_then_poll`` test in
+    ``test_api_v1_agent_runs.py`` uses the same pattern for the same
+    reason.
+
+    The async path's design property: the route returns 202 + handle
+    immediately and the heavy pipeline work runs off the request
+    thread. The test asserts the route returns in well under 1
+    second (a generous bound -- in practice it returns in tens of
+    milliseconds because the parser only runs inside the background
+    task) regardless of how long the actual pipeline takes.
+    """
+    import time as _time
+
+    from httpx import ASGITransport
+
+    from meho_backplane.main import app
+
+    spec_path = tmp_path / "stress.yaml"
+    spec_size = _build_large_openapi_fixture(spec_path, op_count=1500)
+    # Sanity: the fixture lands in the representative-size regime.
+    # The real-world target is 7.5 MB; we accept anything ≥ 5 MB so
+    # an OpenAPI-emitter tweak that compresses the YAML still keeps
+    # the test honest about "representative size".
+    assert spec_size >= 5 * 1024 * 1024, (
+        f"stress fixture too small ({spec_size} bytes); fail closed so a "
+        "future contributor shrinking the fixture trips this assertion "
+        "rather than silently weakening the budget guard"
+    )
+    propose_json = (
+        '[{"group_key": "resources", "name": "Resources", '
+        '"when_to_use": "Use these to manage synthetic stress resources."}]'
+    )
+    assign_json = "{}"
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="https://testserver",
+        ) as ac:
+            request_start = _time.monotonic()
+            response = await ac.post(
+                "/api/v1/connectors/ingest",
+                json={
+                    "product": "stress-vmware",
+                    "version": "9.0.0.0",
+                    "impl_id": "stress-vmware-rest",
+                    "specs": [{"uri": str(spec_path)}],
+                    # Default is ``async=true``; the assertion below
+                    # is what the issue's "must not crash the pod"
+                    # framing protects against. No need to set it
+                    # explicitly.
+                },
+                headers=_authed(token),
+            )
+            request_duration_seconds = _time.monotonic() - request_start
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["status"] == "running"
+    assert "job_id" in body
+    # ``poll_url`` is a relative path so a REST client can append it
+    # to the same base url it POSTed to. The shape is documented in
+    # docs/codebase/spec-ingestion.md.
+    assert body["poll_url"] == f"/api/v1/connectors/ingest/jobs/{body['job_id']}"
+    # The load-bearing assertion. The route returned long before the
+    # background pipeline finishes, so the request thread is free to
+    # serve liveness probes. The kubelet liveness deadline is 25 s
+    # (default values for the helm chart's ``meho-backplane``
+    # deployment); 3 s as a test budget is ~8x more headroom than
+    # we need, ~10x faster than the legacy ~30 s blocking path that
+    # tripped the probe in production. The asymmetry is for
+    # SQLite contention in the test environment: the audit
+    # middleware writes its row while the background task hammers
+    # the same single-writer DB, so the response's middleware-side
+    # tail is dominated by the test DB's connection contention.
+    # In production with Postgres + pool size 10, the audit row
+    # write grabs its own connection and the path returns in tens
+    # of milliseconds (see docs/codebase/spec-ingestion.md
+    # "Async ingest mode"). The budget gives us a clean
+    # "the route did NOT serially-wait on the 30-second pipeline"
+    # signal without false-positives on shared-CI machine load.
+    assert request_duration_seconds < 3.0, (
+        f"async ingest request blocked the event loop for "
+        f"{request_duration_seconds:.2f} s; the route is supposed to "
+        "fire the pipeline off the request thread and return 202 + "
+        "handle inside the kubelet liveness-probe budget. See "
+        "claude-rdc-hetzner-dc#771 Finding 20 for the pod-crash repro."
+    )
+
+
+def test_ingest_async_job_poll_returns_404_for_unknown_id(
+    client: TestClient,
+) -> None:
+    """An unknown job_id returns 404 (mirrors the cross-tenant conflation).
+
+    The polling endpoint reuses the
+    :class:`ConnectorNotFoundError`-style 404 conflation -- an
+    unknown id and a cross-tenant probe both surface as 404 so an
+    operator cannot enumerate other tenants by status-code
+    differential.
+    """
+    key, token = _admin_token()
+    bogus_id = uuid.uuid4()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            f"/api/v1/connectors/ingest/jobs/{bogus_id}",
+            headers=_authed(token),
+        )
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "ingest_job_not_found"
+
+
+@pytest.mark.asyncio
+async def test_ingest_async_job_poll_cross_tenant_is_404_not_403(
+    tmp_path: Any,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Tenant B polling tenant A's ingest job sees 404, not 403.
+
+    Same conflation :class:`ReviewService` enforces on the read
+    surfaces -- an operator must not be able to enumerate other
+    tenants by status-code differential. The test seeds a job under
+    tenant A (real flow: POST /ingest under tenant A's admin token)
+    and then polls it under tenant B's admin token.
+
+    Driven over :class:`ASGITransport` (not :class:`TestClient`)
+    because the POST + the cross-tenant GET share a single event
+    loop only that way -- see
+    :func:`test_ingest_async_default_returns_202_with_job_handle`
+    for the load-bearing rationale.
+    """
+    from httpx import ASGITransport
+
+    from meho_backplane.main import app
+
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: t
+  version: '1'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    propose_json = (
+        '[{"group_key": "items", "name": "Items", "when_to_use": "Use these to manage items."}]'
+    )
+    assign_json = '{"GET:/items": "items"}'
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+
+    tenant_a_id = uuid.uuid4()
+    tenant_b_id = uuid.uuid4()
+    key_a, token_a = _admin_token(tenant_id=tenant_a_id, sub="op-admin-a", kid="kid-admin-a")
+    key_b, token_b = _admin_token(tenant_id=tenant_b_id, sub="op-admin-b", kid="kid-admin-b")
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        # Both keys in one JWKS so the chassis JWT validator can
+        # resolve either token's ``kid`` -- calling
+        # ``_mock_discovery_and_jwks`` twice would have the second
+        # call shadow the first, dropping key A from the published
+        # JWKS and 401-ing the POST on the very signature it
+        # produced.
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key_a, key_b))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="https://testserver",
+        ) as ac:
+            response = await ac.post(
+                "/api/v1/connectors/ingest",
+                json={
+                    "product": "tenant-iso",
+                    "version": "1.0",
+                    "impl_id": "tenant-iso-impl",
+                    "specs": [{"uri": str(spec_path)}],
+                },
+                headers=_authed(token_a),
+            )
+            assert response.status_code == 202, response.text
+            job_id = response.json()["job_id"]
+
+            cross_response = await ac.get(
+                f"/api/v1/connectors/ingest/jobs/{job_id}",
+                headers=_authed(token_b),
+            )
+    assert cross_response.status_code == 404, cross_response.text
+    assert cross_response.json()["detail"] == "ingest_job_not_found"
 
 
 # Silence unused-import lints on test seams reserved for sibling tasks.

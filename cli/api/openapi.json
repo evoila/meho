@@ -2247,7 +2247,7 @@
           "connectors"
         ],
         "summary": "Ingest Endpoint",
-        "description": "Run the full ingestion pipeline (T1 \u2192 T2 \u2192 T3) for one connector.\n\n``dry_run=true`` parses every spec but writes nothing; the\nresponse carries the parser's ``inserted_count`` projection and\n``grouping=None``. The real path runs the parse \u2192 register_\ningested \u2192 run_llm_grouping pipeline serially and returns the\naggregated counts + grouping result.\n\nThe body accepts two mutually-exclusive request shapes (see\n:class:`IngestRequest`):\n\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  is a ``\"<product>/<version>\"`` reference; this handler resolves\n  it against the packaged catalog (:func:`load_catalog`) and\n  dispatches through the same ingest path as if the caller had\n  supplied the resolved quadruple.\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources. The MCP admin tool and historical clients use\n  this shape.\n\nTenant scoping: the operator's tenant_id from the JWT is used\nas the write scope unless the operator is ``tenant_admin``\n(built-in ingest, ``tenant_id=NULL``). For v0.2 the route always\nwrites under the operator's tenant_id; built-in ingest is the\nsame call shape from a tenant_admin operator whose tenant_id\nhappens to be the \"built-in\" admin tenant. The CLI / MCP\nsiblings can target the built-in scope explicitly when needed\nby hitting :class:`IngestionPipelineService` directly with\n``tenant_id=None``.",
+        "description": "Run the full ingestion pipeline (T1 \u2192 T2 \u2192 T3) for one connector.\n\nAsync (default; ``async=true``) fires the pipeline off the request\nthread via :func:`asyncio.create_task` and returns\n:class:`IngestJobHandle` at HTTP 202; the operator polls\n``GET /api/v1/connectors/ingest/jobs/{job_id}`` for completion.\nThis is the only mode that survives real-world vendor specs\nwithout tripping the kubelet liveness probe -- the\n``vmware/9.0.0.0`` spec at 7.5 MB / 1275 ops blocks the event\nloop for ~30 s in the register + LLM-grouping phases, past\nthe 25 s liveness deadline. The 202 + job-id shape is the\n\"escape hatch must not crash the pod\" answer G0.16-T1 closes.\n\nSync (legacy; ``async=false``) runs the pipeline inline and\nreturns :class:`IngestResponse` at HTTP 200. Kept for small-spec\ncallers (CI tests with \u2264 100-op fixtures, ad-hoc shell scripts,\nthe v0.8.x clients that pre-date the async shape). Will not\nsurvive real-world specs and is documented as such in\n``docs/codebase/spec-ingestion.md`` and\n``docs/codebase/api-shape-conventions.md`` \u00a71.\n\n``dry_run=true`` parses every spec but writes nothing and is\nalways synchronous (the parse-only path is the fast leg per\nRDC #771 Finding 21 -- 30 s for the same spec, but with no DB\nor LLM hops and steady event-loop yields, well clear of the\nprobe deadline in practice). ``async`` is ignored on the dry-run\npath; the response carries the parser's ``inserted_count``\nprojection and ``grouping=None``.\n\nThe body accepts two mutually-exclusive request shapes (see\n:class:`IngestRequest`):\n\n* **Catalog-driven shape** (G0.14-T9 / #1150) \u2014 ``catalog_entry``\n  is a ``\"<product>/<version>\"`` reference; this handler resolves\n  it against the packaged catalog (:func:`load_catalog`) and\n  dispatches through the same ingest path as if the caller had\n  supplied the resolved quadruple.\n* **Explicit-quadruple shape** \u2014 ``product`` + ``version`` +\n  ``impl_id`` + ``specs[]`` carry the resolved triple plus the\n  spec sources. The MCP admin tool and historical clients use\n  this shape.\n\nTenant scoping: the operator's tenant_id from the JWT is used\nas the write scope unless the operator is ``tenant_admin``\n(built-in ingest, ``tenant_id=NULL``). For v0.2 the route always\nwrites under the operator's tenant_id; built-in ingest is the\nsame call shape from a tenant_admin operator whose tenant_id\nhappens to be the \"built-in\" admin tenant. The CLI / MCP\nsiblings can target the built-in scope explicitly when needed\nby hitting :class:`IngestionPipelineService` directly with\n``tenant_id=None``.",
         "operationId": "ingest_endpoint_api_v1_connectors_ingest_post",
         "parameters": [
           {
@@ -2273,11 +2273,75 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Sync legacy path (``async=false`` or ``dry_run=true``) -- pipeline ran inline; body is the full :class:`IngestResponse` (``ingestion`` + optional ``grouping``).",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Async default (``async=true``) -- pipeline running off the request thread; body is an :class:`IngestJobHandle` with the ``job_id`` to poll via ``GET /api/v1/connectors/ingest/jobs/{job_id}``.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestJobHandle"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/ingest/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Ingest Job Endpoint",
+        "description": "Poll the durable status of an async ingest job.\n\nCompanion to the async path of :func:`ingest_endpoint`. Reads\nthe in-memory :class:`~meho_backplane.operations.ingest.IngestJob`\nrow by id, projects it into :class:`IngestJobStatusResponse`,\nand returns it.\n\nTenant-isolation gate: a non-admin operator probing a built-in\n(``tenant_id is None``) job, or an operator probing another\ntenant's job, sees the same 404 a missing id returns. The\n``tenant_admin`` role lifts the built-in gate (so admins can\ninspect global ingests they kicked off).\n\nProcess-local storage: jobs evaporate on pod restart, and a\npolling client that hits a freshly-restarted pod will see 404\nfor a job_id the prior pod was running. The operator-facing\nworkflow accepts that trade -- a job whose pod died had its\npipeline interrupted and would not have completed regardless.\nDurable cross-restart jobs are tracked under v0.9.",
+        "operationId": "get_ingest_job_endpoint_api_v1_connectors_ingest_jobs__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestJobStatusResponse"
                 }
               }
             }
@@ -10681,6 +10745,118 @@
         "title": "HealthResponse",
         "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"always\"`` \u2014 any ``Mcp-Session-Id`` header the client sends is\n  captured into ``audit_log.agent_session_id``; a missing header is\n  accepted (the row's session id lands as NULL). This is the\n  default and what G8.2 audit-replay needs to light up on a stock\n  deploy.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in\n  compliance deploys that forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET."
       },
+      "IngestJobHandle": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Job Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "succeeded",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "poll_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Poll Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "status",
+          "poll_url"
+        ],
+        "title": "IngestJobHandle",
+        "description": "Response body for ``POST /api/v1/connectors/ingest`` (HTTP 202).\n\nReturned when the route fires the pipeline off the request thread\n(the default; ``async=false`` switches to the legacy blocking\n:class:`IngestResponse` at HTTP 200). Carries the freshly-minted\n``job_id``, the current ``status`` (always ``\"running\"`` here),\nand a relative ``poll_url`` the operator's client can follow to\ninspect progress.\n\nThe shape is deliberately small -- two strings + a URL -- because\nevery meaningful field lives on the polling response\n(:class:`IngestJobStatusResponse`). A handle is what you get back\nimmediately so the request that started the work can return\ninside the kubelet liveness-probe deadline (escape hatch must\nnot crash the pod, per G0.16-T1 / RDC #771 Finding 20)."
+      },
+      "IngestJobStatusResponse": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Job Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "succeeded",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "catalog_entry": {
+            "type": "string",
+            "nullable": true,
+            "title": "Catalog Entry"
+          },
+          "product": {
+            "type": "string",
+            "nullable": true,
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Version"
+          },
+          "impl_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Impl Id"
+          },
+          "spec_uris": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Spec Uris"
+          },
+          "started_at": {
+            "type": "number",
+            "title": "Started At"
+          },
+          "ended_at": {
+            "type": "number",
+            "nullable": true,
+            "title": "Ended At"
+          },
+          "ingestion": {
+            "$ref": "#/components/schemas/IngestionResultModel",
+            "nullable": true
+          },
+          "grouping": {
+            "$ref": "#/components/schemas/GroupingResultModel",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          },
+          "error_class": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error Class"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "status",
+          "started_at"
+        ],
+        "title": "IngestJobStatusResponse",
+        "description": "Response body for ``GET /api/v1/connectors/ingest/jobs/{job_id}``.\n\nMirrors the in-memory\n:class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,\nprojecting it into a Pydantic-typed shape the route returns.\nThree field clusters:\n\n* **Identity** -- ``job_id`` + the originator's request descriptors\n  (``catalog_entry`` / ``product`` / ``version`` / ``impl_id`` /\n  ``spec_uris``). Echo so the polling caller doesn't need to\n  correlate against their own state.\n* **Lifecycle** -- ``status`` + ``started_at`` + optional\n  ``ended_at``. Status moves ``running`` \u2192 ``succeeded`` or\n  ``running`` \u2192 ``failed`` once.\n* **Result vs error** -- exactly one of ``ingestion`` (with\n  optional ``grouping``) or ``error`` is populated, keyed on\n  status. ``running`` leaves both ``None`` so polling clients\n  branch on ``status`` rather than checking presence.\n\n``error`` is the capped exception message; ``error_class`` is the\nPython exception class name -- structured enough for agents that\nwant to branch (``VersionMismatchError`` vs\n``LlmClientUnavailable``) without parsing prose. The structured\n422 envelopes the synchronous ingest path used to return (the\nerror-shape convention's classifier + ``detail`` body) are NOT\navailable off the request thread; the polling response is the\nnew error surface for the async path."
+      },
       "IngestKbRequest": {
         "properties": {
           "directory": {
@@ -10752,6 +10928,12 @@
             "type": "boolean",
             "title": "Dry Run",
             "default": false
+          },
+          "async": {
+            "type": "boolean",
+            "title": "Async",
+            "description": "Run the pipeline off the request thread (202 + job handle); set to false for the legacy blocking response. Ignored when dry_run=true.",
+            "default": true
           }
         },
         "additionalProperties": false,

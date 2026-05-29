@@ -225,7 +225,42 @@ def _get_llm_client_factory() -> LlmClientFactory:
     return _llm_client_factory
 
 
-@router.post("/ingest")
+@router.post(
+    "/ingest",
+    # Both response shapes declared explicitly so FastAPI's autogen
+    # OpenAPI surfaces them and the regen'd Go CLI sees typed
+    # ``api.IngestResponse`` (200, sync legacy) and
+    # ``api.IngestJobHandle`` (202, async default). Without this map
+    # the route returns a bare ``JSONResponse`` and the spec emits a
+    # generic ``application/json`` body, which causes oapi-codegen to
+    # drop ``IngestResponse`` entirely -- the failure mode that
+    # surfaced as ``undefined: api.IngestResponse`` golangci-lint
+    # errors in ``cli/internal/cmd/connector/{ingest.go,connector_test.go}``
+    # after the async/job-handle shape landed. Mirrors the
+    # ``DELETE /api/v1/targets/{name}`` 409 declaration in
+    # ``api/v1/targets.py`` -- explicit ``responses`` map even when
+    # the handler returns ``JSONResponse`` directly.
+    responses={
+        200: {
+            "model": IngestResponse,
+            "description": (
+                "Sync legacy path (``async=false`` or ``dry_run=true``)"
+                " -- pipeline ran inline; body is the full"
+                " :class:`IngestResponse` (``ingestion`` + optional"
+                " ``grouping``)."
+            ),
+        },
+        202: {
+            "model": IngestJobHandle,
+            "description": (
+                "Async default (``async=true``) -- pipeline running"
+                " off the request thread; body is an"
+                " :class:`IngestJobHandle` with the ``job_id`` to"
+                " poll via ``GET /api/v1/connectors/ingest/jobs/{job_id}``."
+            ),
+        },
+    },
+)
 async def ingest_endpoint(
     body: IngestRequest,
     operator: Operator = _require_admin,

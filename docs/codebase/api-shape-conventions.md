@@ -531,7 +531,86 @@ that already treats ``"9.0"`` ↔ ``"9.0.0.0"`` as exact
 load-bearing application on the gh-rest entry where the
 divergence (``"3"`` ↔ ``"1.1.4"``) blocks ingest without it.
 
-## 10. Where the conventions live in code
+## 10. Intra-connector list-op request-shape parity
+
+**Sibling list operations on one connector share one input-parameter
+shape.**
+
+RDC #771 post-cycle rolling dogfood (2026-05-29) Finding 24:
+`k8s.event.list` required `namespace` and rejected `all_namespaces`,
+while `k8s.pod.list` on the same connector accepted
+`{all_namespaces: true}` and listed cluster-wide in one call. The
+asymmetry forced an N-namespace client-side loop for "show me all
+Warning events cluster-wide" — `kubectl get events -A` in one call
+was impossible.
+
+Where §2 and §5 govern list *response* shape, this governs list
+*request* shape. The K8s list-op family at v0.8.0 split two ways:
+
+| Operation | namespace | all_namespaces | label_selector | field_selector | paging |
+|---|---|---|---|---|---|
+| `k8s.pod.list`, `k8s.deployment.list` | XOR | ✓ | ✓ | ✓ | limit + continue_token |
+| `k8s.event.list` | required | — | — | ✓ | limit |
+| `k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list` | required | — | — | — | — |
+
+All six resources are namespaced in Kubernetes, and the upstream
+client exposes `list_X_for_all_namespaces` + `label_selector` +
+`field_selector` for every one — so the divergence was a MEHO
+authoring choice, not a vendor constraint. G0.17-T1 (#1330, merged
+via #1332) factored the workload ops' private
+`_LIST_BASE_PROPERTIES` + `_NAMESPACE_XOR_ALL_NAMESPACES` out into
+`connectors/kubernetes/ops_listparams.py` and converged the
+remaining four list ops onto that shape; `LIST_BASE_PROPERTIES` +
+`NAMESPACE_XOR_ALL_NAMESPACES` are now the canonical reference.
+
+### The convention
+
+Sibling list operations over the same kind of scoped resource on one
+connector share one input-parameter shape:
+
+- A **cross-scope flag** (`all_namespaces`, `all_projects`,
+  `--recursive`, …) is uniformly present or uniformly absent across
+  the siblings — and when present, expressed the same way (here:
+  `namespace` XOR `all_namespaces` via a shared `oneOf`).
+- **Common server-side filters** (`label_selector`, `field_selector`)
+  and paging knobs (`limit`, continue/cursor token) are offered
+  consistently across siblings — or an omission is documented
+  per-op, the way `event.list` documents its deliberate
+  `continue_token` omission via
+  `K8S_EVENT_LIST_PAGINATION_HINT` (recency-sort + truncation
+  supersedes server-side paging for events).
+- **The shared shape lives in one place** (`LIST_BASE_PROPERTIES` +
+  the `NAMESPACE_XOR_ALL_NAMESPACES` `oneOf` in
+  `ops_listparams.py`), imported by every sibling rather than
+  copy-pasted, so the schema and its validation test stay in
+  lockstep.
+
+The reference shape is `k8s.pod.list`. A new list op spreads
+`LIST_BASE_PROPERTIES`; an op that legitimately omits a knob
+cherry-picks the individual property blocks (`NAMESPACE_PARAM` /
+`ALL_NAMESPACES_PARAM` / `LABEL_SELECTOR_PARAM` /
+`FIELD_SELECTOR_PARAM` / `LIMIT_PARAM` / `CONTINUE_TOKEN_PARAM`)
+it does support and documents the omission in its docstring. A
+genuinely cluster-scoped resource (`k8s.node.list`,
+`k8s.namespace.list`) has no `namespace` / `all_namespaces` axis at
+all and neither block applies.
+
+### Migration shape
+
+Unlike §2's response-envelope migration, adding an input parameter
+is backward-compatible — it widens what's accepted, and existing
+`{namespace}` calls keep working — so no `?envelope=v2` gate is
+needed. Add the parameter, branch the handler to the all-namespaces
+client call (`list_event_for_all_namespaces`, …), forward
+`label_selector`, and add the schema-XOR test plus an
+all-namespaces dispatch test mirroring the `pod.list` pair.
+
+Paging (`limit` + `continue_token`) on `service` / `ingress` /
+`configmap` was deferred under #1332 — typically O(10)/namespace
+resources, mechanical to add later by spreading `LIMIT_PARAM` +
+`CONTINUE_TOKEN_PARAM` from the same module.
+
+## 11. Where the conventions live in code
 
 When a future contributor lands a new endpoint, the conventions
 above should already be visible in the adjacent code:
@@ -548,11 +627,17 @@ above should already be visible in the adjacent code:
 - **Probe ↔ dispatch** —
   `meho_backplane/operations/dispatch.py` is the shared call
   site; `meho_backplane/api/v1/probe.py` calls into it.
+- **Connector list-op input shapes** —
+  `meho_backplane/connectors/kubernetes/ops_listparams.py`
+  (`LIST_BASE_PROPERTIES` + `NAMESPACE_XOR_ALL_NAMESPACES` + the
+  per-knob property building blocks) is the §10 reference; sibling
+  list ops import it rather than re-declaring `namespace` /
+  `all_namespaces` / `label_selector` / paging knobs.
 
 Each section's example endpoint is the reference shape. New
 endpoints copy from there.
 
-## 11. How this doc gets updated
+## 12. How this doc gets updated
 
 This file grows in the same shape as
 [error-message-shape.md](error-message-shape.md): one section per

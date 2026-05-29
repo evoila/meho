@@ -545,7 +545,11 @@ class GcloudConnector(HttpConnector):
     # ABC methods
     # ------------------------------------------------------------------
 
-    async def fingerprint(self, target: GcloudTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: GcloudTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint via Cloud Resource Manager ``projects.get``.
 
         Calls ``GET https://cloudresourcemanager.googleapis.com/v1/projects/<gcp_project>``.
@@ -567,11 +571,18 @@ class GcloudConnector(HttpConnector):
         On any transport, auth, or status failure (including the SA-JSON-key
         refusal), returns a non-reachable :class:`FingerprintResult` whose
         ``extras["error"]`` carries the exception class + message.
+
+        ``operator`` exists for ABC parity with the G0.16-T4 (#1306)
+        widening; the route operator is forwarded into the SA-token
+        acquisition chain when provided, which means the token-loader's
+        Vault read happens under the operator's identity instead of the
+        system-operator placeholder (matching the dispatch path).
         """
         probed_at = datetime.now(UTC)
+        eff_operator = operator if operator is not None else synthesise_system_operator()
         url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}"
         try:
-            payload = await self._get_json_abs(target, url, operator=synthesise_system_operator())
+            payload = await self._get_json_abs(target, url, operator=eff_operator)
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
             return FingerprintResult(
                 vendor="google",

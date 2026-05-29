@@ -84,7 +84,7 @@ class _DefaultsConnector(Connector):
 
     product = "default-topology"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:
@@ -99,7 +99,7 @@ class _OverridingConnector(Connector):
 
     product = "override-topology"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:

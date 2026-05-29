@@ -403,7 +403,7 @@ class _NoOpVaultConnector(Connector):
     version = "1.x"
     impl_id = "vault"
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -681,7 +681,7 @@ async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
     class _ConflictA(Connector):
         product = "kclash"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -695,7 +695,7 @@ async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
     class _ConflictB(Connector):
         product = "kclash"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -769,7 +769,7 @@ async def test_dispatch_ingested_returns_ambiguous_when_resolver_cant_tiebreak(
     class _AmbA(Connector):
         product = "ghost"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -783,7 +783,7 @@ async def test_dispatch_ingested_returns_ambiguous_when_resolver_cant_tiebreak(
     class _AmbB(Connector):
         product = "ghost"
 
-        async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
             raise NotImplementedError
 
         async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
@@ -871,7 +871,7 @@ class _FakeHttpConnector(HttpConnector):
         super().__init__()
         self.calls: list[dict[str, Any]] = []
 
-    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
 
     async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]

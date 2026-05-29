@@ -59,6 +59,7 @@ from typing import Any
 import asyncssh
 import structlog
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
@@ -204,7 +205,11 @@ class HolodeckConnector(SshConnector):
     version = "9.0"
     impl_id = "holodeck-ssh"
 
-    async def fingerprint(self, target: Target) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: Target,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Read Photon release + ``Get-HoloDeckConfig`` -- canonical fingerprint.
 
         Runs (in order, sharing one pooled SSH connection):
@@ -227,7 +232,12 @@ class HolodeckConnector(SshConnector):
         cannot leak through because the connector handlers never
         interpolate ``target.secret_ref`` fields into the PowerShell
         text.
+
+        ``operator`` exists for ABC parity (G0.16-T4 #1306) — Holodeck
+        authenticates via SSH key, not Vault OIDC, so the route operator
+        plays no role here.
         """
+        del operator  # unused — SSH key auth, no Vault credential read
         probed_at = datetime.now(UTC)
 
         # Phase 1: read /etc/photon-release. Failure here is a hard

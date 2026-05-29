@@ -111,7 +111,11 @@ class VaultConnector(Connector):
     version = "1.x"
     impl_id = "vault"
 
-    async def fingerprint(self, target: Target | None) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: Target | None,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint from ``GET /v1/sys/health``.
 
         Reuses :func:`~meho_backplane.auth.vault._build_client` so the
@@ -120,7 +124,13 @@ class VaultConnector(Connector):
         construction logic. ``target`` is part of the
         :class:`~meho_backplane.connectors.base.Connector` ABC contract
         but unused — Vault connection params come from settings.
+        ``operator`` is also unused: the ``/sys/health`` endpoint is
+        unauthenticated, so the route operator has no role here. The
+        argument exists for ABC signature parity (G0.16-T4 #1306
+        widened the ABC to support per-operator Vault credential reads
+        on the connectors that need them).
         """
+        del operator  # unused — health endpoint is unauthenticated
         settings = get_settings()
         client = _auth_vault._build_client(settings)
         payload = await _auth_vault._to_thread_read_health(client)

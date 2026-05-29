@@ -70,6 +70,7 @@ from typing import Any
 import asyncssh
 import structlog
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.bind9.ops import BIND9_OPS
 from meho_backplane.connectors.schemas import (
@@ -408,7 +409,11 @@ class Bind9Connector(SshConnector):
         )
         return result
 
-    async def fingerprint(self, target: Target) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: Target,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Read ``named -v`` plus ``/etc/os-release`` -- canonical fingerprint.
 
         Runs two ``_run_command`` calls in sequence (the SSH adapter's
@@ -435,7 +440,12 @@ class Bind9Connector(SshConnector):
         pfsense sibling and lets the shared
         :meth:`~meho_backplane.connectors.adapters.ssh.SshConnector._assert_reachable`
         guard surface the failure consistently from ``about`` (#986).
+
+        ``operator`` exists for ABC parity (G0.16-T4 #1306) — bind9
+        authenticates via SSH key, not Vault OIDC, so the route operator
+        plays no role here.
         """
+        del operator  # unused — SSH key auth, no Vault credential read
         probed_at = datetime.now(UTC)
 
         try:

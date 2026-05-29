@@ -278,7 +278,11 @@ class HarborConnector(HttpConnector):
             )
             return raw
 
-    async def fingerprint(self, target: HarborTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: HarborTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from ``GET /api/v2.0/systeminfo``.
 
         The ``harbor_version`` field is split on the first ``-`` to produce
@@ -289,7 +293,16 @@ class HarborConnector(HttpConnector):
         :class:`FingerprintResult` whose ``extras["error"]`` carries the
         exception class + message — same pattern the SDDC Manager and NSX
         connectors established.
+
+        ``operator`` exists for ABC parity with the G0.16-T4 (#1306)
+        widening of the K8s/vmware/sddc/NSX fingerprint surface. Harbor
+        was not in the v0.8.0 dogfood's affected-targets list; leaving
+        the system-context path in place avoids changing behaviour for
+        targets that were not observed to misbehave. A future deliberate
+        convergence sweep could route the operator through here on the
+        same shape as the four affected connectors.
         """
+        del operator  # see docstring — out of #1306's scope
         probed_at = datetime.now(UTC)
         try:
             payload = await self._get_json(

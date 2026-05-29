@@ -398,7 +398,11 @@ class VcfLogsConnector(HttpConnector):
                 ) from exc
             raise
 
-    async def fingerprint(self, target: VcfLogsTargetLike) -> FingerprintResult:
+    async def fingerprint(
+        self,
+        target: VcfLogsTargetLike,
+        operator: Operator | None = None,
+    ) -> FingerprintResult:
         """Canonical fingerprint built from unauthenticated ``GET /api/v2/version``.
 
         The version endpoint is unauthenticated -- the wrapper's probe
@@ -415,7 +419,12 @@ class VcfLogsConnector(HttpConnector):
         operator's first ``meho connector fingerprint`` against an
         unreachable vRLI gets a structured response rather than a
         stack trace.
+
+        ``operator`` exists for ABC parity (G0.16-T4 #1306) — vRLI's
+        version endpoint is unauthenticated, so the route operator
+        plays no role here.
         """
+        del operator  # unused — unauthenticated probe, no Vault read
         probed_at = datetime.now(UTC)
         probe_method = f"GET {_VERSION_PATH}"
         try:

@@ -88,6 +88,44 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   before Vault is touched. This is the rubric **State 2** wiring
   (`shared_service_account` only). Decision: [`docs/architecture/connector-auth.md`](../architecture/connector-auth.md).
 
+## Probe ↔ dispatch convergence on the route operator (G0.16-T4 #1306)
+
+The `Connector.fingerprint(target, operator=None)` ABC signature
+gained the optional `operator` parameter in G0.16-T4. The four
+fingerprint surfaces that authenticate via Vault (this connector,
+`vmware-rest-9.0`, `sddc-rest-9.0`, `nsx-rest-4.2`) now read the
+per-target credentials under the **same identity** the dispatch path
+uses:
+
+- **REST probe route** (`POST /api/v1/targets/{name}/probe`) — the
+  `require_operator` dependency lifts the chassis-validated operator
+  and the handler forwards it via
+  `cls().fingerprint(target, operator=operator)`.
+- **UI re-probe route** (`POST /ui/connectors/{name}/probe`) —
+  `resolve_operator_or_403` lifts an operator gated on
+  `TENANT_ADMIN`, and the handler forwards it identically.
+- **Dispatch path** (`POST /api/v1/operations/call`) — unchanged; the
+  dispatcher has always threaded the operator into the connector's
+  HTTP auth surface.
+
+The fallback `operator=None` synthesises a system operator (whose
+non-empty placeholder JWT fails closed at the live Vault round-trip)
+for callers that have no real operator in scope (the readiness probe
+worker, the K8s topology refresh service). This preserves the
+locked Option A decision's system-call carve-out — *system-initiated
+calls cannot perform an operator-context Vault read*.
+
+Pre-#1306 the probe routes hard-coded the system operator
+synthesis inside each connector's `fingerprint()`. Vault's JWT/OIDC
+auth method rejected the placeholder JWT as `malformed jwt: must
+have three parts` (compact-JWS format requires three dot-separated
+parts; the placeholder
+`"system:connector-probe-placeholder-jwt"` has zero), which surfaced
+on every probe of the four affected connectors in the v0.8.0 dogfood
+cycle (`claude-rdc-hetzner-dc#771` Finding 4). The fix is the
+single-source-of-truth shape — probe + dispatch both flow the same
+real operator through the same loader.
+
 ## Shipped op surface
 
 | op_id                  | safety | description                                                       |

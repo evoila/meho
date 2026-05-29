@@ -455,6 +455,19 @@ from the spec's documentation version) need (2), while
 VMware-shape APIs (where the catalog version IS the product
 version) work cleanly with (1).
 
+Code reference: the catalog schema field
+``spec_info_versions_compatible`` in
+[`backend/src/meho_backplane/operations/ingest/catalog.py`](../../backend/src/meho_backplane/operations/ingest/catalog.py)
+(plus the
+``spec_info_version_matches_compatibility_specifier`` helper)
+implements resolution (2). The shipped vmware entry adopts
+``spec_info_versions_compatible: ["9.0.x"]`` as a
+belt-and-suspenders declaration over the PEP-440 prefix-match
+that already treats ``"9.0"`` ↔ ``"9.0.0.0"`` as exact
+(G0.16-T6 Finding H #1312); T5 (#1307) carries the
+load-bearing application on the gh-rest entry where the
+divergence (``"3"`` ↔ ``"1.1.4"``) blocks ingest without it.
+
 ## 10. Where the conventions live in code
 
 When a future contributor lands a new endpoint, the conventions

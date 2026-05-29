@@ -106,6 +106,22 @@ connector-related release-notes line.
   future field added to `Target` without the matching summary
   update fails CI.
 
+### Added
+
+- **Catalog `spec_info_versions_compatible` field
+  (G0.16-T6 Finding H #1312).** Connector-spec catalog entries can
+  now declare PEP-440-prefix wildcards (e.g. `["9.0.x"]`) that
+  document which spec `info.version` strings the validator must
+  accept under the catalog's product-line `version` label, per
+  `docs/codebase/api-shape-conventions.md` §9. The shipped vmware
+  entry adopts `spec_info_versions_compatible: ["9.0.x"]` as a
+  belt-and-suspenders declaration over the existing PEP-440
+  prefix-match (vmware `9.0` ↔ spec `9.0.0.0` already classifies
+  as "exact"). Pairs with T5 (#1307) which carries the
+  load-bearing application for the gh-rest entry where the
+  divergence (`"3"` ↔ `"1.1.4"`) blocks ingest without an explicit
+  compatibility hint.
+
 ### Changed
 
 - **`GET /api/v1/feed?since=` accepts ISO-8601 timestamps

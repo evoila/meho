@@ -99,8 +99,69 @@ class ConnectorSpecEntry(BaseModel):
     requires_connector_class: str = Field(min_length=1, max_length=128)
     upstream: tuple[str, ...] | None = None
     spec_info_version: str | None = Field(default=None, max_length=64)
+    #: G0.16-T6 Finding H (#1312) — companion to T5 (#1307) for the
+    #: gh-rest variant. Per
+    #: ``docs/codebase/api-shape-conventions.md`` §9, when the catalog's
+    #: ``version`` label (a product-line tag) diverges from the spec's
+    #: ``info.version`` (a documentation version), the catalog declares
+    #: which ``info.version`` patterns are compatible so the validator
+    #: accepts the divergence rather than raising ``spec_label_mismatch``.
+    #: The empty default means "no compatibility hints declared; fall
+    #: back to the PEP-440 prefix-match in ``_classify_version_match``".
+    #: Entries are wildcard specifiers (``"9.0.x"``, ``"1.1.x"``);
+    #: ``_spec_info_version_matches_compatibility_specifier`` resolves
+    #: each entry against an observed ``info.version`` via release-tuple
+    #: prefix matching on the part before ``".x"`` (so ``"9.0.x"``
+    #: matches every ``info.version`` with release tuple
+    #: ``(9, 0, ...)``). Bare versions (no ``.x`` suffix) are treated
+    #: as PEP 440 exact-or-prefix.
+    spec_info_versions_compatible: tuple[str, ...] | None = None
     sha256: str | None = Field(default=None, max_length=64)
     notes: str = Field(default="", max_length=2048)
+
+    @field_validator("spec_info_versions_compatible")
+    @classmethod
+    def _compatibility_specifiers_well_formed(
+        cls, value: tuple[str, ...] | None
+    ) -> tuple[str, ...] | None:
+        if value is None:
+            return value
+        if not value:
+            raise ValueError(
+                "spec_info_versions_compatible must be null (no hints) "
+                "or a non-empty list of specifiers"
+            )
+        normalized = tuple(spec.strip() for spec in value)
+        for spec in normalized:
+            if not spec:
+                raise ValueError("spec_info_versions_compatible entries must be non-empty")
+            base = spec.removesuffix(".x")
+            if base == spec:
+                # No ``.x`` suffix — treat as an exact / prefix label,
+                # so it must parse as a PEP 440 version. Same gate as
+                # ``spec_info_version`` above.
+                try:
+                    Version(base)
+                except InvalidVersion as exc:
+                    raise ValueError(
+                        f"spec_info_versions_compatible entry {spec!r} is "
+                        "neither a wildcard ('9.0.x') nor a PEP 440 "
+                        "version ('9.0.3')"
+                    ) from exc
+            else:
+                if not base:
+                    raise ValueError(
+                        f"spec_info_versions_compatible entry {spec!r} "
+                        "has no version part before the '.x' suffix"
+                    )
+                try:
+                    Version(base)
+                except InvalidVersion as exc:
+                    raise ValueError(
+                        f"spec_info_versions_compatible entry {spec!r}: "
+                        f"prefix {base!r} is not a valid PEP 440 version"
+                    ) from exc
+        return normalized
 
     @field_validator("product", "version", "impl_id", "requires_connector_class")
     @classmethod
@@ -183,6 +244,57 @@ class CatalogListResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     catalog: tuple[ConnectorSpecEntry, ...]
+
+
+def spec_info_version_matches_compatibility_specifier(
+    info_version: str,
+    specifier: str,
+) -> bool:
+    """Return ``True`` iff *info_version* matches the catalog *specifier*.
+
+    G0.16-T6 Finding H (#1312) — companion to T5 (#1307). The
+    catalog's ``spec_info_versions_compatible`` field declares which
+    spec ``info.version`` strings the validator should accept under a
+    catalog label whose ``version`` doesn't match the spec verbatim
+    (per ``docs/codebase/api-shape-conventions.md`` §9). Two specifier
+    shapes:
+
+    * **Wildcard** (``"9.0.x"``) — release-tuple prefix match on the
+      part before ``.x``. ``"9.0.x"`` matches any spec whose PEP 440
+      release tuple starts with ``(9, 0, ...)`` (so ``9.0``, ``9.0.0``,
+      ``9.0.0.0``, and ``9.0.3`` all match; ``9.1.0`` doesn't).
+    * **Exact / prefix** (``"9.0.3"``) — bare PEP 440 version; matches
+      the spec verbatim or via release-tuple prefix
+      (``Version("9.0.3").release == (9, 0, 3)`` ⊆ a spec
+      ``9.0.3.0``'s release ``(9, 0, 3, 0)``). Same semantics as
+      :func:`_classify_version_match`'s "exact" band for non-wildcard
+      labels.
+
+    Returns ``False`` on PEP-440-unparseable input rather than raising
+    — the catalog validator already enforces the specifier is
+    well-formed at parse time, so any runtime PEP-440 failure here
+    points at the spec, not the catalog, and ``False`` lets the
+    caller fall through to the next specifier (or the structured
+    ``spec_label_mismatch`` envelope).
+    """
+    try:
+        spec_v = Version(info_version)
+    except InvalidVersion:
+        return False
+    if specifier.endswith(".x"):
+        prefix_str = specifier[: -len(".x")]
+        try:
+            prefix_v = Version(prefix_str)
+        except InvalidVersion:
+            return False
+        return spec_v.release[: len(prefix_v.release)] == prefix_v.release
+    try:
+        bare_v = Version(specifier)
+    except InvalidVersion:
+        return False
+    if spec_v == bare_v:
+        return True
+    return spec_v.release[: len(bare_v.release)] == bare_v.release
 
 
 def parse_catalog(raw: str) -> ConnectorSpecCatalog:

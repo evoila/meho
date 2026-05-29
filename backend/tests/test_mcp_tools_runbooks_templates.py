@@ -40,6 +40,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import RunbookRun
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.runbooks.schemas import DraftTemplateRequest, PublishTemplateRequest
 from meho_backplane.runbooks.service import RunbookTemplateService
@@ -55,9 +57,14 @@ _ADMIN_TOOLS = {
     "runbook_edit_template",
     "runbook_publish_template",
     "runbook_deprecate_template",
-    "runbook_show_template",
 }
-_OPERATOR_TOOLS = {"runbook_list_templates"}
+# ``runbook_show_template`` is OPERATOR-readable at the dispatcher gate
+# (G12.3-T4 / #1309); the run-state-conditional opacity-floor check lives
+# inside the handler, not in :func:`required_role`. Operators see the tool
+# in ``tools/list`` but a call without a completed/abandoned run against
+# the resolved (slug, version) is refused by the handler with
+# ``-32602`` and the ``opacity_floor`` reason.
+_OPERATOR_TOOLS = {"runbook_list_templates", "runbook_show_template"}
 
 
 def _body(title: str = "Rotate cert", *, step_body: str = "Rotate the cert.") -> dict[str, Any]:
@@ -392,20 +399,126 @@ def test_show_template_admin_ok(
     assert payload["steps"][0]["id"] == "rotate"
 
 
-@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
-def test_show_template_operator_denied(
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_show_tool_admin_unchanged(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC: an OPERATOR calling show is refused by the dispatcher role gate → ``-32602``.
+    """Regression: an admin still reads the full body unconditionally.
 
-    The opacity floor lives on the run surface (G12.3); the template-side
-    read is TENANT_ADMIN-only. The dispatcher refuses the call before the
-    handler runs.
+    G12.3-T4 changes the operator path; the admin path must remain a
+    pass-through to :meth:`RunbookTemplateService.show_template` with no
+    run-state predicate consulted.
     """
     client, _op = client_with_operator
+    _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+
+    payload = _result_payload(_call(client, "runbook_show_template", {"slug": "cert-rotate"}))
+    assert payload["slug"] == "cert-rotate"
+    assert payload["version"] == 1
+    assert len(payload["steps"]) == 1
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_show_tool_operator_with_completed_run_succeeds(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC: operator with a completed run gets the full body (post-mortem read).
+
+    Seed a published v1 directly via the template service, then insert a
+    ``completed`` :class:`RunbookRun` for ``op`` against ``(slug, v1)``. The
+    handler's predicate call must return ``True`` and the response must be
+    the full body (with step contents).
+    """
+    client, op = client_with_operator
+    # Seed a published v1 from a fresh admin-shaped service call.
+    other_admin_sub = "seed-admin"
+    service = RunbookTemplateService()
+    await service.create_draft(
+        tenant_id=op.tenant_id,
+        operator_sub=other_admin_sub,
+        request=DraftTemplateRequest.model_validate({"slug": "cert-rotate", "body": _body()}),
+    )
+    await service.publish(
+        tenant_id=op.tenant_id,
+        request=PublishTemplateRequest(slug="cert-rotate", version=1),
+    )
+
+    # Seed a completed run for the operator against (cert-rotate, v1).
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            RunbookRun(
+                tenant_id=op.tenant_id,
+                template_slug="cert-rotate",
+                template_version=1,
+                assigned_to=op.sub,
+                target="host:edge-01",
+                params={},
+                state="completed",
+                started_by=op.sub,
+            )
+        )
+        await session.commit()
+
+    payload = _result_payload(_call(client, "runbook_show_template", {"slug": "cert-rotate"}))
+    assert payload["slug"] == "cert-rotate"
+    assert payload["version"] == 1
+    # Full body including step contents.
+    assert len(payload["steps"]) == 1
+    assert payload["steps"][0]["id"] == "rotate"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_show_tool_operator_with_no_run_denied(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC: operator with no completed/abandoned run → -32602, ``opacity_floor`` reason.
+
+    The template exists (seeded for the operator's tenant) but no run row
+    is inserted; the handler-internal predicate returns ``False`` and the
+    refusal carries the ``opacity_floor`` keyword that distinguishes
+    "opacity floor held" from "schema invalid".
+    """
+    client, op = client_with_operator
+    # Seed a published v1 so the existence path is OK; the denial is purely
+    # about the missing run row.
+    service = RunbookTemplateService()
+    await service.create_draft(
+        tenant_id=op.tenant_id,
+        operator_sub="seed-admin",
+        request=DraftTemplateRequest.model_validate({"slug": "cert-rotate", "body": _body()}),
+    )
+    await service.publish(
+        tenant_id=op.tenant_id,
+        request=PublishTemplateRequest(slug="cert-rotate", version=1),
+    )
+
     body = _call(client, "runbook_show_template", {"slug": "cert-rotate"})
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "forbidden" in body["error"]["message"].lower()
+    assert "opacity_floor" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_show_tool_description_includes_post_completion_text(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """Regression: the verbatim POST-COMPLETION EXCEPTION text is in the description.
+
+    The description is part of the contract -- agents read it to learn when
+    they are allowed to call this tool. A refactor that drops the carve-out
+    text would silently regress junior-agent UX.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+    show_desc = tools_by_name["runbook_show_template"]["description"]
+    assert "POST-COMPLETION EXCEPTION" in show_desc
+    # The two halves of the contract: the carve-out and the still-held
+    # in_progress denial. Both are load-bearing.
+    assert "completed or abandoned" in show_desc
+    assert "in_progress" in show_desc
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)

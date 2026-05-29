@@ -138,6 +138,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1._envelope import (
+    ENVELOPE_QUERY,
+    EnvelopeVersion,
+    wrap_v2_envelope,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.base import Connector
@@ -149,11 +154,6 @@ from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.targets.resolver import resolve_target
-from meho_backplane.api.v1._envelope import (
-    ENVELOPE_QUERY,
-    EnvelopeVersion,
-    wrap_v2_envelope,
-)
 from meho_backplane.targets.schemas import Target, TargetCreate, TargetSummary, TargetUpdate
 
 __all__ = ["router"]

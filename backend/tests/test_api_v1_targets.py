@@ -1304,11 +1304,7 @@ async def test_list_target_field_set_superset_of_detail(client: TestClient) -> N
     # The only fields a list row is allowed to omit are the
     # operator-authored free-form blobs the convention doc names.
     allowed_omissions = {"notes", "extras"}
-    masked = {
-        k
-        for k in detail_row
-        if k not in allowed_omissions and k not in list_row
-    }
+    masked = {k for k in detail_row if k not in allowed_omissions and k not in list_row}
     assert masked == set(), f"list silently masks {masked!r} relative to detail"
     # And the load-bearing routing fields specifically carry the
     # same non-null value the detail surface returned.

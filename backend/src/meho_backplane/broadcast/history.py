@@ -360,10 +360,7 @@ def parse_entry(
     # discriminator; fall back to the historical ``event_kind`` field
     # for v0.8.0 in-flight stream entries that haven't aged out via
     # the publisher's ``MAXLEN ~`` trim yet.
-    if isinstance(peek, dict):
-        discriminator = peek.get("kind") or peek.get("event_kind")
-    else:
-        discriminator = None
+    discriminator = peek.get("kind") or peek.get("event_kind") if isinstance(peek, dict) else None
     model_cls: type[BroadcastEvent] | type[AgentAnnouncementEvent] = (
         AgentAnnouncementEvent if discriminator == "agent_announcement" else BroadcastEvent
     )

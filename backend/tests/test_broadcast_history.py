@@ -321,9 +321,7 @@ async def test_parse_entry_dispatches_on_top_level_kind() -> None:
     legacy_obj = json.loads(legacy_wire)
     legacy_obj.pop("kind")  # simulate v0.8.0 wire shape
     legacy_fields = {"event": json.dumps(legacy_obj)}
-    legacy_parsed = parse_entry(
-        "1747800000001-0", legacy_fields, stream_key=f"meho:feed:{_TENANT}"
-    )
+    legacy_parsed = parse_entry("1747800000001-0", legacy_fields, stream_key=f"meho:feed:{_TENANT}")
     assert isinstance(legacy_parsed, AgentAnnouncementEvent)
 
 
@@ -340,17 +338,13 @@ async def test_parse_entry_legacy_audit_event_infers_operation() -> None:
     wire_obj = json.loads(event.model_dump_json())
     wire_obj.pop("kind")  # simulate pre-migration entry
     legacy_fields = {"event": json.dumps(wire_obj)}
-    parsed = parse_entry(
-        "1747800000002-0", legacy_fields, stream_key=f"meho:feed:{_TENANT}"
-    )
+    parsed = parse_entry("1747800000002-0", legacy_fields, stream_key=f"meho:feed:{_TENANT}")
     assert isinstance(parsed, BroadcastEvent)
     # Default attribute value provides the ``kind`` the post-migration
     # parser surfaces back to callers.
     assert parsed.kind == "operation"
 
 
-def _xrange_entry_for_ann(
-    event: Any, entry_id: str
-) -> tuple[str, dict[str, str]]:
+def _xrange_entry_for_ann(event: Any, entry_id: str) -> tuple[str, dict[str, str]]:
     """Mirror of :func:`_xrange_entry` for announcement events."""
     return entry_id, {"event": event.model_dump_json()}

@@ -406,7 +406,9 @@ def test_shipped_vmware_catalog_declares_9_0_x_compatibility() -> None:
     load-bearing.
     """
     vmware = next(
-        entry for entry in load_catalog().entries if (entry.product, entry.version) == ("vmware", "9.0")
+        entry
+        for entry in load_catalog().entries
+        if (entry.product, entry.version) == ("vmware", "9.0")
     )
     assert vmware.spec_info_versions_compatible == ("9.0.x",)
 

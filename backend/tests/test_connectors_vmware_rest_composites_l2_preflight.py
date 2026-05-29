@@ -313,9 +313,20 @@ def test_result_composite_l2_missing_shape_matches_t11_convention() -> None:
     1. Stable code (``composite_l2_missing``) under
        ``extras["error_code"]``.
     2. Human-readable ``error`` message that names: missing op ids,
-       remediation imperative (catalog command), doc reference.
+       diagnostic framing (curation gap), escape-hatch recipe
+       (catalog command), and the two doc references (strategic
+       framing + vmware-rest L1+L2 dispatch contract).
     3. Structured ``extras`` payload with the structured fields
        (``missing_op_ids``, ``catalog_command``).
+
+    G0.16-T1 (#1303) reframed the human message: the catalog command
+    is no longer described as "the remediation path" (which read as
+    a recommendation in v0.8.0 and operators followed it into a pod
+    crash before #1303 landed the safe shape); it is now described
+    as the OpenAPI escape hatch with the L1-wrapper request as the
+    recommended path. The structured ``data`` payload is unchanged
+    -- agents that branch on ``error_code`` + ``catalog_command``
+    keep working without migration.
     """
     out = result_composite_l2_missing(
         op_id="vmware.composite.datastore.usage",
@@ -330,7 +341,19 @@ def test_result_composite_l2_missing_shape_matches_t11_convention() -> None:
     assert "GET:/vcenter/datastore" in out.error
     assert "GET:/vcenter/vm" in out.error
     assert "meho connector ingest --catalog vmware/9.0" in out.error
+    # Strategic framing doc must be referenced -- the v0.9 reframe
+    # is the source of truth for "OpenAPI is the escape hatch, not
+    # the daily-driver".
+    assert "docs/codebase/api-shape-conventions.md" in out.error
+    # The vmware-rest L1+L2 dispatch contract reference stays --
+    # operators digging into the diagnostic need both docs.
     assert "docs/codebase/connectors-vmware-rest.md" in out.error
+    # Diagnostic framing: the message must call out the curation
+    # gap (and name the L1-wrapper request as the recommended path)
+    # rather than recommending the catalog command outright.
+    assert "curated" in out.error.lower()
+    assert "escape hatch" in out.error.lower()
+    assert "L1 wrapper" in out.error
     assert out.extras == {
         "error_code": "composite_l2_missing",
         "missing_op_ids": ["GET:/vcenter/datastore", "GET:/vcenter/vm"],

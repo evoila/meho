@@ -90,8 +90,67 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- `POST /api/v1/connectors/ingest` defaults to `async=true` and returns
+  `202 Accepted` + a job handle on the non-dry-run path; operators poll
+  `GET /api/v1/connectors/ingest/jobs/{job_id}` for completion.
+  Real-world vendor specs (the consumer signal was a 7.55 MB / 1275-op
+  `vmware/9.0.0.0` ingest that blocked the request thread for ~30 s
+  and tripped the kubelet liveness probe → pod restart) no longer
+  crash the backplane pod. `dry_run=true` keeps the synchronous shape
+  (the parse-only leg is the fast path); pass `async=false` for the
+  legacy blocking response on small specs (#1303).
+- `composite_l2_missing` error envelope reworded per the
+  curated-daily-driver vs OpenAPI-escape-hatch framing in
+  [`docs/codebase/api-shape-conventions.md`](docs/codebase/api-shape-conventions.md)
+  §1. The human message names the curation gap first, points at the
+  L1-wrapper request as the recommended path, and presents the
+  `catalog_command` as the escape-hatch recipe rather than the
+  remediation path. The structured `extras` (`error_code`,
+  `missing_op_ids`, `catalog_command`) are unchanged — agents that
+  branch on those fields keep working without migration (#1303).
+
 ### Fixed
 
+- **SSE feed delivers zero bytes despite stream writes (SEV-1, signal
+  draft `sse-feed-delivers-zero-events-despite-stream-writes`)** — a
+  fresh `GET /api/v1/feed` or `/ui/broadcast/stream` connection
+  defaulted to the Valkey `$` live-tail cursor, which combined with
+  the 30 s heartbeat cadence produced 0 bytes for the first 30 s on
+  any tenant with no concurrent writes during the window, and
+  permanently empty `/ui/broadcast` pages for tenants with 76+
+  existing entries on the stream. `_feed_generator` and
+  `_ui_feed_generator` now run a backlog prelude
+  (`XREVRANGE … COUNT 50`) before the BLOCK loop on fresh `$`
+  connections; explicit-replay cursors (`Last-Event-Id`, `since`)
+  skip the prelude. Root cause documented in
+  `docs/codebase/broadcast.md` as the writer → fanout → consumer
+  triage path (#1305 / #1302).
+- **gh-rest connector `auth_model` reconciled with `TargetCreate`
+  enum (G0.16-T2 #1304).** The v0.8.0 dogfood (consumer signal
+  `gh-rest-auth-model-target-vs-connector-mismatch`) caught a
+  SEV-1 mismatch between the target schema's `auth_model` enum
+  (`{impersonation, shared_service_account, per_user}`) and the
+  historical gh-rest connector boundary (which demanded
+  `auth_model="github-app"` or `"github-pat"` — neither a legal
+  enum value). The fix takes Approach B: the connector now
+  inspects the **Vault payload's field shape** to pick the
+  upstream credential protocol — `app_id` + `private_key` +
+  `installation_id` → App installation-token path; `token` →
+  PAT path; neither → typed `github_ambiguous_vault_payload`
+  envelope naming both required field sets so operators can
+  repair the Vault row without guessing. Targets keep
+  `auth_model="shared_service_account"` (the documented runbook
+  shape — `docs/cross-repo/github-connector.md` and the new
+  `load_github_credentials_from_vault` helper match the doc).
+  Mirrors the `vmware-rest-9.0` pattern (target carries the
+  identity model; connector reads the protocol from Vault).
+  Backwards-compatible for the `evoila-bosnia-gh` shape RDC
+  registered against v0.8.0 — the target row already carried
+  `shared_service_account` (the only enum value the operator
+  could pass), so re-deploying the post-#1304 backplane image
+  flips probe + dispatch green without operator action. (#1304)
 - **Connector probe — Vault OIDC fingerprint loader converges with dispatch.**
   `POST /api/v1/targets/{name}/probe` and `POST /ui/connectors/{name}/probe`
   now forward the route operator into the resolved connector's

@@ -246,28 +246,47 @@ def result_composite_l2_missing(
     G0.14-T10 (#1151). A composite (``vmware.composite.*``) declares the
     raw-REST sub-ops it dispatches into via
     :func:`~meho_backplane.connectors.vmware_rest.composites._preflight.preflight_l2_dependencies`.
-    When one or more are not registered in ``endpoint_descriptor`` -- the
-    operator hasn't run ``meho connector ingest --catalog
-    <product>/<version>`` yet -- the helper raises
+    When one or more are not registered in ``endpoint_descriptor`` --
+    no operator has run ``meho connector ingest --catalog
+    <product>/<version>`` yet for this connector -- the helper raises
     :class:`~meho_backplane.operations.composite.CompositeL2DependencyMissing`
     and the dispatcher converts it to this structured result.
 
-    The error shape complies with the
+    Wording is the v0.9 reframe from G0.16-T1 (#1303). The v0.8.0
+    envelope cast the catalog command as "the remediation path" and
+    operators read it as the recommended next step; reality is the
+    opposite (per
+    ``docs/codebase/api-shape-conventions.md`` §1) -- the curated
+    daily-driver is the recommended path and the OpenAPI ingest is
+    the escape hatch operators reach for when they're willing to
+    handle vendor-shape responses without operator-shape envelopes
+    or ``requires_approval`` annotations. The reword preserves the
+    structured ``catalog_command`` field (the escape hatch must
+    remain usable) but the human message names the curation gap
+    first and the escape hatch second.
+
+    The error shape still complies with the
     ``docs/codebase/error-message-shape.md`` convention (G0.14-T11
-    #1141): a stable ``composite_l2_missing`` code, a remediation-bearing
-    human message (names missing op-ids + the catalog command + the doc
-    reference), and a structured ``data`` payload (``missing_op_ids`` +
-    ``catalog_command``) so an agent can branch on the diagnostic without
-    re-parsing the human text.
+    #1141): a stable ``composite_l2_missing`` code, a
+    diagnostic-bearing human message (curation gap + the missing
+    op-ids + the escape-hatch recipe + two doc references), and a
+    structured ``data`` payload (``missing_op_ids`` +
+    ``catalog_command``) so an agent can branch on the diagnostic
+    without re-parsing the human text.
     """
     missing_repr = ", ".join(missing_op_ids) if missing_op_ids else "(none)"
     return OperationResult(
         status="error",
         op_id=op_id,
         error=(
-            f"composite_l2_missing: composite {op_id!r} depends on L2 sub-ops "
-            f"not registered in the catalog: [{missing_repr}]. Run "
-            f"{catalog_command!r} to ingest them, then retry. See "
+            f"composite_l2_missing: composite {op_id!r} depends on sub-ops "
+            f"not curated for this connector: [{missing_repr}]. The curated "
+            f"daily-driver is the recommended path -- file an issue for an "
+            f"L1 wrapper that exposes these ops in operator shape. As an "
+            f"escape hatch, run {catalog_command!r} to ingest the raw "
+            f"vendor ops (vendor-shape responses, no approval annotations) "
+            f"and retry. See docs/codebase/api-shape-conventions.md "
+            f"section 1 for the strategic framing and "
             f"docs/codebase/connectors-vmware-rest.md for the L1+L2 "
             f"dispatch contract."
         ),

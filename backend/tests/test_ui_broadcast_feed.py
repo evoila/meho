@@ -130,6 +130,29 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_engine_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def _empty_backlog_prelude_by_default(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Default the UI bridge's prelude ``XREVRANGE`` to "no entries".
+
+    G0.16-T3 (#1305) added the backlog prelude shared between
+    ``/api/v1/feed`` and ``/ui/broadcast/stream``. The pre-existing
+    UI tests under :class:`TestBroadcastStreamGenerator` pass
+    ``cursor="$"`` and only mock ``xread``; without this fixture
+    they would hit a real ``redis.asyncio.Redis.xrevrange`` call
+    against the test ``BROADCAST_REDIS_URL`` (``broadcast.test``,
+    unresolvable in CI / sandbox) and fail with a connection
+    error. Patching at the class level mirrors the same fixture in
+    :mod:`backend.tests.test_api_v1_feed`.
+    """
+    import redis.asyncio as redis
+
+    async def _empty(*_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr(redis.Redis, "xrevrange", _empty, raising=True)
+    yield
+
+
 def _build_app() -> FastAPI:
     """Construct a minimal FastAPI app wired for the broadcast UI tests.
 
@@ -518,6 +541,105 @@ class TestBroadcastStreamGenerator:
             ]
         )
         assert decoded["op_class"] == "read"
+
+    async def test_fresh_dollar_connection_replays_backlog_chronologically(self) -> None:
+        """G0.16-T3 (#1305): UI bridge prelude surfaces history on fresh ``$`` connection.
+
+        Mirrors :class:`backend.tests.test_api_v1_feed.TestFeedBacklogPrelude`'s
+        equivalent — the UI bridge imports
+        :func:`_emit_backlog_prelude` from
+        :mod:`meho_backplane.api.v1.feed` so the wire shape stays
+        byte-compatible. This test pins the call against the
+        bridge's own generator so a future divergence between the
+        two surfaces would surface here.
+        """
+        events = [
+            _make_event(op_id="audit.one", tenant_id=_TENANT_A),
+            _make_event(op_id="audit.two", tenant_id=_TENANT_A),
+        ]
+        # XREVRANGE returns latest-first by entry id: id 11 (newer)
+        # comes before id 10 (older). ``audit.two`` was published
+        # after ``audit.one`` so it carries the larger id.
+        xrevrange_items = [
+            ("1715600000011-0", {"event": events[1].model_dump_json()}),
+            ("1715600000010-0", {"event": events[0].model_dump_json()}),
+        ]
+        broadcast_client = get_broadcast_client()
+        prelude = AsyncMock(return_value=xrevrange_items)
+        # Idle XREAD with a yield point — see :func:`_xread_returning`'s
+        # docstring for the cancellation rationale.
+        idle_xread = _xread_returning([])
+        with (
+            patch.object(broadcast_client, "xrevrange", new=prelude),
+            patch.object(broadcast_client, "xread", new=idle_xread),
+        ):
+            gen = _ui_feed_generator(
+                tenant_id=_TENANT_A,
+                operator_sub="op-a",
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            # n=3 reaches the BLOCK loop's first XREAD after the
+            # two prelude frames are yielded (see the API edge's
+            # equivalent test for the same async-generator drain
+            # rationale — ``_collect_n_frames`` only suspends past
+            # the last requested frame).
+            frames = await _collect_n_frames(gen, n=3, timeout=2.0)
+
+        assert prelude.await_count == 1
+        assert prelude.await_args_list[0].args[0] == f"meho:feed:{_TENANT_A}"
+        assert prelude.await_args_list[0].kwargs.get("count") == 50
+        assert len(frames) == 2
+        op_ids = [
+            json.loads(
+                next(line for line in frame.split("\n") if line.startswith("data: "))[
+                    len("data: ") :
+                ]
+            )["op_id"]
+            for frame in frames
+        ]
+        assert op_ids == ["audit.one", "audit.two"]
+        # BLOCK loop's first XREAD reads strictly past the prelude.
+        first_block_cursor = idle_xread.await_args_list[0].args[0]
+        assert first_block_cursor == {f"meho:feed:{_TENANT_A}": "1715600000011-0"}
+
+    async def test_explicit_replay_cursor_skips_prelude_on_ui_bridge(self) -> None:
+        """``Last-Event-Id`` reconnect via UI bridge bypasses backlog.
+
+        Same contract as the API edge: the caller pinned an
+        anchor; replaying from ``+`` would re-deliver entries the
+        EventSource already saw and produce duplicate frames on
+        reconnect.
+        """
+        broadcast_client = get_broadcast_client()
+        prelude = AsyncMock(return_value=[])
+        # Idle XREAD with a yield point — see :func:`_xread_returning`'s
+        # docstring for the cancellation rationale.
+        idle_xread = _xread_returning([])
+        with (
+            patch.object(broadcast_client, "xrevrange", new=prelude),
+            patch.object(broadcast_client, "xread", new=idle_xread),
+        ):
+            gen = _ui_feed_generator(
+                tenant_id=_TENANT_A,
+                operator_sub="op-a",
+                cursor="1715600000000-0",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            # n=1 lets the generator land in the BLOCK loop's xread
+            # (n=0 short-circuits through ``aclose`` before the
+            # generator's body runs at all — same drain rationale
+            # as the API edge tests).
+            await _collect_n_frames(gen, n=1, timeout=0.3)
+
+        assert prelude.await_count == 0
+        assert idle_xread.await_args_list[0].args[0] == {
+            f"meho:feed:{_TENANT_A}": "1715600000000-0"
+        }
 
 
 # ---------------------------------------------------------------------------

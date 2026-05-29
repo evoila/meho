@@ -112,9 +112,30 @@ willing to handle vendor-shape responses (`apiVersion` / `kind` /
 
 The OpenAPI-derived path can't crash the pod. The escape hatch needs
 to survive real vendor specs (7+ MB OpenAPI documents with
-1000+ ops). G0.16-T1 covers that. But it's a SEV-3 ("escape hatch
-shouldn't OOM") not a SEV-1 ("daily-driver path broken"). The
-curated daily-driver works; the escape hatch needs to not crash.
+1000+ ops). G0.16-T1 (#1303) closes that: `POST /api/v1/connectors/ingest`
+defaults to `async=true` and returns `202 Accepted` + a job handle;
+the heavy commit + LLM-grouping pass runs off the request thread, so
+the kubelet liveness probe sees a quick request return and the pod
+stays Ready. Operators poll
+`GET /api/v1/connectors/ingest/jobs/{job_id}` for status. The
+`dry_run=true` path stays synchronous because the parse-only leg
+already returns inside the liveness budget on real-world specs
+(per RDC #771 Finding 21). Full shape in
+[spec-ingestion.md](spec-ingestion.md) §"Async ingest mode".
+
+The same task reworded the `composite_l2_missing` envelope per the
+strategic framing in this section: the human message stops
+describing the catalog command as "the remediation path"
+(operators read that as a recommendation and followed it into the
+pod-restart loop) and names the curation-gap framing first, with
+the L1-wrapper request as the recommended path and the
+`catalog_command` retained as the escape-hatch recipe. The
+structured `extras` payload (`error_code`, `missing_op_ids`,
+`catalog_command`) is unchanged -- agents that branch on those
+fields continue to work without migration. It's a SEV-3 ("escape
+hatch shouldn't crash the pod") not a SEV-1 ("daily-driver path
+broken"). The curated daily-driver works; the escape hatch now
+fails gracefully.
 
 ## 2. List-endpoint envelope shape
 

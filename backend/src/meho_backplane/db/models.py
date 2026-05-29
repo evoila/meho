@@ -251,6 +251,9 @@ __all__ = [
     "GraphNodeHistory",
     "IdentityBudget",
     "OperationGroup",
+    "RunbookRun",
+    "RunbookRunStepState",
+    "RunbookTemplate",
     "Target",
     "Tenant",
     "TenantConvention",
@@ -482,6 +485,23 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # Runbook correlation (G12.1-T2 #1292). The dispatcher contextvar
+    # populates ``run_id`` + ``step_id`` for every operation issued inside
+    # a runbook run; pre-G12.1 rows and operations outside a run context
+    # carry NULL on both columns. Soft-FK discipline — no DB-level FK
+    # constraint to ``runbook_runs.run_id`` in v0.2, same as
+    # ``parent_audit_id`` / ``target_id`` / ``agent_session_id``. Added by
+    # migration ``0034``.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    step_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -517,6 +537,11 @@ class AuditLog(Base):
         Index(
             "audit_log_actor_sub_idx",
             "actor_sub",
+            postgresql_using="btree",
+        ),
+        Index(
+            "audit_log_run_id_idx",
+            "run_id",
             postgresql_using="btree",
         ),
     )
@@ -4265,5 +4290,283 @@ class IdentityBudget(Base):
             "tenant_id",
             "principal_sub",
             postgresql_using="btree",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runbook schema (G12.1-T1 / #1292)
+# ---------------------------------------------------------------------------
+
+
+class RunbookTemplate(Base):
+    """A versioned runbook recipe (immutable on publish).
+
+    One row per ``(tenant_id, slug, version)`` triple. The ``slug`` is
+    the operator-facing stable identifier for the procedure (e.g.
+    ``drain-k8s-node``); ``version`` is a monotonically increasing
+    integer per ``(tenant_id, slug)`` — first draft starts at 1, each
+    edit that bumps the draft creates a new version row. The G12.2
+    write layer rejects edits to published templates (a new version must
+    be created).
+
+    Schema decisions
+    ----------------
+
+    * ``id`` — UUID primary key; ``default=uuid.uuid4`` for the SQLite
+      dev/test path (no ``gen_random_uuid()`` server default in v0.2).
+    * ``tenant_id`` — UUID NOT NULL. Soft-FK per existing discipline
+      (no DB-level FK to ``tenant.id`` in v0.2 — same as every other
+      per-tenant table that predates the FK-tightening pass).
+    * ``slug`` — Text NOT NULL. Validated against
+      :data:`meho_backplane.kb.schemas.SLUG_PATTERN` at the schema
+      layer (G12.2); the DB only stores the pre-validated string.
+    * ``version`` — Integer NOT NULL. Uniqueness enforced by
+      ``runbook_templates_tenant_slug_version_idx`` (unique b-tree on
+      ``(tenant_id, slug, version)``).
+    * ``steps`` — ``_PORTABLE_JSON`` NOT NULL. Ordered list of step
+      descriptors; shape validation (discriminated
+      ``type: operation_call`` / ``type: manual`` unions) lives in the
+      Pydantic layer (G12.2).
+    * ``status`` — Text NOT NULL DEFAULT ``'draft'``. Drives the
+      lifecycle machine ``draft → published → deprecated``.
+      ``CheckConstraint`` enforces the closed vocabulary.
+    * ``created_by`` / ``edited_by`` — operator sub (JWT ``sub`` claim).
+      ``edited_by`` mirrors ``created_by`` on first creation; updated by
+      the G12.2 edit surface on each subsequent write.
+    * ``created_at`` / ``edited_at`` — ``timestamptz`` NOT NULL.
+      ``default=lambda: datetime.now(UTC)`` so SQLite dev/test paths
+      populate the column without relying on a dialect server default.
+
+    Indexes
+    -------
+
+    * ``runbook_templates_tenant_slug_version_idx`` — unique b-tree on
+      ``(tenant_id, slug, version)``.  Templates are always
+      tenant-scoped so a single full unique index suffices (no partial-
+      index split like ``operation_group_global_idx`` /
+      ``operation_group_tenant_idx``).
+    * ``runbook_templates_tenant_status_idx`` — b-tree on
+      ``(tenant_id, status)`` for the ``runbook_list_templates`` query
+      path (G12.2).
+    """
+
+    __tablename__ = "runbook_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Soft-FK — no DB-level FK to tenant.id in v0.2 (same discipline
+    # as every other per-tenant table in this module).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    steps: Mapped[list[dict[str, object]]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=list,
+    )
+    target_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    edited_by: Mapped[str] = mapped_column(Text, nullable=False)
+    edited_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "runbook_templates_tenant_slug_version_idx",
+            "tenant_id",
+            "slug",
+            "version",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        Index(
+            "runbook_templates_tenant_status_idx",
+            "tenant_id",
+            "status",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            "status IN ('draft', 'published', 'deprecated')",
+            name="ck_runbook_templates_status",
+        ),
+    )
+
+
+class RunbookRun(Base):
+    """An execution of a :class:`RunbookTemplate` — one row per invocation.
+
+    The state machine drives ``in_progress → completed | abandoned``.
+    ``template_slug`` and ``template_version`` are pinned at run start so
+    later template edits cannot alter an in-flight run's step list. The
+    ``params`` column carries the ``${run.params.X}`` substitution context
+    (G12.3); it defaults to an empty dict so a params-less run is
+    insertable without ambiguity.
+
+    Schema decisions
+    ----------------
+
+    * ``run_id`` — UUID primary key; ``default=uuid.uuid4`` for dev/test.
+    * ``tenant_id`` — UUID NOT NULL. Soft-FK (no DB-level FK in v0.2).
+    * ``template_slug`` / ``template_version`` — pinned at start. Composite
+      soft-reference to ``(tenant_id, slug, version)`` in
+      ``runbook_templates`` — no DB-level multi-column FK in v0.2 by the
+      existing discipline.
+    * ``params`` — ``_PORTABLE_JSON`` NOT NULL. ``default=dict`` for the
+      SQLite path; PG gets ``'{}'`` as the server default in the migration
+      (same pattern as ``event_outbox.payload`` in migration ``0027``).
+    * ``state`` — Text NOT NULL DEFAULT ``'in_progress'``.
+      ``CheckConstraint`` enforces the closed vocabulary.
+    * ``completed_at`` / ``abandoned_at`` — NULL until the respective
+      terminal transition.
+
+    Indexes
+    -------
+
+    * ``runbook_runs_tenant_assigned_state_idx`` — b-tree on
+      ``(tenant_id, assigned_to, state)`` — drives the G12.4 priming
+      query ("in-progress runs assigned to this operator") and
+      ``runbook_list_runs`` (G12.3).
+    * ``runbook_runs_tenant_template_idx`` — b-tree on
+      ``(tenant_id, template_slug, template_version)`` — drives the
+      G12.3 post-completion read-allowance lookup ("did this operator
+      run this template?").
+    """
+
+    __tablename__ = "runbook_runs"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Soft-FK (same discipline as tenant_id on other tables).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    # Pinned at start; composite soft-reference to runbook_templates.
+    template_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    template_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    assigned_to: Mapped[str] = mapped_column(Text, nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    params: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="in_progress")
+    started_by: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    abandoned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "runbook_runs_tenant_assigned_state_idx",
+            "tenant_id",
+            "assigned_to",
+            "state",
+            postgresql_using="btree",
+        ),
+        Index(
+            "runbook_runs_tenant_template_idx",
+            "tenant_id",
+            "template_slug",
+            "template_version",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            "state IN ('in_progress', 'completed', 'abandoned')",
+            name="ck_runbook_runs_state",
+        ),
+    )
+
+
+class RunbookRunStepState(Base):
+    """Per-(run, step) state for a :class:`RunbookRun`.
+
+    One row per step per run; created in bulk when a run is started
+    (G12.3), all rows initially in ``state='pending'``. The composite PK
+    ``(run_id, step_id)`` is the natural join key; no additional index is
+    needed because the PK covers the per-run advance query path (G12.3:
+    "advance run X to step Y").
+
+    Schema decisions
+    ----------------
+
+    * ``run_id`` — part of the composite PK. Real
+      ``ForeignKey("runbook_runs.run_id", ondelete="CASCADE")`` — this
+      is a new-table child relationship, so a DB-level FK is
+      appropriate (same pattern as :class:`GraphEdge` → :class:`GraphNode`
+      with ``ondelete="CASCADE"``). Cascade-delete so dropping a run row
+      also removes its step states.
+    * ``step_id`` — part of the composite PK. Matches the ``id`` field
+      inside ``runbook_templates.steps[]``; validated by the G12.3 layer
+      at write time.
+    * ``state`` — Text NOT NULL DEFAULT ``'pending'``. Drives the per-step
+      state machine. ``CheckConstraint`` enforces the closed vocabulary.
+    * ``started_at`` — NULL while ``state='pending'``; stamped when the
+      step transitions to ``in_progress``.
+    * ``verified_at`` — NULL until the step reaches ``verified``.
+    * ``verify_response`` — nullable JSONB. Captures the operator's
+      confirmation result (``yes`` / ``no`` / ``escalate`` for ``confirm``
+      steps) or the dispatched-call result (for ``operation_call`` steps).
+      NULL while the step is in-progress or pending.
+    """
+
+    __tablename__ = "runbook_run_step_states"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("runbook_runs.run_id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    step_id: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    verify_response: Mapped[object] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "state IN ('pending', 'in_progress', 'verified', 'failed')",
+            name="ck_runbook_run_step_states_state",
         ),
     )

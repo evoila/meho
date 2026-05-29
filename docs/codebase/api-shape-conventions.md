@@ -283,6 +283,19 @@ When the two diverge, the MCP shape is usually the more
 considered one (more recent, more agent-facing). Migration goes
 REST-toward-MCP, not the other way.
 
+Code reference: G0.16-T6 Finding E (#1312) lands the migration
+on `GET /api/v1/topology/dependents/{name}` and
+`/dependencies/{name}` via the `?envelope=v2` opt-in (shared
+helper from Finding A). Default response stays the v0.8.0 bare
+`list[TopologyNode]` so no client breaks; the opt-in returns
+`{"kind": "dependents", "nodes": [...]}` matching the MCP
+`query_topology` tool's response. The wider topology endpoint
+set (`path` / `edges` / `timeline` / `diff` / `history`) ships
+in a follow-up Task — those endpoints already return typed
+dict envelopes (no bare list) so the v2 opt-in needs an
+endpoint-specific decision on whether to retain the existing
+field names or migrate to the §2 `items` form.
+
 ## 5. List ↔ detail field consistency
 
 **List endpoints return the same fields as their detail siblings.**

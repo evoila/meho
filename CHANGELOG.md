@@ -108,6 +108,18 @@ connector-related release-notes line.
 
 ### Added
 
+- **`?envelope=v2` opt-in on the REST topology dependents /
+  dependencies endpoints (G0.16-T6 Finding E #1312).** Passing
+  `?envelope=v2` returns `{"kind": "dependents", "nodes": [...]}`
+  or `{"kind": "dependencies", "nodes": [...]}` matching the MCP
+  `query_topology` tool's response shape per
+  `docs/codebase/api-shape-conventions.md` §4 (migration goes
+  REST-toward-MCP). Default response stays the v0.8.0 bare
+  `list[TopologyNode]` so no client breaks. The wider topology
+  endpoint set (`path` / `edges` / `timeline` / `diff` /
+  `history`) ships in a follow-up Task — those endpoints already
+  return typed dict envelopes that need endpoint-specific
+  migration decisions.
 - **`GET /api/v1/targets?envelope=v2` opt-in returns the unified
   list shape (G0.16-T6 Finding A reference adoption #1312).**
   Pass `?envelope=v2` to receive `{items, next_cursor?}` per

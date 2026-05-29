@@ -100,6 +100,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.api.v1._envelope import ENVELOPE_QUERY, EnvelopeVersion
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_raw_session
@@ -220,14 +221,15 @@ _MAX_HOPS_DEFAULT = 8
 _MAX_HOPS_MAX = 32
 
 
-@router.get("/dependents/{name}", response_model=list[TopologyNode])
+@router.get("/dependents/{name}")
 async def dependents(
     name: str,
     depth: int = Query(default=_DEPTH_DEFAULT, ge=1, le=_DEPTH_MAX),
     kind: str | None = Query(default=None),
     kind_filter: str | None = Query(default=None),
+    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
-) -> list[TopologyNode]:
+) -> list[TopologyNode] | dict[str, object]:
     """Reverse closure: every node that depends on *name*.
 
     Wraps :func:`~meho_backplane.topology.query.find_dependents`. The
@@ -241,13 +243,22 @@ async def dependents(
     (``ambiguous_node``) rather than silently merging unrelated
     closures. ``kind_filter`` restricts the walk to edges of that
     ``graph_edge.kind``.
+
+    G0.16-T6 Finding E (#1312) — opt-in to the REST↔MCP envelope
+    agreement per ``docs/codebase/api-shape-conventions.md`` §4.
+    Default response stays the v0.8.0 bare ``list[TopologyNode]`` so
+    no client breaks; passing ``?envelope=v2`` returns the
+    discriminated envelope ``{"kind": "dependents", "nodes": [...]}``
+    matching the MCP ``query_topology`` tool's shape. The convention
+    doc names "migration is REST-toward-MCP, not the other way";
+    the v2 opt-in is the migration mechanism.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_DEPENDENTS,
         audit_op_class="read",
     )
     try:
-        return await find_dependents(
+        nodes = await find_dependents(
             operator,
             name,
             kind=kind,
@@ -256,30 +267,39 @@ async def dependents(
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
+    if envelope is None:
+        return nodes
+    return {
+        "kind": "dependents",
+        "nodes": [n.model_dump(mode="json") for n in nodes],
+    }
 
 
-@router.get("/dependencies/{name}", response_model=list[TopologyNode])
+@router.get("/dependencies/{name}")
 async def dependencies(
     name: str,
     depth: int = Query(default=_DEPTH_DEFAULT, ge=1, le=_DEPTH_MAX),
     kind: str | None = Query(default=None),
     kind_filter: str | None = Query(default=None),
+    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
-) -> list[TopologyNode]:
+) -> list[TopologyNode] | dict[str, object]:
     """Forward closure: everything *name* depends on.
 
     The mirror of :func:`dependents` — same shape, same one-row-per-
     node closure dedupe, same ``kind`` disambiguation contract, same
     tenant scoping — walking edges out of the current node rather than
     into it. Wraps
-    :func:`~meho_backplane.topology.query.find_dependencies`.
+    :func:`~meho_backplane.topology.query.find_dependencies`. Honours
+    the same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)
+    returning ``{"kind": "dependencies", "nodes": [...]}``.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_DEPENDENCIES,
         audit_op_class="read",
     )
     try:
-        return await find_dependencies(
+        nodes = await find_dependencies(
             operator,
             name,
             kind=kind,
@@ -288,6 +308,12 @@ async def dependencies(
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
+    if envelope is None:
+        return nodes
+    return {
+        "kind": "dependencies",
+        "nodes": [n.model_dump(mode="json") for n in nodes],
+    }
 
 
 @router.get("/path", response_model=TopologyPath | None)

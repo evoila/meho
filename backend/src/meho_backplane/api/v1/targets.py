@@ -154,7 +154,13 @@ from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.targets.resolver import resolve_target
-from meho_backplane.targets.schemas import Target, TargetCreate, TargetSummary, TargetUpdate
+from meho_backplane.targets.schemas import (
+    Target,
+    TargetCreate,
+    TargetSummary,
+    TargetUpdate,
+    project_target_to_summary,
+)
 
 __all__ = ["router"]
 
@@ -279,38 +285,14 @@ class TargetsDiscoverResult(BaseModel):
     skipped: list[SkippedConnector]
 
 
-def _to_summary(t: TargetORM) -> TargetSummary:
-    """Project an ORM row to the wire :class:`TargetSummary` shape.
-
-    G0.16-T6 Finding D (#1312) widened the summary to mirror the
-    detail-endpoint shape per
-    ``docs/codebase/api-shape-conventions.md`` §5, so list-row field
-    set ⊇ detail field set holds for every field except the two
-    deliberately-omitted free-form blobs (``notes``, ``extras``); see
-    :class:`TargetSummary` for the rationale.
-    """
-    return TargetSummary(
-        id=t.id,
-        tenant_id=t.tenant_id,
-        name=t.name,
-        # ORM stores aliases as ``list[str]`` (mutable JSON column);
-        # the response schema declares ``tuple[str, ...]`` for
-        # frozen-model immutability. Coerce at the boundary.
-        aliases=tuple(t.aliases),
-        product=t.product,
-        version=t.version,
-        host=t.host,
-        port=t.port,
-        fqdn=t.fqdn,
-        secret_ref=t.secret_ref,
-        auth_model=AuthModel(t.auth_model),
-        vpn_required=t.vpn_required,
-        fingerprint=t.fingerprint,
-        preferred_impl_id=t.preferred_impl_id,
-        created_at=t.created_at,
-        updated_at=t.updated_at,
-        deleted_at=t.deleted_at,
-    )
+# G0.16-T6 review-iter-1 m1 (#1312). The ORM→TargetSummary projection
+# was previously duplicated byte-for-byte on this module and on
+# :mod:`meho_backplane.targets.resolver`; the duplication was the
+# drift class that produced Finding D (list silently masking version
+# / secret_ref / preferred_impl_id while detail returned them).
+# Single canonical helper now lives at
+# :func:`meho_backplane.targets.schemas.project_target_to_summary`;
+# both sites import + call it directly.
 
 
 def _build_unknown_product_detail(
@@ -552,7 +534,7 @@ async def list_targets(
     fetched = list(result.scalars().all())
     has_more = len(fetched) > limit
     rows = fetched[:limit]
-    summaries = [_to_summary(t) for t in rows]
+    summaries = [project_target_to_summary(t) for t in rows]
     if envelope is None:
         return summaries
     next_cursor = rows[-1].name if has_more else None

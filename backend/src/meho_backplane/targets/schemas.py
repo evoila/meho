@@ -46,12 +46,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.connectors.schemas import AuthModel
+
+if TYPE_CHECKING:
+    from meho_backplane.db.models import Target as TargetORM
 
 __all__ = [
     "AuthModel",
@@ -59,6 +62,7 @@ __all__ = [
     "TargetCreate",
     "TargetSummary",
     "TargetUpdate",
+    "project_target_to_summary",
 ]
 
 
@@ -277,3 +281,49 @@ class TargetUpdate(BaseModel):
     extras: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
+
+
+def project_target_to_summary(t: TargetORM) -> TargetSummary:
+    """Project a :class:`TargetORM` row to the wire :class:`TargetSummary` shape.
+
+    G0.16-T6 review-iter-1 m1 (#1312). Single canonical projection
+    for both the ``GET /api/v1/targets`` list endpoint
+    (:mod:`meho_backplane.api.v1.targets`) and the
+    :func:`~meho_backplane.targets.resolver.resolve_target`
+    near-miss / ambiguity diagnostics
+    (:mod:`meho_backplane.targets.resolver`). The two sites
+    previously held byte-for-byte duplicate ``_to_summary`` helpers;
+    the drift class they invited is exactly what Finding D caught
+    (list silently masking ``version`` / ``secret_ref`` /
+    ``preferred_impl_id`` while detail returned them). One helper,
+    one place to change, no drift.
+
+    Coerces ``aliases`` from the ORM column's mutable ``list[str]``
+    JSON shape to the wire schema's ``tuple[str, ...]`` so the
+    frozen :class:`TargetSummary` instance is genuinely immutable,
+    and wraps the raw ``auth_model`` string in the
+    :class:`~meho_backplane.connectors.schemas.AuthModel` enum so
+    callers get the typed value the schema declares.
+    """
+    return TargetSummary(
+        id=t.id,
+        tenant_id=t.tenant_id,
+        name=t.name,
+        # ORM stores aliases as ``list[str]`` (mutable JSON column);
+        # the response schema declares ``tuple[str, ...]`` for
+        # frozen-model immutability. Coerce at the boundary.
+        aliases=tuple(t.aliases),
+        product=t.product,
+        version=t.version,
+        host=t.host,
+        port=t.port,
+        fqdn=t.fqdn,
+        secret_ref=t.secret_ref,
+        auth_model=AuthModel(t.auth_model),
+        vpn_required=t.vpn_required,
+        fingerprint=t.fingerprint,
+        preferred_impl_id=t.preferred_impl_id,
+        created_at=t.created_at,
+        updated_at=t.updated_at,
+        deleted_at=t.deleted_at,
+    )

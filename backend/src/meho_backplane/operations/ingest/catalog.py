@@ -26,10 +26,12 @@ connector-catalog.md`` is the operator-facing pointer.
 
 * :func:`load_catalog` (called at backplane startup) parses the YAML and
   runs Pydantic schema validation -- unknown fields, a non-PEP-440
-  ``spec_info_version``, a duplicate ``(product, version)``, or malformed
-  YAML crash startup (and therefore CI's app-boot smoke). It does not
-  touch the connector registry, so it is safe to run inside the lifespan
-  regardless of import-cache state.
+  ``spec_info_version``, an unparseable
+  ``spec_info_versions_compatible`` pattern, a duplicate
+  ``(product, version)``, or malformed YAML crash startup (and
+  therefore CI's app-boot smoke). It does not touch the connector
+  registry, so it is safe to run inside the lifespan regardless of
+  import-cache state.
 * :func:`validate_catalog_registry_coverage` cross-checks every entry
   against :func:`~meho_backplane.connectors.registry.all_connectors_v2`
   on two axes:
@@ -63,6 +65,7 @@ import re
 from importlib import resources
 
 import yaml
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -73,6 +76,13 @@ _CATALOG_RESOURCE = "catalog.yaml"
 #: A SHA-256 digest is 64 lowercase hex characters.
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
+#: Glob form for ``spec_info_versions_compatible`` entries — one or more
+#: integer release segments followed by one or more trailing ``x``
+#: wildcards. ``"1.x"`` / ``"1.x.x"`` / ``"9.0.x"`` all match; ``"x"``,
+#: ``"1.x.y"``, ``"1.2"`` do not. The translation to a PEP 440 specifier
+#: lives in :func:`_compatibility_pattern_to_specifier`.
+_COMPAT_GLOB_RE = re.compile(r"^\d+(?:\.\d+)*(?:\.x)+$")
+
 
 class CatalogError(RuntimeError):
     """Raised when the connector-spec catalog is malformed or incoherent.
@@ -81,6 +91,90 @@ class CatalogError(RuntimeError):
     failure) and by :func:`validate_catalog_registry_coverage` (registry
     mismatch).
     """
+
+
+def _compatibility_pattern_to_specifier(pattern: str) -> SpecifierSet:
+    """Translate one ``spec_info_versions_compatible`` entry to a PEP 440 specifier.
+
+    Two accepted shapes:
+
+    * **Glob** — one or more integer release segments followed by one
+      or more trailing ``x`` wildcards (``"1.x"``, ``"1.x.x"``,
+      ``"9.0.x"``). The leading numeric segments fix that prefix; every
+      ``.x`` widens the band by one release-tuple level. ``"1.x"``
+      means "any 1.*"; ``"9.0.x"`` means "any 9.0.*". The translation
+      mirrors PEP 440's ``~=`` semantics so the resulting specifier
+      reuses the well-tested ``packaging`` matcher rather than rolling
+      a custom comparator.
+    * **PEP 440 specifier set** — operators can pass the canonical
+      form directly (``">=1.0,<2.0"``, ``"~=1.4"``). Accepted verbatim
+      via :class:`packaging.specifiers.SpecifierSet`.
+
+    Raises :class:`ValueError` for any shape we can't decode. The two
+    branches both surface as one validation error from the field
+    validator, so the operator sees one consistent
+    ``ValidationError`` per malformed pattern regardless of which
+    shape they intended.
+    """
+    pattern = pattern.strip()
+    if not pattern:
+        raise ValueError("spec_info_versions_compatible entries must not be blank")
+    if _COMPAT_GLOB_RE.fullmatch(pattern):
+        # Strip the trailing ``.x`` segments; the remaining prefix is the
+        # fixed lower bound. ``"1.x.x"`` → prefix ``("1",)``; ``"9.0.x"``
+        # → prefix ``("9", "0")``. The upper bound bumps the last fixed
+        # segment by one (e.g. ``"1"`` → ``"<2"``, ``"9.0"`` → ``"<9.1"``)
+        # so a pattern with N fixed segments lets all releases under
+        # that band through.
+        segments = pattern.split(".")
+        prefix: list[str] = []
+        for seg in segments:
+            if seg == "x":
+                break
+            prefix.append(seg)
+        if not prefix:
+            # _COMPAT_GLOB_RE already rules this out, but keep the
+            # invariant explicit for a future regex relax.
+            raise ValueError(
+                f"spec_info_versions_compatible pattern {pattern!r} must fix at least one segment"
+            )
+        lower = ".".join(prefix)
+        upper_segments = [*prefix[:-1], str(int(prefix[-1]) + 1)]
+        upper = ".".join(upper_segments)
+        return SpecifierSet(f">={lower},<{upper}")
+    try:
+        return SpecifierSet(pattern)
+    except InvalidSpecifier as exc:
+        raise ValueError(
+            f"spec_info_versions_compatible entry {pattern!r} is neither a glob "
+            "(e.g. '1.x', '9.0.x') nor a valid PEP 440 specifier set "
+            "(e.g. '>=1.0,<2.0')"
+        ) from exc
+
+
+def info_version_matches_compatibility(info_version: str, patterns: tuple[str, ...]) -> bool:
+    """Return ``True`` when ``info_version`` matches any compatibility pattern.
+
+    The patterns must already have passed
+    :func:`_compatibility_pattern_to_specifier` validation at catalog
+    parse time (the field validator guarantees this for shipped
+    entries; synthetic test callers can rely on the same invariant).
+    A non-PEP-440 ``info_version`` returns ``False`` — the
+    compatibility check is opt-in PEP 440 by design and other version
+    schemes fall back to the verbatim/major-band classifier.
+    """
+    try:
+        version = Version(info_version)
+    except InvalidVersion:
+        return False
+    for pattern in patterns:
+        try:
+            specifier = _compatibility_pattern_to_specifier(pattern)
+        except ValueError:
+            continue
+        if version in specifier:
+            return True
+    return False
 
 
 class ConnectorSpecEntry(BaseModel):
@@ -99,6 +193,24 @@ class ConnectorSpecEntry(BaseModel):
     requires_connector_class: str = Field(min_length=1, max_length=128)
     upstream: tuple[str, ...] | None = None
     spec_info_version: str | None = Field(default=None, max_length=64)
+    #: Opt-in compatibility range the validator widens against. The
+    #: catalog row keeps its operator-facing ``version`` label (a
+    #: product-line name like ``"3"`` for GitHub REST API v3 or
+    #: ``"9.0"`` for vCenter 9.0); the spec's actual ``info.version``
+    #: floats inside the band declared here. Each entry is either a
+    #: glob (``"1.x"`` / ``"9.0.x"``) or a PEP 440 specifier set
+    #: (``">=1.0,<2.0"``) — see
+    #: :func:`_compatibility_pattern_to_specifier`. ``None`` means
+    #: "no opt-in"; the validator falls back to the verbatim /
+    #: major-band classifier in :mod:`pipeline`.
+    #:
+    #: G0.16-T5 (#1307): the ``gh/3`` row uses this opt-in because
+    #: GitHub's ``info.version`` documents the OpenAPI description's
+    #: own version (currently ``1.1.4``, regenerated daily on
+    #: ``main``) — orthogonal to the ``v3`` product-line label
+    #: github.com calls the API. Without the opt-in, every upstream
+    #: bump breaks ingest until an operator hand-edits the catalog.
+    spec_info_versions_compatible: tuple[str, ...] | None = None
     sha256: str | None = Field(default=None, max_length=64)
     notes: str = Field(default="", max_length=2048)
 
@@ -129,6 +241,27 @@ class ConnectorSpecEntry(BaseModel):
         if not _SHA256_RE.fullmatch(value):
             raise ValueError("sha256 must be 64 lowercase hex characters")
         return value
+
+    @field_validator("spec_info_versions_compatible")
+    @classmethod
+    def _compatibility_patterns_are_parseable(
+        cls, value: tuple[str, ...] | None
+    ) -> tuple[str, ...] | None:
+        if value is None:
+            return value
+        if not value:
+            raise ValueError(
+                "spec_info_versions_compatible must be null (no opt-in) or a non-empty list"
+            )
+        normalized: list[str] = []
+        for raw_pattern in value:
+            pattern = raw_pattern.strip()
+            # Eagerly compile each entry so a malformed pattern crashes
+            # the startup parse (T11 fail-loud-early) rather than
+            # surfacing only when an ingest happens to use this row.
+            _compatibility_pattern_to_specifier(pattern)
+            normalized.append(pattern)
+        return tuple(normalized)
 
     @field_validator("upstream")
     @classmethod

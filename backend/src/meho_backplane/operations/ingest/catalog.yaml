@@ -34,6 +34,13 @@
 #       smoke-tested the spec; PEP 440 when present. null until a connector's
 #       spec has actually been ingest-verified through MEHO (these are
 #       empirical values, not guesses -- populate on first verified ingest).
+#   spec_info_versions_compatible -- optional opt-in compatibility range for
+#       label-vs-spec ingest. List of patterns -- glob (`"1.x"`, `"9.0.x"`)
+#       or PEP 440 specifier set (`">=1.0,<2.0"`). When set, the validator
+#       passes an ingest whose spec `info.version` matches any pattern even
+#       if it differs from the catalog `version` label. Used when the
+#       catalog `version` is a product-line label divergent from the spec's
+#       documentation version (G0.16-T5 #1307 -- gh/3 vs `info.version=1.x.x`).
 #   sha256                       -- advisory content hash MEHO smoke-tested
 #       against; optional, not enforced. null until smoke-tested.
 #   notes                        -- operator context: sharp edges, version
@@ -122,6 +129,16 @@ entries:
     upstream:
       - "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json"
     spec_info_version: "1.1.4"
+    # G0.16-T5 (#1307): catalog version "3" is the product-line label;
+    # the spec's info.version tracks the OpenAPI description's own
+    # documentation versioning (currently 1.1.4, growing). Without this
+    # opt-in the validator's spec_label_mismatch fires on every upstream
+    # 1.x bump until an operator hand-edits the catalog. The compat
+    # range accepts the full 1.x band -- once GitHub publishes a 2.x
+    # description an operator decides whether to extend this range,
+    # cut a new catalog row, or take action specific to the bump.
+    spec_info_versions_compatible:
+      - "1.x.x"
     sha256: null
     notes: >-
       Generic-ingested. GitHub REST API (Apache-2.0, machine-generated

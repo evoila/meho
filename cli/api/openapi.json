@@ -10016,6 +10016,14 @@
             "nullable": true,
             "title": "Spec Info Version"
           },
+          "spec_info_versions_compatible": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Spec Info Versions Compatible"
+          },
           "sha256": {
             "type": "string",
             "maxLength": 64,

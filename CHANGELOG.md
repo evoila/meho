@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **Catalog field `spec_info_versions_compatible` for label-vs-spec
+  decoupling (G0.16-T5 #1307).** Optional `list[str]` on each
+  `ConnectorSpecEntry`. Entries are either glob shapes (`"1.x"`,
+  `"9.0.x"`) or PEP 440 specifier sets (`">=1.0,<2.0"`, `"~=1.4"`)
+  — any-of semantics across multiple patterns. Documented in
+  [`docs/cross-repo/connector-catalog.md`](docs/cross-repo/connector-catalog.md#label-vs-spec-decoupling-spec_info_versions_compatible).
+  Companion to G0.16-T6 Finding 22 / Task #1312 H for vmware catalog
+  `9.0` vs spec `9.0.0.0` — the new field is available for the
+  vmware variant to adopt if Task #1312 chooses approach (b). (#1307)
+
 ### Changed
 
 - `POST /api/v1/connectors/ingest` defaults to `async=true` and returns
@@ -169,6 +181,21 @@ connector-related release-notes line.
   callers (readiness probe, K8s topology refresh) that have no real
   operator in scope, preserving the locked Option A decision's
   system-call carve-out. (G0.16-T4 #1306)
+- **gh/3 catalog ingest no longer fails `spec_label_mismatch` on the
+  live upstream spec (G0.16-T5 #1307).** The catalog row's
+  `version="3"` is the product-line label (`v3` as github.com itself
+  calls it); the upstream OpenAPI description's `info.version` is
+  `1.1.4` and grows on every spec edit. Pre-fix the ingest
+  validator's verbatim/major-band cross-check refused the pair as
+  incompatible majors. The catalog now declares an opt-in
+  `spec_info_versions_compatible: ["1.x.x"]` range; the validator
+  widens to accept any `info.version` inside the declared band, so
+  `1.1.4 → 1.1.5 → 1.2.0` upstream bumps ingest cleanly without a
+  catalog edit. The opt-in is per-row — vmware-style catalogs whose
+  `version` IS the spec's `info.version` keep the historical strict
+  check. Consumer signal:
+  [`claude-rdc-hetzner-dc#771` Finding 18](https://github.com/evoila-bosnia/meho-internal/issues/771).
+  (#1307)
 
 ## [0.8.0] - 2026-05-28
 

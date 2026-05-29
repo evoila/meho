@@ -47,6 +47,7 @@ from meho_backplane.operations.ingest.catalog import (
     CatalogError,
     ConnectorSpecCatalog,
     ConnectorSpecEntry,
+    info_version_matches_compatibility,
     load_catalog,
     parse_catalog,
     validate_catalog_registry_coverage,
@@ -390,3 +391,97 @@ async def test_catalog_endpoint_returns_all_entries() -> None:
     response = await catalog_endpoint(operator=MagicMock())
     returned = {(e.product, e.version) for e in response.catalog}
     assert returned == _EXPECTED_PRODUCT_VERSION
+
+
+# ---------------------------------------------------------------------------
+# spec_info_versions_compatible (G0.16-T5 #1307 label-vs-spec decoupling opt-in)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("pattern", "matching", "non_matching"),
+    [
+        # Glob: one fixed major, two wildcards.
+        ("1.x.x", ["1.0", "1.1.4", "1.99.99"], ["0.9", "2.0", "2.1.0"]),
+        # Glob: one fixed major, one wildcard.
+        ("9.x", ["9.0", "9.99"], ["8.99", "10.0"]),
+        # Glob: fixed major + minor, one wildcard.
+        ("9.0.x", ["9.0", "9.0.0.0", "9.0.99"], ["9.1", "9.1.0"]),
+        # PEP 440 specifier set passes through verbatim.
+        (">=1.0,<2.0", ["1.0", "1.99"], ["0.9", "2.0"]),
+        # PEP 440 compatible-release operator.
+        ("~=1.4", ["1.4", "1.4.0", "1.99"], ["1.3.99", "2.0"]),
+    ],
+)
+def test_compatibility_glob_and_specifier_shapes_round_trip(
+    pattern: str, matching: list[str], non_matching: list[str]
+) -> None:
+    """Both glob and SpecifierSet entries match expected versions."""
+    entry = _entry(spec_info_versions_compatible=[pattern])
+    assert entry.spec_info_versions_compatible == (pattern,)
+    for v in matching:
+        assert info_version_matches_compatibility(v, (pattern,)), f"{v!r} should match {pattern!r}"
+    for v in non_matching:
+        assert not info_version_matches_compatibility(v, (pattern,)), (
+            f"{v!r} should not match {pattern!r}"
+        )
+
+
+def test_compatibility_match_handles_multiple_patterns() -> None:
+    """Any-of semantics: a version matches the band if any pattern accepts it."""
+    patterns = ("1.x.x", "2.0.x")
+    assert info_version_matches_compatibility("1.5.0", patterns)
+    assert info_version_matches_compatibility("2.0.99", patterns)
+    assert not info_version_matches_compatibility("2.1.0", patterns)
+
+
+def test_compatibility_match_returns_false_for_non_pep440_version() -> None:
+    """Non-PEP-440 ``info.version`` strings short-circuit to False."""
+    assert not info_version_matches_compatibility("acme-2024Q3", ("1.x",))
+
+
+def test_entry_accepts_no_opt_in() -> None:
+    """``spec_info_versions_compatible=None`` is the default (no opt-in)."""
+    assert _entry().spec_info_versions_compatible is None
+
+
+def test_entry_rejects_empty_compatibility_list() -> None:
+    """An empty list is ambiguous — operators should leave the field unset."""
+    with pytest.raises(ValidationError, match="non-empty list"):
+        _entry(spec_info_versions_compatible=[])
+
+
+@pytest.mark.parametrize(
+    "bad_pattern",
+    [
+        "x",  # no fixed prefix
+        "1.x.y",  # non-x trailing wildcard
+        "1.2",  # no wildcard at all
+        "not-a-version",  # neither glob nor PEP 440
+        "",  # blank
+    ],
+)
+def test_entry_rejects_malformed_compatibility_pattern(bad_pattern: str) -> None:
+    with pytest.raises(ValidationError):
+        _entry(spec_info_versions_compatible=[bad_pattern])
+
+
+def test_shipped_catalog_gh3_carries_compatibility_opt_in() -> None:
+    """The gh/3 row uses the new field to decouple label '3' from info.version '1.x'."""
+    catalog = load_catalog()
+    gh = catalog.get("gh", "3")
+    assert gh is not None
+    assert gh.spec_info_versions_compatible == ("1.x.x",)
+    # The shipped info.version (1.1.4) must fall inside the declared band.
+    assert info_version_matches_compatibility("1.1.4", gh.spec_info_versions_compatible)
+
+
+def test_shipped_catalog_non_gh_rows_have_no_opt_in() -> None:
+    """The opt-in is targeted; rows with reconciled label-vs-spec (vmware,
+    nsx, etc.) leave ``spec_info_versions_compatible`` null."""
+    for entry in load_catalog().entries:
+        if entry.product == "gh":
+            continue
+        assert entry.spec_info_versions_compatible is None, (
+            f"{entry.product}/{entry.version} unexpectedly opts in"
+        )

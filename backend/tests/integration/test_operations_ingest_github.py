@@ -54,10 +54,18 @@ catalog form.)
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
+import structlog
 
-from meho_backplane.operations.ingest import parse_openapi
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.operations.ingest import (
+    IngestionPipelineService,
+    SpecSource,
+    parse_openapi,
+)
+from meho_backplane.operations.ingest.catalog import load_catalog
 
 # Default to the catalog-shipped upstream. Override via env var for
 # pinned-SHA / fork canaries.
@@ -121,3 +129,55 @@ def test_parse_github_rest_spec_lands_700_plus_rows() -> None:
     assert all(r.safety_level == "dangerous" for r in dangerous[:5])
     # spec_source threading.
     assert all("spec:gh/3" in row.tags for row in rows)
+
+
+@pytest.mark.skipif(
+    _resolve_gh_spec() is None,
+    reason=(
+        "GitHub spec live ingest gated by MEHO_GH_INGEST_LIVE=1 "
+        "(G0.16-T5 #1307 AC: validator accepts live upstream info.version "
+        "under catalog label '3' via spec_info_versions_compatible)."
+    ),
+)
+def test_validator_accepts_live_gh3_spec_under_catalog_label() -> None:
+    """G0.16-T5 #1307 acceptance: live upstream spec ingests under label '3'.
+
+    The catalog row's ``version="3"`` is the GitHub REST product-line
+    label; the live upstream's ``info.version`` (currently ``1.1.4``,
+    growing on ``main``) is the OpenAPI description's own
+    documentation version. Pre-fix, the spec-vs-label cross-check
+    raised ``spec_label_mismatch`` (different majors). Post-fix the
+    catalog row's ``spec_info_versions_compatible=["1.x.x"]`` opt-in
+    widens the validator and the ingest proceeds without raising.
+
+    This test exercises the validator boundary only: the post-1.x.x
+    upstream bump is exactly the failure mode the fix is supposed to
+    prevent, so re-running this after a 1.1.5 / 1.2.0 release should
+    still pass without any catalog edit.
+    """
+    spec_url = _resolve_gh_spec()
+    assert spec_url is not None  # guarded by skipif above
+
+    catalog = load_catalog()
+    gh = catalog.get("gh", "3")
+    assert gh is not None
+    assert gh.spec_info_versions_compatible == ("1.x.x",), (
+        "shipped catalog must declare the 1.x.x compat range — the test "
+        "asserts the validator works with the catalog as shipped"
+    )
+
+    operator = Operator(
+        sub="test-operator",
+        raw_jwt="test-jwt",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    service = IngestionPipelineService(operator=operator)
+    # Should not raise — the catalog's opt-in lets info.version in the
+    # 1.x band through under the operator-facing label "3".
+    service._validate_spec_versions(
+        specs=[SpecSource(uri=spec_url)],
+        requested_version=gh.version,
+        log=structlog.get_logger(__name__).bind(test=True),
+        spec_info_versions_compatible=gh.spec_info_versions_compatible,
+    )

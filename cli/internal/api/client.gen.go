@@ -135,6 +135,13 @@ const (
 	RunsOn           GraphEdgeKind = "runs-on"
 )
 
+// Defines values for IngestJobStatusResponseStatus.
+const (
+	Failed    IngestJobStatusResponseStatus = "failed"
+	Running   IngestJobStatusResponseStatus = "running"
+	Succeeded IngestJobStatusResponseStatus = "succeeded"
+)
+
 // Defines values for MemoryScope.
 const (
 	MemoryScopeTarget     MemoryScope = "target"
@@ -2073,6 +2080,66 @@ type HealthResponse struct {
 	Vault VaultStatus `json:"vault"`
 }
 
+// IngestJobStatusResponse Response body for “GET /api/v1/connectors/ingest/jobs/{job_id}“.
+//
+// Mirrors the in-memory
+// :class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,
+// projecting it into a Pydantic-typed shape the route returns.
+// Three field clusters:
+//
+//   - **Identity** -- “job_id“ + the originator's request descriptors
+//     (“catalog_entry“ / “product“ / “version“ / “impl_id“ /
+//     “spec_uris“). Echo so the polling caller doesn't need to
+//     correlate against their own state.
+//   - **Lifecycle** -- “status“ + “started_at“ + optional
+//     “ended_at“. Status moves “running“ → “succeeded“ or
+//     “running“ → “failed“ once.
+//   - **Result vs error** -- exactly one of “ingestion“ (with
+//     optional “grouping“) or “error“ is populated, keyed on
+//     status. “running“ leaves both “None“ so polling clients
+//     branch on “status“ rather than checking presence.
+//
+// “error“ is the capped exception message; “error_class“ is the
+// Python exception class name -- structured enough for agents that
+// want to branch (“VersionMismatchError“ vs
+// “LlmClientUnavailable“) without parsing prose. The structured
+// 422 envelopes the synchronous ingest path used to return (the
+// error-shape convention's classifier + “detail“ body) are NOT
+// available off the request thread; the polling response is the
+// new error surface for the async path.
+type IngestJobStatusResponse struct {
+	CatalogEntry *string  `json:"catalog_entry"`
+	EndedAt      *float32 `json:"ended_at"`
+	Error        *string  `json:"error"`
+	ErrorClass   *string  `json:"error_class"`
+
+	// Grouping Pydantic projection of
+	// :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
+	//
+	// Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
+	// in the ingest response so the operator sees both counts.
+	Grouping *GroupingResultModel `json:"grouping,omitempty"`
+	ImplId   *string              `json:"impl_id"`
+
+	// Ingestion Pydantic projection of
+	// :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.
+	//
+	// The dataclass lives in :mod:`register_ingested` so the helper
+	// can stay framework-agnostic; this model is the wire-format twin
+	// the routes return. Fields mirror the dataclass one-for-one with
+	// an extra ``connector_id`` echo for round-trip clarity.
+	Ingestion *IngestionResultModel         `json:"ingestion,omitempty"`
+	JobId     openapi_types.UUID            `json:"job_id"`
+	Product   *string                       `json:"product"`
+	SpecUris  *[]string                     `json:"spec_uris,omitempty"`
+	StartedAt float32                       `json:"started_at"`
+	Status    IngestJobStatusResponseStatus `json:"status"`
+	Version   *string                       `json:"version"`
+}
+
+// IngestJobStatusResponseStatus defines model for IngestJobStatusResponse.Status.
+type IngestJobStatusResponseStatus string
+
 // IngestKbRequest POST body for “/api/v1/kb/ingest“ -- server-side bulk ingest.
 //
 // Exactly one of “directory“ / “tarball_url“ must be set; the
@@ -2139,6 +2206,8 @@ type IngestKbRequest struct {
 // would otherwise mean the pipeline runs with the wrong impl_id
 // and the operator only finds out at review-time.
 type IngestRequest struct {
+	// Async Run the pipeline off the request thread (202 + job handle); set to false for the legacy blocking response. Ignored when dry_run=true.
+	Async        *bool         `json:"async,omitempty"`
 	BaseUrl      *string       `json:"base_url"`
 	CatalogEntry *string       `json:"catalog_entry"`
 	DryRun       *bool         `json:"dry_run,omitempty"`
@@ -2146,36 +2215,6 @@ type IngestRequest struct {
 	Product      *string       `json:"product"`
 	Specs        *[]SpecSource `json:"specs,omitempty"`
 	Version      *string       `json:"version"`
-}
-
-// IngestResponse Response shape for “POST /api/v1/connectors/ingest“.
-//
-// “ingestion“ is always present. “grouping“ is “None“ for the
-// dry-run path (no DB writes, no LLM call) and for the no-op
-// re-run path (every op already grouped from a prior pass).
-//
-// The response carries no audit_log id explicitly — the chassis
-// audit middleware writes one row per HTTP request with the route
-// path bound, and the service-level helpers
-// (:func:`register_ingested_operations`, :func:`run_llm_grouping`)
-// write their own per-call rows under
-// “meho.connector.llm_grouping“ etc.
-type IngestResponse struct {
-	// Grouping Pydantic projection of
-	// :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
-	//
-	// Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
-	// in the ingest response so the operator sees both counts.
-	Grouping *GroupingResultModel `json:"grouping,omitempty"`
-
-	// Ingestion Pydantic projection of
-	// :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.
-	//
-	// The dataclass lives in :mod:`register_ingested` so the helper
-	// can stay framework-agnostic; this model is the wire-format twin
-	// the routes return. Fields mirror the dataclass one-for-one with
-	// an extra ``connector_id`` echo for round-trip clarity.
-	Ingestion IngestionResultModel `json:"ingestion"`
 }
 
 // IngestionResultModel Pydantic projection of
@@ -4163,6 +4202,11 @@ type IngestEndpointApiV1ConnectorsIngestPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams defines parameters for GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet.
+type GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams defines parameters for DisableEndpointApiV1ConnectorsConnectorIdDisablePost.
 type DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -5176,6 +5220,9 @@ type ClientInterface interface {
 
 	IngestEndpointApiV1ConnectorsIngestPost(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, body IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet request
+	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DisableEndpointApiV1ConnectorsConnectorIdDisablePost request
 	DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -6136,6 +6183,18 @@ func (c *Client) IngestEndpointApiV1ConnectorsIngestPostWithBody(ctx context.Con
 
 func (c *Client) IngestEndpointApiV1ConnectorsIngestPost(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, body IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewIngestEndpointApiV1ConnectorsIngestPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetRequest(c.Server, jobId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -9873,6 +9932,55 @@ func NewIngestEndpointApiV1ConnectorsIngestPostRequestWithBody(server string, pa
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetRequest generates requests for GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet
+func NewGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetRequest(server string, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "job_id", runtime.ParamLocationPath, jobId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/ingest/jobs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -16402,6 +16510,9 @@ type ClientWithResponsesInterface interface {
 
 	IngestEndpointApiV1ConnectorsIngestPostWithResponse(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, body IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestEndpointApiV1ConnectorsIngestPostResponse, error)
 
+	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse request
+	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error)
+
 	// DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse request
 	DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error)
 
@@ -17586,7 +17697,7 @@ func (r CatalogEndpointApiV1ConnectorsCatalogGetResponse) StatusCode() int {
 type IngestEndpointApiV1ConnectorsIngestPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *IngestResponse
+	JSON200      *interface{}
 	JSON422      *HTTPValidationError
 }
 
@@ -17600,6 +17711,29 @@ func (r IngestEndpointApiV1ConnectorsIngestPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r IngestEndpointApiV1ConnectorsIngestPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *IngestJobStatusResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -20325,6 +20459,15 @@ func (c *ClientWithResponses) IngestEndpointApiV1ConnectorsIngestPostWithRespons
 	return ParseIngestEndpointApiV1ConnectorsIngestPostResponse(rsp)
 }
 
+// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse request returning *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse
+func (c *ClientWithResponses) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error) {
+	rsp, err := c.GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx, jobId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp)
+}
+
 // DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse request returning *DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse
 func (c *ClientWithResponses) DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error) {
 	rsp, err := c.DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx, connectorId, params, reqEditors...)
@@ -22674,7 +22817,40 @@ func ParseIngestEndpointApiV1ConnectorsIngestPostResponse(rsp *http.Response) (*
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest IngestResponse
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse parses an HTTP response from a GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse call
+func ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp *http.Response) (*GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest IngestJobStatusResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

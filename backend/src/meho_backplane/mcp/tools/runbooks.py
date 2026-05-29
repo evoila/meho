@@ -77,6 +77,7 @@ from meho_backplane.runbooks.schemas import (
     EditTemplateRequest,
     ListTemplatesFilter,
     PublishTemplateRequest,
+    ShowTemplateResponse,
 )
 from meho_backplane.runbooks.service import (
     DuplicateDraftError,
@@ -494,7 +495,7 @@ async def _show_template_operator_path(
     operator: Operator,
     slug: str,
     requested_version: int | None,
-) -> Any:
+) -> ShowTemplateResponse:
     """Apply the run-state-conditional carve-out for OPERATOR callers.
 
     Differential-timing posture: when ``requested_version`` is ``None``,

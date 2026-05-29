@@ -1469,14 +1469,15 @@ type ConnectorReviewPayload struct {
 // the CLI's “ingest --catalog“ path (#915) refuses such an entry rather
 // than POSTing an empty “specs“ list.
 type ConnectorSpecEntry struct {
-	ImplId                 string    `json:"impl_id"`
-	Notes                  *string   `json:"notes,omitempty"`
-	Product                string    `json:"product"`
-	RequiresConnectorClass string    `json:"requires_connector_class"`
-	Sha256                 *string   `json:"sha256"`
-	SpecInfoVersion        *string   `json:"spec_info_version"`
-	Upstream               *[]string `json:"upstream"`
-	Version                string    `json:"version"`
+	ImplId                     string    `json:"impl_id"`
+	Notes                      *string   `json:"notes,omitempty"`
+	Product                    string    `json:"product"`
+	RequiresConnectorClass     string    `json:"requires_connector_class"`
+	Sha256                     *string   `json:"sha256"`
+	SpecInfoVersion            *string   `json:"spec_info_version"`
+	SpecInfoVersionsCompatible *[]string `json:"spec_info_versions_compatible"`
+	Upstream                   *[]string `json:"upstream"`
+	Version                    string    `json:"version"`
 }
 
 // Convention Full-row representation returned by GET-single / POST / PATCH.

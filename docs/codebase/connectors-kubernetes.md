@@ -138,11 +138,11 @@ real operator through the same loader.
 | `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
 | `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
-| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` -- type / cluster_ip / ports / selector. |
-| `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` -- class / hosts / TLS / rules. |
-| `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` -- **keys only, NO values**. |
+| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector + `label_selector`. |
+| `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
+| `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
 | `k8s.configmap.info`   | safe   | `CoreV1Api.read_namespaced_config_map()` -- full data + binary_data. |
-| `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. |
+| `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` / `list_event_for_all_namespaces()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. Forwards `label_selector` + `field_selector`. |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 
 G3.2-T6 (CLI alias verbs + k3d E2E acceptance + operator-facing
@@ -158,24 +158,48 @@ op; the onboarding recipe in
 [`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md)
 is the operator cookbook for migrating off `kubectl-vcf.sh`.
 
-### Workload-op pagination (`k8s.pod.list` / `k8s.deployment.list`)
+### Shared list-op request shape (`ops_listparams.py`)
 
-The list handlers forward the standard k8s `label_selector` /
-`field_selector` / `limit` / `_continue` filter knobs to the API
-server so heavy-tenancy clusters can paginate server-side without
-streaming every row through the connector. The operator passes
-`limit=N` plus optional `continue_token=<cursor>` on each call; the
-response carries `next_continue` whenever the server signals more
-pages. Tokens are server-defined and expire after ~5-15 minutes; a
-stale token returns 410 ResourceExpired, and the handler propagates
-the API exception verbatim so the caller can restart without the
-token.
+Every namespaced list op on this connector
+(`k8s.pod.list`, `k8s.deployment.list`, `k8s.event.list`,
+`k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list`) shares
+the same input-parameter shape via the building blocks in
+[`ops_listparams.py`](../../backend/src/meho_backplane/connectors/kubernetes/ops_listparams.py):
 
-`namespace` and `all_namespaces` are mutually exclusive in the
-schema's `oneOf` clause -- exactly one must be supplied. The
-`all_namespaces=true` path routes through
-`list_pod_for_all_namespaces` / `list_deployment_for_all_namespaces`;
-the per-namespace path uses the `_namespaced_` variants.
+- `namespace` XOR `all_namespaces` -- the `oneOf` clause
+  (`NAMESPACE_XOR_ALL_NAMESPACES`) enforces exactly-one. The
+  `all_namespaces=true` path routes through the
+  `list_X_for_all_namespaces` variant; the per-namespace path uses
+  the `_namespaced_` variant.
+- `label_selector` -- forwarded server-side; same K8s selector syntax
+  for every op.
+
+Pod / deployment list additionally use the full base via
+`LIST_BASE_PROPERTIES`, which adds `field_selector` + `limit` +
+`continue_token`. The operator passes `limit=N` plus optional
+`continue_token=<cursor>` on each call; the response carries
+`next_continue` whenever the server signals more pages. Tokens are
+server-defined and expire after ~5-15 minutes; a stale token returns
+410 ResourceExpired, and the handler propagates the API exception
+verbatim so the caller can restart without the token.
+
+The event / service / ingress / configmap list ops deliberately omit
+some knobs of the full base:
+
+- `k8s.event.list` keeps `field_selector` + `limit` but omits
+  `continue_token` -- the handler's client-side recency-sort +
+  truncation contract supersedes server-side paging; the omission is
+  documented in `K8S_EVENT_LIST_PAGINATION_HINT`.
+- `k8s.service.list`, `k8s.ingress.list`, `k8s.configmap.list` omit
+  `field_selector` + `limit` + `continue_token` -- these resources
+  are typically O(10) per namespace and the
+  [G0.17-T1](https://github.com/evoila/meho/issues/1330) sweep
+  deferred the paging widening as a mechanical follow-up.
+
+See [`docs/codebase/api-shape-conventions.md`](api-shape-conventions.md)
+§10 for the convention this shared shape anchors (intra-connector
+list-op request-shape parity); the rule applies across connectors
+once siblings adopt the pattern.
 
 ### Workload-op prefix resolution (`k8s.pod.info` / `k8s.deployment.info`)
 

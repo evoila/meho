@@ -4,24 +4,40 @@
 """Config ops -- ``k8s.configmap.list/info``.
 
 G3.2-T4 (#324) of Initiative #320. Two read-only "what's configured?"
-ops layered on top of the T1 / T2 / T5 base substrate:
+ops layered on top of the T1 / T2 / T5 base substrate. G0.17-T1
+(#1330) converged ``k8s.configmap.list``'s request shape onto the
+workload list ops' base (``namespace`` XOR ``all_namespaces`` +
+``label_selector``); ``.info`` stays per-configmap because the
+targeted-read audit semantics are unchanged.
 
-* ``k8s.configmap.list [--namespace X]`` -- ``CoreV1Api.list_namespaced_config_map``.
+* ``k8s.configmap.list [--namespace X | --all-namespaces]
+  [--label-selector ...]`` --
+  ``CoreV1Api.list_namespaced_config_map`` (per-namespace) /
+  ``CoreV1Api.list_config_map_for_all_namespaces`` (cluster-wide).
   Per-row shape carries ``keys`` (the configmap's data keys) **but
-  never the values**. The split is privacy-relevant: configmaps in the
-  wild often blur into sensitive territory (registry credentials in
-  ``imagePullSecrets``-adjacent maps, OIDC client secrets in
+  never the values**. The split is privacy-relevant: configmaps in
+  the wild often blur into sensitive territory (registry credentials
+  in ``imagePullSecrets``-adjacent maps, OIDC client secrets in
   ``argocd-cm``, vendor licence keys), and the operator's list view
   should not bulk-broadcast the bytes through the SSE feed during a
-  routine "what's configured here?" scan. Operators wanting values
-  call ``.info`` per configmap so the audit row records the targeted
-  read instead of the bulk dump.
+  routine "what's configured here?" scan. The privacy contract holds
+  identically across the namespace and all_namespaces paths --
+  values are emitted by neither. Operators wanting values call
+  ``.info`` per configmap so the audit row records the targeted read
+  instead of the bulk dump.
 
 * ``k8s.configmap.info <name> --namespace X`` -- ``CoreV1Api.read_namespaced_config_map``.
   Returns the full configmap, including ``data`` and ``binary_data``.
   Carries ``op_class=read`` for v0.2; G6.3 may upgrade specific
   configmap patterns (managed-by ``secret-translator``, names matching
-  ``*-secret-config``) to a ``sensitive-read`` audit classifier.
+  ``*-secret-config``) to a ``sensitive-read`` audit classifier. The
+  info op is intentionally not cross-namespace -- the audit row
+  needs a single (name, namespace) tuple to record.
+
+Server-side ``limit`` / ``_continue`` paging is **deliberately not
+exposed** on ``configmap.list`` in G0.17-T1 -- configmap populations
+are typically O(10) per namespace and the issue's acceptance section
+calls out the paging widening as a follow-up candidate.
 
 Row-shape helpers (:func:`configmap_list_row`, :func:`configmap_info`)
 are pure functions over :mod:`kubernetes_asyncio.client.models`
@@ -34,8 +50,10 @@ under the 600-line code-quality cap.
 
 References
 ----------
-* Parent task: G3.2-T4 (#324).
+* Parent task: G3.2-T4 (#324); request-shape parity: G0.17-T1 (#1330).
 * Parent Initiative: G3.2 (#320), kubernetes-asyncio typed connector.
+* Conventions doc: ``docs/codebase/api-shape-conventions.md`` §10
+  (intra-connector list-op request-shape parity).
 * k8s ConfigMap API: https://kubernetes.io/docs/reference/kubernetes-api/config-and-storage-resources/config-map-v1/
 * ``kubernetes_asyncio.CoreV1Api``:
   https://github.com/tomplus/kubernetes_asyncio/blob/master/kubernetes_asyncio/docs/CoreV1Api.md
@@ -48,6 +66,12 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
 from meho_backplane.connectors.kubernetes.ops_core import age_seconds
+from meho_backplane.connectors.kubernetes.ops_listparams import (
+    ALL_NAMESPACES_PARAM,
+    LABEL_SELECTOR_PARAM,
+    NAMESPACE_PARAM,
+    NAMESPACE_XOR_ALL_NAMESPACES,
+)
 
 if TYPE_CHECKING:
     from kubernetes_asyncio.client.models import V1ConfigMap
@@ -154,20 +178,29 @@ def configmap_info(
 # ---------------------------------------------------------------------------
 
 
-_NAMESPACE_PARAM_SCHEMA: dict[str, Any] = {
+#: Tighter ``namespace`` shape for the per-resource ``.info`` op:
+#: still single-namespace + non-empty + non-whitespace. The
+#: ``oneOf`` machinery applies only to the list op.
+_INFO_NAMESPACE_PARAM_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "pattern": r"\S",
-    "description": "Namespace to list within.",
+    "description": "Namespace to read within.",
 }
 
 
+#: ``k8s.configmap.list`` parameter schema. Adopts the shared
+#: ``namespace`` XOR ``all_namespaces`` selector + ``label_selector``
+#: (G0.17-T1 #1330). The privacy contract (no values emitted) holds
+#: across both the namespace and the all_namespaces paths.
 K8S_CONFIGMAP_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "namespace": _NAMESPACE_PARAM_SCHEMA,
+        "namespace": NAMESPACE_PARAM,
+        "all_namespaces": ALL_NAMESPACES_PARAM,
+        "label_selector": LABEL_SELECTOR_PARAM,
     },
-    "required": ["namespace"],
+    "oneOf": NAMESPACE_XOR_ALL_NAMESPACES,
     "additionalProperties": False,
 }
 
@@ -198,20 +231,31 @@ K8S_CONFIGMAP_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
 
 K8S_CONFIGMAP_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
-        "Call when the operator asks 'what configmaps are in <namespace>?' "
-        "or needs to discover configmap names + the set of keys each one "
-        "exposes -- WITHOUT exposing values to the audit/broadcast feed. "
-        "For full data, follow up with k8s.configmap.info per "
-        "configmap (the targeted read records a per-configmap audit row)."
+        "Call when the operator asks 'what configmaps are in "
+        "<namespace>?' or needs to discover configmap names + the set "
+        "of keys each one exposes -- WITHOUT exposing values to the "
+        "audit/broadcast feed. Use ``all_namespaces=true`` for the "
+        "cluster-wide variant. For full data, follow up with "
+        "k8s.configmap.info per configmap (the targeted read records "
+        "a per-configmap audit row)."
     ),
     "parameter_hints": {
-        "namespace": ("Required. The Kubernetes namespace whose configmaps to list."),
+        "namespace": "Required unless ``all_namespaces`` is true.",
+        "all_namespaces": (
+            "Pass true for cluster-wide listings; mutually exclusive with ``namespace``."
+        ),
+        "label_selector": (
+            "Optional. k8s label-selector syntax (e.g. "
+            "``managed-by=helm``, ``app in (argocd,traefik)``)."
+        ),
     },
     "output_shape": (
         "{'rows': [{name, namespace, keys, age_seconds}], 'total': <int>}. "
         "``keys`` is the sorted union of ``data`` + ``binary_data`` keys. "
         "Values are NEVER included in this op; call k8s.configmap.info "
-        "to read them."
+        "to read them. Each row carries its own ``namespace`` so "
+        "cross-namespace rows under ``all_namespaces=true`` stay "
+        "distinguishable."
     ),
 }
 
@@ -225,7 +269,7 @@ K8S_CONFIGMAP_INFO_PARAMETER_SCHEMA: dict[str, Any] = {
             "pattern": r"\S",
             "description": "Configmap name (exact match; no prefix resolution).",
         },
-        "namespace": _NAMESPACE_PARAM_SCHEMA,
+        "namespace": _INFO_NAMESPACE_PARAM_SCHEMA,
     },
     "required": ["name", "namespace"],
     "additionalProperties": False,
@@ -283,16 +327,20 @@ CONFIG_OPS: tuple[KubernetesOp, ...] = (
     KubernetesOp(
         op_id="k8s.configmap.list",
         handler_attr="k8s_configmap_list",
-        summary="List configmaps in a namespace -- keys only, NO values.",
+        summary=("List configmaps per-namespace or cluster-wide -- keys only, NO values."),
         description=(
-            "Calls ``CoreV1Api.list_namespaced_config_map(namespace)`` "
-            "and projects each ConfigMap into {name, namespace, keys, "
-            "age_seconds}. ``keys`` is the sorted union of ``data`` "
-            "and ``binary_data`` keys. Values are **never** included -- "
-            "the list op is the privacy-safe entry point; operators "
-            "that need values call ``k8s.configmap.info`` per "
-            "configmap so the audit row records the targeted read "
-            "instead of the bulk dump. Read-only."
+            "Calls "
+            "``CoreV1Api.list_namespaced_config_map(namespace, ...)`` "
+            "(per-namespace) or "
+            "``CoreV1Api.list_config_map_for_all_namespaces(...)`` "
+            "(``all_namespaces=true``) and projects each ConfigMap "
+            "into {name, namespace, keys, age_seconds}. ``keys`` is "
+            "the sorted union of ``data`` and ``binary_data`` keys. "
+            "Values are **never** included -- the list op is the "
+            "privacy-safe entry point; operators that need values "
+            "call ``k8s.configmap.info`` per configmap so the audit "
+            "row records the targeted read instead of the bulk dump. "
+            "``label_selector`` is forwarded server-side. Read-only."
         ),
         parameter_schema=K8S_CONFIGMAP_LIST_PARAMETER_SCHEMA,
         response_schema=K8S_CONFIGMAP_LIST_RESPONSE_SCHEMA,

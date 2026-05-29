@@ -57,8 +57,6 @@ from meho_backplane.operations._audit import run_id_var, step_id_var
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
 
-pytestmark = pytest.mark.asyncio
-
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
 # Guard: skip DB-column assertions when the schema predates migration 0034.

@@ -28,16 +28,26 @@ The description IS the contract for "how to use this tool well."
 RBAC, audit, error mapping
 ===========================
 
-Five of the six tools are ``TENANT_ADMIN``-only (authoring + status
-flips); ``runbook_list_templates`` is ``OPERATOR``-readable (summaries,
-no step bodies). ``runbook_show_template`` stays ``TENANT_ADMIN``-only
-because the template-side read is the authoring / review surface; step
-opacity at execution time is enforced by G12.3 at the *run* surface (the
-post-completion read exception G12.3 layers on top is out of scope here).
+Four of the six tools are ``TENANT_ADMIN``-only (authoring + status
+flips). ``runbook_list_templates`` is ``OPERATOR``-readable (summaries,
+no step bodies). ``runbook_show_template`` admits an ``OPERATOR`` at the
+dispatcher gate but applies a *run-state-conditional* carve-out inside
+the handler (G12.3-T4 / #1309): a ``TENANT_ADMIN`` is a pass-through, an
+``OPERATOR`` is granted the read only when
+:meth:`~meho_backplane.runbooks.run_service.RunbookRunService.can_show_template_post_completion`
+returns ``True`` -- i.e. the operator has a ``completed`` or ``abandoned``
+run against the resolved ``(slug, version)``. Otherwise the handler
+refuses with :class:`McpInvalidParamsError` carrying the
+``opacity_floor`` reason -- the JSON-RPC ``-32602`` shape an ``OPERATOR``
+already gets on every other denial path, but with a body keyword that
+distinguishes "opacity floor held" from "schema invalid".
+
 The role gate on each :class:`ToolDefinition` is enforced by the
 dispatcher *before* the handler runs, so an ``OPERATOR`` calling a
 ``TENANT_ADMIN`` tool is refused with JSON-RPC ``-32602`` and never
-reaches the handler.
+reaches the handler. The handler-internal opacity-floor check is
+strictly *after* the dispatcher gate fires (and is irrelevant for
+admins).
 
 Same dispatcher mechanism as the kb tools — one ``audit_log`` row + one
 broadcast event per ``tools/call``, with ``op_class`` (``"read"`` for
@@ -60,6 +70,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.runbooks.run_service import RunbookRunService
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateRequest,
     DraftTemplateRequest,
@@ -224,14 +235,17 @@ _LIST_DESCRIPTION: Final[str] = (
 
 _SHOW_DESCRIPTION: Final[str] = (
     "Read the full body of a runbook template, including step contents.\n\n"
-    "ROLE GATE: TENANT_ADMIN-only.\n\n"
-    "The TENANT_ADMIN gate is the authoring/review surface. **For operators "
-    "executing\n"
-    "a runbook, step opacity lives on the run surface — `runbook_next` "
-    "returns only\n"
-    "the current step at run time, not the whole template.** An operator "
-    "calling\n"
-    "`runbook_show_template` directly is denied (-32602).\n\n"
+    "ROLE GATE: TENANT_ADMIN unconditionally; OPERATOR only with the "
+    "post-completion\n"
+    "carve-out below.\n\n"
+    "For TENANT_ADMIN this is the authoring/review surface — admins read "
+    "freely.\n"
+    "**For operators executing a runbook, step opacity lives on the run "
+    "surface — \n"
+    "`runbook_next` returns only the current step at run time, not the whole "
+    "template.** An operator calling `runbook_show_template` directly while a "
+    "run\n"
+    "is in flight is denied (-32602, opacity_floor).\n\n"
     "POST-COMPLETION EXCEPTION (G12.3): once an operator has a completed or "
     "abandoned\n"
     "run against (slug, version), reading the template they ran is allowed "
@@ -243,8 +257,10 @@ _SHOW_DESCRIPTION: Final[str] = (
     "draft before\n"
     "publish, or learning from a runbook you've already completed. See "
     "docs/runbooks/authoring.md for the authoring workflow.\n\n"
-    "The `version` parameter is optional — when omitted, returns the latest "
-    "version."
+    "The `version` parameter is optional — when omitted, the latest tenant "
+    "version is resolved first; an operator must hold a completed or "
+    "abandoned run against that specific resolved version to be granted the "
+    "read."
 )
 
 
@@ -429,21 +445,100 @@ async def _show_template_handler(
 ) -> dict[str, Any]:
     """Return the full template body for ``(slug, version?)``.
 
-    TENANT_ADMIN-only — the dispatcher refuses an operator before this
-    handler runs (the opacity floor lives on the run surface, G12.3).
-    Resolves the latest version when ``version`` is omitted.
+    Role floor: ``OPERATOR``. ``TENANT_ADMIN`` is a pass-through (the
+    authoring / review surface). An ``OPERATOR`` is granted the read only
+    when
+    :meth:`~meho_backplane.runbooks.run_service.RunbookRunService.can_show_template_post_completion`
+    returns ``True`` for the resolved ``(slug, version)`` -- i.e. the
+    operator has a ``completed`` or ``abandoned`` run against that pinned
+    version (post-mortem / learning carve-out, G12.3-T4 #1309). Anything
+    else (no run, ``in_progress`` only, wrong version, slug missing) is
+    refused with :class:`McpInvalidParamsError` carrying the
+    ``opacity_floor`` reason -- the same JSON-RPC ``-32602`` shape any
+    other denial uses, with the body keyword that distinguishes "opacity
+    floor held" from "schema invalid".
+
+    Resolves the latest version when ``version`` is omitted; the operator
+    branch resolves the latest *first* so the authorization check uses the
+    same version the response would return (see
+    :func:`_show_template_operator_path`).
     """
-    service = RunbookTemplateService()
-    try:
-        version = arguments.get("version")
-        response = await service.show_template(
-            tenant_id=operator.tenant_id,
-            slug=arguments["slug"],
-            version=int(version) if version is not None else None,
-        )
-    except _INVALID_PARAMS_ERRORS as exc:
-        raise _to_invalid_params("runbook_show_template", exc) from exc
+    template_service = RunbookTemplateService()
+    slug = arguments["slug"]
+    raw_version = arguments.get("version")
+    requested_version = int(raw_version) if raw_version is not None else None
+
+    if operator.tenant_role == TenantRole.TENANT_ADMIN:
+        try:
+            response = await template_service.show_template(
+                tenant_id=operator.tenant_id, slug=slug, version=requested_version
+            )
+        except _INVALID_PARAMS_ERRORS as exc:
+            raise _to_invalid_params("runbook_show_template", exc) from exc
+        return response.model_dump(mode="json")
+
+    response = await _show_template_operator_path(
+        template_service=template_service,
+        run_service=RunbookRunService(),
+        operator=operator,
+        slug=slug,
+        requested_version=requested_version,
+    )
     return response.model_dump(mode="json")
+
+
+async def _show_template_operator_path(
+    *,
+    template_service: RunbookTemplateService,
+    run_service: RunbookRunService,
+    operator: Operator,
+    slug: str,
+    requested_version: int | None,
+) -> Any:
+    """Apply the run-state-conditional carve-out for OPERATOR callers.
+
+    Differential-timing posture: when ``requested_version`` is ``None``,
+    the latest version is resolved **first** so the authorization check
+    runs against the same version the response would return. Resolution
+    failure on a slug the operator has no run against still surfaces as
+    ``opacity_floor`` rather than a not-found channel -- a slug-existence
+    channel an operator cannot read into would otherwise leak template
+    presence to enumerators.
+    """
+    if requested_version is None:
+        try:
+            response = await template_service.show_template(
+                tenant_id=operator.tenant_id, slug=slug, version=None
+            )
+        except TemplateNotFoundError as exc:
+            raise _opacity_floor_denial() from exc
+        if await run_service.can_show_template_post_completion(
+            operator.tenant_id, operator.sub, slug, response.version
+        ):
+            return response
+        raise _opacity_floor_denial()
+
+    if not await run_service.can_show_template_post_completion(
+        operator.tenant_id, operator.sub, slug, requested_version
+    ):
+        raise _opacity_floor_denial()
+    try:
+        return await template_service.show_template(
+            tenant_id=operator.tenant_id, slug=slug, version=requested_version
+        )
+    except TemplateNotFoundError as exc:
+        raise _opacity_floor_denial() from exc
+
+
+def _opacity_floor_denial() -> McpInvalidParamsError:
+    """Construct the canonical opacity-floor refusal.
+
+    Centralised so every operator-path denial uses the same message --
+    anti-enumeration relies on the response being identical regardless of
+    which leg of the predicate failed (slug missing, version missing, no
+    completed run).
+    """
+    return McpInvalidParamsError("runbook_show_template: opacity_floor")
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +678,7 @@ register_mcp_tool(
             "required": ["slug"],
             "additionalProperties": False,
         },
-        required_role=TenantRole.TENANT_ADMIN,
+        required_role=TenantRole.OPERATOR,
         op_class=_OP_CLASS_READ,
     ),
     handler=_show_template_handler,

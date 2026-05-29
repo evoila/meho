@@ -84,6 +84,7 @@ from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jw
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
 
 _ROUTE = "meho_backplane.api.v1.runbook_templates.RunbookTemplateService"
+_RUN_ROUTE = "meho_backplane.api.v1.runbook_templates.RunbookRunService"
 
 # ---------------------------------------------------------------------------
 # Settings + JWKS cache fixtures
@@ -482,13 +483,188 @@ def test_show_admin_ok(client: TestClient) -> None:
     assert body["steps"][0]["id"] == "revoke-old-cert"
 
 
-def test_show_operator_403(client: TestClient) -> None:
-    """Operator on show → 403 (opacity floor, NOT 404)."""
+def test_show_admin_unchanged(client: TestClient) -> None:
+    """Regression: tenant_admin reads still 200 + full body (T4 must not break admin)."""
+    key, token = _admin_token()
+    fake_show = AsyncMock(return_value=_show_response())
+    fake_predicate = AsyncMock(return_value=False)  # never consulted for admins
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+        patch(f"{_RUN_ROUTE}.can_show_template_post_completion", fake_predicate),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/runbooks/templates/rotate-cert", headers=_authed(token))
+    assert response.status_code == 200
+    assert response.json()["slug"] == "rotate-cert"
+    # The run-state predicate is never consulted for the admin path.
+    fake_predicate.assert_not_awaited()
+
+
+def test_show_operator_with_no_run_gets_403(client: TestClient) -> None:
+    """AC: operator with no run against (slug, latest) → 403, detail=opacity_floor."""
     key, token = _operator_token()
-    with respx.mock as mock_router:
+    fake_show = AsyncMock(return_value=_show_response(version=1))
+    fake_predicate = AsyncMock(return_value=False)
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+        patch(f"{_RUN_ROUTE}.can_show_template_post_completion", fake_predicate),
+    ):
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/runbooks/templates/rotate-cert", headers=_authed(token))
     assert response.status_code == 403
+    assert response.json()["detail"] == "opacity_floor"
+    fake_predicate.assert_awaited_once()
+
+
+def test_show_operator_with_in_progress_run_gets_403(client: TestClient) -> None:
+    """AC: in_progress run does NOT lift the gate — predicate returns False, route 403s."""
+    # The predicate (T3, #1308) only returns True for completed/abandoned; for
+    # an in_progress run it returns False — the route's role-conditional handler
+    # is the same shape regardless of *why* False was returned.
+    key, token = _operator_token()
+    fake_show = AsyncMock(return_value=_show_response(version=1))
+    fake_predicate = AsyncMock(return_value=False)
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+        patch(f"{_RUN_ROUTE}.can_show_template_post_completion", fake_predicate),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/runbooks/templates/rotate-cert", headers=_authed(token))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "opacity_floor"
+
+
+def test_show_operator_with_completed_run_gets_200(client: TestClient) -> None:
+    """AC: completed run against (slug, v1) → predicate True → 200 + full body."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a, sub="op-operator")
+    fake_show = AsyncMock(return_value=_show_response(version=1))
+    fake_predicate = AsyncMock(return_value=True)
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+        patch(f"{_RUN_ROUTE}.can_show_template_post_completion", fake_predicate),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/runbooks/templates/rotate-cert?version=1",
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["slug"] == "rotate-cert"
+    assert body["version"] == 1
+    assert body["steps"][0]["id"] == "revoke-old-cert"
+    # Predicate called with the operator's tenant_id + sub + the resolved (slug, version).
+    args = fake_predicate.await_args.args
+    assert args[0] == tenant_a
+    assert args[1] == "op-operator"
+    assert args[2] == "rotate-cert"
+    assert args[3] == 1
+
+
+def test_show_operator_with_abandoned_run_gets_200(client: TestClient) -> None:
+    """AC: abandoned counts the same as completed (post-mortem use case)."""
+    # The predicate's body returns True for state ∈ {completed, abandoned}; the
+    # route does not distinguish — both yield 200.
+    key, token = _operator_token()
+    fake_show = AsyncMock(return_value=_show_response(version=1))
+    fake_predicate = AsyncMock(return_value=True)
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+        patch(f"{_RUN_ROUTE}.can_show_template_post_completion", fake_predicate),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/runbooks/templates/rotate-cert?version=1",
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+
+
+def test_show_operator_no_version_resolves_latest_then_authorizes(client: TestClient) -> None:
+    """AC: operator with no ?version: latest is resolved first, then predicate checked.
+
+    Service is called once with version=None to resolve latest (returns v2);
+    the predicate is then called with the *resolved* version (v2), not None,
+    so the authorization check uses the same version the response returns.
+    """
+    key, token = _operator_token()
+    fake_show = AsyncMock(return_value=_show_response(version=2))
+    fake_predicate = AsyncMock(return_value=True)
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+        patch(f"{_RUN_ROUTE}.can_show_template_post_completion", fake_predicate),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/runbooks/templates/rotate-cert", headers=_authed(token))
+    assert response.status_code == 200
+    assert response.json()["version"] == 2
+    # The service was asked for version=None (resolve-latest);
+    # the predicate was asked for the resolved version (2), not None.
+    show_kwargs = fake_show.await_args.kwargs
+    assert show_kwargs["version"] is None
+    assert fake_predicate.await_args.args[3] == 2
+
+
+def test_show_operator_completed_v1_asks_for_v2_gets_403(client: TestClient) -> None:
+    """AC: version-specific authorization — completed v1 does NOT authorize v2 reads."""
+    # Caller asks ?version=2 explicitly; predicate is asked about v2 (not v1)
+    # and returns False (operator only has a v1 run). Route 403s.
+    key, token = _operator_token()
+    fake_show = AsyncMock(return_value=_show_response(version=2))
+    fake_predicate = AsyncMock(return_value=False)
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+        patch(f"{_RUN_ROUTE}.can_show_template_post_completion", fake_predicate),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/runbooks/templates/rotate-cert?version=2",
+            headers=_authed(token),
+        )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "opacity_floor"
+    # Predicate was asked about v2 (the version the operator requested).
+    assert fake_predicate.await_args.args[3] == 2
+    # And on the predicate-first branch the service is never called.
+    fake_show.assert_not_awaited()
+
+
+def test_show_cross_tenant_operator_gets_403(client: TestClient) -> None:
+    """AC: operator in tenant A asking for tenant B's slug → 403 (predicate is tenant-scoped).
+
+    The predicate receives ``operator.tenant_id`` (tenant A); a row matching
+    tenant B is invisible to the query, so the predicate returns False and
+    the route surfaces 403 with the anti-enumeration ``opacity_floor`` detail
+    rather than leaking template-existence via a differential status.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    # The service's tenant-scoped query makes tenant B's slug invisible →
+    # TemplateNotFoundError. The route's operator branch maps that to 403
+    # opacity_floor (NOT 404) so an operator cannot enumerate other tenants'
+    # slugs via status-code differential.
+    fake_show = AsyncMock(side_effect=TemplateNotFoundError("not found for tenant"))
+    fake_predicate = AsyncMock(return_value=False)
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.show_template", fake_show),
+        patch(f"{_RUN_ROUTE}.can_show_template_post_completion", fake_predicate),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/runbooks/templates/other-tenant-slug",
+            headers=_authed(token),
+        )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "opacity_floor"
 
 
 def test_show_missing_404(client: TestClient) -> None:

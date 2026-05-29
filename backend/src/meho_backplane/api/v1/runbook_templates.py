@@ -24,7 +24,9 @@ Route inventory
 * ``GET /api/v1/runbooks/templates/{slug}`` -- fetch the full body of one
   template. Query param: ``version`` (optional -> latest). Returns
   :class:`~meho_backplane.runbooks.schemas.ShowTemplateResponse`. 404 when
-  absent. Role: ``tenant_admin``.
+  absent for admins; 403 ``opacity_floor`` for operators without a
+  matching completed/abandoned run. Role: ``operator`` (with
+  run-state-conditional carve-out, see "Role floor" below).
 * ``PATCH /api/v1/runbooks/templates/{slug}`` -- edit a draft in place or
   fork a new draft from the latest published version (the service picks
   the path). Body:
@@ -53,12 +55,19 @@ differential. Same posture as :mod:`meho_backplane.api.v1.kb`.
 Role floor
 ----------
 
-``list`` accepts ``operator`` (and ``tenant_admin``); the remaining five
-routes require ``tenant_admin``. ``show`` is deliberately admin-only --
-an operator gets a clean 403 (the opacity floor). The post-completion
-operator exception (an operator who owns an in-flight run may read the
-template that run is pinned to) lives on the run surface in G12.3, not on
-this direct-template-read route.
+``list`` accepts ``operator`` (and ``tenant_admin``); ``draft`` /
+``edit`` / ``publish`` / ``deprecate`` require ``tenant_admin``. ``show``
+admits ``operator`` at the role gate but applies a *run-state-conditional*
+carve-out in the handler (G12.3-T4 / #1309): a ``tenant_admin`` is a
+pass-through, an ``operator`` is granted the read only when
+:meth:`~meho_backplane.runbooks.run_service.RunbookRunService.can_show_template_post_completion`
+returns ``True`` for the resolved ``(slug, version)`` -- i.e. the operator
+has a ``completed`` or ``abandoned`` run against that pinned version. An
+operator with no such run, or with only ``in_progress`` runs, still gets a
+403 (the opacity floor is real during a live run). The 403 carries
+``detail="opacity_floor"`` regardless of whether the slug exists, the
+version exists, or just the predicate fired -- the same anti-enumeration
+posture the cross-tenant 404 contract uses.
 
 Typed-exception -> HTTP-status mapping
 --------------------------------------
@@ -107,8 +116,6 @@ Out of scope
 * MCP tools -- G12.2-T4 (#1298) wraps the same service over MCP.
 * Run lifecycle routes (``/api/v1/runbooks/runs/*``) -- G12.3 ships them
   in a sibling ``runbook_runs.py``.
-* The post-completion operator ``show_template`` exception -- G12.3 (the
-  run-state-conditional check, not this template-read route).
 * CLI verbs -- G12.5.
 """
 
@@ -124,6 +131,7 @@ from pydantic import BaseModel, ConfigDict
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.kb.schemas import InvalidKbSlugError, validate_slug
+from meho_backplane.runbooks.run_service import RunbookRunService
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateRequest,
     DeprecateTemplateResponse,
@@ -294,21 +302,34 @@ async def list_templates(
 async def show_template(
     slug: str,
     version: int | None = Query(default=None, ge=1),
-    operator: Operator = _require_admin,
+    operator: Operator = _require_operator,
 ) -> ShowTemplateResponse:
     """Return the full body of one template by slug (latest, or ``version``).
 
-    ``tenant_admin`` only -- the opacity floor. An ``operator`` gets a
-    clean 403 via :func:`require_role`; the post-completion operator
-    exception (read the template a run you own is pinned to) lives on the
-    run surface in G12.3, not here.
+    Role floor: ``operator``. A ``tenant_admin`` is a pass-through (the
+    authoring / review surface). An ``operator`` is granted the read only
+    when
+    :meth:`~meho_backplane.runbooks.run_service.RunbookRunService.can_show_template_post_completion`
+    returns ``True`` for the resolved ``(slug, version)`` -- i.e. the
+    operator already has a ``completed`` or ``abandoned`` run against that
+    pinned version (post-mortem / learning carve-out, G12.3-T4 #1309).
+    Anything else (no run, in-flight run, wrong version, cross-tenant
+    probe) collapses to ``HTTP 403`` with ``detail="opacity_floor"``.
 
-    Cross-tenant probes surface as 404 (not 403): the service's
-    tenant-scoped query makes another tenant's slug invisible, so
-    :class:`TemplateNotFoundError` fires exactly as it would for a
-    genuinely absent slug. The conflation prevents enumerating another
-    tenant's templates via status-code differential -- same posture
-    :mod:`meho_backplane.api.v1.kb` uses.
+    Differential-timing posture for the operator path: when ``version`` is
+    omitted, the latest version is resolved **first** (so the authorization
+    check uses the same version the response would return). Resolution
+    failure on a slug the operator has no run against still surfaces as
+    ``opacity_floor`` 403 rather than 404 -- a slug-existence channel an
+    operator can't read into would otherwise leak template-presence.
+    Anti-enumeration matches the cross-tenant 404 contract for admins:
+    same status regardless of which leg of the predicate failed.
+
+    Cross-tenant probes for ``tenant_admin`` callers surface as 404 (the
+    service's tenant-scoped query makes the other tenant's row invisible,
+    so :class:`TemplateNotFoundError` fires exactly as it would for a
+    genuinely absent slug -- same posture
+    :mod:`meho_backplane.api.v1.kb` uses).
 
     Binds ``audit_op_id="runbook.show_template"`` + ``audit_op_class=
     "read"`` + ``audit_slug`` before the service call; ``runbook.
@@ -321,14 +342,94 @@ async def show_template(
         audit_op_class="read",
         audit_slug=slug,
     )
-    service = RunbookTemplateService()
+    template_service = RunbookTemplateService()
+    if operator.tenant_role == TenantRole.TENANT_ADMIN:
+        return await _show_template_admin(template_service, operator, slug, version)
+    return await _show_template_operator(
+        template_service, RunbookRunService(), operator, slug, version
+    )
+
+
+async def _show_template_admin(
+    template_service: RunbookTemplateService,
+    operator: Operator,
+    slug: str,
+    version: int | None,
+) -> ShowTemplateResponse:
+    """Admin pass-through. Tenant-scoped 404 on a missing row.
+
+    Same shape as the original admin-only handler before G12.3-T4: the
+    service-raised :class:`TemplateNotFoundError` maps to ``HTTP 404`` (and
+    cross-tenant probes collapse here too -- the service's tenant filter
+    makes the other tenant's row invisible).
+    """
     try:
-        return await service.show_template(operator.tenant_id, slug, version=version)
+        return await template_service.show_template(operator.tenant_id, slug, version=version)
     except TemplateNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
+
+
+async def _show_template_operator(
+    template_service: RunbookTemplateService,
+    run_service: RunbookRunService,
+    operator: Operator,
+    slug: str,
+    version: int | None,
+) -> ShowTemplateResponse:
+    """Operator path with the post-completion carve-out.
+
+    The authorization check needs to know which version it is granting
+    before granting it:
+
+    * **version omitted** -- resolve the latest version via the service
+      *first*, then check the predicate against that resolved version. A
+      slug that does not exist for this tenant collapses to the same
+      ``opacity_floor`` 403 the predicate-failure path emits -- operators
+      cannot discover slugs they have never run against via status-code
+      differential.
+    * **version supplied** -- check the predicate up front, then fetch. A
+      predicate-true read against a missing version is a corner case (the
+      operator would have had to complete a run against it for the
+      predicate to be true), but the service's
+      :class:`TemplateNotFoundError` still surfaces as 403 for the same
+      anti-enumeration reason.
+    """
+    if version is None:
+        try:
+            template = await template_service.show_template(operator.tenant_id, slug, version=None)
+        except TemplateNotFoundError as exc:
+            raise _opacity_floor() from exc
+        if await run_service.can_show_template_post_completion(
+            operator.tenant_id, operator.sub, slug, template.version
+        ):
+            return template
+        raise _opacity_floor()
+
+    if not await run_service.can_show_template_post_completion(
+        operator.tenant_id, operator.sub, slug, version
+    ):
+        raise _opacity_floor()
+    try:
+        return await template_service.show_template(operator.tenant_id, slug, version=version)
+    except TemplateNotFoundError as exc:
+        raise _opacity_floor() from exc
+
+
+def _opacity_floor() -> HTTPException:
+    """Construct the canonical opacity-floor 403.
+
+    Centralised so every operator-path denial uses the same status + detail
+    -- anti-enumeration relies on the response being identical regardless
+    of which leg of the predicate failed (slug missing, version missing,
+    no completed run).
+    """
+    return HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail="opacity_floor",
+    )
 
 
 @router.patch("/{slug}", response_model=EditTemplateResponse)

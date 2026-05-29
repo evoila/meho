@@ -181,6 +181,40 @@ def test_every_requires_connector_class_is_registered(
         assert entry.requires_connector_class in _registered_connectors
 
 
+def test_catalog_product_field_matches_target_create_enum(
+    _registered_connectors: set[str],
+) -> None:
+    """Catalog ``product`` aligns with the registered-product enum (Finding B).
+
+    G0.16-T6 Finding B (#1312). Per
+    ``docs/codebase/api-shape-conventions.md`` §3 (Enum vocabulary
+    discipline), the ``TargetCreate`` enum and the catalog ``product``
+    field must hold identical strings for every product they both
+    name. RDC #771 Finding 6 caught the v0.7-era ``"sddc"`` vs
+    ``"sddc-manager"`` mismatch where the catalog advertised one
+    spelling and the connector class registered the other.
+
+    The test guards the convention structurally: every catalog
+    entry's ``product`` must be present in the
+    ``registered_product_tokens`` set the OpenAPI
+    ``TargetCreate.product`` enum is generated from. A future
+    drift (typo on a new catalog entry, rename on a connector
+    without updating the catalog) trips here at unit-test time
+    instead of surfacing as a 422 on the operator's first POST.
+    """
+    from meho_backplane.connectors.registry import registered_product_tokens
+
+    catalog_products = {entry.product for entry in load_catalog().entries}
+    enum_products = set(registered_product_tokens())
+    missing = catalog_products - enum_products
+    assert missing == set(), (
+        f"catalog declares product(s) {missing!r} that are not in the "
+        "TargetCreate product enum; reconcile the catalog YAML or the "
+        "connector class registration per docs/codebase/"
+        "api-shape-conventions.md §3."
+    )
+
+
 def test_validate_catalog_registry_coverage_passes_for_shipped_catalog(
     _registered_connectors: set[str],
 ) -> None:

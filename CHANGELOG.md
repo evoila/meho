@@ -108,6 +108,16 @@ connector-related release-notes line.
 
 ### Changed
 
+- **Catalog ↔ TargetCreate enum reconciliation locked in
+  structurally (G0.16-T6 Finding B #1312).** RDC #771 Finding 6
+  caught the v0.7-era `"sddc"` vs `"sddc-manager"` catalog-vs-enum
+  mismatch; subsequent connector renames had already converged
+  the catalog to `"sddc-manager"`. The verification regression
+  test added in
+  `backend/tests/test_operations_ingest_catalog.py` keeps the
+  alignment locked in: a future catalog typo or connector rename
+  without the matching counterpart edit fails CI rather than
+  surfacing as a 422 on the operator's first POST.
 - **`preferred_impl_id` accepts the versioned form on both POST and
   PATCH (G0.16-T6 Finding C #1312).** `TargetCreate` and `TargetUpdate`
   validators now treat the canonical `"impl_id-version"` shape

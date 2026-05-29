@@ -204,6 +204,15 @@ is named:
 - **TargetCreate / TargetUpdate enums** are the canonical source.
   Anywhere else (catalog `product` field, connector source's
   `auth_model`, MCP tool param descriptions, …) must match.
+
+  Code reference: the regression test
+  :func:`test_catalog_product_field_matches_target_create_enum`
+  in
+  [`backend/tests/test_operations_ingest_catalog.py`](../../backend/tests/test_operations_ingest_catalog.py)
+  pins the catalog ↔ enum convergence structurally so a future
+  drift fails at unit-test time rather than surfacing as a 422
+  on the operator's first POST (G0.16-T6 Finding B #1312;
+  closes the residual surface of RDC #771 Finding 6).
 - **Versioned vs base impl-ids** — pick one. The recommendation
   is **versioned** (`nsx-rest-4.2`) because:
   - Versioned is more specific (avoids ambiguity when multiple

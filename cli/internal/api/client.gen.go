@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -201,6 +202,13 @@ const (
 	ScheduledTriggerStatusPaused    ScheduledTriggerStatus = "paused"
 )
 
+// Defines values for ShowTemplateResponseStatus.
+const (
+	ShowTemplateResponseStatusDeprecated ShowTemplateResponseStatus = "deprecated"
+	ShowTemplateResponseStatusDraft      ShowTemplateResponseStatus = "draft"
+	ShowTemplateResponseStatusPublished  ShowTemplateResponseStatus = "published"
+)
+
 // Defines values for SurfaceChecklistSurface.
 const (
 	SurfaceChecklistSurfaceKb         SurfaceChecklistSurface = "kb"
@@ -254,6 +262,13 @@ const (
 	VcfLogs       TargetCreateProduct = "vcf-logs"
 	VcfOperations TargetCreateProduct = "vcf-operations"
 	Vmware        TargetCreateProduct = "vmware"
+)
+
+// Defines values for TemplateSummaryStatus.
+const (
+	TemplateSummaryStatusDeprecated TemplateSummaryStatus = "deprecated"
+	TemplateSummaryStatusDraft      TemplateSummaryStatus = "draft"
+	TemplateSummaryStatusPublished  TemplateSummaryStatus = "published"
 )
 
 // Defines values for TopologyDiffEntryChangeKind.
@@ -312,6 +327,13 @@ const (
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceKb         UsageEndpointApiV1RetrieveUsageGetParamsSurface = "kb"
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceMemory     UsageEndpointApiV1RetrieveUsageGetParamsSurface = "memory"
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceOperations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
+)
+
+// Defines values for ListTemplatesApiV1RunbooksTemplatesGetParamsStatus.
+const (
+	Deprecated ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "deprecated"
+	Draft      ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "draft"
+	Published  ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "published"
 )
 
 // Defines values for ListTriggersApiV1SchedulerTriggersGetParamsKind.
@@ -1416,6 +1438,16 @@ type CatalogListResponse struct {
 	Catalog []ConnectorSpecEntry `json:"catalog"`
 }
 
+// ConfirmVerify Operator answers a yes/no prompt; only an affirmative advances.
+//
+// The minimal verify shape: MEHO shows :attr:`prompt` to the operator
+// and gates the step on their answer. No structured result, no
+// comparison -- the human is the oracle.
+type ConfirmVerify struct {
+	Prompt string `json:"prompt"`
+	Type   string `json:"type"`
+}
+
 // ConnectorReviewGroup One group within the review payload.
 //
 // Carries the LLM-generated group metadata
@@ -1841,6 +1873,42 @@ type DecideResponseBody struct {
 	Reason            string             `json:"reason"`
 }
 
+// DeprecateTemplateResponse Response for “runbook_deprecate_template“ -- the now-deprecated coordinates.
+type DeprecateTemplateResponse struct {
+	Slug    string `json:"slug"`
+	Status  string `json:"status"`
+	Version int    `json:"version"`
+}
+
+// DraftTemplateRequest Request body for “runbook_draft_template“ -- create a new draft.
+//
+// :attr:`slug` is validated against :data:`SLUG_PATTERN` (the kb slug
+// contract, reused verbatim).
+type DraftTemplateRequest struct {
+	// Body The author-facing template shape stored in ``runbook_templates.steps``.
+	//
+	// This is what a template author writes and what the G12.2 service
+	// layer (T2) serialises into the ``steps`` JSONB column (alongside the
+	// ``title`` / ``description`` / ``target_kind`` columns it lifts out).
+	// :attr:`steps` is ordered; each step's verify gates advance to the
+	// next at run time.
+	//
+	// The :meth:`_validate_step_ids_unique_and_substitutions_allowlisted`
+	// validator enforces the two template-level invariants the per-step
+	// models cannot see on their own: step-id uniqueness across the
+	// template, and the ``${...}`` substitution allowlist over every
+	// string the template carries.
+	Body RunbookTemplateBody `json:"body"`
+	Slug string              `json:"slug"`
+}
+
+// DraftTemplateResponse Response for “runbook_draft_template“ -- the created draft's coordinates.
+type DraftTemplateResponse struct {
+	Slug    string `json:"slug"`
+	Status  string `json:"status"`
+	Version int    `json:"version"`
+}
+
 // EditGroupBody PATCH body for “/api/v1/connectors/{id}/groups/{key}“.
 //
 // Both fields optional but at least one must be set; the route
@@ -1898,6 +1966,27 @@ type EditOpBody struct {
 // EditOpBodySafetyLevel defines model for EditOpBody.SafetyLevel.
 type EditOpBodySafetyLevel string
 
+// EditTemplateResponse Response for “runbook_edit_template“.
+//
+// :attr:`version` equals the input version when editing a draft in
+// place; it is a new version when forking from a published template, in
+// which case :attr:`forked_from` is populated with the source's
+// :class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is
+// “None“.
+type EditTemplateResponse struct {
+	// ForkedFrom Surfaced by ``runbook_edit_template`` when editing a published template forks.
+	//
+	// Editing a *published* template cannot mutate it in place (published
+	// templates are immutable); the edit forks a new draft instead. This
+	// shape tells the senior what they are forking from -- the source
+	// version and how many runs are still pinned to it -- so they can decide
+	// whether the fork is the right move.
+	ForkedFrom *ForkInfo `json:"forked_from,omitempty"`
+	Slug       string    `json:"slug"`
+	Status     string    `json:"status"`
+	Version    int       `json:"version"`
+}
+
 // EvalRequest POST body for “/api/v1/retrieve/eval“.
 //
 // Frozen + extra=forbid so a typo (“surfaces“ instead of
@@ -1954,6 +2043,19 @@ type FingerprintResult struct {
 	Reachable   bool                    `json:"reachable"`
 	Vendor      string                  `json:"vendor"`
 	Version     *string                 `json:"version"`
+}
+
+// ForkInfo Surfaced by “runbook_edit_template“ when editing a published template forks.
+//
+// Editing a *published* template cannot mutate it in place (published
+// templates are immutable); the edit forks a new draft instead. This
+// shape tells the senior what they are forking from -- the source
+// version and how many runs are still pinned to it -- so they can decide
+// whether the fork is the right move.
+type ForkInfo struct {
+	InFlightRunCount int    `json:"in_flight_run_count"`
+	Slug             string `json:"slug"`
+	Version          int    `json:"version"`
 }
 
 // GraphEdgeKind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
@@ -2396,6 +2498,24 @@ type KbListResponse struct {
 	Entries []KbEntryPreview `json:"entries"`
 }
 
+// ManualStep A step the operator performs off-MEHO (SSH, web UI, console).
+//
+// Carries no operation call -- :attr:`body` is the operator-readable
+// instruction (Markdown; may contain “${...}“ substitutions) and
+// :attr:`verify` gates advance once the operator reports the step done.
+type ManualStep struct {
+	Body   string            `json:"body"`
+	Id     string            `json:"id"`
+	Title  string            `json:"title"`
+	Type   string            `json:"type"`
+	Verify ManualStep_Verify `json:"verify"`
+}
+
+// ManualStep_Verify defines model for ManualStep.Verify.
+type ManualStep_Verify struct {
+	union json.RawMessage
+}
+
 // MemoryEntry Read shape -- one memory row as the service returns it.
 //
 // Frozen so callers can stash the entry in audit / log records
@@ -2462,6 +2582,43 @@ type MemoryListResponse struct {
 // “"scope=user"“ rather than “"scope=MemoryScope.USER"“, matching
 // the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 type MemoryScope string
+
+// OperationCallStep A step the agent dispatches via the operation registry.
+//
+// :attr:`op_id` is the registry operation id (e.g.
+// “vmware.composite.vm.create“); :attr:`params` is the call payload,
+// which may contain “${...}“ substitutions resolved at advance time.
+// :attr:`body` is operator-readable Markdown context (may also contain
+// substitutions). :attr:`verify` gates advance to the next step.
+type OperationCallStep struct {
+	Body   string                   `json:"body"`
+	Id     string                   `json:"id"`
+	OpId   string                   `json:"op_id"`
+	Params map[string]interface{}   `json:"params"`
+	Title  string                   `json:"title"`
+	Type   string                   `json:"type"`
+	Verify OperationCallStep_Verify `json:"verify"`
+}
+
+// OperationCallStep_Verify defines model for OperationCallStep.Verify.
+type OperationCallStep_Verify struct {
+	union json.RawMessage
+}
+
+// OperationCallVerify MEHO dispatches the verify call and matches the result against “expect“.
+//
+// The match is structural-equality + presence only: every key/value in
+// :attr:`expect` must be present and equal in the call result. There are
+// deliberately no operators, no JSONPath, and no boolean composition --
+// substrate minimalism (same call as #1177): determinism over
+// expressivity. :attr:`params` may carry “${...}“ substitutions
+// (allowlisted at publish time); :attr:`expect` may too.
+type OperationCallVerify struct {
+	Expect map[string]interface{} `json:"expect"`
+	OpId   string                 `json:"op_id"`
+	Params map[string]interface{} `json:"params"`
+	Type   string                 `json:"type"`
+}
 
 // OperationDescriptor Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.
 //
@@ -2608,6 +2765,13 @@ type PromoteBody struct {
 	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
 	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 	To MemoryScope `json:"to"`
+}
+
+// PublishTemplateResponse Response for “runbook_publish_template“ -- the now-published coordinates.
+type PublishTemplateResponse struct {
+	Slug    string `json:"slug"`
+	Status  string `json:"status"`
+	Version int    `json:"version"`
 }
 
 // QueryResult Per-query eval row — what the runner produces for each corpus entry.
@@ -2862,6 +3026,41 @@ type RetrieveRequest struct {
 type RetrieveResponse struct {
 	Hits            []RetrievalHit `json:"hits"`
 	QueryDurationMs float32        `json:"query_duration_ms"`
+}
+
+// RunbookTemplateBody The author-facing template shape stored in “runbook_templates.steps“.
+//
+// This is what a template author writes and what the G12.2 service
+// layer (T2) serialises into the “steps“ JSONB column (alongside the
+// “title“ / “description“ / “target_kind“ columns it lifts out).
+// :attr:`steps` is ordered; each step's verify gates advance to the
+// next at run time.
+//
+// The :meth:`_validate_step_ids_unique_and_substitutions_allowlisted`
+// validator enforces the two template-level invariants the per-step
+// models cannot see on their own: step-id uniqueness across the
+// template, and the “${...}“ substitution allowlist over every
+// string the template carries.
+type RunbookTemplateBody struct {
+	Description string                           `json:"description"`
+	Steps       []RunbookTemplateBody_Steps_Item `json:"steps"`
+	TargetKind  *string                          `json:"target_kind"`
+	Title       string                           `json:"title"`
+}
+
+// RunbookTemplateBody_Steps_Item defines model for RunbookTemplateBody.steps.Item.
+type RunbookTemplateBody_Steps_Item struct {
+	union json.RawMessage
+}
+
+// RunbookTemplateListResponse Response envelope for “GET /api/v1/runbooks/templates“.
+//
+// Wrapped in “{"templates": [...]}“ so a future paging / cursor field
+// can land non-breakingly -- same shape :mod:`meho_backplane.api.v1.kb`
+// adopted for its list response. Per-entry shape is the substrate's
+// :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.
+type RunbookTemplateListResponse struct {
+	Templates []TemplateSummary `json:"templates"`
 }
 
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
@@ -3144,6 +3343,34 @@ type ScheduledTriggerRead struct {
 //     :class:`ScheduledTrigger` rows in this state are retained for
 //     audit (last-fired-at + identity_sub) but never re-dispatched.
 type ScheduledTriggerStatus string
+
+// ShowTemplateResponse Full template surface returned by “runbook_show_template“.
+//
+// The complete template including the ordered :attr:`steps` and the
+// authorship / timestamp provenance. Mirrors the
+// :class:`~meho_backplane.db.models.RunbookTemplate` column set projected
+// to wire types.
+type ShowTemplateResponse struct {
+	CreatedAt   time.Time                         `json:"created_at"`
+	CreatedBy   string                            `json:"created_by"`
+	Description string                            `json:"description"`
+	EditedAt    time.Time                         `json:"edited_at"`
+	EditedBy    string                            `json:"edited_by"`
+	Slug        string                            `json:"slug"`
+	Status      ShowTemplateResponseStatus        `json:"status"`
+	Steps       []ShowTemplateResponse_Steps_Item `json:"steps"`
+	TargetKind  *string                           `json:"target_kind"`
+	Title       string                            `json:"title"`
+	Version     int                               `json:"version"`
+}
+
+// ShowTemplateResponseStatus defines model for ShowTemplateResponse.Status.
+type ShowTemplateResponseStatus string
+
+// ShowTemplateResponse_Steps_Item defines model for ShowTemplateResponse.steps.Item.
+type ShowTemplateResponse_Steps_Item struct {
+	union json.RawMessage
+}
 
 // SkippedConnector One connector that did not contribute candidates for a product.
 //
@@ -3441,6 +3668,23 @@ type TargetsDiscoverResult struct {
 	Discovered []CandidateHint    `json:"discovered"`
 	Skipped    []SkippedConnector `json:"skipped"`
 }
+
+// TemplateSummary Operator-readable summary row surfaced by “runbook_list_templates“.
+//
+// The list-view projection -- enough to identify a template and its
+// lifecycle state without loading the full step list (which
+// :class:`ShowTemplateResponse` carries).
+type TemplateSummary struct {
+	EditedAt   time.Time             `json:"edited_at"`
+	Slug       string                `json:"slug"`
+	Status     TemplateSummaryStatus `json:"status"`
+	TargetKind *string               `json:"target_kind"`
+	Title      string                `json:"title"`
+	Version    int                   `json:"version"`
+}
+
+// TemplateSummaryStatus defines model for TemplateSummary.Status.
+type TemplateSummaryStatus string
 
 // Thresholds Per-metric green-band thresholds for a verdict computation.
 //
@@ -4083,6 +4327,18 @@ type UnderscoreEdgeEndpoint struct {
 // UnderscoreSortDirection Sort direction -- “asc“ (default) or “desc“.
 type UnderscoreSortDirection string
 
+// UnderscoreVersionBody Request body for the publish / deprecate routes -- carries “version“ only.
+//
+// The slug is the URL's job (the route's “{slug}“ path parameter); the
+// body carries just the integer version to act on. “extra="forbid"“
+// rejects a stray “slug“ in the body at 422 rather than silently
+// ignoring it -- the URL is the single source of truth for which
+// template the operation targets, and a body that smuggled a different
+// slug would otherwise be a confused-deputy footgun.
+type UnderscoreVersionBody struct {
+	Version int `json:"version"`
+}
+
 // UnderscoreViewMode Closed enum of view modes exposed on “GET /ui/topology“.
 //
 // “table“ is the default (T1 / #880); “graph“ switches to the
@@ -4498,6 +4754,43 @@ type UsageEndpointApiV1RetrieveUsageGetParams struct {
 // UsageEndpointApiV1RetrieveUsageGetParamsSurface defines parameters for UsageEndpointApiV1RetrieveUsageGet.
 type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
+// ListTemplatesApiV1RunbooksTemplatesGetParams defines parameters for ListTemplatesApiV1RunbooksTemplatesGet.
+type ListTemplatesApiV1RunbooksTemplatesGetParams struct {
+	Status        *ListTemplatesApiV1RunbooksTemplatesGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TargetKind    *string                                             `form:"target_kind,omitempty" json:"target_kind,omitempty"`
+	Limit         *int                                                `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string                                             `json:"authorization,omitempty"`
+}
+
+// ListTemplatesApiV1RunbooksTemplatesGetParamsStatus defines parameters for ListTemplatesApiV1RunbooksTemplatesGet.
+type ListTemplatesApiV1RunbooksTemplatesGetParamsStatus string
+
+// DraftTemplateApiV1RunbooksTemplatesPostParams defines parameters for DraftTemplateApiV1RunbooksTemplatesPost.
+type DraftTemplateApiV1RunbooksTemplatesPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowTemplateApiV1RunbooksTemplatesSlugGetParams defines parameters for ShowTemplateApiV1RunbooksTemplatesSlugGet.
+type ShowTemplateApiV1RunbooksTemplatesSlugGetParams struct {
+	Version       *int    `form:"version,omitempty" json:"version,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// EditTemplateApiV1RunbooksTemplatesSlugPatchParams defines parameters for EditTemplateApiV1RunbooksTemplatesSlugPatch.
+type EditTemplateApiV1RunbooksTemplatesSlugPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams defines parameters for DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost.
+type DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams defines parameters for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost.
+type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListTriggersApiV1SchedulerTriggersGetParams defines parameters for ListTriggersApiV1SchedulerTriggersGet.
 type ListTriggersApiV1SchedulerTriggersGetParams struct {
 	Limit         *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
@@ -4842,6 +5135,18 @@ type EvalEndpointApiV1RetrieveEvalPostJSONRequestBody = EvalRequest
 // RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody defines body for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost for application/json ContentType.
 type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody = RetireChecklistRequest
 
+// DraftTemplateApiV1RunbooksTemplatesPostJSONRequestBody defines body for DraftTemplateApiV1RunbooksTemplatesPost for application/json ContentType.
+type DraftTemplateApiV1RunbooksTemplatesPostJSONRequestBody = DraftTemplateRequest
+
+// EditTemplateApiV1RunbooksTemplatesSlugPatchJSONRequestBody defines body for EditTemplateApiV1RunbooksTemplatesSlugPatch for application/json ContentType.
+type EditTemplateApiV1RunbooksTemplatesSlugPatchJSONRequestBody = RunbookTemplateBody
+
+// DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody defines body for DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost for application/json ContentType.
+type DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody = UnderscoreVersionBody
+
+// PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody defines body for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost for application/json ContentType.
+type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody = UnderscoreVersionBody
+
 // CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody defines body for CreateTriggerApiV1SchedulerTriggersPost for application/json ContentType.
 type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCreate
 
@@ -5055,6 +5360,362 @@ func (t CallOperationBody_Target) MarshalJSON() ([]byte, error) {
 }
 
 func (t *CallOperationBody_Target) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsConfirmVerify returns the union data inside the ManualStep_Verify as a ConfirmVerify
+func (t ManualStep_Verify) AsConfirmVerify() (ConfirmVerify, error) {
+	var body ConfirmVerify
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromConfirmVerify overwrites any union data inside the ManualStep_Verify as the provided ConfirmVerify
+func (t *ManualStep_Verify) FromConfirmVerify(v ConfirmVerify) error {
+	v.Type = "confirm"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeConfirmVerify performs a merge with any union data inside the ManualStep_Verify, using the provided ConfirmVerify
+func (t *ManualStep_Verify) MergeConfirmVerify(v ConfirmVerify) error {
+	v.Type = "confirm"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOperationCallVerify returns the union data inside the ManualStep_Verify as a OperationCallVerify
+func (t ManualStep_Verify) AsOperationCallVerify() (OperationCallVerify, error) {
+	var body OperationCallVerify
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOperationCallVerify overwrites any union data inside the ManualStep_Verify as the provided OperationCallVerify
+func (t *ManualStep_Verify) FromOperationCallVerify(v OperationCallVerify) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOperationCallVerify performs a merge with any union data inside the ManualStep_Verify, using the provided OperationCallVerify
+func (t *ManualStep_Verify) MergeOperationCallVerify(v OperationCallVerify) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t ManualStep_Verify) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"type"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t ManualStep_Verify) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "confirm":
+		return t.AsConfirmVerify()
+	case "operation_call":
+		return t.AsOperationCallVerify()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t ManualStep_Verify) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *ManualStep_Verify) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsConfirmVerify returns the union data inside the OperationCallStep_Verify as a ConfirmVerify
+func (t OperationCallStep_Verify) AsConfirmVerify() (ConfirmVerify, error) {
+	var body ConfirmVerify
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromConfirmVerify overwrites any union data inside the OperationCallStep_Verify as the provided ConfirmVerify
+func (t *OperationCallStep_Verify) FromConfirmVerify(v ConfirmVerify) error {
+	v.Type = "confirm"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeConfirmVerify performs a merge with any union data inside the OperationCallStep_Verify, using the provided ConfirmVerify
+func (t *OperationCallStep_Verify) MergeConfirmVerify(v ConfirmVerify) error {
+	v.Type = "confirm"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOperationCallVerify returns the union data inside the OperationCallStep_Verify as a OperationCallVerify
+func (t OperationCallStep_Verify) AsOperationCallVerify() (OperationCallVerify, error) {
+	var body OperationCallVerify
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOperationCallVerify overwrites any union data inside the OperationCallStep_Verify as the provided OperationCallVerify
+func (t *OperationCallStep_Verify) FromOperationCallVerify(v OperationCallVerify) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOperationCallVerify performs a merge with any union data inside the OperationCallStep_Verify, using the provided OperationCallVerify
+func (t *OperationCallStep_Verify) MergeOperationCallVerify(v OperationCallVerify) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t OperationCallStep_Verify) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"type"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t OperationCallStep_Verify) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "confirm":
+		return t.AsConfirmVerify()
+	case "operation_call":
+		return t.AsOperationCallVerify()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t OperationCallStep_Verify) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *OperationCallStep_Verify) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsOperationCallStep returns the union data inside the RunbookTemplateBody_Steps_Item as a OperationCallStep
+func (t RunbookTemplateBody_Steps_Item) AsOperationCallStep() (OperationCallStep, error) {
+	var body OperationCallStep
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOperationCallStep overwrites any union data inside the RunbookTemplateBody_Steps_Item as the provided OperationCallStep
+func (t *RunbookTemplateBody_Steps_Item) FromOperationCallStep(v OperationCallStep) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOperationCallStep performs a merge with any union data inside the RunbookTemplateBody_Steps_Item, using the provided OperationCallStep
+func (t *RunbookTemplateBody_Steps_Item) MergeOperationCallStep(v OperationCallStep) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsManualStep returns the union data inside the RunbookTemplateBody_Steps_Item as a ManualStep
+func (t RunbookTemplateBody_Steps_Item) AsManualStep() (ManualStep, error) {
+	var body ManualStep
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromManualStep overwrites any union data inside the RunbookTemplateBody_Steps_Item as the provided ManualStep
+func (t *RunbookTemplateBody_Steps_Item) FromManualStep(v ManualStep) error {
+	v.Type = "manual"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeManualStep performs a merge with any union data inside the RunbookTemplateBody_Steps_Item, using the provided ManualStep
+func (t *RunbookTemplateBody_Steps_Item) MergeManualStep(v ManualStep) error {
+	v.Type = "manual"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t RunbookTemplateBody_Steps_Item) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"type"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t RunbookTemplateBody_Steps_Item) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "manual":
+		return t.AsManualStep()
+	case "operation_call":
+		return t.AsOperationCallStep()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t RunbookTemplateBody_Steps_Item) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *RunbookTemplateBody_Steps_Item) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsOperationCallStep returns the union data inside the ShowTemplateResponse_Steps_Item as a OperationCallStep
+func (t ShowTemplateResponse_Steps_Item) AsOperationCallStep() (OperationCallStep, error) {
+	var body OperationCallStep
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOperationCallStep overwrites any union data inside the ShowTemplateResponse_Steps_Item as the provided OperationCallStep
+func (t *ShowTemplateResponse_Steps_Item) FromOperationCallStep(v OperationCallStep) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOperationCallStep performs a merge with any union data inside the ShowTemplateResponse_Steps_Item, using the provided OperationCallStep
+func (t *ShowTemplateResponse_Steps_Item) MergeOperationCallStep(v OperationCallStep) error {
+	v.Type = "operation_call"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsManualStep returns the union data inside the ShowTemplateResponse_Steps_Item as a ManualStep
+func (t ShowTemplateResponse_Steps_Item) AsManualStep() (ManualStep, error) {
+	var body ManualStep
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromManualStep overwrites any union data inside the ShowTemplateResponse_Steps_Item as the provided ManualStep
+func (t *ShowTemplateResponse_Steps_Item) FromManualStep(v ManualStep) error {
+	v.Type = "manual"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeManualStep performs a merge with any union data inside the ShowTemplateResponse_Steps_Item, using the provided ManualStep
+func (t *ShowTemplateResponse_Steps_Item) MergeManualStep(v ManualStep) error {
+	v.Type = "manual"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t ShowTemplateResponse_Steps_Item) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"type"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t ShowTemplateResponse_Steps_Item) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "manual":
+		return t.AsManualStep()
+	case "operation_call":
+		return t.AsOperationCallStep()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t ShowTemplateResponse_Steps_Item) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *ShowTemplateResponse_Steps_Item) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }
@@ -5447,6 +6108,32 @@ type ClientInterface interface {
 
 	// UsageEndpointApiV1RetrieveUsageGet request
 	UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListTemplatesApiV1RunbooksTemplatesGet request
+	ListTemplatesApiV1RunbooksTemplatesGet(ctx context.Context, params *ListTemplatesApiV1RunbooksTemplatesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DraftTemplateApiV1RunbooksTemplatesPostWithBody request with any body
+	DraftTemplateApiV1RunbooksTemplatesPostWithBody(ctx context.Context, params *DraftTemplateApiV1RunbooksTemplatesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DraftTemplateApiV1RunbooksTemplatesPost(ctx context.Context, params *DraftTemplateApiV1RunbooksTemplatesPostParams, body DraftTemplateApiV1RunbooksTemplatesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowTemplateApiV1RunbooksTemplatesSlugGet request
+	ShowTemplateApiV1RunbooksTemplatesSlugGet(ctx context.Context, slug string, params *ShowTemplateApiV1RunbooksTemplatesSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EditTemplateApiV1RunbooksTemplatesSlugPatchWithBody request with any body
+	EditTemplateApiV1RunbooksTemplatesSlugPatchWithBody(ctx context.Context, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EditTemplateApiV1RunbooksTemplatesSlugPatch(ctx context.Context, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, body EditTemplateApiV1RunbooksTemplatesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBody request with any body
+	DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBody(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, body DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody request with any body
+	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PublishTemplateApiV1RunbooksTemplatesSlugPublishPost(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTriggersApiV1SchedulerTriggersGet request
 	ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -6819,6 +7506,126 @@ func (c *Client) RetireChecklistEndpointApiV1RetrieveRetireChecklistPost(ctx con
 
 func (c *Client) UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUsageEndpointApiV1RetrieveUsageGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListTemplatesApiV1RunbooksTemplatesGet(ctx context.Context, params *ListTemplatesApiV1RunbooksTemplatesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListTemplatesApiV1RunbooksTemplatesGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DraftTemplateApiV1RunbooksTemplatesPostWithBody(ctx context.Context, params *DraftTemplateApiV1RunbooksTemplatesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDraftTemplateApiV1RunbooksTemplatesPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DraftTemplateApiV1RunbooksTemplatesPost(ctx context.Context, params *DraftTemplateApiV1RunbooksTemplatesPostParams, body DraftTemplateApiV1RunbooksTemplatesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDraftTemplateApiV1RunbooksTemplatesPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowTemplateApiV1RunbooksTemplatesSlugGet(ctx context.Context, slug string, params *ShowTemplateApiV1RunbooksTemplatesSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowTemplateApiV1RunbooksTemplatesSlugGetRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditTemplateApiV1RunbooksTemplatesSlugPatchWithBody(ctx context.Context, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditTemplateApiV1RunbooksTemplatesSlugPatchRequestWithBody(c.Server, slug, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditTemplateApiV1RunbooksTemplatesSlugPatch(ctx context.Context, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, body EditTemplateApiV1RunbooksTemplatesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditTemplateApiV1RunbooksTemplatesSlugPatchRequest(c.Server, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBody(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostRequestWithBody(c.Server, slug, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, body DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostRequest(c.Server, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequestWithBody(c.Server, slug, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PublishTemplateApiV1RunbooksTemplatesSlugPublishPost(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequest(c.Server, slug, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -12138,6 +12945,414 @@ func NewUsageEndpointApiV1RetrieveUsageGetRequest(server string, params *UsageEn
 	return req, nil
 }
 
+// NewListTemplatesApiV1RunbooksTemplatesGetRequest generates requests for ListTemplatesApiV1RunbooksTemplatesGet
+func NewListTemplatesApiV1RunbooksTemplatesGetRequest(server string, params *ListTemplatesApiV1RunbooksTemplatesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/templates")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TargetKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target_kind", runtime.ParamLocationQuery, *params.TargetKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDraftTemplateApiV1RunbooksTemplatesPostRequest calls the generic DraftTemplateApiV1RunbooksTemplatesPost builder with application/json body
+func NewDraftTemplateApiV1RunbooksTemplatesPostRequest(server string, params *DraftTemplateApiV1RunbooksTemplatesPostParams, body DraftTemplateApiV1RunbooksTemplatesPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDraftTemplateApiV1RunbooksTemplatesPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewDraftTemplateApiV1RunbooksTemplatesPostRequestWithBody generates requests for DraftTemplateApiV1RunbooksTemplatesPost with any type of body
+func NewDraftTemplateApiV1RunbooksTemplatesPostRequestWithBody(server string, params *DraftTemplateApiV1RunbooksTemplatesPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/templates")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowTemplateApiV1RunbooksTemplatesSlugGetRequest generates requests for ShowTemplateApiV1RunbooksTemplatesSlugGet
+func NewShowTemplateApiV1RunbooksTemplatesSlugGetRequest(server string, slug string, params *ShowTemplateApiV1RunbooksTemplatesSlugGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/templates/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Version != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "version", runtime.ParamLocationQuery, *params.Version); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEditTemplateApiV1RunbooksTemplatesSlugPatchRequest calls the generic EditTemplateApiV1RunbooksTemplatesSlugPatch builder with application/json body
+func NewEditTemplateApiV1RunbooksTemplatesSlugPatchRequest(server string, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, body EditTemplateApiV1RunbooksTemplatesSlugPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEditTemplateApiV1RunbooksTemplatesSlugPatchRequestWithBody(server, slug, params, "application/json", bodyReader)
+}
+
+// NewEditTemplateApiV1RunbooksTemplatesSlugPatchRequestWithBody generates requests for EditTemplateApiV1RunbooksTemplatesSlugPatch with any type of body
+func NewEditTemplateApiV1RunbooksTemplatesSlugPatchRequestWithBody(server string, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/templates/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostRequest calls the generic DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost builder with application/json body
+func NewDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostRequest(server string, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, body DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostRequestWithBody(server, slug, params, "application/json", bodyReader)
+}
+
+// NewDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostRequestWithBody generates requests for DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost with any type of body
+func NewDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostRequestWithBody(server string, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/templates/%s/deprecate", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequest calls the generic PublishTemplateApiV1RunbooksTemplatesSlugPublishPost builder with application/json body
+func NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequest(server string, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequestWithBody(server, slug, params, "application/json", bodyReader)
+}
+
+// NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequestWithBody generates requests for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost with any type of body
+func NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequestWithBody(server string, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runbooks/templates/%s/publish", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListTriggersApiV1SchedulerTriggersGetRequest generates requests for ListTriggersApiV1SchedulerTriggersGet
 func NewListTriggersApiV1SchedulerTriggersGetRequest(server string, params *ListTriggersApiV1SchedulerTriggersGetParams) (*http.Request, error) {
 	var err error
@@ -16786,6 +18001,32 @@ type ClientWithResponsesInterface interface {
 	// UsageEndpointApiV1RetrieveUsageGetWithResponse request
 	UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error)
 
+	// ListTemplatesApiV1RunbooksTemplatesGetWithResponse request
+	ListTemplatesApiV1RunbooksTemplatesGetWithResponse(ctx context.Context, params *ListTemplatesApiV1RunbooksTemplatesGetParams, reqEditors ...RequestEditorFn) (*ListTemplatesApiV1RunbooksTemplatesGetResponse, error)
+
+	// DraftTemplateApiV1RunbooksTemplatesPostWithBodyWithResponse request with any body
+	DraftTemplateApiV1RunbooksTemplatesPostWithBodyWithResponse(ctx context.Context, params *DraftTemplateApiV1RunbooksTemplatesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DraftTemplateApiV1RunbooksTemplatesPostResponse, error)
+
+	DraftTemplateApiV1RunbooksTemplatesPostWithResponse(ctx context.Context, params *DraftTemplateApiV1RunbooksTemplatesPostParams, body DraftTemplateApiV1RunbooksTemplatesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*DraftTemplateApiV1RunbooksTemplatesPostResponse, error)
+
+	// ShowTemplateApiV1RunbooksTemplatesSlugGetWithResponse request
+	ShowTemplateApiV1RunbooksTemplatesSlugGetWithResponse(ctx context.Context, slug string, params *ShowTemplateApiV1RunbooksTemplatesSlugGetParams, reqEditors ...RequestEditorFn) (*ShowTemplateApiV1RunbooksTemplatesSlugGetResponse, error)
+
+	// EditTemplateApiV1RunbooksTemplatesSlugPatchWithBodyWithResponse request with any body
+	EditTemplateApiV1RunbooksTemplatesSlugPatchWithBodyWithResponse(ctx context.Context, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditTemplateApiV1RunbooksTemplatesSlugPatchResponse, error)
+
+	EditTemplateApiV1RunbooksTemplatesSlugPatchWithResponse(ctx context.Context, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, body EditTemplateApiV1RunbooksTemplatesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditTemplateApiV1RunbooksTemplatesSlugPatchResponse, error)
+
+	// DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBodyWithResponse request with any body
+	DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBodyWithResponse(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse, error)
+
+	DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithResponse(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, body DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse, error)
+
+	// PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse request with any body
+	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error)
+
+	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error)
+
 	// ListTriggersApiV1SchedulerTriggersGetWithResponse request
 	ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error)
 
@@ -18597,6 +19838,144 @@ func (r UsageEndpointApiV1RetrieveUsageGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UsageEndpointApiV1RetrieveUsageGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListTemplatesApiV1RunbooksTemplatesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunbookTemplateListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListTemplatesApiV1RunbooksTemplatesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListTemplatesApiV1RunbooksTemplatesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DraftTemplateApiV1RunbooksTemplatesPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *DraftTemplateResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DraftTemplateApiV1RunbooksTemplatesPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DraftTemplateApiV1RunbooksTemplatesPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowTemplateApiV1RunbooksTemplatesSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ShowTemplateResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowTemplateApiV1RunbooksTemplatesSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowTemplateApiV1RunbooksTemplatesSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EditTemplateApiV1RunbooksTemplatesSlugPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *EditTemplateResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EditTemplateApiV1RunbooksTemplatesSlugPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EditTemplateApiV1RunbooksTemplatesSlugPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DeprecateTemplateResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PublishTemplateResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -21010,6 +22389,92 @@ func (c *ClientWithResponses) UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx
 		return nil, err
 	}
 	return ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp)
+}
+
+// ListTemplatesApiV1RunbooksTemplatesGetWithResponse request returning *ListTemplatesApiV1RunbooksTemplatesGetResponse
+func (c *ClientWithResponses) ListTemplatesApiV1RunbooksTemplatesGetWithResponse(ctx context.Context, params *ListTemplatesApiV1RunbooksTemplatesGetParams, reqEditors ...RequestEditorFn) (*ListTemplatesApiV1RunbooksTemplatesGetResponse, error) {
+	rsp, err := c.ListTemplatesApiV1RunbooksTemplatesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListTemplatesApiV1RunbooksTemplatesGetResponse(rsp)
+}
+
+// DraftTemplateApiV1RunbooksTemplatesPostWithBodyWithResponse request with arbitrary body returning *DraftTemplateApiV1RunbooksTemplatesPostResponse
+func (c *ClientWithResponses) DraftTemplateApiV1RunbooksTemplatesPostWithBodyWithResponse(ctx context.Context, params *DraftTemplateApiV1RunbooksTemplatesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DraftTemplateApiV1RunbooksTemplatesPostResponse, error) {
+	rsp, err := c.DraftTemplateApiV1RunbooksTemplatesPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDraftTemplateApiV1RunbooksTemplatesPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) DraftTemplateApiV1RunbooksTemplatesPostWithResponse(ctx context.Context, params *DraftTemplateApiV1RunbooksTemplatesPostParams, body DraftTemplateApiV1RunbooksTemplatesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*DraftTemplateApiV1RunbooksTemplatesPostResponse, error) {
+	rsp, err := c.DraftTemplateApiV1RunbooksTemplatesPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDraftTemplateApiV1RunbooksTemplatesPostResponse(rsp)
+}
+
+// ShowTemplateApiV1RunbooksTemplatesSlugGetWithResponse request returning *ShowTemplateApiV1RunbooksTemplatesSlugGetResponse
+func (c *ClientWithResponses) ShowTemplateApiV1RunbooksTemplatesSlugGetWithResponse(ctx context.Context, slug string, params *ShowTemplateApiV1RunbooksTemplatesSlugGetParams, reqEditors ...RequestEditorFn) (*ShowTemplateApiV1RunbooksTemplatesSlugGetResponse, error) {
+	rsp, err := c.ShowTemplateApiV1RunbooksTemplatesSlugGet(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowTemplateApiV1RunbooksTemplatesSlugGetResponse(rsp)
+}
+
+// EditTemplateApiV1RunbooksTemplatesSlugPatchWithBodyWithResponse request with arbitrary body returning *EditTemplateApiV1RunbooksTemplatesSlugPatchResponse
+func (c *ClientWithResponses) EditTemplateApiV1RunbooksTemplatesSlugPatchWithBodyWithResponse(ctx context.Context, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditTemplateApiV1RunbooksTemplatesSlugPatchResponse, error) {
+	rsp, err := c.EditTemplateApiV1RunbooksTemplatesSlugPatchWithBody(ctx, slug, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditTemplateApiV1RunbooksTemplatesSlugPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) EditTemplateApiV1RunbooksTemplatesSlugPatchWithResponse(ctx context.Context, slug string, params *EditTemplateApiV1RunbooksTemplatesSlugPatchParams, body EditTemplateApiV1RunbooksTemplatesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditTemplateApiV1RunbooksTemplatesSlugPatchResponse, error) {
+	rsp, err := c.EditTemplateApiV1RunbooksTemplatesSlugPatch(ctx, slug, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditTemplateApiV1RunbooksTemplatesSlugPatchResponse(rsp)
+}
+
+// DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBodyWithResponse request with arbitrary body returning *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse
+func (c *ClientWithResponses) DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBodyWithResponse(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse, error) {
+	rsp, err := c.DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithBody(ctx, slug, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithResponse(ctx context.Context, slug string, params *DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostParams, body DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostJSONRequestBody, reqEditors ...RequestEditorFn) (*DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse, error) {
+	rsp, err := c.DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePost(ctx, slug, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse(rsp)
+}
+
+// PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse request with arbitrary body returning *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse
+func (c *ClientWithResponses) PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error) {
+	rsp, err := c.PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ctx, slug, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error) {
+	rsp, err := c.PublishTemplateApiV1RunbooksTemplatesSlugPublishPost(ctx, slug, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse(rsp)
 }
 
 // ListTriggersApiV1SchedulerTriggersGetWithResponse request returning *ListTriggersApiV1SchedulerTriggersGetResponse
@@ -24001,6 +25466,204 @@ func ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp *http.Response) (*Usage
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest UsageReport
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListTemplatesApiV1RunbooksTemplatesGetResponse parses an HTTP response from a ListTemplatesApiV1RunbooksTemplatesGetWithResponse call
+func ParseListTemplatesApiV1RunbooksTemplatesGetResponse(rsp *http.Response) (*ListTemplatesApiV1RunbooksTemplatesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListTemplatesApiV1RunbooksTemplatesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunbookTemplateListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDraftTemplateApiV1RunbooksTemplatesPostResponse parses an HTTP response from a DraftTemplateApiV1RunbooksTemplatesPostWithResponse call
+func ParseDraftTemplateApiV1RunbooksTemplatesPostResponse(rsp *http.Response) (*DraftTemplateApiV1RunbooksTemplatesPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DraftTemplateApiV1RunbooksTemplatesPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest DraftTemplateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowTemplateApiV1RunbooksTemplatesSlugGetResponse parses an HTTP response from a ShowTemplateApiV1RunbooksTemplatesSlugGetWithResponse call
+func ParseShowTemplateApiV1RunbooksTemplatesSlugGetResponse(rsp *http.Response) (*ShowTemplateApiV1RunbooksTemplatesSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowTemplateApiV1RunbooksTemplatesSlugGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ShowTemplateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEditTemplateApiV1RunbooksTemplatesSlugPatchResponse parses an HTTP response from a EditTemplateApiV1RunbooksTemplatesSlugPatchWithResponse call
+func ParseEditTemplateApiV1RunbooksTemplatesSlugPatchResponse(rsp *http.Response) (*EditTemplateApiV1RunbooksTemplatesSlugPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EditTemplateApiV1RunbooksTemplatesSlugPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest EditTemplateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse parses an HTTP response from a DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostWithResponse call
+func ParseDeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse(rsp *http.Response) (*DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeprecateTemplateApiV1RunbooksTemplatesSlugDeprecatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DeprecateTemplateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse parses an HTTP response from a PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithResponse call
+func ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse(rsp *http.Response) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PublishTemplateResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

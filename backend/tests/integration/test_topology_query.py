@@ -59,6 +59,7 @@ from meho_backplane.topology.query import (
     find_dependents,
     find_path,
 )
+from meho_backplane.topology.resolvers import NodeNotFoundError
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 
 # Match the tenant rows the ``pg_engine`` conftest fixture seeds.
@@ -257,6 +258,59 @@ async def test_find_path_returns_none_when_unreachable(
     # Genuinely absent target also yields None.
     missing = await find_path(_operator(TENANT_A_ID), "app", "no-such-node")
     assert missing is None
+
+
+@_skip_no_docker
+async def test_find_dependents_untracked_vs_tracked_no_deps(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """Mirror the RDC #789 N2 repro: ``[]`` must not conflate untracked
+    with tracked-but-no-dependents (G0.18-T4 #1357).
+
+    The ``known_graph`` fixture seeds ``ds1`` as a leaf — nothing
+    depends on it, so the reverse closure is the one-element ``[ds1]``
+    (the substrate's depth-0 anchor row). A non-existent
+    ``vault-prod`` target — the exact shape a registered non-k8s
+    target takes today because auto-discovery is k8s-only — raises
+    :class:`NodeNotFoundError` rather than returning the bare ``[]``
+    the pre-fix behaviour produced.
+
+    The pre-G0.18-T4 implementation returned the same empty list for
+    both, and the consumer's pre-destructive blast-radius check read
+    the empty list as "safe to delete," a false-negative SEV-3.
+    """
+    tracked = await find_dependents(_operator(TENANT_A_ID), "ds1")
+    assert [n.name for n in tracked] == ["ds1"]
+    assert tracked[0].depth == 0
+
+    with pytest.raises(NodeNotFoundError) as excinfo:
+        await find_dependents(_operator(TENANT_A_ID), "vault-prod")
+    assert excinfo.value.name == "vault-prod"
+
+    # Same contract on the forward verb.
+    with pytest.raises(NodeNotFoundError):
+        await find_dependencies(_operator(TENANT_A_ID), "vault-prod")
+
+
+@_skip_no_docker
+async def test_find_dependents_cross_tenant_node_raises_node_not_found(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """A node that exists only in tenant B is untracked from tenant A.
+
+    Tenant boundary already isolated cross-tenant nodes from the
+    closure return (the empty-list contract). G0.18-T4 (#1357)
+    upgrades that to the typed :class:`NodeNotFoundError` so the
+    operator-facing surface reads "untracked here" rather than the
+    misleading "exists with no dependents." Cross-tenant nodes are
+    never visible regardless.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        await _seed_node(session, tenant_id=TENANT_B_ID, kind="host", name="cross-tenant-host")
+
+    with pytest.raises(NodeNotFoundError):
+        await find_dependents(_operator(TENANT_A_ID), "cross-tenant-host")
 
 
 @_skip_no_docker

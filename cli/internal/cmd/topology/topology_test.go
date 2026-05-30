@@ -193,17 +193,55 @@ func TestBuildPathQuerySetsFromTo(t *testing.T) {
 	}
 }
 
-// TestPrintNodeClosureEmpty — zero rows render the not-found line
-// (the cross-tenant / missing-node surface) without a header.
+// TestPrintNodeClosureEmpty — the defensive zero-row branch renders
+// a no-result line without the header. Since G0.18-T4 (#1357) an
+// untracked anchor surfaces as a 404 ``node_untracked`` that
+// `renderHTTPStatus` -> `formatNotFound` handles before this point;
+// the function still tolerates a zero-row payload as a future
+// contract-drift guard.
 func TestPrintNodeClosureEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	printNodeClosure(&buf, "ghost", nil)
 	out := buf.String()
-	if !strings.Contains(out, `no node named "ghost"`) {
-		t.Errorf("empty closure missing not-found hint; got %q", out)
+	if !strings.Contains(out, "ghost") {
+		t.Errorf("empty closure missing anchor name; got %q", out)
+	}
+	if !strings.Contains(out, "node_untracked") {
+		t.Errorf("empty closure missing 404-contract hint; got %q", out)
 	}
 	if strings.Contains(out, "DEPTH") {
 		t.Errorf("empty closure should skip header; got %q", out)
+	}
+}
+
+// TestFormatNotFoundNodeUntracked — a 404 ``node_untracked`` envelope
+// from a dependents / dependencies route renders a clear "register /
+// refresh or annotate" prompt instead of being swept into the
+// resolver near-miss formatter. G0.18-T4 (#1357, RDC #789 N2).
+func TestFormatNotFoundNodeUntracked(t *testing.T) {
+	body := `{"detail":{"error":"node_untracked","name":"vault-prod"}}`
+	out := formatNotFound(body)
+	for _, want := range []string{
+		`"vault-prod"`,
+		"not tracked",
+		"meho topology refresh",
+		"meho topology annotate",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("formatNotFound missing %q in %q", want, out)
+		}
+	}
+}
+
+// TestFormatNotFoundNodeUntrackedWithKind — when the closure route's
+// 404 envelope carries the ``kind`` echo (caller supplied --node-kind),
+// the rendered line includes the kind pin so the operator has a
+// self-contained diagnostic.
+func TestFormatNotFoundNodeUntrackedWithKind(t *testing.T) {
+	body := `{"detail":{"error":"node_untracked","name":"vc-prod","kind":"target"}}`
+	out := formatNotFound(body)
+	if !strings.Contains(out, "kind=target") {
+		t.Errorf("formatNotFound missing kind pin in %q", out)
 	}
 }
 

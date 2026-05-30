@@ -31,7 +31,7 @@ The `evoila/meho` repo is public. Migration `0018` originally upserted `rdc-inte
 - The `default` tenant + 2 illustrative conventions demonstrate the feature without baking in a specific consumer's identity.
 - The 2 conventions read as documentation about the convention surface itself (slug naming convention, the operator-facing nature of the surface) -- they explain what the feature does rather than carrying any specific operator's operational rules.
 - Operators replace the illustrative seed with their own content via the T2 API (`PATCH /api/v1/conventions/{slug}`) or T3 CLI (`meho conventions ...`).
-- The MCP `initialize.instructions` field still flows from `assemble_preamble(operator.tenant_id)` -- but for operators whose `tenant_id` is not `default` (the common case for any deploy), the field is empty until the operator authors their own conventions.
+- The MCP `initialize.instructions` field still flows from `assemble_preamble(operator.tenant_id, operator.sub)` -- but for operators whose `tenant_id` is not `default` (the common case for any deploy), the conventions band is empty until the operator authors their own conventions (the runbook-priming band G12.4-T2 #1316 added is independently bounded and surfaces only when the calling operator has in-progress runs).
 
 The two seeded conventions:
 

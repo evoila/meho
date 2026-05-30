@@ -112,12 +112,25 @@ def _next_step_for_registered(
     :func:`parse_connector_id`'s deterministic shortening, and looking up
     ``("sddc", "9.0")`` would always miss for SDDC.
 
-    Two branches:
+    Three branches:
 
-    * **Catalog hit** — verb points at ``meho connector ingest --catalog
-      <product>/<version>``; rationale says the spec is available in the
-      catalog. The CLI form is the same one the curated-on-ramp ships
-      (#915 / G0.7-T5); copying the verb verbatim closes the workflow.
+    * **Catalog hit, ``catalog_ingest="supported"``** — verb points at
+      ``meho connector ingest --catalog <product>/<version>``; rationale
+      says the spec is available in the catalog. The CLI form is the
+      same one the curated-on-ramp ships (#915 / G0.7-T5); copying the
+      verb verbatim closes the workflow.
+    * **Catalog hit, ``catalog_ingest="spec-only"``** — verb points at
+      the manual-mode ``meho connector ingest --product <p> --version
+      <v> --impl <i> --spec <uri>`` form using the catalog's native
+      product/version/impl triple. Rationale calls out that the
+      catalog row exists but its upstream is HTML-portal or
+      fqdn-templated, so catalog-driven ingest would 422 -- the
+      operator must fetch the spec themselves. Closes the v0.8.1
+      RDC dogfood signal (#789 N8): the previous "spec available in
+      catalog; run ingest" hint over-promised the VCF-family rows
+      whose upstream is fundamentally not raw YAML/JSON (G0.18-T8 /
+      #1361). The same triple the operator would have used after a
+      hit lands here, so the verb still copies-and-runs.
     * **Catalog miss** — verb points at the manual-mode ``meho connector
       ingest --product <p> --version <v> --impl <i> --spec <uri>``;
       rationale calls out the missing catalog entry so the operator
@@ -133,10 +146,23 @@ def _next_step_for_registered(
     workflow doesn't depend on the catalog being live.
     """
     entry = catalog.get(registry_product, registry_version) if catalog is not None else None
-    if entry is not None:
+    if entry is not None and entry.catalog_ingest == "supported":
         return NextStep(
             verb=f"meho connector ingest --catalog {entry.product}/{entry.version}",
             rationale="spec available in catalog; run ingest to populate operations",
+        )
+    if entry is not None and entry.catalog_ingest == "spec-only":
+        return NextStep(
+            verb=(
+                f"meho connector ingest --product {entry.product} "
+                f"--version {entry.version} --impl {entry.impl_id} "
+                f"--spec <concrete-openapi-uri>"
+            ),
+            rationale=(
+                "catalog upstream is HTML-portal or fqdn-templated and "
+                "cannot drive --catalog ingest server-side; fetch the "
+                "raw OpenAPI spec from the appliance and pass via --spec"
+            ),
         )
     return NextStep(
         verb=(

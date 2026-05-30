@@ -63,11 +63,23 @@ import difflib
 import functools
 import re
 from importlib import resources
+from typing import Literal
 
 import yaml
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+#: Declarative classifier for whether the catalog row's upstream URL(s)
+#: can drive a ``meho connector ingest --catalog <product>/<version>``
+#: invocation end-to-end. ``"supported"`` (the default) — the upstream
+#: serves an OpenAPI spec directly, the catalog path works as advertised.
+#: ``"spec-only"`` — the upstream is an HTML developer-portal landing page
+#: (Broadcom Developer Portal for the VCF family) or an appliance-served
+#: fqdn-templated URL (NSX manager) that the catalog can't dereference
+#: server-side. Operators must fetch the spec themselves and pass it via
+#: the explicit-quadruple ``--spec`` shape.
+CatalogIngestSupport = Literal["supported", "spec-only"]
 
 #: Package + resource name of the catalog YAML shipped as package data.
 _CATALOG_PACKAGE = "meho_backplane.operations.ingest"
@@ -218,6 +230,27 @@ class ConnectorSpecEntry(BaseModel):
     spec_info_versions_compatible: tuple[str, ...] | None = None
     sha256: str | None = Field(default=None, max_length=64)
     notes: str = Field(default="", max_length=2048)
+    #: Whether the catalog row's ``upstream`` URL(s) can drive
+    #: ``meho connector ingest --catalog`` end-to-end. Defaults to
+    #: ``"supported"`` for backwards compatibility with every
+    #: pre-G0.18-T8 row -- the validator already rejects malformed shapes
+    #: at parse time. Rows whose upstream is an HTML developer-portal
+    #: landing page (Broadcom for vmware/sddc-manager) or an
+    #: fqdn-templated appliance URL (NSX) must set ``"spec-only"`` so
+    #: ``GET /api/v1/connectors`` emits a ``next_step`` hint pointing
+    #: at ``--spec`` instead of over-promising ``--catalog`` --
+    #: G0.18-T8 (#1361) / RDC #789 N8.
+    #:
+    #: The route's ``_reject_unusable_entry`` 422 branches
+    #: (``catalog_entry_typed_connector``,
+    #: ``catalog_entry_templated_upstream``, plus the
+    #: ``UpstreamNotSpecError`` path that surfaces
+    #: ``catalog_entry_upstream_not_spec``) are unchanged; this field
+    #: is the declarative source of truth the listing's ``next_step``
+    #: emitter reads, not a new validation gate. Operators who ignore
+    #: the hint and POST a ``--catalog`` body anyway still hit the
+    #: existing structured 422s.
+    catalog_ingest: CatalogIngestSupport = "supported"
 
     @field_validator("product", "version", "impl_id", "requires_connector_class")
     @classmethod

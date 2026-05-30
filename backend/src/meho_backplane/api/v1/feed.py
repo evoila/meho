@@ -669,6 +669,69 @@ async def _emit_backlog_prelude(
     return frames, last_entry_id
 
 
+async def _run_prelude_and_advance_cursor(
+    fast_client: object,
+    *,
+    operator: Operator,
+    stream_key: str,
+    cursor: str,
+    op_class: str | None,
+    principal: str | None,
+    target: str | None,
+) -> tuple[list[str], str, str | None]:
+    """Run the backlog prelude; return ``(frames, new_cursor, error_frame_or_None)``.
+
+    The prelude is gated on ``cursor == _LIVE_TAIL_CURSOR`` —
+    ``Last-Event-Id`` / ``since`` are explicit "resume here" anchors and
+    replaying from ``+`` would re-deliver entries the caller already saw
+    (the consumer-side repro for that path lives in
+    ``claude-rdc-hetzner-dc#771`` Finding 14 / #1305).
+
+    Returns:
+        * ``frames`` — prelude SSE frames to yield (empty when the cursor
+          is not ``$`` or the stream is empty).
+        * ``new_cursor`` — the cursor the BLOCK loop should read from.
+          Advanced to the most recent prelude entry id (NOT the last
+          matched one) so a busy-but-filtered tenant doesn't re-read the
+          same batch in the first BLOCK iteration. Left untouched when no
+          entries were fetched.
+        * ``error_frame_or_None`` — when the prelude XREVRANGE raises a
+          :class:`redis.exceptions.RedisError`, the formatted T11
+          ``event: feed_error`` frame; the caller yields it and returns.
+          Same operator-visible condition as the live-loop's first
+          ``xread`` failure (broadcast pod down on a fresh deploy).
+          ``None`` on the happy path.
+
+    Extracted out of :func:`_feed_generator` so the parent function stays
+    under the code-quality function-size + cyclomatic ceilings; the
+    UI bridge's :func:`_ui_feed_generator` shares the same prelude
+    shape and could adopt this helper too (kept independent for now
+    because the bridge does not emit T11 error frames — distinct
+    contract at the UI surface).
+    """
+    if cursor != _LIVE_TAIL_CURSOR:
+        return [], cursor, None
+    try:
+        prelude_frames, prelude_last_id = await _emit_backlog_prelude(
+            fast_client,
+            stream_key=stream_key,
+            op_class=op_class,
+            principal=principal,
+            target=target,
+        )
+    except RedisError as exc:
+        # Same operator-visible condition as the live-loop's first XREAD
+        # failure. Hand the formatted error frame back to the caller so
+        # the parent generator's yield/return is a single arm.
+        return (
+            [],
+            cursor,
+            _log_and_format_broadcast_unavailable(operator, stream_key, exc),
+        )
+    new_cursor = cursor if prelude_last_id is None else prelude_last_id
+    return prelude_frames, new_cursor, None
+
+
 async def _feed_generator(
     operator: Operator,
     cursor: str,
@@ -679,42 +742,22 @@ async def _feed_generator(
     """SSE generator: prelude → BLOCK on XREAD, delegate parsing, heartbeat-on-silence.
 
     See :func:`_run_prelude_and_advance_cursor` for the backlog-prelude
-    contract (cursor ``$`` only; RDC #771 Finding 14 / #1305 repro;
-    cursor advance past every prelude entry).
+    contract (cursor ``$`` only; RDC #771 Finding 14 / #1305 repro).
+    ``last_heartbeat`` tracks the wall-clock of the last *outbound*
+    yield so busy-but-filtered tenants still emit keepalives.
 
-    Heartbeat semantics — ``last_heartbeat`` tracks the wall-clock of
-    the **last outbound yield** (event frame or heartbeat), NOT the
-    last inbound XREAD result. A noisy tenant where every event is
-    filtered out for this subscriber still produces zero outbound
-    bytes; the "all entries filtered out" path emits an inline
-    heartbeat when the idle window has elapsed so both quiet and
-    busy-but-filtered tenants keep the connection alive against
-    nginx / ALB / CloudFront idle-timeout caps.
+    On client disconnect: re-raise per the asyncio cancellation
+    contract (Sonar S7497). On :class:`redis.exceptions.RedisError`:
+    one T11 ``feed_error`` frame + break. ``None`` from ``xread``
+    (BLOCK expired naturally) falls through to the heartbeat path.
 
-    On client disconnect Starlette raises
-    :class:`asyncio.CancelledError`; the handler logs and re-raises
-    per the asyncio cancellation contract (Sonar S7497). The audit
-    row at session end still records a clean 200 close because
-    ``http.response.start`` was sent on the first yield.
-
-    On :class:`redis.exceptions.RedisError` (connection refused,
-    transport failure, unexpected response) the generator emits one
-    T11-compliant ``event: feed_error`` frame and breaks. The
-    empty-stream case (Valkey reachable, no entries yet) is NOT a
-    failure: redis-py returns ``None`` from XREAD and the
-    :func:`_consume_xread_batch` helper falls through to the heartbeat
-    path.
-
-    Two clients, two contracts. The backlog prelude reads via the
-    short-timeout fast client (:func:`get_broadcast_client`,
-    ``socket_timeout=5 s``); the BLOCK loop reads via the long-timeout
-    blocking client (:func:`get_broadcast_blocking_client`,
-    ``socket_timeout=35 s``) so a 30 s ``XREAD BLOCK`` against a
+    Two clients, two contracts: backlog prelude via the fast client
+    (5 s ``socket_timeout``); BLOCK loop via the blocking client
+    (35 s ``socket_timeout``) so a 30 s ``XREAD BLOCK`` against a
     quiet stream returns ``None`` (the natural keepalive path) instead
     of raising ``redis.TimeoutError`` at the socket layer at 5 s —
-    the spurious ``feed_error`` frame catalogued in RDC #789 N1 /
-    Initiative #1353. See :mod:`meho_backplane.broadcast.client` for
-    the two-client rationale.
+    RDC #789 N1 / Initiative #1353. See
+    :mod:`meho_backplane.broadcast.client` for the rationale.
     """
     fast_client = get_broadcast_client()
     blocking_client = get_broadcast_blocking_client()
@@ -722,46 +765,22 @@ async def _feed_generator(
     last_heartbeat = time.monotonic()
 
     try:
-        # Backlog prelude — only when the caller didn't pin an explicit
-        # replay anchor. ``Last-Event-Id`` / ``since`` are honoured as
-        # "resume exactly here", which is incompatible with a backlog
-        # dump from "+" (would replay events the caller already saw).
-        # See the module docstring's *Replay* section for the full
-        # rationale and the consumer-side repro this addresses.
-        if cursor == _LIVE_TAIL_CURSOR:
-            try:
-                prelude_frames, prelude_last_id = await _emit_backlog_prelude(
-                    fast_client,
-                    stream_key=stream_key,
-                    op_class=op_class,
-                    principal=principal,
-                    target=target,
-                )
-            except RedisError as exc:
-                # Same operator-visible condition as the live-loop's
-                # first XREAD failure (broadcast pod down). Emit one
-                # T11-compliant error frame and break — the connection
-                # closes cleanly and ``EventSource`` reconnects per its
-                # spec semantics, which will re-evaluate Valkey
-                # reachability on the next handshake.
-                yield _log_and_format_broadcast_unavailable(operator, stream_key, exc)
-                return
-            for frame in prelude_frames:
-                yield frame
-            if prelude_last_id is not None:
-                # Advance past every prelude entry — including the ones
-                # that filtered out — so the BLOCK loop reads strictly
-                # past the prelude window. Without this advance, a
-                # fully-filtered prelude would leave cursor at ``$``,
-                # the BLOCK loop would silently re-skip every prelude
-                # entry on its next read (XREAD with id strictly later
-                # than $ never returns older entries, but a busy stream
-                # could still flag this as "we re-fetched and the
-                # filter dropped them again"). Setting the cursor here
-                # makes the intent explicit.
-                cursor = prelude_last_id
-            if prelude_frames:
-                last_heartbeat = time.monotonic()
+        prelude_frames, cursor, prelude_error_frame = await _run_prelude_and_advance_cursor(
+            fast_client,
+            operator=operator,
+            stream_key=stream_key,
+            cursor=cursor,
+            op_class=op_class,
+            principal=principal,
+            target=target,
+        )
+        if prelude_error_frame is not None:
+            yield prelude_error_frame
+            return
+        for frame in prelude_frames:
+            yield frame
+        if prelude_frames:
+            last_heartbeat = time.monotonic()
         while True:
             try:
                 entries = await blocking_client.xread(
@@ -770,24 +789,10 @@ async def _feed_generator(
                     count=_XREAD_COUNT,
                 )
             except RedisError as exc:
-                # Catch the full ``RedisError`` family — its concrete
-                # subclasses (``ConnectionError``, ``TimeoutError``,
-                # ``ResponseError``) all share the same operator-side
-                # remediation: "the broadcast subsystem is not
-                # reachable; check the broadcast pod / network /
-                # ``BROADCAST_REDIS_URL`` and read the doc". A single
-                # ``feed_error`` frame is the right granularity at the
-                # SSE boundary; the helper handles structured logging
-                # and frame formatting in one paired call.
-                #
-                # Re-raising would propagate to FastAPI's default
-                # handler — but ``http.response.start`` was already
-                # sent on the first iteration (or on a prior yielded
-                # frame on subsequent iterations), so FastAPI cannot
-                # swap to a 5xx body; the consumer sees a bare drop.
-                # Yielding a structured frame + breaking the loop
-                # gives the client a recoverable signal and lets the
-                # underlying transport close cleanly.
+                # All ``RedisError`` subclasses share the same operator-side
+                # remediation; one ``feed_error`` frame + break lets the
+                # consumer close cleanly (``http.response.start`` is already
+                # past, so FastAPI cannot swap to a 5xx body).
                 yield _log_and_format_broadcast_unavailable(operator, stream_key, exc)
                 break
             now = time.monotonic()
@@ -807,10 +812,8 @@ async def _feed_generator(
                 yield ": heartbeat\n\n"
                 last_heartbeat = now
     except asyncio.CancelledError:
-        # Client disconnect. Log the structured event for operator
-        # triage, then re-raise so the task tree unwinds per asyncio's
-        # cancellation contract — Sonar S7497, Python 3.13+ asyncio
-        # internals (re-issue cancellation if it goes unpropagated).
+        # Client disconnect — log + re-raise per the asyncio cancellation
+        # contract (Sonar S7497).
         _log.info(
             "feed_subscriber_disconnected",
             stream_key=stream_key,

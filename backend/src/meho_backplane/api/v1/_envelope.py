@@ -43,14 +43,16 @@ endpoint.
 
 Code reference: see :func:`meho_backplane.api.v1.targets.list_targets`
 for the reference adoption (the first endpoint widened to honour the
-opt-in). G0.16-T6 Finding A (#1312) partially landed this round
-— the targets endpoint as the reference. The four sister
-endpoints
+opt-in). All five §2 list endpoints now accept the opt-in: the
+``targets`` reference and the topology ``dependents`` /
+``dependencies`` endpoints (G0.16-T6 Finding A #1312), plus the four
+sister endpoints
 (``conventions`` / ``audit/my-recent`` / ``broadcast/overrides``
-/ ``connectors``) plus the CLI / MCP sister-surface forwarding
-ship in a follow-up Task; see the result file
-``.claude/auto/state/issue-1312-attempt-1.json``
-under ``findings_deferred``.
+/ ``connectors``) widened by G0.18-T3 (#1356), completing #1312
+acceptance A. The MCP sister tools are v2-native (they call the
+service layer in-process and return their own list shapes, with no
+HTTP ``?envelope=`` param to forward); the CLI typed clients consume
+the v0.8.0 default shape, so neither forwards the param.
 """
 
 from __future__ import annotations

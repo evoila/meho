@@ -121,6 +121,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
 from fastapi.responses import JSONResponse, Response
 
+from meho_backplane.api.v1._envelope import (
+    ENVELOPE_QUERY,
+    EnvelopeVersion,
+    wrap_v2_envelope,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.operations.ingest import (
@@ -851,7 +856,8 @@ async def _run_ingest_with_http_mapping(
 async def list_endpoint(
     status: ConnectorStatusFilter | None = Query(default=None),
     operator: Operator = _require_operator,
-) -> dict[str, list[dict[str, object]]]:
+    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
+) -> dict[str, list[dict[str, object]]] | dict[str, object]:
     """List ingested connectors visible to the operator.
 
     Visibility scope (per
@@ -859,21 +865,31 @@ async def list_endpoint(
     built-ins. The optional ``status`` filter narrows by aggregated
     review status; ``all`` (or omission) returns everything.
 
-    The response is wrapped in ``{"connectors": [...]}`` so future
-    paging / cursor fields can land non-breakingly. The route builds
-    the payload by calling :meth:`ConnectorListItem.model_dump`
+    The default response is wrapped in ``{"connectors": [...]}`` so
+    future paging / cursor fields can land non-breakingly. The route
+    builds the payload by calling :meth:`ConnectorListItem.model_dump`
     (with ``mode="json"``) on each item returned by
     :func:`list_ingested_connectors` rather than annotating
     ``response_model=ConnectorListResponse`` — per-item ``tenant_id``
     UUIDs need to render as strings in JSON, and the per-item
     ``mode="json"`` dump is the simplest way to get that without
     introducing a custom serializer.
+
+    Passing ``?envelope=v2`` returns the unified ``{"items": [...],
+    "next_cursor": ...}`` shape per
+    ``docs/codebase/api-shape-conventions.md`` §2. This listing is
+    not cursor-paginated, so ``next_cursor`` is always ``None`` under
+    the opt-in. Omitting the param keeps the v0.8.0 default shape so
+    no client breaks (G0.18-T3 #1356, completing #1312 acceptance A).
     """
     items = await list_ingested_connectors(
         operator=operator,
         status=status,
     )
-    return {"connectors": [item.model_dump(mode="json") for item in items]}
+    serialised = [item.model_dump(mode="json") for item in items]
+    if envelope == "v2":
+        return wrap_v2_envelope(serialised, next_cursor=None)
+    return {"connectors": serialised}
 
 
 @router.get("/catalog", response_model=CatalogListResponse)

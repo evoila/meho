@@ -207,11 +207,30 @@ adoption on
 via the shared helper
 [`backend/src/meho_backplane/api/v1/_envelope.py`](../../backend/src/meho_backplane/api/v1/_envelope.py)
 (``EnvelopeVersion`` type, ``ENVELOPE_QUERY`` declaration,
-``wrap_v2_envelope`` builder). The four sister endpoints
-(``conventions`` / ``audit/my-recent`` / ``broadcast/overrides`` /
-``connectors``) plus the CLI / MCP sister-surface forwarding ship
-in a follow-up Task — the helper module is shared so the
-remaining adoptions are 5-line patches per endpoint.
+``wrap_v2_envelope`` builder). All five list endpoints now accept
+the opt-in: `targets` (the reference) and the topology
+`dependents`/`dependencies` reads in #1312, plus the four sister
+endpoints (``conventions`` / ``audit/my-recent`` /
+``broadcast/overrides`` / ``connectors``) in G0.18-T3 (#1356),
+completing #1312 acceptance A. The ``connectors``, ``conventions``,
+and ``broadcast/overrides`` lists are unpaginated, so their
+``next_cursor`` is always ``null`` under the opt-in; ``conventions``
+carries ``budget_status`` as a top-level sidecar.
+
+The three sister endpoints with a named/typed v0.8.0 response model
+(``conventions`` → ``ConventionListResponse``, ``audit/my-recent``
+→ ``AuditQueryResult``, ``broadcast/overrides`` →
+``[BroadcastOverrideRead]``) keep ``response_model`` on the route and
+emit the v2 envelope via a raw ``JSONResponse`` in the opt-in branch.
+That preserves the named OpenAPI 200 schema — and the typed CLI
+client generated from it — while still returning the unified shape
+under ``?envelope=v2`` (a union return type would collapse the
+schema to ``anyOf`` and break the generated Go client).
+
+Sister-surface forwarding: the MCP list tools call the service layer
+in-process and return their own list shapes (no HTTP ``?envelope=``
+param to forward), and the CLI typed clients consume the v0.8.0
+default shape — so neither forwards the opt-in.
 
 ## 3. Enum vocabulary discipline
 

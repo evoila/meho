@@ -151,6 +151,34 @@ connector-related release-notes line.
   `LlmClient` adapter at lifespan startup remains the
   operator-side follow-up.
 
+### Documentation
+
+- **`/mcp` root-mount carve-out documented + `/api/v1/mcp`
+  phantom-path confusion closed (G0.18-T9 #1362, RDC #789
+  mcp-route).** A new §13 in `docs/codebase/api-shape-conventions.md`
+  ("Route-prefix placement: `/api/v1/*` vs the `/mcp` carve-out")
+  codifies the convention that every chassis HTTP surface lives
+  under `/api/v1/*` while the MCP endpoint is the lone, deliberate
+  root-mount at `/mcp` — required by the MCP 2025-06-18 transport
+  contract (clients use the bare server URL), RFC 9728
+  protected-resource discovery (`resource` claim binds to
+  `${BACKPLANE_URL}/mcp`), and the OAuth `aud` audience binding
+  the same. The section also pins the tool-name-≠-path-segment rule
+  (`query_topology` is a JSON-RPC body parameter, never a URL
+  segment — the REST sister is `/api/v1/topology/*`, not
+  `/api/v1/query/topology`) and ships a phantom-paths-that-never-
+  existed table so future consumer probe scripts stop deriving
+  `/api/v1/mcp` from the `/api/v1/*` pattern. One-line cross-links
+  from `docs/architecture/mcp.md` (Transport) and
+  `docs/cross-repo/mcp-client-setup.md` (Why this doc exists)
+  point at §13. No code change; a 308 alias from
+  `/api/v1/mcp` → `/mcp` was considered and rejected because the
+  OAuth `aud` is bound to `/mcp` so a client following the
+  redirect would 401 post-redirect with `invalid_audience`. The
+  three v0.8.x dogfood cycles' recurring "mcp-route moved" finding
+  was INVALID-as-framed every time; the routes are correct and
+  stable since v0.2.0 (#266).
+
 ## [0.8.1] - 2026-05-29
 
 ### Added

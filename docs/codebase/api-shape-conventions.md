@@ -733,3 +733,142 @@ finding that surfaced the need. New conventions land as new
 sections during the dogfood cycle they emerge from. The
 convention itself is what we hold to going forward; the historical
 finding is the citation, not the convention.
+
+## 13. Route-prefix placement: `/api/v1/*` vs the `/mcp` carve-out
+
+**Every chassis HTTP surface lives under `/api/v1/*`. The MCP
+endpoint is the lone, deliberate carve-out at `/mcp` — root-mounted,
+unversioned, single-path. Tool *names* are not URL path segments;
+splicing a tool name onto the REST prefix produces a phantom path.**
+
+RDC #789's `mcp-route-and-response-format-changed-v0.8.0` finding
+(judged INVALID-as-framed) is the third dogfood cycle in a row where
+a consumer's probe script reached for `/api/v1/mcp` (and, paired,
+`/api/v1/query/topology`) on the assumption that "everything else is
+`/api/v1/*` so MCP must be too" / "the MCP tool is called
+`query_topology` so the REST endpoint must be
+`/api/v1/query/topology`." Neither path has ever existed in any tag
+of either repo (archaeology across all 10 tags + 1492 commits;
+canonical MCP endpoint introduced in v0.2.0 #266 and never moved).
+The routes are correct and stable; the doc gap that re-seeds the
+wrong guess is what this section closes.
+
+### The convention
+
+- **Versioned chassis routes** — every operator-facing HTTP surface
+  that the chassis owns (targets, topology, connectors, audit, feed,
+  health, runbook templates / runs, kb, memory, operations, retrieve,
+  broadcast overrides, agent grants, …) lives under `/api/v1/*`. The
+  prefix is registered in
+  [`backend/src/meho_backplane/main.py`](../../backend/src/meho_backplane/main.py)
+  via per-router `app.include_router(...)` calls; each router declares
+  `APIRouter(prefix="/api/v1/<resource>", ...)`.
+- **MCP root-mount carve-out** — the MCP endpoint is mounted at
+  bare `/mcp`, unversioned and outside the `/api/v1/*` namespace.
+  The router declares
+  [`APIRouter(prefix="/mcp", tags=["mcp"])`](../../backend/src/meho_backplane/mcp/server.py)
+  and the single dispatch handler is
+  [`@router.post("")`](../../backend/src/meho_backplane/mcp/server.py);
+  mounted by `app.include_router(mcp_router)` in
+  [`main.py`](../../backend/src/meho_backplane/main.py)
+  with no prefix override.
+- **MCP tool names are not URL path segments.** Tool names
+  (`query_topology`, `call_operation`, `search_knowledge`, …) are
+  JSON-RPC method-call parameters passed in the body of `POST /mcp`;
+  they never appear in any URL. Their corresponding REST endpoints
+  (when one exists) name the *resource*, not the *tool*:
+  `query_topology` ↔ `/api/v1/topology/*`, `query_audit` ↔
+  `/api/v1/audit/*`, `call_operation` ↔ `/api/v1/operations/call`.
+
+### Why MCP is root-mounted (load-bearing — do not "fix")
+
+The carve-out is required by the MCP 2025-06-18 transport contract
+and the OAuth 2.1 resource-server pattern §4 documents:
+
+- **MCP clients use the bare server URL.** [Claude.ai Custom
+  Connector](https://modelcontextprotocol.io/docs/develop/connect-remote-servers),
+  MCP Inspector, Cline, Continue, and every other spec-conformant
+  client expect a single Streamable-HTTP endpoint URL — they do not
+  walk a versioned API prefix. Operators paste
+  `https://meho.example.com/mcp` into the connector card; the client
+  speaks JSON-RPC at that URL and nowhere else.
+- **The protected-resource discovery URL is built off `/mcp`.**
+  [RFC 9728 §4.1](https://datatracker.ietf.org/doc/html/rfc9728#section-4.1)
+  pins the `resource` claim on the metadata document at
+  `/.well-known/oauth-protected-resource`; MEHO defaults
+  `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp`
+  ([`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py),
+  also called out in
+  [`docs/cross-repo/mcp-client-setup.md`](../cross-repo/mcp-client-setup.md)
+  Step 1).
+- **The OAuth `aud` claim is bound to that exact URI.** Tokens issued
+  by Keycloak for MCP carry `aud=${BACKPLANE_URL}/mcp` (mandated by
+  the audience-protocol-mapper recipe in
+  [`docs/cross-repo/mcp-client-setup.md`](../cross-repo/mcp-client-setup.md)
+  Step 1). The MCP audience is **distinct** from the chassis HTTP-API
+  audience (`KEYCLOAK_AUDIENCE`) — an HTTP-API JWT does not satisfy
+  the MCP route and vice versa
+  ([`docs/architecture/mcp.md`](../architecture/mcp.md) §"OAuth 2.1
+  resource-server pattern").
+
+A "compat alias" via 308 redirect from `/api/v1/mcp` → `/mcp` would
+not help: the OAuth token's `aud` is bound to `${BACKPLANE_URL}/mcp`
+(no `/api/v1` prefix), so a client following the redirect would 401
+post-redirect with `invalid_audience`. There is no useful fix on the
+code side. The fix is documentation.
+
+### Phantom paths that have never existed
+
+For the avoidance of doubt — and for future consumer probe scripts
+that grep this section before trying to derive a URL:
+
+| Phantom path | Why guessed | What's actually there |
+|---|---|---|
+| `POST /api/v1/mcp` | "Everything else is `/api/v1/*` so MCP must be too." | `POST /mcp` (root-mounted, since v0.2.0 #266; never moved). A request to `/api/v1/mcp` returns 404. |
+| `POST /api/v1/query/topology` | "The MCP tool is called `query_topology` so the REST endpoint must be too." | REST: `GET /api/v1/topology/{dependents,dependencies,path,…}/{name}` (since v0.2.1 #560). MCP: the `query_topology` tool dispatches under `POST /mcp` with `method="tools/call"` and `params.name="query_topology"`. The string `query_topology` is a JSON-RPC method-call parameter, not a path segment. |
+| `POST /api/v1/query/audit`, `…/call/operation`, `…/search/operations`, … (any `/api/v1/<tool-name-with-underscores-rewritten-as-slashes>`) | Same splice as the topology row. | `POST /mcp` for the MCP tool; the REST sister (if any) names the *resource* (`/api/v1/audit/*`, `/api/v1/operations/call`, `/api/v1/operations/search`), not the tool. |
+
+The complete agent-facing MCP tool surface (~17 meta-tools) is
+listed in [`docs/architecture/mcp.md`](../architecture/mcp.md) "Architectural
+correction (2026-05-14)"; none of these names is ever a URL path
+segment.
+
+### Response format (so consumers don't re-litigate "format changed")
+
+- **HTTP verb + content-type.** `POST /mcp` with
+  `Content-Type: application/json`. Body is a single JSON-RPC 2.0
+  envelope — batch arrays are unsupported (MCP Streamable HTTP
+  mandates single envelopes).
+- **Response body.** JSON-RPC 2.0 over **plain JSON** (no SSE, no
+  chunked streaming on the response). Stable since v0.2.0. The
+  response shapes per spec §"Sending Messages to the Server" are
+  catalogued in
+  [`docs/architecture/mcp.md`](../architecture/mcp.md) "Transport"
+  (Request → 200 + JSON envelope; Notification → 202 no body; parse
+  / invalid-request errors → 200 + JSON-RPC error envelope;
+  unsupported `MCP-Protocol-Version` → 400 + JSON-RPC error per spec
+  MUST; etc.).
+- **`GET /mcp` returns HTTP 405.** FastAPI's default for an
+  unmatched method, which satisfies the spec's fallback when the
+  server doesn't implement the GET-opens-SSE branch of the
+  Streamable HTTP transport. The 405 is intentional — not a missing
+  route, not a misconfiguration.
+
+### Forward convention for new surfaces
+
+- **New chassis HTTP endpoints** go under `/api/v1/*`. No new
+  unversioned root mounts.
+- **New MCP tools** are added under the existing `/mcp` endpoint as
+  JSON-RPC method-call params (see
+  [`docs/architecture/mcp.md`](../architecture/mcp.md) "Adding an
+  MCP tool"). No new MCP-shaped routes, no per-tool URL endpoints,
+  no `/api/v1/<tool-name>` aliases.
+- **Cross-references for any future "MCP route moved" finding.**
+  The MCP prefix is `"/mcp"` in
+  [`backend/src/meho_backplane/mcp/server.py`](../../backend/src/meho_backplane/mcp/server.py)
+  and that string has never been edited since the file was
+  introduced in v0.2.0 (#266). The mount-time include in
+  [`backend/src/meho_backplane/main.py`](../../backend/src/meho_backplane/main.py)
+  carries no prefix override. Both anchors are CI-grep-able; before
+  re-filing a "route moved" finding, confirm against these files
+  directly.

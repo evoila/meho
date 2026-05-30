@@ -156,7 +156,11 @@ from redis.exceptions import RedisError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.broadcast import BroadcastEvent, get_broadcast_client
+from meho_backplane.broadcast import (
+    BroadcastEvent,
+    get_broadcast_blocking_client,
+    get_broadcast_client,
+)
 
 __all__ = ["router"]
 
@@ -674,57 +678,46 @@ async def _feed_generator(
 ) -> AsyncIterator[str]:
     """SSE generator: prelude → BLOCK on XREAD, delegate parsing, heartbeat-on-silence.
 
-    Backlog prelude — when *cursor* is ``$`` (the live-tail default
-    selected by :func:`_resolve_cursor` when neither ``Last-Event-Id``
-    nor ``since`` is provided), the generator first calls
-    :func:`_emit_backlog_prelude` to replay the most recent
-    :data:`_BACKLOG_PRELUDE_COUNT` entries on the stream. This solves
-    the consumer-visible bug surfaced by ``claude-rdc-hetzner-dc#771``
-    Finding 14 (G0.16-T3, #1305): a fresh
-    ``GET /api/v1/feed`` against a tenant with existing entries but
-    no new writes during the test window otherwise returns zero bytes
-    for ``_HEARTBEAT_INTERVAL_SECONDS`` (``$`` skips backlog AND the
-    heartbeat cadence is 30 s), tripping curl / EventSource
-    intermediary timeouts before any byte is observed. The prelude
-    also gives the ``/ui/broadcast`` page a populated initial render
-    instead of a misleading empty list under a "Live activity" header.
-    Subscribers that pass an explicit replay cursor
-    (``Last-Event-Id`` or ``since``) skip the prelude — those cursors
-    are "resume exactly here" anchors and the caller already saw the
-    history.
+    See :func:`_run_prelude_and_advance_cursor` for the backlog-prelude
+    contract (cursor ``$`` only; RDC #771 Finding 14 / #1305 repro;
+    cursor advance past every prelude entry).
 
     Heartbeat semantics — ``last_heartbeat`` tracks the wall-clock of
     the **last outbound yield** (event frame or heartbeat), NOT the
     last inbound XREAD result. A noisy tenant where every event is
     filtered out for this subscriber still produces zero outbound
-    bytes; without this guarantee the connection would idle-timeout
-    at the nginx / ALB / CloudFront layer. The "all entries filtered
-    out" path therefore emits an inline heartbeat when the idle
-    window has elapsed — both quiet and busy-but-filtered tenants
-    keep the connection alive.
+    bytes; the "all entries filtered out" path emits an inline
+    heartbeat when the idle window has elapsed so both quiet and
+    busy-but-filtered tenants keep the connection alive against
+    nginx / ALB / CloudFront idle-timeout caps.
 
     On client disconnect Starlette raises
-    :class:`asyncio.CancelledError` into the pending ``xread`` await;
-    the handler logs and re-raises per the asyncio cancellation
-    contract (Sonar S7497 — swallowing CancelledError breaks the task
-    tree's unwind invariants and Python 3.13+ asyncio internals re-
-    issue cancellation when it goes unpropagated). The audit row at
-    session end still records a clean 200 close because
-    ``http.response.start`` was sent on the first yield (before any
-    cancellation point), so AuditMiddleware's buffered status_code
-    is already locked at 200.
+    :class:`asyncio.CancelledError`; the handler logs and re-raises
+    per the asyncio cancellation contract (Sonar S7497). The audit
+    row at session end still records a clean 200 close because
+    ``http.response.start`` was sent on the first yield.
 
     On :class:`redis.exceptions.RedisError` (connection refused,
-    transport timeout, unexpected response) the generator emits one
+    transport failure, unexpected response) the generator emits one
     T11-compliant ``event: feed_error`` frame and breaks. The
     empty-stream case (Valkey reachable, no entries yet) is NOT a
     failure: redis-py returns ``None`` from XREAD and the
     :func:`_consume_xread_batch` helper falls through to the heartbeat
-    path. The failure handled here is the genuinely-broken case
-    (broadcast pod down, network partition) — signal 10 of
-    ``claude-rdc-hetzner-dc#697``.
+    path.
+
+    Two clients, two contracts. The backlog prelude reads via the
+    short-timeout fast client (:func:`get_broadcast_client`,
+    ``socket_timeout=5 s``); the BLOCK loop reads via the long-timeout
+    blocking client (:func:`get_broadcast_blocking_client`,
+    ``socket_timeout=35 s``) so a 30 s ``XREAD BLOCK`` against a
+    quiet stream returns ``None`` (the natural keepalive path) instead
+    of raising ``redis.TimeoutError`` at the socket layer at 5 s —
+    the spurious ``feed_error`` frame catalogued in RDC #789 N1 /
+    Initiative #1353. See :mod:`meho_backplane.broadcast.client` for
+    the two-client rationale.
     """
-    client = get_broadcast_client()
+    fast_client = get_broadcast_client()
+    blocking_client = get_broadcast_blocking_client()
     stream_key = _stream_key(operator)
     last_heartbeat = time.monotonic()
 
@@ -738,7 +731,7 @@ async def _feed_generator(
         if cursor == _LIVE_TAIL_CURSOR:
             try:
                 prelude_frames, prelude_last_id = await _emit_backlog_prelude(
-                    client,
+                    fast_client,
                     stream_key=stream_key,
                     op_class=op_class,
                     principal=principal,
@@ -771,7 +764,7 @@ async def _feed_generator(
                 last_heartbeat = time.monotonic()
         while True:
             try:
-                entries = await client.xread(
+                entries = await blocking_client.xread(
                     {stream_key: cursor},
                     block=_XREAD_BLOCK_MS,
                     count=_XREAD_COUNT,

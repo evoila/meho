@@ -84,7 +84,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 import structlog
 from redis.exceptions import RedisError
 
-from meho_backplane.broadcast.client import get_broadcast_client
+from meho_backplane.broadcast.client import get_broadcast_blocking_client
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -321,7 +321,13 @@ async def wait_for_approval_decision(
         agent's cooperative-cancellation tree.
     """
     deadline = time.monotonic() + timeout_seconds
-    client = get_broadcast_client()
+    # Long-poll client; per-iteration BLOCK is _BLOCK_WINDOW_MS (5 s). The
+    # fast client's 5 s socket_timeout races the BLOCK exit (either could
+    # win at the boundary), producing spurious redis.TimeoutError raises
+    # that the loop has to absorb into a back-off; the blocking client's
+    # 35 s socket_timeout removes the race so a quiet stream returns
+    # cleanly from XREAD with no entries. RDC #789 N1 / Initiative #1353.
+    client = get_broadcast_blocking_client()
     stream_key = _stream_key(tenant_id)
     target_request_id = str(approval_request_id)
     # ``"$"`` is the Valkey "tail from the moment of this call" cursor. The

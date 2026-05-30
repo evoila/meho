@@ -68,9 +68,12 @@ from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import (
     BroadcastEvent,
+    dispose_broadcast_blocking_client,
     dispose_broadcast_client,
+    get_broadcast_blocking_client,
     get_broadcast_client,
     publish_event,
+    reset_broadcast_blocking_client_for_testing,
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.middleware import RequestContextMiddleware
@@ -96,8 +99,10 @@ _TENANT_B: UUID = UUID("22222222-2222-2222-2222-222222222222")
 @pytest.fixture(autouse=True)
 def _isolated_broadcast_client() -> Iterator[None]:
     reset_broadcast_client_for_testing()
+    reset_broadcast_blocking_client_for_testing()
     yield
     reset_broadcast_client_for_testing()
+    reset_broadcast_blocking_client_for_testing()
 
 
 @pytest.fixture(autouse=True)
@@ -302,7 +307,7 @@ async def _drive_generator_with_one_batch(
     per-test bodies stop repeating the AsyncMock / patch.object /
     _feed_generator scaffold (SonarCloud duplication-on-new-code).
     """
-    broadcast_client = get_broadcast_client()
+    broadcast_client = get_broadcast_blocking_client()
     call_count = {"n": 0}
 
     async def _xread_side_effect(*_a: object, **_k: object) -> object:
@@ -475,7 +480,7 @@ class TestFeedGenerator:
     async def test_basic_event_yield_with_tenant_scoping(self, _feed_env: None) -> None:
         """One event → one well-formed SSE frame; stream key is JWT-derived."""
         event = _make_event(tenant_id=_TENANT_A)
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         mock = _xread_returning([event])
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _feed_generator(
@@ -505,7 +510,7 @@ class TestFeedGenerator:
     async def test_filter_by_op_class(self, _feed_env: None) -> None:
         read_event = _make_event(op_class="read", op_id="vsphere.vm.list")
         write_event = _make_event(op_class="write", op_id="vsphere.vm.create")
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         mock = _xread_returning([read_event, write_event])
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _feed_generator(
@@ -528,7 +533,7 @@ class TestFeedGenerator:
     async def test_filter_by_principal(self, _feed_env: None) -> None:
         a_event = _make_event(principal_sub="alice")
         b_event = _make_event(principal_sub="bob")
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         mock = _xread_returning([a_event, b_event])
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _feed_generator(
@@ -552,7 +557,7 @@ class TestFeedGenerator:
         vcenter_event = _make_event(target_name="rdc-vcenter")
         k8s_event = _make_event(target_name="rdc-k8s")
         no_target_event = _make_event(target_name=None)
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         mock = _xread_returning([vcenter_event, k8s_event, no_target_event])
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _feed_generator(
@@ -605,7 +610,7 @@ class TestFeedGenerator:
         # heartbeat window to elapse.
         write_event_a = _make_event(op_class="write", op_id="vsphere.vm.create")
         write_event_b = _make_event(op_class="write", op_id="vsphere.vm.delete")
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         items = [
             (f"{1715600000000 + i}-0", {"event": event.model_dump_json()})
             for i, event in enumerate([write_event_a, write_event_b])
@@ -668,7 +673,7 @@ class TestFeedGenerator:
         write_a = _make_event(op_class="write", op_id="vsphere.vm.create")
         write_b = _make_event(op_class="write", op_id="vsphere.vm.delete")
         read_c = _make_event(op_class="read", op_id="vsphere.vm.list")
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         seen_cursors: list[str] = []
 
         async def _xread_side_effect(
@@ -725,7 +730,7 @@ class TestFeedGenerator:
 
     async def test_cursor_passes_through_to_xread(self, _feed_env: None) -> None:
         """The cursor argument (already resolved by the handler) is what xread sees."""
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         event = _make_event(tenant_id=_TENANT_A)
         mock = _xread_returning([event])
         with patch.object(broadcast_client, "xread", new=mock):
@@ -787,7 +792,7 @@ class TestFeedGenerator:
         """
         import redis.exceptions as redis_exc
 
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         mock = AsyncMock(side_effect=redis_exc.ConnectionError("connection refused"))
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _feed_generator(
@@ -834,7 +839,7 @@ class TestFeedGenerator:
         """
         import redis.exceptions as redis_exc
 
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         mock = AsyncMock(
             side_effect=redis_exc.ResponseError(
                 "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -863,14 +868,30 @@ class TestFeedGenerator:
         # response body. Only the exception class name lands.
         assert "WRONGTYPE" not in decoded["message"]
 
-    async def test_xread_error_mid_stream_emits_feed_error_after_prior_events(
+    async def test_transport_timeout_mid_stream_emits_feed_error_after_prior_events(
         self,
         _feed_env: None,
     ) -> None:
-        """First call returns events, second call raises → events flow then error frame."""
+        """First call returns events, second raises ``TimeoutError`` → events then error frame.
+
+        Post RDC #789 N1 / Initiative #1353: ``redis.TimeoutError`` from
+        ``xread`` no longer fires at ~5 s on a quiet stream — the
+        blocking client's 35 s ``socket_timeout`` exceeds the 30 s
+        ``XREAD BLOCK`` window, so a quiet BLOCK expires naturally and
+        ``xread`` returns ``None`` (covered by the new
+        :meth:`test_quiet_stream_block_timeout_yields_no_error_frame`).
+        A ``TimeoutError`` propagating out of ``xread`` therefore now
+        signals a *genuine* transport failure: socket dead longer than
+        the configured ``socket_timeout``. That remains a
+        ``broadcast_subsystem_unavailable`` condition — the operator
+        side cannot distinguish "blocked too long" from "broker died"
+        and the remediation is the same (chase the broadcast pod /
+        network); the SSE consumer sees a single ``feed_error`` frame
+        and a clean close.
+        """
         import redis.exceptions as redis_exc
 
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         event = _make_event(tenant_id=_TENANT_A)
         items = [("1715600000000-0", {"event": event.model_dump_json()})]
         call_count = {"n": 0}
@@ -879,7 +900,12 @@ class TestFeedGenerator:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return [(f"meho:feed:{_TENANT_A}", items)]
-            raise redis_exc.TimeoutError("BLOCK timed out at the transport layer")
+            # Genuine transport timeout — socket dead past the blocking
+            # client's 35 s socket_timeout. Distinct from "BLOCK
+            # expired naturally on a quiet stream" (xread returns None),
+            # which the post-fix generator handles via the heartbeat
+            # path without an error frame.
+            raise redis_exc.TimeoutError("transport socket timed out")
 
         mock = AsyncMock(side_effect=_xread_side_effect)
         with patch.object(broadcast_client, "xread", new=mock):
@@ -907,6 +933,140 @@ class TestFeedGenerator:
         )
         assert decoded["code"] == "broadcast_subsystem_unavailable"
         assert "TimeoutError" in decoded["message"]
+
+    async def test_quiet_stream_block_timeout_yields_no_error_frame(
+        self,
+        _feed_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``xread`` returning ``None`` (quiet-stream BLOCK expiry) → heartbeat, NOT ``feed_error``.
+
+        Pre RDC #789 N1: redis-py's 5 s ``socket_timeout`` (pinned on
+        the single process-wide client) raised
+        ``redis.TimeoutError`` from inside the 30 s ``XREAD BLOCK`` on
+        every fresh SSE connection within ~5 s, producing a spurious
+        ``feed_error`` frame on a healthy substrate.
+
+        Post-fix: the blocking client's 35 s ``socket_timeout`` exceeds
+        the 30 s BLOCK window, so a quiet stream's BLOCK now expires
+        naturally and ``xread`` returns ``None`` — the
+        :func:`_consume_xread_batch` "no entries" path. The generator
+        treats that as the keep-alive signal: the next loop iteration
+        emits a heartbeat once
+        :data:`_HEARTBEAT_INTERVAL_SECONDS` of outbound silence has
+        elapsed, never a ``feed_error``. Asserted here at the
+        generator layer with a sub-second heartbeat interval so the
+        test exits in milliseconds instead of the production 30 s.
+        """
+        from meho_backplane.api.v1 import feed as feed_module
+
+        # Sub-second heartbeat interval so the test exits quickly.
+        monkeypatch.setattr(feed_module, "_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+
+        broadcast_client = get_broadcast_blocking_client()
+        call_count = {"n": 0}
+
+        async def _xread_side_effect(*_a: object, **_k: object) -> object:
+            call_count["n"] += 1
+            # Mirror redis-py's BLOCK-expired-naturally contract: an
+            # await point yields to the loop, then None comes back
+            # (no entries arrived inside the BLOCK window).
+            await asyncio.sleep(0.1)
+            return None
+
+        mock = AsyncMock(side_effect=_xread_side_effect)
+        with patch.object(broadcast_client, "xread", new=mock):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            frames = await _collect_n_frames(gen, n=1, timeout=2.0)
+
+        # Exactly the heartbeat — never a ``feed_error`` frame on a
+        # quiet stream after the fix. This is the test that would have
+        # *failed* against the pre-fix shape (where xread raised
+        # TimeoutError at ~5 s and the generator yielded the
+        # broadcast_subsystem_unavailable frame).
+        assert len(frames) == 1
+        assert frames[0] == ": heartbeat\n\n"
+        # The mock was called at least once (the BLOCK loop entered);
+        # asserting on call count > 0 keeps the test robust to the
+        # event loop scheduling between the heartbeat emission and
+        # the test's collect-loop exit.
+        assert mock.await_count >= 1
+
+    async def test_fresh_dollar_quiet_stream_survives_past_fast_socket_timeout(
+        self,
+        _feed_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fresh ``$`` SSE reader survives a >5 s quiet window without ``feed_error``.
+
+        Direct repro of the RDC #789 N1 consumer signal: open a
+        ``GET /api/v1/feed`` (cursor=``$``) against a tenant with no
+        new writes; pre-fix, the connection died at ~5 s with a
+        spurious ``broadcast_subsystem_unavailable`` frame because
+        ``socket_timeout=5.0`` (on the single process-wide client)
+        was shorter than the 30 s ``XREAD BLOCK`` window.
+
+        Post-fix, the blocking client's ``socket_timeout=35 s`` lets
+        the BLOCK expire naturally (``xread`` returns ``None``) and
+        the generator emits a heartbeat. This test compresses time
+        (sub-second BLOCK and heartbeat intervals) and asserts on the
+        relevant shape: a quiet window longer than the *fast*
+        client's 5 s timeout produces a heartbeat, not a
+        ``feed_error``.
+
+        Pinned to the prelude path's empty-stream branch so the test
+        covers the fresh-``$`` connection shape end to end: prelude
+        ``XREVRANGE`` returns no entries (empty stream) → BLOCK loop
+        enters with cursor ``$`` → ``xread`` returns ``None`` after
+        the BLOCK window → heartbeat.
+        """
+        from meho_backplane.api.v1 import feed as feed_module
+
+        # Sub-second cadence so the test runs in milliseconds, not 35 s.
+        monkeypatch.setattr(feed_module, "_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+
+        fast_client = get_broadcast_client()
+        blocking_client = get_broadcast_blocking_client()
+        # Empty XREVRANGE — fresh tenant with no backlog entries.
+        prelude = AsyncMock(return_value=[])
+
+        async def _quiet_block(*_a: object, **_k: object) -> object:
+            # Quiet BLOCK: wait longer than the fast client's 5 s
+            # socket_timeout pre-fix would have allowed, then return
+            # None (BLOCK expired naturally). The compressed sleep
+            # here stands in for the real 30 s BLOCK window; the
+            # contract under test is "None from xread → heartbeat,
+            # never a feed_error".
+            await asyncio.sleep(0.1)
+            return None
+
+        idle_xread = AsyncMock(side_effect=_quiet_block)
+        with (
+            patch.object(fast_client, "xrevrange", new=prelude),
+            patch.object(blocking_client, "xread", new=idle_xread),
+        ):
+            gen = _feed_generator(
+                operator=_make_operator(tenant_id=_TENANT_A),
+                cursor="$",
+                op_class=None,
+                principal=None,
+                target=None,
+            )
+            frames = await _collect_n_frames(gen, n=1, timeout=2.0)
+
+        # The single observable frame is the keep-alive heartbeat —
+        # never a ``broadcast_subsystem_unavailable`` ``feed_error``.
+        assert len(frames) == 1
+        assert frames[0] == ": heartbeat\n\n"
+        for frame in frames:
+            assert "broadcast_subsystem_unavailable" not in frame
+            assert "feed_error" not in frame
 
 
 # ---------------------------------------------------------------------------
@@ -976,15 +1136,20 @@ class TestFeedBacklogPrelude:
             ("1715600000001-0", {"event": events[1].model_dump_json()}),
             ("1715600000000-0", {"event": events[0].model_dump_json()}),
         ]
-        broadcast_client = get_broadcast_client()
+        # Two-client split per RDC #789 N1 / Initiative #1353: prelude
+        # XREVRANGE uses the fast (5 s socket_timeout) client; BLOCK
+        # XREAD uses the long-poll (35 s socket_timeout) client. Tests
+        # mirror that split.
+        fast_client = get_broadcast_client()
+        blocking_client = get_broadcast_blocking_client()
         # Idle XREAD with a yield point — see :func:`_idle_xread_mock`'s
         # docstring for the cancellation rationale (a bare
         # ``AsyncMock(return_value=None)`` pins the runner core).
         idle_xread = _idle_xread_mock()
         prelude = AsyncMock(return_value=xrevrange_items)
         with (
-            patch.object(broadcast_client, "xrevrange", new=prelude),
-            patch.object(broadcast_client, "xread", new=idle_xread),
+            patch.object(fast_client, "xrevrange", new=prelude),
+            patch.object(blocking_client, "xread", new=idle_xread),
         ):
             gen = _feed_generator(
                 operator=_make_operator(tenant_id=_TENANT_A),
@@ -1035,12 +1200,13 @@ class TestFeedBacklogPrelude:
         xrevrange_items = [
             ("1715600000005-0", {"event": event.model_dump_json()}),
         ]
-        broadcast_client = get_broadcast_client()
+        fast_client = get_broadcast_client()
+        blocking_client = get_broadcast_blocking_client()
         idle_xread = _idle_xread_mock()
         prelude = AsyncMock(return_value=xrevrange_items)
         with (
-            patch.object(broadcast_client, "xrevrange", new=prelude),
-            patch.object(broadcast_client, "xread", new=idle_xread),
+            patch.object(fast_client, "xrevrange", new=prelude),
+            patch.object(blocking_client, "xread", new=idle_xread),
         ):
             gen = _feed_generator(
                 operator=_make_operator(tenant_id=_TENANT_A),
@@ -1071,13 +1237,14 @@ class TestFeedBacklogPrelude:
         the live-tail behaviour pre-#1305 — no prelude frames, BLOCK
         loop's first XREAD uses ``$``.
         """
-        broadcast_client = get_broadcast_client()
+        fast_client = get_broadcast_client()
+        blocking_client = get_broadcast_blocking_client()
         # Empty xrevrange = empty stream.
         prelude = AsyncMock(return_value=[])
         idle_xread = _idle_xread_mock()
         with (
-            patch.object(broadcast_client, "xrevrange", new=prelude),
-            patch.object(broadcast_client, "xread", new=idle_xread),
+            patch.object(fast_client, "xrevrange", new=prelude),
+            patch.object(blocking_client, "xread", new=idle_xread),
         ):
             gen = _feed_generator(
                 operator=_make_operator(tenant_id=_TENANT_A),
@@ -1112,12 +1279,13 @@ class TestFeedBacklogPrelude:
         couldn't trust the cursor handshake. The prelude must skip
         on any non-``$`` cursor.
         """
-        broadcast_client = get_broadcast_client()
+        fast_client = get_broadcast_client()
+        blocking_client = get_broadcast_blocking_client()
         prelude = AsyncMock(return_value=[])
         idle_xread = _idle_xread_mock()
         with (
-            patch.object(broadcast_client, "xrevrange", new=prelude),
-            patch.object(broadcast_client, "xread", new=idle_xread),
+            patch.object(fast_client, "xrevrange", new=prelude),
+            patch.object(blocking_client, "xread", new=idle_xread),
         ):
             gen = _feed_generator(
                 operator=_make_operator(tenant_id=_TENANT_A),
@@ -1153,12 +1321,13 @@ class TestFeedBacklogPrelude:
             ("1715600000001-0", {"event": write_event.model_dump_json()}),
             ("1715600000000-0", {"event": read_event.model_dump_json()}),
         ]
-        broadcast_client = get_broadcast_client()
+        fast_client = get_broadcast_client()
+        blocking_client = get_broadcast_blocking_client()
         prelude = AsyncMock(return_value=xrevrange_items)
         idle_xread = _idle_xread_mock()
         with (
-            patch.object(broadcast_client, "xrevrange", new=prelude),
-            patch.object(broadcast_client, "xread", new=idle_xread),
+            patch.object(fast_client, "xrevrange", new=prelude),
+            patch.object(blocking_client, "xread", new=idle_xread),
         ):
             gen = _feed_generator(
                 operator=_make_operator(tenant_id=_TENANT_A),
@@ -1203,12 +1372,13 @@ class TestFeedBacklogPrelude:
         """
         import redis.exceptions as redis_exc
 
-        broadcast_client = get_broadcast_client()
+        fast_client = get_broadcast_client()
+        blocking_client = get_broadcast_blocking_client()
         prelude = AsyncMock(side_effect=redis_exc.ConnectionError("connection refused"))
         idle_xread = _idle_xread_mock()
         with (
-            patch.object(broadcast_client, "xrevrange", new=prelude),
-            patch.object(broadcast_client, "xread", new=idle_xread),
+            patch.object(fast_client, "xrevrange", new=prelude),
+            patch.object(blocking_client, "xread", new=idle_xread),
         ):
             gen = _feed_generator(
                 operator=_make_operator(tenant_id=_TENANT_A),
@@ -1303,10 +1473,12 @@ class TestFeedIntegration:
             monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
             get_settings.cache_clear()
             reset_broadcast_client_for_testing()
+            reset_broadcast_blocking_client_for_testing()
             try:
                 yield url
             finally:
                 await dispose_broadcast_client()
+                await dispose_broadcast_blocking_client()
                 get_settings.cache_clear()
 
     async def test_publish_then_generator_read(self, valkey_url: str) -> None:

@@ -98,6 +98,7 @@ from meho_backplane.auth.jwt import (
 from meho_backplane.auth.vault import vault_readiness_probe
 from meho_backplane.broadcast import (
     broadcast_readiness_probe,
+    dispose_broadcast_blocking_client,
     dispose_broadcast_client,
     get_broadcast_client,
 )
@@ -199,9 +200,13 @@ async def _run_lifespan_shutdown() -> None:
 
     Per-disposer ``try`` / ``except`` so an asyncpg-pool teardown
     failure in :func:`dispose_engine` cannot short-circuit
-    :func:`dispose_broadcast_client` and leak the redis pool;
-    structlog captures the failure class so operators can chase
-    the leak from logs.
+    :func:`dispose_broadcast_client` (or
+    :func:`dispose_broadcast_blocking_client`) and leak the redis
+    pool; structlog captures the failure class so operators can chase
+    the leak from logs. The two broadcast clients (fast for
+    PING/XADD, long-poll for XREAD BLOCK readers — see
+    :mod:`meho_backplane.broadcast.client`) get independent dispose
+    arms so a failure in one doesn't leak the other's pool.
     """
     log = structlog.get_logger()
     try:
@@ -212,6 +217,10 @@ async def _run_lifespan_shutdown() -> None:
         await dispose_broadcast_client()
     except Exception:
         log.exception("dispose_broadcast_client_failed")
+    try:
+        await dispose_broadcast_blocking_client()
+    except Exception:
+        log.exception("dispose_broadcast_blocking_client_failed")
 
 
 async def _run_lifespan_startup() -> None:

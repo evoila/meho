@@ -24,7 +24,7 @@ Typed connectors and ingested connectors are both first-class ([CLAUDE.md](../..
 - **Role.** Write verbs (`ingest`, `edit-group`, `edit-op`, `enable`, `disable`) require `tenant_admin`. Read verbs (`list`, `review`) require `operator`. The backplane returns HTTP 403 with the CLI exit code 5 if the wrong role tries a write verb.
 - **A running backplane.** `meho login <backplane-url>` writes a session token the CLI reuses across every verb. Override per-call with `--backplane <url>` when needed.
 - **The OpenAPI spec.** A path to a local file (`file:///abs/path/spec.yaml`) or an HTTPS URL the backplane can fetch (`https://vendor.example.com/openapi.yaml`). The CLI also accepts the `docs:<product>-<version>/<spec>.yaml` shorthand that resolves against `$CLAUDE_RDC_DOCS` when set; otherwise the shorthand is passed through for the backplane to resolve against its own checked-in docs corpus.
-- **An LLM client configured for the grouping pass.** Production deploys wire the Anthropic Messages-API adapter via [`IngestionPipelineService(..., llm_client_factory=...)`](../../backend/src/meho_backplane/operations/ingest/pipeline.py). If the adapter is unwired, the ingest REST route returns HTTP 503 `LlmClientUnavailable` and the CLI prints the structured error.
+- **An LLM client configured for the grouping pass.** This is the v0.9 reality check: **no production `LlmClient` adapter ships in the chassis today.** The wire-up seam exists ([`set_llm_client_factory`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py)) and the constructor accepts an injected factory ([`IngestionPipelineService(..., llm_client_factory=...)`](../../backend/src/meho_backplane/operations/ingest/pipeline.py)), but FastAPI lifespan startup has no caller for the seam — `settings.anthropic_api_key` flows only to the agent runtime (`agent/run.py:432`). On a stock deploy the ingest REST route returns HTTP 503 `LlmClientUnavailable` for any non-dry-run ingest and the CLI prints the structured error; ingest grouping is build-time-only until an operator installs a real `LlmClient` (Anthropic Messages API or provider-routed via G11.5) and calls `set_llm_client_factory(...)` at lifespan startup. See [`docs/codebase/spec-ingestion.md` §"LLM-client wiring (build-time-only today)"](../codebase/spec-ingestion.md#llm-client-wiring-build-time-only-today) for the full operator-facing framing.
 - **Postgres with pgvector + FTS extensions.** v0.2 ships the `pgvector/pgvector:pg16`-derived chart image; local development uses the testcontainers fixture.
 
 ## Step-by-step
@@ -300,17 +300,17 @@ Resolution path: extend T3 with a per-op `llm_instructions` generation pass that
 
 ### Gap 3 — live-LLM canary validation
 
-**Status:** documented; gated on [Task #467](https://github.com/evoila/meho/issues/467).
+**Status:** documented; gated on an operator-installed production `LlmClient` adapter wired at FastAPI lifespan startup. **No such adapter ships today.** The previously-cited [`Task #467`](https://github.com/evoila/meho/issues/467) was [G8.1-T3 audit CLI verbs (CLOSED)](https://github.com/evoila/meho/issues/467), never the chassis adapter; the cleanup landed via [G0.18-T7 #1360](https://github.com/evoila/meho/issues/1360). See [`docs/codebase/spec-ingestion.md` §"LLM-client wiring (build-time-only today)"](../codebase/spec-ingestion.md#llm-client-wiring-build-time-only-today) for the operator-facing framing.
 
-The canary's acceptance test ships a deterministic stub-LLM that classifies ops by URL-path prefix. The stub keeps the test reproducible and fast but doesn't exercise the production Anthropic adapter's prompt-engineering or retry-policy edges.
+The canary's acceptance test ships a deterministic stub-LLM that classifies ops by URL-path prefix. The stub keeps the test reproducible and fast but doesn't exercise a live Anthropic adapter's prompt-engineering or retry-policy edges.
 
-A live-LLM variant exists at `MEHO_G07_CANARY_LIVE_LLM=1` but currently skips because [Task #467](https://github.com/evoila/meho/issues/467) (Anthropic chassis adapter) hasn't landed. Once #467 ships:
+A live-LLM variant exists at `MEHO_G07_CANARY_LIVE_LLM=1` but currently skips because no production `LlmClient` is wired via `meho_backplane.api.v1.connectors_ingest.set_llm_client_factory(...)` at FastAPI lifespan startup. Once an operator wires one:
 
 1. Re-run the canary with the env var set.
 2. Pick harder queries the path-prefix stub can't trivially classify — snapshot revert, performance-metrics query, host-network atomic mutation.
 3. Compare top-3 hit rate against the stub baseline to verify the live LLM doesn't regress retrieval quality.
 
-**File a Task** in #467's wake; do not block #467 on it.
+**File a Task** for the production-adapter wire-up itself (under Goal #221 / Initiative #389-family) before extending the canary; do not block the canary on it.
 
 ## References
 

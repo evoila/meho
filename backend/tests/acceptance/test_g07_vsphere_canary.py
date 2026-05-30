@@ -119,8 +119,13 @@ every CI run. The default stub returns deterministic group proposals
 ranks every canonical op in the top-3", not "the LLM produces good
 groups" (the latter is a manual operator-review step). An opt-in
 ``ANTHROPIC_API_KEY``-gated live-LLM run via
-``MEHO_G07_CANARY_LIVE_LLM=1`` exercises the real Anthropic adapter
-once the production adapter wires up (G0.7 follow-up #467).
+``MEHO_G07_CANARY_LIVE_LLM=1`` would exercise the real Anthropic
+adapter once a production ``LlmClient`` adapter is wired at
+FastAPI lifespan startup. **No production adapter ships today** —
+see ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring
+(build-time-only today)" and G0.18-T7 (#1360) for the doc cleanup;
+the live-LLM variant is parked until an operator wires the
+adapter via ``set_llm_client_factory``.
 """
 
 from __future__ import annotations
@@ -1471,14 +1476,20 @@ async def test_canary_live_llm_grouping_produces_named_groups(
         "anthropic",
         reason="anthropic SDK not installed; live-LLM variant is opt-in",
     )
-    # The production LLM adapter lands in a sibling Task (#467);
-    # until then this stub raises BLOCKED-prerequisite so operators
-    # running this manually see a clear pointer rather than a
-    # silent skip.
+    # No production LlmClient adapter wires itself at FastAPI
+    # lifespan startup today -- the previously-cited ``Task #467``
+    # was G8.1-T3 (audit CLI verbs, CLOSED), never the Anthropic
+    # adapter. Keep this stub-skip so operators running the canary
+    # manually see a clear pointer rather than a silent skip. See
+    # G0.18-T7 (#1360) for the dead-reference cleanup +
+    # ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring
+    # (build-time-only today)" for the operator-facing framing.
     pytest.skip(
-        "Live-LLM canary requires the production Anthropic adapter (Task #467). "
-        "Stubs cover the canary's correctness; this variant lands when the "
-        "adapter does.",
+        "Live-LLM canary requires a production Anthropic LlmClient "
+        "adapter wired at FastAPI lifespan startup; the chassis does "
+        "not yet ship one. Stubs cover the canary's correctness; this "
+        "variant lands when an operator installs the adapter (see "
+        "docs/codebase/spec-ingestion.md and G0.18-T7 #1360).",
     )
 
 

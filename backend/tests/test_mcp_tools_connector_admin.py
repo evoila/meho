@@ -518,9 +518,11 @@ def test_call_meho_connector_ingest_threads_specs_through(
     assert len(call_kwargs["specs"]) == 2
     assert call_kwargs["specs"][0].uri == "docs:vcenter-9.0/vcenter.yaml"
     assert call_kwargs["specs"][1].uri == "docs:vcenter-9.0/vi-json.yaml"
-    # Pipeline gets a factory; the default fail-closed factory is the
-    # production wiring the chassis swaps out at lifespan once the
-    # Anthropic adapter lands (T5 #405).
+    # Pipeline gets a factory; the chassis-shipped fail-closed
+    # default is what we install today (no production adapter is
+    # wired at FastAPI lifespan startup -- G0.18-T7 #1360). A
+    # future operator-installed adapter would replace it via
+    # ``set_llm_client_factory(...)``.
     assert pipeline.init_kwargs.get("llm_client_factory") is not None
 
 

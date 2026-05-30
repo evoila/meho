@@ -41,11 +41,19 @@ operation groups first, then scope a query to one". The grouping
 pass + operator review (T4) is what produces that surface.
 
 The LLM client itself is injected as a :class:`LlmClient` Protocol so
-the chassis can swap the real Anthropic Messages-API adapter without
-re-plumbing T3. Production callers (T5's ``meho connector ingest``)
-will resolve a configured Sonnet/Haiku-backed implementation; tests
-inject a deterministic stub. There is no module-level singleton --
-every call site passes a client.
+the chassis can swap in a real Anthropic Messages-API adapter without
+re-plumbing T3. **No production adapter ships today** —
+``set_llm_client_factory`` (in
+:mod:`meho_backplane.api.v1.connectors_ingest`) is the wire-up seam,
+but FastAPI lifespan startup has no caller for it; ``meho connector
+ingest`` (CLI / REST / MCP) on a stock deploy returns HTTP 503 /
+``LlmClientUnavailable`` for any non-dry-run ingest until an
+operator-installed adapter (a Sonnet/Haiku-backed implementation, or
+a provider-routed shape via G11.5) is wired. Tests inject a
+deterministic stub via the same hook. There is no module-level
+singleton -- every call site passes a client. See G0.18-T7 (#1360)
+and ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring
+(build-time-only today)" for the operator-facing framing.
 """
 
 from __future__ import annotations

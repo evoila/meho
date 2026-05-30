@@ -96,11 +96,19 @@ parameter-ref parser branch and #503 extended this canary):
   (T5, #486). The connector CLI talks to the REST API at
   ``http(s)://<backplane>/api/v1/connectors/ingest``.
 
-- An LLM client configured for the grouping pass. Production
-  deployments wire the Anthropic Messages-API adapter under
-  ``IngestionPipelineService(..., llm_client_factory=...)``; the
-  canary acceptance test uses a deterministic stub (see *Test
-  variant* below).
+- An LLM client configured for the grouping pass. **No production
+  ``LlmClient`` adapter ships in the chassis today** —
+  ``set_llm_client_factory`` is the wire-up seam, but FastAPI
+  lifespan startup has no caller for it, so non-dry-run ingest
+  returns HTTP 503 / ``LlmClientUnavailable`` on stock deploys.
+  Operators install a real adapter (Anthropic Messages-API binding
+  or provider-routed via G11.5) and pass it via
+  ``IngestionPipelineService(..., llm_client_factory=...)`` /
+  ``set_llm_client_factory(...)`` to unblock the canary on a live
+  backplane. The canary acceptance test uses a deterministic stub
+  (see *Test variant* below) so it can run without an adapter
+  wired. Full framing in
+  [``docs/codebase/spec-ingestion.md``](../codebase/spec-ingestion.md#llm-client-wiring-build-time-only-today).
 
 ## Operator procedure
 
@@ -237,8 +245,13 @@ runs the same procedure non-interactively against a
 testcontainers Postgres + a deterministic LLM stub that classifies
 ops by URL path prefix. The stub keeps the test reproducible and
 fast (~5 s ingest + ~1-2 s per benchmark query); a live-LLM variant
-gated on ``MEHO_G07_CANARY_LIVE_LLM=1`` is reserved for the day the
-production Anthropic adapter (Task #467) lands.
+gated on ``MEHO_G07_CANARY_LIVE_LLM=1`` is reserved for the day a
+production Anthropic ``LlmClient`` adapter is wired at FastAPI
+lifespan startup. No such adapter ships today (the previously-cited
+``Task #467`` was the audit CLI verb tracker, not an LLM adapter
+— see G0.18-T7 #1360 for the cleanup and
+``docs/codebase/spec-ingestion.md`` §"LLM-client wiring
+(build-time-only today)" for the operator-facing framing).
 
 The acceptance test asserts:
 

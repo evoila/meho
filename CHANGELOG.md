@@ -90,7 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-## [0.8.1] - 2026-05-29
+### Fixed
+
+- **`POST /api/v1/targets` accepts the `meho connector list` SDDC
+  product token (G0.18-T2 #1355).** Closes #1312 acceptance B, which
+  had been marked "already aligned" but the split persisted:
+  `meho connector list` emits `product="sddc"` (parser-derived from
+  `sddc-rest-9.0`, load-bearing for the #773 connector_id
+  round-trip), while the v2 registry, the spec catalog, and the
+  `TargetCreate` validator all use the canonical `sddc-manager`.
+  An operator copying the listing token into a create now succeeds:
+  a `PRODUCT_ALIASES` map in
+  `meho_backplane.connectors.registry` normalises `sddc` →
+  `sddc-manager` at the write surface (`POST` + `PATCH
+  /api/v1/targets`) before the registered-product validator runs,
+  and the canonical token is what gets stored — so the resolver,
+  audit log, and every list / detail read see one spelling
+  regardless of which the operator typed. A new structural test in
+  `test_operations_ingest_catalog.py` pins the round-trip for
+  every shipped connector so a future drift fails CI rather than
+  surfacing on the next dogfood cycle. RDC #789 Finding 6.
+
+
 
 ### Added
 

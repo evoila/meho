@@ -713,6 +713,22 @@ async def test_list_surfaces_register_connector_v2_only_entries(
       rows. When DB rows land under the parser-derived product the
       row transitions cleanly from ``state="registered"`` to
       ``state="ingested"`` without a ``connector_id`` change.
+
+    G0.18-T2 (#1355) — the parser-derived ``"sddc"`` token the
+    listing emits is bridged to the registry's canonical
+    ``"sddc-manager"`` by the
+    :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES`
+    map at the write surface (see
+    :func:`~meho_backplane.connectors.registry.canonical_product_token`).
+    So an operator copying ``product`` out of this listing into
+    ``POST /api/v1/targets`` succeeds: the alias normalises ``"sddc"``
+    to the canonical ``"sddc-manager"`` before the registered-product
+    validator runs, and the canonical token is what gets stored.
+    The listing keeps emitting ``"sddc"`` (not ``"sddc-manager"``)
+    because that is the parser-derived token, load-bearing for the
+    #773 connector_id round-trip; the round-trip closure for the
+    operator is now end-to-end (closes #1312 acceptance B,
+    re-flagged by RDC #789 Finding 6).
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -740,6 +756,11 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     sddc = by_id["sddc-rest-9.0"]
     # The listing emits the parser-derived product ("sddc"), not the
     # v2 registry's "sddc-manager" — see test docstring for rationale.
+    # G0.18-T2 (#1355): the value below is what an operator copies
+    # into POST /api/v1/targets; round-trip closure is proved by
+    # ``test_create_target_accepts_sddc_listing_alias`` in
+    # ``test_api_v1_targets.py`` (the alias bridges this listing
+    # token to the canonical "sddc-manager" before validation).
     assert sddc["product"] == "sddc"
     assert sddc["impl_id"] == "sddc-rest"
     assert sddc["version"] == "9.0"

@@ -146,7 +146,11 @@ from meho_backplane.api.v1._envelope import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.base import Connector
-from meho_backplane.connectors.registry import all_connectors_v2, registered_product_tokens
+from meho_backplane.connectors.registry import (
+    all_connectors_v2,
+    canonical_product_token,
+    registered_product_tokens,
+)
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.db.engine import get_session
@@ -327,6 +331,42 @@ def _build_unknown_product_detail(
             f"the convention."
         ),
     }
+
+
+def _canonicalise_and_validate_product(supplied: str) -> str:
+    """Resolve ``supplied`` to a canonical registry product or raise 422.
+
+    G0.18-T2 (#1355). Shared canonicalisation + enum-validation step
+    for the POST / PATCH write surfaces. Runs ``supplied`` through
+    :func:`canonical_product_token` so the listing-spelling alias
+    (``"sddc"``) maps to the registry's canonical form
+    (``"sddc-manager"``) before the registered-product validator
+    fires; without this an operator copying ``product`` straight out
+    of ``meho connector list`` would hit a 422 (RDC #789 Finding 6;
+    closes #1312 acceptance B).
+
+    The 422 detail names the *originally supplied* token (not the
+    canonicalised form) so the operator's error message shows what
+    they actually typed, matching the T11 contract that
+    ``unknown_product.product`` echoes the user's input. The
+    canonical token is what the caller stores; the validator's
+    "valid set" is also the canonical-only set (``valid_products``
+    is exposed on Swagger via the same source-of-truth helper).
+
+    The validator is skipped when the registry is empty — that state
+    means "no connectors imported" (test isolation, or a deploy
+    booted before :func:`_eager_import_connectors` ran). In
+    production the lifespan populates the registry before the first
+    request arrives.
+    """
+    canonical = canonical_product_token(supplied)
+    valid_products = sorted(registered_product_tokens())
+    if valid_products and canonical not in valid_products:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_build_unknown_product_detail(supplied, valid_products),
+        )
+    return canonical
 
 
 def _to_full(t: TargetORM) -> Target:
@@ -794,12 +834,15 @@ async def create_target(
     skip branch never fires; a misregistered deploy that *did* hit it
     is recoverable via T4 #1145's PATCH-product or DELETE path.
     """
-    valid_products = sorted(registered_product_tokens())
-    if valid_products and body.product not in valid_products:
-        raise HTTPException(
-            status_code=422,
-            detail=_build_unknown_product_detail(body.product, valid_products),
-        )
+    # G0.18-T2 (#1355). Canonicalise + validate the incoming product
+    # token in one step so a value copied straight out of
+    # ``meho connector list`` is accept-equivalent here. See
+    # :func:`_canonicalise_and_validate_product` for the
+    # ``sddc``/``sddc-manager`` rationale; the canonical token is
+    # what gets stored so the resolver and every downstream read see
+    # the registry's spelling regardless of which alias the operator
+    # typed.
+    product = _canonicalise_and_validate_product(body.product)
     # G0.15-T6 (#1215). Validate ``preferred_impl_id`` against the
     # registered impl set so the resolver-silently-ignores-unknown-id
     # foot-gun surfaces at write time. ``None`` is the absent / cleared
@@ -808,13 +851,15 @@ async def create_target(
     # target's product** (G0.16-T6 review-iter-1 B1 #1312 -- a
     # cross-product allowlist let a ``k8s`` target pin
     # ``vmware-rest-9.0`` and the resolver would silently ignore it
-    # at dispatch). ``valid_impl_ids`` is empty when no connector is
-    # registered for the product (test isolation / pre-lifespan
-    # state, or a not-yet-registered product); we skip validation in
-    # that case for parity with the ``product`` validator above --
-    # the operator already saw a structured 422 from the product
-    # check if their product is unknown to the registry.
-    valid_impl_ids = sorted(_registered_impl_ids(body.product))
+    # at dispatch). The scope uses the canonical product token so an
+    # ``sddc``-aliased create still resolves the SDDC impl set.
+    # ``valid_impl_ids`` is empty when no connector is registered for
+    # the product (test isolation / pre-lifespan state, or a
+    # not-yet-registered product); we skip validation in that case for
+    # parity with the ``product`` validator above -- the operator
+    # already saw a structured 422 from the product check if their
+    # product is unknown to the registry.
+    valid_impl_ids = sorted(_registered_impl_ids(product))
     if (
         body.preferred_impl_id is not None
         and valid_impl_ids
@@ -825,12 +870,17 @@ async def create_target(
             detail=_build_unknown_preferred_impl_detail(body.preferred_impl_id, valid_impl_ids),
         )
     now = datetime.now(UTC)
+    create_fields = body.model_dump()
+    # Persist the canonical product token, not the alias the operator
+    # may have supplied, so the stored row matches the registry /
+    # resolver spelling (G0.18-T2 #1355).
+    create_fields["product"] = product
     t = TargetORM(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
         created_at=now,
         updated_at=now,
-        **body.model_dump(),
+        **create_fields,
     )
     session.add(t)
     try:
@@ -899,34 +949,24 @@ async def update_target(
                 ),
             },
         )
-    new_product = updates.get("product")
+    # G0.18-T2 (#1355). Canonicalise + validate the patched product
+    # token the same way ``create_target`` does so a PATCH that copies
+    # ``product`` out of ``meho connector list`` (e.g. ``"sddc"``)
+    # lands the canonical registry token (``"sddc-manager"``) rather
+    # than 422-ing or storing the alias. The shared helper raises a
+    # T11-compliant 422 on unknown products; we only invoke it when
+    # the operator actually changes ``product`` so a same-value PATCH
+    # short-circuits (matches the pre-T2 behaviour pinned by
+    # ``test_patch_product_same_value_passes_without_validator``).
+    raw_new_product = updates.get("product")
+    new_product = canonical_product_token(raw_new_product) if raw_new_product is not None else None
+    if new_product is not None:
+        updates["product"] = new_product
     if new_product is not None and new_product != t.product:
-        # Mirror the probe / dispatch resolver's notion of "valid
-        # product" at PATCH time so a typo-correcting operator does
-        # not trade an immediately-broken target for a target that
-        # will surface as 501 at the next probe. The structured
-        # detail follows ``docs/codebase/error-message-shape.md`` --
-        # a snake_case code, a human-readable message naming the
-        # offending value and the remediation step, and a machine-
-        # actionable ``valid_products`` list the client can branch
-        # on.
-        valid_products = sorted(_registered_products())
-        if new_product not in valid_products:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail={
-                    "kind": "unknown_product",
-                    "product": new_product,
-                    "valid_products": valid_products,
-                    "message": (
-                        f"product={new_product!r} is not registered; "
-                        f"pick one of {valid_products!r} or register a "
-                        f"connector for it before retrying. "
-                        f"See docs/codebase/error-message-shape.md for "
-                        f"the convention."
-                    ),
-                },
-            )
+        # raw_new_product is the operator's literal input; pass it
+        # through so the 422 detail echoes what they typed.
+        assert raw_new_product is not None  # guarded by the outer if
+        _canonicalise_and_validate_product(raw_new_product)
     # G0.15-T6 (#1215). Same impl_id rejection as on POST. ``None`` is
     # the explicit-clear state and is always valid (operator wants to
     # remove the override); a non-``None`` value must match a

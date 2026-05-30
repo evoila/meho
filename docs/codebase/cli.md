@@ -128,7 +128,11 @@ names.
     `HTTPException(detail=str(exc))` 422 bodies reachable (the typed
     parser rejects them because the schema declares 422 as the
     Pydantic validation-error list shape).
-  - T3 (#1320) ships `docs/cli/runbook.md`.
+  - T3 (#1320) ships [`docs/cli/runbook.md`](../cli/runbook.md) — the
+    operator-facing CLI reference for the eleven-verb tree (synopsis +
+    role gate + exit codes per verb, three worked transcripts —
+    execution / authoring / escalation, the YAML template body schema,
+    and the explicit "no skip, no force-advance" CLI contract).
 
 ## Module layout
 

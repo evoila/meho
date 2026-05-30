@@ -79,23 +79,56 @@ names.
   real HTTP submission layer (POST `/api/v1/memory`), post-login nudge,
   marker file, and `docs/cli/memory-migration.md`. Depends on
   `charm.land/huh/v2` (MIT).
-- `meho runbook ...` (G12.5-T1 #1318) — runbook template authoring
-  surface (`list-templates`, `show-template`, `draft-template`,
-  `edit-template`, `publish-template`, `deprecate-template`) wrapping
-  the six `/api/v1/runbooks/templates*` routes shipped by G12.2-T3
-  (#1297). The two non-trivial verbs (`draft-template` /
-  `edit-template`) accept `--from <file.yaml>` and run a local
-  pre-flight (slug regex, step-id uniqueness + grammar, step / verify
-  type allowlists, substitution allowlist over every string) that
-  mirrors the backend's
-  `_validate_step_ids_unique_and_substitutions_allowlisted` in
-  `backend/src/meho_backplane/runbooks/schemas.py`. Pre-flight is a
-  UX layer — the backend re-validates authoritatively at the wire.
-  Read verbs are operator-level (with the tenant_admin / post-completion
-  carve-out on `show-template`, implemented backend-side per #1309);
-  write verbs require tenant_admin. T2 (#1319) extends the parent
-  with the five run verbs (`start`, `next`, `abort`, `reassign`,
-  `runs`); T3 (#1320) ships `docs/cli/runbook.md`.
+- `meho runbook ...` (G12.5-T1 #1318, G12.5-T2 #1319) — eleven-verb
+  runbook surface:
+  - **Template side** (T1, six verbs): `list-templates`,
+    `show-template`, `draft-template`, `edit-template`,
+    `publish-template`, `deprecate-template` wrap the six
+    `/api/v1/runbooks/templates*` routes shipped by G12.2-T3 (#1297).
+    The two non-trivial verbs (`draft-template` / `edit-template`)
+    accept `--from <file.yaml>` and run a local pre-flight (slug
+    regex, step-id uniqueness + grammar, step / verify type
+    allowlists, substitution allowlist over every string) that
+    mirrors the backend's
+    `_validate_step_ids_unique_and_substitutions_allowlisted` in
+    `backend/src/meho_backplane/runbooks/schemas.py`. Pre-flight is a
+    UX layer — the backend re-validates authoritatively at the wire.
+    Read verbs are operator-level (with the tenant_admin /
+    post-completion carve-out on `show-template`, implemented
+    backend-side per #1309); write verbs require tenant_admin.
+  - **Run side** (T2, five verbs): `start`, `next`, `abort`,
+    `reassign`, `runs` wrap the five `/api/v1/runbooks/runs*` routes
+    shipped by G12.3-T5 (#1311). `start` and `next` are the
+    human-surface end of the substrate opacity contract (#1313,
+    #1301): they render exactly one step body at a time, never the
+    full template, never future steps. The renderer reads only
+    fields under a narrow `stepBodyDTO` projection, so even a
+    hypothetical backend bug leaking other step ids into the response
+    envelope cannot reach the operator's terminal (regression-tested
+    in `start_test.go` / `next_test.go`'s opacity tests). `next`
+    carries the load-bearing interactive prompt: when the operator
+    omits `--verify-response yes|no|escalate` and the substrate
+    surfaces 422 `VerifyResponseRequiredError`, the CLI prompts on
+    stdin and re-issues the call with the answer (error-as-control-
+    flow per the issue's decision tree). `abort` follows the
+    `meho kb delete` pattern for the missing-`--reason` case: prompts
+    on a TTY, exits 1 with a useful message on non-TTY. Role-scoping
+    is server-side: an OPERATOR caller never sees other operators'
+    runs even with `--assignee` set; the CLI sends whatever flags the
+    caller supplied and renders what the backend returns.
+  - Both halves share the chassis (`runbook.go`, `yaml.go`): the
+    `newAuthedClient` / `retryOn401` / `renderRequestError` /
+    `renderHTTPStatus` helpers, the 1 MiB response-body cap, and the
+    FastAPI HTTPException detail decoder. The run-side verbs
+    (`start.go`, `next.go`) bypass the generated typed-response
+    parser for the discriminated-union response shapes (the codegen
+    lifts them into structs with an unexported `union json.RawMessage`
+    field) and decode the raw bytes directly via
+    `decodeNextStepResponse`; the bypass also keeps FastAPI's
+    `HTTPException(detail=str(exc))` 422 bodies reachable (the typed
+    parser rejects them because the schema declares 422 as the
+    Pydantic validation-error list shape).
+  - T3 (#1320) ships `docs/cli/runbook.md`.
 
 ## Module layout
 
@@ -214,8 +247,8 @@ cli/
     │   │   ├── memory_test.go    # --dry-run envelope, --non-interactive filter, machine-local skip, empty-dir guard, wire-body stability.
     │   │   ├── submit.go         # doSubmit + spinner + RememberApiV1MemoryPostWithResponse via api.AuthedClient + retryOn401 generic. G0.12-T11 #1269 dropped the in-package HTTP helper trio (doAuthedRequest/sendRequest/httpError) + the local `source_id`-in-body bug the typed RememberBody schema's `extra="forbid"` would have rejected on a real backend (httptest mock masked it). isTransient retry logic preserved.
     │   │   └── submit_test.go    # typed RememberBody body shape, same-slug rerun stable, no-source_id-on-wire, transient retry, summary line, --mark-migrated, 201-without-payload nil-guard, 401/403/422 classification, no-backplane → auth_expired.
-    │   ├── runbook/           # G12.5-T1 #1318 — `meho runbook …` runbook template authoring verb tree. Initiative #1200; wraps the six /api/v1/runbooks/templates routes shipped by G12.2-T3 #1297.
-    │   │   ├── runbook.go               # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus typed-client helpers + path-escape / truncate helpers.
+    │   ├── runbook/           # G12.5-T1 #1318 (template verbs) + G12.5-T2 #1319 (run verbs) — `meho runbook …` eleven-verb tree. Initiative #1200; wraps the six /api/v1/runbooks/templates routes (G12.2-T3 #1297) + the five /api/v1/runbooks/runs routes (G12.3-T5 #1311).
+    │   │   ├── runbook.go               # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus typed-client helpers + path-escape / truncate helpers + stdinIsTTY seam (golang.org/x/term, overridable for tests).
     │   │   ├── yaml.go                  # YAML parsing + local pre-flight validators (slug regex, step-id grammar, step / verify type allowlists, substitution allowlist over every string). Mirrors `backend/src/meho_backplane/runbooks/schemas.py`'s `_validate_step_ids_unique_and_substitutions_allowlisted` + `validate_substitutions`.
     │   │   ├── list_templates.go        # `meho runbook list-templates` (GET /api/v1/runbooks/templates).
     │   │   ├── show_template.go         # `meho runbook show-template <slug>` (GET /api/v1/runbooks/templates/{slug}); heading + numbered step list + verify summary.
@@ -223,14 +256,24 @@ cli/
     │   │   ├── edit_template.go         # `meho runbook edit-template <slug> --from <file.yaml>` (PATCH /api/v1/runbooks/templates/{slug}); renders `forked_from` on the fork-on-edit path.
     │   │   ├── publish_template.go      # `meho runbook publish-template <slug> --version N` (POST /api/v1/runbooks/templates/{slug}/publish).
     │   │   ├── deprecate_template.go    # `meho runbook deprecate-template <slug> --version N` (POST /api/v1/runbooks/templates/{slug}/deprecate).
-    │   │   ├── runbook_test.go          # helpers + register-all-six-verbs + URL-normalisation + body/role/path-escape contract tests.
+    │   │   ├── start.go                 # T2 — `meho runbook start <slug> --target T [--param k=v ...]` (POST /api/v1/runbooks/runs). Hosts the opacity rendering helpers (stepBodyDTO + decodeNextStepResponse + renderCurrentStep) that next.go also consumes. Bypasses the generated typed parser for the discriminated-union 201 body; uses the rawNextResponse shim (defined in next.go) so retryOn401's generic still flows.
+    │   │   ├── next.go                  # T2 — `meho runbook next <run_id> [--verify-response yes|no|escalate]` (POST /api/v1/runbooks/runs/{run_id}/next). Load-bearing: hosts the interactive verify-prompt loop (probes 422 VerifyResponseRequiredError via verifyResponseRequired, then prompts on stdin), the buildNextRequestBody / makeConfirmVerifyResponse union builders, and renderNextResponse which routes between current_step and completed kinds. Also defines rawNextResponse — a tiny shim adapting raw `*http.Response` reads to retryOn401's generic API so the 422 HTTPException body reaches verifyResponseRequired verbatim.
+    │   │   ├── abort.go                 # T2 — `meho runbook abort <run_id> [--reason "<text>"]` (POST /api/v1/runbooks/runs/{run_id}/abort). When `--reason` is missing: prompts on TTY (stdinIsTTY); exits 1 with abortExitCode1 wrapper on non-TTY. Mirrors the `meho kb delete` confirm-prompt pattern.
+    │   │   ├── reassign.go              # T2 — `meho runbook reassign <run_id> --to <sub>` (POST /api/v1/runbooks/runs/{run_id}/reassign). Tenant_admin-only at the route gate; thin HTTP wrapper.
+    │   │   ├── runs.go                  # T2 — `meho runbook runs [--assignee] [--status] [--template-slug] [--limit]` (GET /api/v1/runbooks/runs). 7-column table (RUN_ID truncated to 8 chars; full UUIDs in --json). Pass-through filters — the backend enforces role-based scoping (OPERATOR sees own; TENANT_ADMIN sees all unless narrowed).
+    │   │   ├── runbook_test.go          # helpers + register-all-eleven-verbs + URL-normalisation + body/role/path-escape contract tests + --help-mentions-all-verbs + OPACITY-language assertion.
     │   │   ├── yaml_test.go             # YAML parse error, pre-flight matrix (slug regex, dup step id, step/verify type allowlists, substitution allowlist incl. nested-param rejection), buildRunbookTemplateBody discriminator round-trip.
     │   │   ├── list_templates_test.go   # query-param emit (status/target_kind/limit) + 5-col table render + JSON envelope + 403/network error tests.
     │   │   ├── show_template_test.go    # version query + heading + step-list render + 404 / 403 (incl. post-completion exception) tests.
     │   │   ├── draft_template_test.go   # POST body shape + pre-flight short-circuits (bad slug, dup step id, disallowed substitution, bad YAML — all zero HTTP calls) + 403/409/422 surface tests.
     │   │   ├── edit_template_test.go    # PATCH body shape + draft-in-place vs fork-on-edit summary + 404 / 403 / 422 tests.
     │   │   ├── publish_template_test.go # POST body shape + 1-line confirmation + 404 / 403 / network-error tests.
-    │   │   └── deprecate_template_test.go # POST body shape + 1-line confirmation + 400 cannot-deprecate-draft + 403 tests.
+    │   │   ├── deprecate_template_test.go # POST body shape + 1-line confirmation + 400 cannot-deprecate-draft + 403 tests.
+    │   │   ├── start_test.go            # T2 — POST body + step body render + OPACITY regression (leaked future-step ids in wire JSON MUST NOT reach stdout) + operation_call verify hint render + --json envelope + 400/404/network + parseParamFlags matrix + decodeNextStepResponse routing.
+    │   │   ├── next_test.go             # T2 — explicit --verify-response yes/no/escalate single POST + interactive 422-prompt-retry loop (incl. invalid-answer re-prompt + escalate) + OPACITY regression on the /next response + operation_call verify pass/fail + RunCompletedResponse render + 403 NotRunAssigneeError + 422-non-required (mismatch) doesn't enter prompt loop + --json + bad UUID + bad answer.
+    │   │   ├── abort_test.go            # T2 — TTY-mock prompt-for-reason + non-TTY exit 1 + empty-prompted-reason exit 1 + 403 NotRunAssigneeError + 404 + --json + happy path with wire-body assertion.
+    │   │   ├── reassign_test.go         # T2 — POST body + 403 (operator at admin gate) + 400 RunAlreadyTerminalError + 404 + bad UUID + empty --to + --json envelope.
+    │   │   └── runs_test.go             # T2 — 7-column table render (incl. 8-char RUN_ID truncation) + JSON full-UUIDs + operator-omits-assignee-query + admin-with-assignee + empty list one-liner + 403 + bad --status / --limit + OPACITY (no leaked nested step body) + listRunsParams pointer-omission matrix.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
     │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).

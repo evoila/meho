@@ -66,19 +66,28 @@ func newRunCmd(t *testing.T) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	return cmd, &stdout, &stderr
 }
 
-// TestNewRootCmdRegistersAllSixVerbs — AC1: every advertised verb
-// has a cobra subcommand. The CLI manifest is the contract operators
-// build muscle memory around; dropping a verb silently is the
-// regression class we want to catch at unit-time.
-func TestNewRootCmdRegistersAllSixVerbs(t *testing.T) {
+// TestNewRootCmdRegistersAllElevenVerbs — AC1 + issue test #20:
+// every advertised verb has a cobra subcommand. The CLI manifest is
+// the contract operators build muscle memory around; dropping a
+// verb silently is the regression class we want to catch at unit-
+// time. T1 (#1318) registered six template verbs; T2 (#1319)
+// extends with five run verbs, eleven total.
+func TestNewRootCmdRegistersAllElevenVerbs(t *testing.T) {
 	root := NewRootCmd()
 	want := map[string]bool{
+		// T1 template verbs (#1318)
 		"list-templates":     false,
 		"show-template":      false,
 		"draft-template":     false,
 		"edit-template":      false,
 		"publish-template":   false,
 		"deprecate-template": false,
+		// T2 run verbs (#1319)
+		"start":    false,
+		"next":     false,
+		"abort":    false,
+		"reassign": false,
+		"runs":     false,
 	}
 	for _, sub := range root.Commands() {
 		name := strings.SplitN(sub.Use, " ", 2)[0]
@@ -91,10 +100,23 @@ func TestNewRootCmdRegistersAllSixVerbs(t *testing.T) {
 			t.Errorf("subcommand %q not registered under `meho runbook`", name)
 		}
 	}
+	// Parity: confirm the test enumerates all currently-registered
+	// subcommands. If a future verb gets added to NewRootCmd
+	// without an entry in `want`, this assertion forces the test
+	// author to update both surfaces in lock-step.
+	got := make(map[string]bool, len(root.Commands()))
+	for _, sub := range root.Commands() {
+		got[strings.SplitN(sub.Use, " ", 2)[0]] = true
+	}
+	if len(got) != len(want) {
+		t.Errorf("registered verbs count: got %d, want %d (got=%v)",
+			len(got), len(want), got)
+	}
 }
 
 // TestRootCmdHelpListsAllVerbs — the parent's help text should
 // mention every verb so operators new to the surface find them.
+// Issue test #20.
 func TestRootCmdHelpListsAllVerbs(t *testing.T) {
 	root := NewRootCmd()
 	var buf bytes.Buffer
@@ -106,9 +128,17 @@ func TestRootCmdHelpListsAllVerbs(t *testing.T) {
 	}
 	help := buf.String()
 	for _, want := range []string{
+		// Template verbs (T1)
 		"list-templates", "show-template", "draft-template",
 		"edit-template", "publish-template", "deprecate-template",
 		"tenant_admin",
+		// Run verbs (T2)
+		"start", "next", "abort", "reassign", "runs",
+		// Opacity language is a load-bearing piece of the
+		// parent's help text -- regressing it would mean the
+		// surface no longer documents the contract operators
+		// rely on.
+		"OPACITY",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("expected `meho runbook --help` to mention %q; got:\n%s", want, help)

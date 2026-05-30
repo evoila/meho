@@ -222,9 +222,9 @@ func TestValidateYAMLTemplateAllowsRunParams(t *testing.T) {
 // TestValidateYAMLTemplateRejectsNestedRunParams — `${run.params.X.Y}`
 // is rejected (nested paths are not in the allowlist).
 func TestValidateYAMLTemplateRejectsNestedRunParams(t *testing.T) {
-	bad := strings.Replace(validYAML,
+	bad := strings.ReplaceAll(validYAML,
 		"${run.params.cn}",
-		"${run.params.cn.nested}", -1) //nolint:gocritic // exhaustive replacement intended
+		"${run.params.cn.nested}")
 	body, _ := loadYAMLTemplate(writeYAML(t, bad))
 	err := validateYAMLTemplate("vcenter-cert-rotation", body)
 	if err == nil {

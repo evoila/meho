@@ -12,8 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/evoila/meho/cli/internal/api"
 	"github.com/google/uuid"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 func newRunSummary(t *testing.T, id, slug, assignedTo string, state api.RunSummaryState, n, total int) api.RunSummary {

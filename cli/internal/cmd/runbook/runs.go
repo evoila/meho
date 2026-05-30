@@ -111,7 +111,7 @@ func runListRuns(cmd *cobra.Command, opts listRunsOptions) error {
 	if opts.Limit < 0 || opts.Limit > 500 {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("--limit must be between 1 and 500; got %d", opts.Limit)),
+			output.Unexpected(fmt.Sprintf("--limit must be 0 (use server default) or between 1 and 500; got %d", opts.Limit)),
 			opts.JSONOut,
 		)
 	}

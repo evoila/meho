@@ -13,8 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/evoila/meho/cli/internal/api"
 	"github.com/google/uuid"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 func newReassignResponse(t *testing.T, runID, assignedTo string, at time.Time) api.ReassignRunResponse {

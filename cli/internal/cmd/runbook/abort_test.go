@@ -14,8 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/evoila/meho/cli/internal/api"
 	"github.com/google/uuid"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // withTTY claims a TTY is present for the duration of the test and

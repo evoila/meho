@@ -35,6 +35,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/pfsense"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
+	"github.com/evoila/meho/cli/internal/cmd/runbook"
 	"github.com/evoila/meho/cli/internal/cmd/scheduler"
 	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
@@ -156,6 +157,20 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `kb` parent.
 	root.AddCommand(kb.NewRootCmd())
+
+	// G12.5-T1 (#1318) -- runbook template authoring verbs
+	// (list-templates / show-template / draft-template / edit-template /
+	// publish-template / deprecate-template) for Initiative #1200.
+	// Wraps the six /api/v1/runbooks/templates routes shipped by
+	// G12.2-T3 (#1297). T1 ships the chassis + template verbs; T2
+	// (#1319) extends with the five run verbs (start / next / abort /
+	// reassign / runs). Read verbs (list-templates) are operator-level;
+	// show-template is tenant_admin with the post-completion carve-out
+	// (#1309); write verbs (draft/edit/publish/deprecate) require
+	// tenant_admin. Registered before registerDynamicSubcommands so
+	// the backplane manifest cannot shadow the built-in `runbook`
+	// parent.
+	root.AddCommand(runbook.NewRootCmd())
 
 	// G7.1-T3 (#315) -- conventions verbs (list / show / create / edit /
 	// delete / history) for Initiative #229 (tenant conventions). Wraps

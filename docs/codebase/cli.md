@@ -79,6 +79,23 @@ names.
   real HTTP submission layer (POST `/api/v1/memory`), post-login nudge,
   marker file, and `docs/cli/memory-migration.md`. Depends on
   `charm.land/huh/v2` (MIT).
+- `meho runbook ...` (G12.5-T1 #1318) — runbook template authoring
+  surface (`list-templates`, `show-template`, `draft-template`,
+  `edit-template`, `publish-template`, `deprecate-template`) wrapping
+  the six `/api/v1/runbooks/templates*` routes shipped by G12.2-T3
+  (#1297). The two non-trivial verbs (`draft-template` /
+  `edit-template`) accept `--from <file.yaml>` and run a local
+  pre-flight (slug regex, step-id uniqueness + grammar, step / verify
+  type allowlists, substitution allowlist over every string) that
+  mirrors the backend's
+  `_validate_step_ids_unique_and_substitutions_allowlisted` in
+  `backend/src/meho_backplane/runbooks/schemas.py`. Pre-flight is a
+  UX layer — the backend re-validates authoritatively at the wire.
+  Read verbs are operator-level (with the tenant_admin / post-completion
+  carve-out on `show-template`, implemented backend-side per #1309);
+  write verbs require tenant_admin. T2 (#1319) extends the parent
+  with the five run verbs (`start`, `next`, `abort`, `reassign`,
+  `runs`); T3 (#1320) ships `docs/cli/runbook.md`.
 
 ## Module layout
 
@@ -197,6 +214,23 @@ cli/
     │   │   ├── memory_test.go    # --dry-run envelope, --non-interactive filter, machine-local skip, empty-dir guard, wire-body stability.
     │   │   ├── submit.go         # doSubmit + spinner + RememberApiV1MemoryPostWithResponse via api.AuthedClient + retryOn401 generic. G0.12-T11 #1269 dropped the in-package HTTP helper trio (doAuthedRequest/sendRequest/httpError) + the local `source_id`-in-body bug the typed RememberBody schema's `extra="forbid"` would have rejected on a real backend (httptest mock masked it). isTransient retry logic preserved.
     │   │   └── submit_test.go    # typed RememberBody body shape, same-slug rerun stable, no-source_id-on-wire, transient retry, summary line, --mark-migrated, 201-without-payload nil-guard, 401/403/422 classification, no-backplane → auth_expired.
+    │   ├── runbook/           # G12.5-T1 #1318 — `meho runbook …` runbook template authoring verb tree. Initiative #1200; wraps the six /api/v1/runbooks/templates routes shipped by G12.2-T3 #1297.
+    │   │   ├── runbook.go               # NewRootCmd + newAuthedClient / retryOn401 / renderRequestError / renderHTTPStatus typed-client helpers + path-escape / truncate helpers.
+    │   │   ├── yaml.go                  # YAML parsing + local pre-flight validators (slug regex, step-id grammar, step / verify type allowlists, substitution allowlist over every string). Mirrors `backend/src/meho_backplane/runbooks/schemas.py`'s `_validate_step_ids_unique_and_substitutions_allowlisted` + `validate_substitutions`.
+    │   │   ├── list_templates.go        # `meho runbook list-templates` (GET /api/v1/runbooks/templates).
+    │   │   ├── show_template.go         # `meho runbook show-template <slug>` (GET /api/v1/runbooks/templates/{slug}); heading + numbered step list + verify summary.
+    │   │   ├── draft_template.go        # `meho runbook draft-template <slug> --from <file.yaml>` (POST /api/v1/runbooks/templates).
+    │   │   ├── edit_template.go         # `meho runbook edit-template <slug> --from <file.yaml>` (PATCH /api/v1/runbooks/templates/{slug}); renders `forked_from` on the fork-on-edit path.
+    │   │   ├── publish_template.go      # `meho runbook publish-template <slug> --version N` (POST /api/v1/runbooks/templates/{slug}/publish).
+    │   │   ├── deprecate_template.go    # `meho runbook deprecate-template <slug> --version N` (POST /api/v1/runbooks/templates/{slug}/deprecate).
+    │   │   ├── runbook_test.go          # helpers + register-all-six-verbs + URL-normalisation + body/role/path-escape contract tests.
+    │   │   ├── yaml_test.go             # YAML parse error, pre-flight matrix (slug regex, dup step id, step/verify type allowlists, substitution allowlist incl. nested-param rejection), buildRunbookTemplateBody discriminator round-trip.
+    │   │   ├── list_templates_test.go   # query-param emit (status/target_kind/limit) + 5-col table render + JSON envelope + 403/network error tests.
+    │   │   ├── show_template_test.go    # version query + heading + step-list render + 404 / 403 (incl. post-completion exception) tests.
+    │   │   ├── draft_template_test.go   # POST body shape + pre-flight short-circuits (bad slug, dup step id, disallowed substitution, bad YAML — all zero HTTP calls) + 403/409/422 surface tests.
+    │   │   ├── edit_template_test.go    # PATCH body shape + draft-in-place vs fork-on-edit summary + 404 / 403 / 422 tests.
+    │   │   ├── publish_template_test.go # POST body shape + 1-line confirmation + 404 / 403 / network-error tests.
+    │   │   └── deprecate_template_test.go # POST body shape + 1-line confirmation + 400 cannot-deprecate-draft + 403 tests.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
     │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).

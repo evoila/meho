@@ -61,6 +61,9 @@ from meho_backplane.audit import bind_preallocated_audit_id
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.conventions.preamble import (
+    BLOCK_END as _CONVENTIONS_BLOCK_END,
+)
+from meho_backplane.conventions.preamble import (
     assemble_preamble,
     assemble_preamble_detailed,
 )
@@ -116,6 +119,47 @@ _OP_ID_HISTORY: Final[str] = "conventions.history"
 #: exactly so a request that passes the path-parse also passes the
 #: pydantic field validator on the create body.
 _SLUG_MAX_LENGTH: Final[int] = 128
+
+
+def _conventions_text_only(preamble_text: str) -> str:
+    """Return the conventions text band from a combined preamble string.
+
+    G12.4-T2 (#1316). The assembled preamble may now stitch two text
+    bands: tenant conventions wrapped in
+    ``<<TENANT_CONVENTIONS ... END_TENANT_CONVENTIONS>>`` followed by
+    runbook priming wrapped in
+    ``<<RUNBOOK_PRIMING — CRITICAL>> ... <<END_RUNBOOK_PRIMING>>``,
+    separated by a blank line. The list endpoint's ``budget_status``
+    reports the conventions-band token count only -- priming is
+    bounded by its own implicit cap (``MAX_PRIMING_BLOCKS``) and is
+    not charged to the conventions budget.
+
+    Strategy: slice up to and including the conventions terminator
+    (:data:`~meho_backplane.conventions.preamble.BLOCK_END`); whatever
+    follows is the priming band (or empty). When the preamble carries
+    only priming (no conventions), the terminator is absent and the
+    function returns the empty string -- ``estimate_tokens("") == 0``,
+    so the budget status correctly reports zero conventions weight
+    for a tenant whose preamble is priming-only.
+
+    The slice is a defensive read: it relies only on the wrapper-
+    emitted terminator (never substituted from user content per the
+    positional-wrapper discipline in
+    :mod:`meho_backplane.conventions.preamble`), so a malicious
+    convention body containing the literal terminator string cannot
+    cause the slice to mis-attribute priming text as conventions
+    text.
+    """
+    if not preamble_text:
+        return ""
+    end = preamble_text.find(_CONVENTIONS_BLOCK_END)
+    if end == -1:
+        # No conventions band in the assembled text -- it is
+        # priming-only (operator has runs but tenant has no
+        # operational conventions). The conventions-only weight is
+        # zero.
+        return ""
+    return preamble_text[: end + len(_CONVENTIONS_BLOCK_END)]
 
 
 def _maybe_emit_resource_updated(
@@ -261,6 +305,7 @@ async def _compute_preamble_status(
     *,
     session: AsyncSession,
     tenant_id: uuid.UUID,
+    operator_sub: str,
     slug: str,
     kind: ConventionKind,
 ) -> PreambleInclusion | None:
@@ -298,6 +343,19 @@ async def _compute_preamble_status(
     current kind: POST uses the request body's kind; PATCH uses the
     existing row's kind (PATCH cannot change kind per the
     :class:`ConventionUpdate` schema).
+
+    G12.4-T2 (#1316) added the *operator_sub* parameter so the
+    assembler can include runbook priming in the assembled preamble
+    -- the post-write preview now reflects exactly what the operator's
+    MCP session receives, priming included. The
+    :class:`PreambleInclusion` projection (``position`` /
+    ``included`` / ``token_count`` / ``would_drop_slugs``) is
+    *conventions-only* -- those fields describe the conventions
+    pack; the priming portion is summarised on the detailed
+    assembly's ``runbook_block_count`` / ``runbook_summarized``
+    fields, which are not surfaced here (the route's
+    :class:`PreambleInclusion` schema is the slug-scoped feedback
+    surface, not a general preamble report).
     """
     if kind is not ConventionKind.OPERATIONAL:
         # ``workflow`` / ``reference`` are not preamble-bound -- a
@@ -308,7 +366,11 @@ async def _compute_preamble_status(
         # response shape honest: ``preamble_status`` present iff the
         # write was a preamble-bound one.
         return None
-    assembly = await assemble_preamble_detailed(tenant_id, session=session)
+    assembly = await assemble_preamble_detailed(
+        tenant_id,
+        operator_sub,
+        session=session,
+    )
     included = slug in assembly.kept_slugs
     position = assembly.kept_slugs.index(slug) + 1 if included else None
     # ``token_counts`` carries every considered slug (kept + dropped);
@@ -404,10 +466,26 @@ async def list_conventions(
     # adds one round-trip on top of the list query above; that is
     # acceptable for the v0.2 budget contract and the natural unit
     # for "what the preamble actually weighs".
-    preamble = await assemble_preamble(operator.tenant_id)
+    #
+    # G12.4-T2 (#1316) extended :func:`assemble_preamble` with the
+    # operator's ``sub`` so the assembled text can include per-run
+    # runbook priming. The ``budget_status`` arithmetic is
+    # **conventions-only**: ``estimated_tokens`` measures the
+    # conventions text band against ``DEFAULT_MAX_PREAMBLE_TOKENS``
+    # (priming has its own implicit cap via ``MAX_PRIMING_BLOCKS``
+    # and is not charged to the conventions budget per the
+    # Initiative #1199 design contract). The operator's preamble is
+    # still assembled with priming so the list view reflects the
+    # exact wire shape the MCP ``initialize`` handler ships; the
+    # priming portion is then stripped before measuring tokens so
+    # the budget signal stays honest -- a tenant with zero
+    # operational conventions reports ``estimated_tokens=0``
+    # regardless of how many runbook runs the operator has.
+    preamble = await assemble_preamble(operator.tenant_id, operator.sub)
+    conventions_only_text = _conventions_text_only(preamble.text)
     budget_status = BudgetStatus(
         max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
-        estimated_tokens=estimate_tokens(preamble.text),
+        estimated_tokens=estimate_tokens(conventions_only_text),
         over_budget=bool(preamble.dropped_slugs),
         dropped_slugs=preamble.dropped_slugs,
     )
@@ -542,6 +620,7 @@ async def create_convention(
     preamble_status = await _compute_preamble_status(
         session=session,
         tenant_id=operator.tenant_id,
+        operator_sub=operator.sub,
         slug=body.slug,
         kind=body.kind,
     )
@@ -635,6 +714,7 @@ async def update_convention(
     preamble_status = await _compute_preamble_status(
         session=session,
         tenant_id=operator.tenant_id,
+        operator_sub=operator.sub,
         slug=slug,
         kind=existing_kind,
     )

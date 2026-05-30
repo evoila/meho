@@ -87,6 +87,7 @@ from meho_backplane.conventions.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantConvention
+from meho_backplane.runbooks.priming import assemble_runbook_priming
 
 __all__ = [
     "BLOCK_END",
@@ -160,7 +161,11 @@ class PreambleAssembly(NamedTuple):
     :func:`assemble_preamble_detailed` variant so the
     ``POST/PATCH /api/v1/conventions`` handlers can resolve a
     just-written slug's preamble position from the same pack the MCP
-    ``initialize`` consumer sees. Fields:
+    ``initialize`` consumer sees. G12.4-T2 (#1316) extended the same
+    record with two runbook-priming diagnostic fields so callers can
+    log how the priming portion was assembled without re-running
+    :func:`~meho_backplane.runbooks.priming.assemble_runbook_priming`.
+    Fields:
 
     * ``text`` / ``dropped_slugs`` -- identical to
       :class:`PreambleResult` so callers needing the wire-format
@@ -176,6 +181,18 @@ class PreambleAssembly(NamedTuple):
       to surface the just-written slug's own budget weight on
       ``preamble_status.token_count`` without re-running
       :func:`~meho_backplane.conventions.schemas.estimate_tokens`.
+    * ``runbook_block_count`` -- count of the operator's in-progress
+      runs the priming helper observed, whether they rendered as
+      per-run blocks or collapsed into the summary form. ``0`` when
+      the operator has no in-progress runs (and priming text was
+      omitted entirely). Mirrors :attr:`dropped_slugs` as a
+      diagnostic-only field: the assembler logs it, no consumer
+      branches on the value.
+    * ``runbook_summarized`` -- ``True`` when the operator had more
+      than :data:`~meho_backplane.runbooks.priming.MAX_PRIMING_BLOCKS`
+      in-progress runs and the helper rendered the summary form
+      instead of per-run blocks; ``False`` otherwise (including the
+      no-runs case).
 
     The MCP read path stays on :func:`assemble_preamble` (returns a
     :class:`PreambleResult`); the inclusion-feedback write path uses
@@ -185,12 +202,20 @@ class PreambleAssembly(NamedTuple):
     preamble the agent session actually received" is the failure
     mode signal 18 names; using one packer for both reads eliminates
     it by construction.
+
+    The two ``runbook_*`` fields default to their empty values
+    (``0`` / ``False``) so existing positional construction
+    ``PreambleAssembly("", [], [], {})`` in tests and other consumers
+    continues to compile -- a NamedTuple with trailing defaults stays
+    source-compatible with shorter positional calls.
     """
 
     text: str
     dropped_slugs: list[str]
     kept_slugs: list[str]
     token_counts: dict[str, int]
+    runbook_block_count: int = 0
+    runbook_summarized: bool = False
 
 
 async def _fetch_operational_conventions(
@@ -225,9 +250,11 @@ async def _fetch_operational_conventions(
 
 async def assemble_preamble(
     tenant_id: UUID,
+    operator_sub: str,
+    *,
     max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
 ) -> PreambleResult:
-    """Assemble the session preamble for *tenant_id* up to *max_tokens*.
+    """Assemble the session preamble for *tenant_id* + *operator_sub* up to *max_tokens*.
 
     Reads all ``kind='operational'`` conventions for *tenant_id*
     ordered ``priority DESC, created_at ASC`` (the deterministic
@@ -236,9 +263,20 @@ async def assemble_preamble(
     count past *max_tokens* (and every entry after it) is dropped
     whole and recorded in :attr:`PreambleResult.dropped_slugs`.
 
-    Empty tenant returns ``PreambleResult("", [])`` -- caller decides
-    how to surface "no preamble" (the MCP ``_initialize`` wrapper
-    maps it to ``instructions: None`` on the wire).
+    Empty tenant + no in-progress runs returns ``PreambleResult("", [])``
+    -- caller decides how to surface "no preamble" (the MCP
+    ``_initialize`` wrapper maps it to ``instructions: None`` on the
+    wire).
+
+    G12.4-T2 (#1316) extended the signature with the operator's
+    ``sub`` so the assembler can call
+    :func:`~meho_backplane.runbooks.priming.assemble_runbook_priming`
+    against the same operator and append per-run priming text after
+    the tenant conventions block. The parameter is **required, no
+    default**: an unmigrated caller surfaces as a type-check failure
+    rather than a runtime regression that silently passes ``None`` and
+    loses priming for every session. Migration cost is one extra
+    positional argument per call site.
 
     Delegates to :func:`assemble_preamble_detailed` and discards the
     verbose fields -- the MCP read path only needs ``text`` and
@@ -247,7 +285,11 @@ async def assemble_preamble(
     consumers (no risk of "the position I told the operator" drifting
     from "the preamble the agent session received").
     """
-    detailed = await assemble_preamble_detailed(tenant_id, max_tokens=max_tokens)
+    detailed = await assemble_preamble_detailed(
+        tenant_id,
+        operator_sub,
+        max_tokens=max_tokens,
+    )
     return PreambleResult(detailed.text, detailed.dropped_slugs)
 
 
@@ -329,59 +371,119 @@ def _wrap_preamble(kept_blocks: list[str]) -> str:
 
 async def assemble_preamble_detailed(
     tenant_id: UUID,
-    max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
+    operator_sub: str,
     *,
+    max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
     session: AsyncSession | None = None,
 ) -> PreambleAssembly:
-    """Assemble the preamble and return the verbose pack record.
+    """Assemble the preamble (verbose pack record + runbook priming band).
 
     G0.14-T8 (#1149, signal 18) addition. Same packer logic as
     :func:`assemble_preamble` -- ``priority DESC, created_at ASC``,
     greedy fill against the ``max_tokens`` budget, lowest-priority
     overflow drops whole -- but the return shape also carries
     ``kept_slugs`` (pack order of slugs that landed in the preamble)
-    and ``token_counts`` (the estimated token cost per row).
-
-    The two are what the POST/PATCH preamble-status feedback needs:
-
-    * ``kept_slugs`` lets the route handler resolve the just-written
-      slug's 1-based preamble position without re-running the pack
-      (``kept_slugs.index(slug) + 1``).
-    * ``token_counts`` lets the handler surface the just-written
-      slug's own token weight via ``preamble_status.token_count``
-      without a second :func:`~meho_backplane.conventions.schemas.estimate_tokens`
-      call on the body text.
+    and ``token_counts`` (the estimated token cost per row), which
+    the POST/PATCH preamble-status feedback needs to resolve a
+    just-written slug's 1-based preamble position
+    (``kept_slugs.index(slug) + 1``) and its own body weight
+    (``token_counts[slug]``) without re-running the pack.
 
     When *session* is ``None`` the function opens its own DB session
     via :func:`~meho_backplane.db.engine.get_sessionmaker` -- the
     MCP ``initialize`` handler is not a FastAPI request handler and
     has no :func:`~meho_backplane.db.engine.get_session`
-    dependency-injected session; the assembler is the natural owner
-    of the read transaction.
-
-    When *session* is supplied, the assembler reads through it
-    rather than opening its own. G0.14-T8's POST/PATCH preamble-
-    status feedback uses this so the pack reflects the in-progress
+    dependency-injected session. When *session* is supplied, the
+    assembler reads through it so the pack reflects the in-progress
     write (the convention's INSERT/UPDATE has flushed but not
-    committed; a separately-opened session would not see it).
-    SQLAlchemy 2.x reads within the same transaction see
-    flushed-but-not-committed rows, so the just-written convention
-    appears in the assembler's query as long as the caller has
-    flushed before calling.
+    committed; SQLAlchemy 2.x reads within the same transaction see
+    flushed-but-not-committed rows). The POST/PATCH preamble-status
+    feedback relies on this read-your-own-writes property.
+
+    G12.4-T2 (#1316) added runbook session priming as a second text
+    band appended after the conventions block. See
+    :func:`_combine_bands` for the empty-priming byte-identity
+    invariant. The two bands have independent token caps by design
+    (conventions: *max_tokens*; priming:
+    :data:`~meho_backplane.runbooks.priming.MAX_PRIMING_BLOCKS`):
+    an operator with 6 in-progress runs does not shrink the
+    conventions surface, and a tenant with 50 conventions does not
+    shrink the priming surface. Treating them as a single shared
+    budget would force a tradeoff that neither caller wants.
     """
-    if session is None:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as owned_session:
-            conventions = await _fetch_operational_conventions(owned_session, tenant_id)
-    else:
-        conventions = await _fetch_operational_conventions(session, tenant_id)
+    conventions = await _load_conventions(session, tenant_id)
+    # The priming helper opens its own DB session through
+    # :class:`RunbookRunService` -- threading the caller's *session*
+    # through is not required because priming reads ``runbook_runs``
+    # rows, which the conventions write transaction never touches.
+    priming = await assemble_runbook_priming(operator_sub, tenant_id)
 
     if not conventions:
-        return PreambleAssembly("", [], [], {})
+        # No conventions text: emit the priming text on its own if
+        # present, else the empty-string sentinel. An operator with
+        # in-progress runs in a tenant without operational
+        # conventions still receives priming -- the two bands are
+        # independent (#1316).
+        return PreambleAssembly(
+            text=priming.text,
+            dropped_slugs=[],
+            kept_slugs=[],
+            token_counts={},
+            runbook_block_count=priming.block_count,
+            runbook_summarized=priming.summarized,
+        )
 
     kept_blocks, kept_slugs, dropped, token_counts = _pack_conventions(
         conventions,
         max_tokens,
     )
-    text = _wrap_preamble(kept_blocks)
-    return PreambleAssembly(text, dropped, kept_slugs, token_counts)
+    return PreambleAssembly(
+        text=_combine_bands(_wrap_preamble(kept_blocks), priming.text),
+        dropped_slugs=dropped,
+        kept_slugs=kept_slugs,
+        token_counts=token_counts,
+        runbook_block_count=priming.block_count,
+        runbook_summarized=priming.summarized,
+    )
+
+
+async def _load_conventions(
+    session: AsyncSession | None,
+    tenant_id: UUID,
+) -> list[TenantConvention]:
+    """Fetch operational conventions, opening a session iff one wasn't supplied.
+
+    Centralises the session-vs-no-session branch that
+    :func:`assemble_preamble_detailed` would otherwise inline. The MCP
+    ``initialize`` handler calls without a session (no FastAPI
+    dependency injection in that path); the POST/PATCH conventions
+    routes call *with* their request-scoped session so the assembler
+    reads through the in-progress write transaction.
+    """
+    if session is None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as owned_session:
+            return await _fetch_operational_conventions(owned_session, tenant_id)
+    return await _fetch_operational_conventions(session, tenant_id)
+
+
+def _combine_bands(conventions_text: str, priming_text: str) -> str:
+    """Stitch the conventions and priming text bands into the assembled preamble.
+
+    G12.4-T2 (#1316). Empty priming -> the assembled text is the
+    conventions text alone, byte-identical to the pre-T2 shape (no
+    trailing blank line, no separator). The separator is conditional
+    on priming having content, so an operator without in-progress
+    runs sees zero behaviour change. Tests in
+    :mod:`tests.test_conventions_preamble` pin this with a byte-shape
+    assertion against the pre-T2 wire string.
+
+    Two newlines between the conventions ``END_TENANT_CONVENTIONS>>``
+    and the priming ``<<RUNBOOK_PRIMING — CRITICAL>>`` so the two
+    bands render as separate paragraphs in the agent's context. Each
+    band carries its own delimiters; the separator is between bands,
+    not inside either.
+    """
+    if not priming_text:
+        return conventions_text
+    return f"{conventions_text}\n\n{priming_text}"

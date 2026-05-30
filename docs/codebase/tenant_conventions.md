@@ -165,8 +165,18 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
 ## Session-preamble assembler (T4)
 
 [`backend/src/meho_backplane/conventions/preamble.py`](../../backend/src/meho_backplane/conventions/preamble.py)
-ships `assemble_preamble(tenant_id, max_tokens=600) -> PreambleResult`.
-Behaviour:
+ships `assemble_preamble(tenant_id, operator_sub, *, max_tokens=600) ->
+PreambleResult`. G12.4-T2 (#1316) extended the signature with a
+required positional `operator_sub` so the assembler can append a
+runbook-priming band (per-run summaries from
+[`runbooks/priming.py`](../../backend/src/meho_backplane/runbooks/priming.py))
+after the conventions block; an operator with zero in-progress runs
+gets `""` from the priming helper and the assembled text is
+byte-identical to the pre-T2 shape (the `_combine_bands` empty-
+priming guard). Conventions and priming have independent token caps:
+the conventions text is packed against `max_tokens`; the priming text
+is bounded by `MAX_PRIMING_BLOCKS` (#1315) and is **not** charged to
+the conventions budget. Behaviour for the conventions band:
 
 - **Reads `kind='operational'` only.** Decision #4 in
   [v0.2-decisions.md](../planning/v0.2-decisions.md) -- workflow
@@ -416,7 +426,16 @@ honours the over-budget warning AC. The
 `GET /api/v1/conventions` response carries a `budget_status`
 sub-document (`max_tokens`, `estimated_tokens`, `over_budget`,
 `dropped_slugs`) computed by a call to
-`assemble_preamble(operator.tenant_id)` on every list call.
+`assemble_preamble(operator.tenant_id, operator.sub)` on every list
+call. `estimated_tokens` stays **conventions-only** even after
+G12.4-T2 (#1316) added the runbook-priming band: the assembler is
+invoked with the calling operator's `sub` so the assembled wire text
+matches the operator's MCP session exactly, then
+`_conventions_text_only` slices off the priming band before
+`estimate_tokens` measures the result. The signal stays honest -- a
+tenant with zero operational conventions reports
+`estimated_tokens=0` regardless of how many runbook runs the
+operator has.
 
 **Per-write inclusion feedback (G0.14-T8 #1149).** A complementary
 post-write signal: `POST /api/v1/conventions` and
@@ -450,13 +469,20 @@ sub-document to the response when the convention is
 signal lives on the list response's `budget_status`) and `null` for
 writes against `workflow` / `reference` kinds (those don't enter
 the preamble). The route handler resolves inclusion via
-`assemble_preamble_detailed(tenant_id, session=session)` -- the
-same session the write committed through, so the pack reflects
-the post-write state without an extra commit round-trip. Signal 18
-in `claude-rdc-hetzner-dc#697` motivated the addition: an operator
-who writes a convention previously got a `201` with no indication
-the row would ever reach an agent session; with `preamble_status`
-the answer arrives in the same round-trip.
+`assemble_preamble_detailed(tenant_id, operator.sub, session=session)`
+-- the same session the write committed through, so the pack
+reflects the post-write state without an extra commit round-trip.
+The `operator.sub` argument (G12.4-T2 #1316) lets the assembler
+include the calling operator's runbook priming in the assembled
+text; the `position` / `included` / `token_count` /
+`would_drop_slugs` projection surfaced on `preamble_status` stays
+**conventions-only** (those fields describe the conventions pack;
+the priming portion lives on `PreambleAssembly.runbook_block_count`
+/ `.runbook_summarized`, neither of which is surfaced to the route
+response). Signal 18 in `claude-rdc-hetzner-dc#697` motivated the
+addition: an operator who writes a convention previously got a
+`201` with no indication the row would ever reach an agent session;
+with `preamble_status` the answer arrives in the same round-trip.
 When the tenant is over budget:
 
 - **Table mode** (default): the table still prints to stdout (the

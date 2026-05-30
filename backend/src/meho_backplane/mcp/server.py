@@ -319,7 +319,12 @@ async def _initialize(
     # module is already loaded by the time any handshake arrives).
     from meho_backplane.conventions.preamble import assemble_preamble
 
-    preamble = await assemble_preamble(operator.tenant_id)
+    # G12.4-T2 (#1316): pass the operator's ``sub`` so the assembler
+    # can append per-run priming text for any ``in_progress`` runs
+    # assigned to this operator. An operator with no in-progress runs
+    # sees a byte-identical preamble to the pre-T2 shape (the priming
+    # helper returns ``text=""`` and the assembler omits the section).
+    preamble = await assemble_preamble(operator.tenant_id, operator.sub)
     if preamble.dropped_slugs:
         # Loud, not silent -- the dropped-slug list is part of the
         # contract per the issue body's acceptance criterion. WARNING

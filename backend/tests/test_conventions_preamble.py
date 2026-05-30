@@ -486,12 +486,19 @@ async def test_zero_in_progress_runs_is_byte_identical_to_pre_t2_shape() -> None
     without runbooks in flight sees zero behaviour change -- no
     extra blank lines, no extra delimiters, no priming section.
 
-    Strategy: assemble the same tenant twice -- once with an
-    operator known to have no in-progress runs (the wired path),
-    once via direct call to the conventions-only packer
-    (:func:`assemble_preamble_detailed` with a placeholder sub
-    returns the same shape when no priming is rendered). Assert
-    byte equality of the two outputs.
+    Strategy: assemble the preamble for an operator with no
+    in-progress runs and pin the wire shape -- the result starts
+    with :data:`BLOCK_START` and ends with :data:`BLOCK_END`
+    (nothing trails the conventions terminator), and neither
+    :data:`PRIMING_BLOCK_START` nor :data:`PRIMING_BLOCK_END`
+    appears anywhere in the text. The byte-identity invariant is
+    held by the conditional-separator branch in
+    :func:`~meho_backplane.conventions.preamble._combine_bands`
+    (``priming_text=""`` returns the conventions text verbatim;
+    no leading/trailing whitespace, no separator) -- a single
+    early-return at the call site, no string concatenation when
+    there is no priming to append. This test pins the wire shape
+    an MCP client would receive end-to-end through the assembler.
     """
     tenant = uuid.uuid4()
     await _insert_convention(

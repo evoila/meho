@@ -216,6 +216,167 @@ def test_catalog_product_field_matches_target_create_enum(
     )
 
 
+# Listing-emitted ``product`` tokens whose registry spelling does NOT
+# round-trip through :func:`canonical_product_token` today. Each entry
+# is a known split where the v2-registry ``product`` and the
+# parser-derived listing token differ AND no
+# :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES` entry
+# bridges them yet. G0.18-T2 (#1355) reconciled the SDDC case
+# (``sddc`` -> ``sddc-manager``); the other five are adjacent findings
+# the structural test below surfaced, recorded here so the same test
+# still catches a *new* drift (a future connector that lands with the
+# same split shape) while the existing five await targeted follow-up
+# Tasks under G0.18 / a successor Initiative.
+#
+# Each row is ``(listing_token, registry_product)``. Adding a token
+# here is an explicit acknowledgement of an operator-visible 422 on
+# ``POST /api/v1/targets`` with the listing spelling; removing one
+# requires either dropping the alias-or-rename or otherwise
+# reconciling the split.
+_KNOWN_LISTING_PRODUCT_DRIFT: dict[str, str] = {
+    "hetzner": "hetzner-robot",
+    "vcfa": "vcf-automation",
+    "fleet": "vcf-fleet",
+    "vrli": "vcf-logs",
+    "vrops": "vcf-operations",
+}
+
+
+def test_listing_product_round_trips_through_target_create_validator(
+    _registered_connectors: set[str],
+) -> None:
+    """Every connector's listing ``product`` is accepted by ``POST /api/v1/targets``.
+
+    G0.18-T2 (#1355) — extends the catalog-↔-enum check above with
+    the half RDC #789 Finding 6 caught the hard way: the
+    ``meho connector list`` token is the **parser-derived** product
+    (what
+    :func:`~meho_backplane.operations._lookup.parse_connector_id`
+    extracts from the connector_id), not the v2-registry ``product``
+    field. For SDDC the registry stores ``"sddc-manager"`` but the
+    listing emits ``"sddc"`` (load-bearing for the #773
+    connector_id round-trip), so the catalog-↔-enum check alone
+    misses the operator-facing split: copying the listing token into
+    a create still 422'd.
+
+    The bridge is
+    :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES` +
+    :func:`~meho_backplane.connectors.registry.canonical_product_token`.
+    This test asserts the round-trip structurally — every shipped
+    connector's listing token must canonicalise to a registered
+    product token, otherwise the operator's first POST fails. A
+    future connector whose listing-emitted product is neither
+    canonical nor an alias trips here at unit-test time, not on
+    the next dogfood cycle.
+
+    Five existing connectors carry the same split shape SDDC did
+    pre-reconciliation (hetzner-robot, vcf-automation, vcf-fleet,
+    vcf-logs, vcf-operations); they are recorded in
+    :data:`_KNOWN_LISTING_PRODUCT_DRIFT` and excluded from the
+    assertion so the SDDC fix can ship without spilling into a
+    five-connector audit. The exclusion list IS the audit surface
+    — each entry is an acknowledged operator-visible 422 on the
+    listing spelling, awaiting its own follow-up task. The test
+    still catches a *new* drift outside that allowlist.
+    """
+    from meho_backplane.connectors.registry import (
+        canonical_product_token,
+        registered_product_tokens,
+    )
+    from meho_backplane.operations._lookup import parse_connector_id
+
+    enum_products = set(registered_product_tokens())
+    unreachable: list[tuple[str, str]] = []
+    for _registry_product, version, impl_id in sorted(all_connectors_v2().keys()):
+        if not version or not impl_id:
+            # Wildcard / v1-compat (``(product, "", "")``) rows are
+            # dropped by ``_resolve_class_only_natural_key`` before
+            # they reach the operator-facing listing, so they don't
+            # contribute a listing token to round-trip.
+            continue
+        connector_id = f"{impl_id}-{version}"
+        try:
+            parsed_product, parsed_version, parsed_impl_id = parse_connector_id(connector_id)
+        except ValueError:
+            # Parser-incompatible id shape; the listing drops with a
+            # structured log line.
+            continue
+        if (parsed_version, parsed_impl_id) != (version, impl_id):
+            # Lossy parse — the dispatcher couldn't recover the
+            # registered triple from the rendered connector_id, so
+            # the listing drops the row. Out of scope for the
+            # round-trip check.
+            continue
+        if parsed_product in _KNOWN_LISTING_PRODUCT_DRIFT:
+            # Acknowledged adjacent finding — same split shape as
+            # the SDDC case but outside the scope of #1355. The
+            # allowlist entry asserts the operator-visible 422 is
+            # known and awaiting its own reconciliation task.
+            continue
+        canonical = canonical_product_token(parsed_product)
+        if canonical not in enum_products:
+            unreachable.append((connector_id, parsed_product))
+    assert unreachable == [], (
+        f"connector(s) emit a listing ``product`` that neither "
+        f"matches a registered product token nor canonicalises to "
+        f"one via PRODUCT_ALIASES (and is not in the explicit "
+        f"_KNOWN_LISTING_PRODUCT_DRIFT allowlist): {unreachable!r}. "
+        f"An operator copying this token into POST /api/v1/targets "
+        f"will hit a 422. Either rename the connector class so "
+        f"registry and parser agree, add a PRODUCT_ALIASES entry "
+        f"per docs/codebase/api-shape-conventions.md §3, or — if "
+        f"the split is intentional and the fix is scoped to a "
+        f"separate task — add a _KNOWN_LISTING_PRODUCT_DRIFT entry."
+    )
+
+
+def test_known_listing_product_drift_entries_still_drift(
+    _registered_connectors: set[str],
+) -> None:
+    """Every allowlist entry still represents a real split — and only one.
+
+    Two invariants:
+
+    * The listing token in :data:`_KNOWN_LISTING_PRODUCT_DRIFT`
+      really fails to round-trip today (otherwise the entry is
+      stale and should be deleted — the connector got fixed). A
+      stale allowlist erodes the structural-drift signal of the
+      sibling test above.
+    * The recorded registry spelling matches the live v2 registry
+      (otherwise a connector rename would invalidate the allowlist
+      without anyone noticing). Pinning both halves catches a
+      rename that "fixes" the drift in one direction without
+      removing the allowlist row.
+    """
+    from meho_backplane.connectors.registry import (
+        canonical_product_token,
+        registered_product_tokens,
+    )
+
+    enum_products = set(registered_product_tokens())
+    stale: list[str] = []
+    misrecorded: list[tuple[str, str, str]] = []
+    for listing_token, recorded_registry in _KNOWN_LISTING_PRODUCT_DRIFT.items():
+        canonical = canonical_product_token(listing_token)
+        if canonical in enum_products:
+            stale.append(listing_token)
+            continue
+        if recorded_registry not in enum_products:
+            misrecorded.append(
+                (listing_token, recorded_registry, "registry spelling not registered")
+            )
+    assert stale == [], (
+        f"_KNOWN_LISTING_PRODUCT_DRIFT has stale entries {stale!r} that "
+        "now round-trip — the underlying connector was reconciled. "
+        "Remove the allowlist row."
+    )
+    assert misrecorded == [], (
+        f"_KNOWN_LISTING_PRODUCT_DRIFT misrecords registry spellings: "
+        f"{misrecorded!r}. Update the allowlist value to the live "
+        "registry product."
+    )
+
+
 def test_validate_catalog_registry_coverage_passes_for_shipped_catalog(
     _registered_connectors: set[str],
 ) -> None:

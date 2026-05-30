@@ -1457,3 +1457,276 @@ async def test_get_single_does_not_carry_preamble_status(client: TestClient) -> 
     # GET deliberately omits preamble_status (returns None) to keep
     # the read paths' responsibilities clean.
     assert resp.json()["preamble_status"] is None
+
+
+# ---------------------------------------------------------------------------
+# G12.4-T2 #1316 -- runbook priming wire-up on the conventions routes
+# ---------------------------------------------------------------------------
+#
+# The issue body prescribes Tests #7 + #8: route-level coverage that
+# the calling operator's runbook priming flows through the conventions
+# API's read + write paths. The route response shapes are
+# ``ConventionListResponse`` (``entries`` + ``budget_status``) on the
+# list endpoint and ``Convention`` (with ``preamble_status``) on POST /
+# PATCH -- none of which surfaces the raw assembled preamble text.
+# By design, ``budget_status`` is **conventions-only** (the priming
+# band has its own implicit cap via ``MAX_PRIMING_BLOCKS`` and is not
+# charged to the conventions budget) and ``preamble_status`` is a
+# slug-scoped projection (``included`` / ``position`` / ``token_count``
+# / ``would_drop_slugs``) over the conventions pack alone (per the
+# ``_compute_preamble_status`` docstring).
+#
+# Per the iter-1 review's M1-alternative: "if the route response shape
+# doesn't expose raw preamble text, document the assembler-level
+# coverage as maximally-feasible and file a follow-up for end-to-end
+# MCP-level route coverage — the deferral has to be explicit."
+#
+# The maximally-feasible route-level coverage here is verifying the
+# **wire-up**: that each route invokes ``assemble_preamble`` /
+# ``assemble_preamble_detailed`` with the calling operator's
+# ``operator.sub`` as the second positional argument. That is the
+# load-bearing T2 claim ("all three call sites updated to pass
+# operator.sub"); a future commit that silently drops the sub argument
+# (or passes a hard-coded sentinel) would fail these tests even when
+# the conventions-only response fields stayed correct.
+#
+# End-to-end coverage of priming-band content in the assembled wire
+# text is delivered through:
+#   * the assembler-level tests in
+#     ``backend/tests/test_conventions_preamble.py`` (the
+#     ``test_one_in_progress_run_appends_priming_after_conventions``
+#     family) that exercise the primitive's full byte shape, and
+#   * ``backend/tests/test_mcp_initialize_instructions.py``
+#     covers the MCP-level wire-up (the load-bearing call site per
+#     the issue body).
+# The MCP-level path is the user-facing surface for priming text; the
+# conventions API surfaces the conventions-only ``budget_status`` /
+# ``preamble_status`` projections and does not promise the priming
+# text on its own response shape. A v0.2.next initiative may add a
+# dedicated ``GET /api/v1/conventions/preview`` route that returns
+# the assembled preamble verbatim (the issue body's original test
+# wording assumed such a route would exist; it does not, and the
+# conventions-only projections are the right shape for the list /
+# write feedback responsibility).
+
+
+@pytest.mark.asyncio
+async def test_list_conventions_invokes_assembler_with_operator_sub(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``GET /api/v1/conventions`` passes ``operator.sub`` to ``assemble_preamble``.
+
+    G12.4-T2 (#1316) wire-up regression guard. The list endpoint
+    builds ``budget_status`` by calling ``assemble_preamble`` with
+    the operator's tenant + sub; a refactor that silently dropped
+    the ``operator.sub`` argument (so every list call would assemble
+    priming for a sentinel operator and the calling operator's
+    in-progress runs would no longer flow into the preamble band)
+    would still produce a correct ``budget_status`` (the conventions
+    pack is sub-agnostic) but would silently break the user-visible
+    priming. This test asserts the right sub is forwarded so the
+    regression is caught at this layer.
+
+    Spy strategy: wrap the real ``assemble_preamble`` import in
+    ``meho_backplane.api.v1.conventions`` and record every call's
+    positional args. Assert the second positional matches the
+    operator's sub from the JWT.
+    """
+    from meho_backplane.api.v1 import conventions as conventions_module
+
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-priming-list-spy")
+    op_sub = "op-priming-list-spy"
+    token = mint_token(
+        key,
+        sub=op_sub,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+    )
+
+    captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real_assemble = conventions_module.assemble_preamble
+
+    async def _spy_assemble(*args: Any, **kwargs: Any) -> Any:
+        captured.append((args, dict(kwargs)))
+        return await real_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(conventions_module, "assemble_preamble", _spy_assemble)
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            "/api/v1/conventions",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    # The list handler invokes the assembler exactly once per request.
+    # Positional args are ``(tenant_id, operator_sub)``; assert the
+    # second one is the operator's sub from the JWT, not a sentinel.
+    assert len(captured) == 1, captured
+    args, _kwargs = captured[0]
+    assert len(args) >= 2, args
+    assert args[0] == _TENANT_A
+    assert args[1] == op_sub
+    # The conventions-only ``budget_status`` projection stays correct
+    # in the response -- the priming wiring does not corrupt it (an
+    # empty operational set still reports ``estimated_tokens=0``).
+    body = resp.json()
+    assert body["budget_status"]["estimated_tokens"] == 0
+    assert body["budget_status"]["over_budget"] is False
+
+
+@pytest.mark.asyncio
+async def test_post_convention_invokes_detailed_assembler_with_operator_sub(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``POST /api/v1/conventions`` passes ``operator.sub`` to ``assemble_preamble_detailed``.
+
+    G12.4-T2 (#1316) wire-up regression guard for the post-write
+    inclusion-feedback path. ``_compute_preamble_status`` (the
+    helper that builds ``preamble_status`` on POST / PATCH responses)
+    delegates to ``assemble_preamble_detailed`` with the operator's
+    sub so the assembled preview reflects what the calling operator's
+    MCP session will see (priming included). Forgetting to pass the
+    sub would leave priming silently absent from the post-write
+    preview while ``preamble_status``'s conventions-only projection
+    still looked right.
+
+    Spy strategy: wrap the real ``assemble_preamble_detailed`` import
+    in ``meho_backplane.api.v1.conventions`` and assert every call
+    carries the operator's sub. Use an operational convention so the
+    helper is actually invoked (workflow / reference short-circuit
+    to ``preamble_status=None`` per the ``_compute_preamble_status``
+    docstring).
+    """
+    from meho_backplane.api.v1 import conventions as conventions_module
+
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-priming-post-spy")
+    op_sub = "op-priming-post-spy"
+    token = mint_token(
+        key,
+        sub=op_sub,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+    )
+
+    captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real_detailed = conventions_module.assemble_preamble_detailed
+
+    async def _spy_detailed(*args: Any, **kwargs: Any) -> Any:
+        captured.append((args, dict(kwargs)))
+        return await real_detailed(*args, **kwargs)
+
+    monkeypatch.setattr(
+        conventions_module,
+        "assemble_preamble_detailed",
+        _spy_detailed,
+    )
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post_convention(
+            client,
+            token,
+            slug="priming-wired-post",
+            body="Body for the post-write priming wire-up check.",
+            kind="operational",
+            priority=5,
+        )
+    assert resp.status_code == 201, resp.text
+    # ``_compute_preamble_status`` invokes the detailed assembler
+    # once per write against an operational kind. Assert the sub
+    # is forwarded as the second positional argument.
+    assert len(captured) == 1, captured
+    args, kwargs = captured[0]
+    assert len(args) >= 2, args
+    assert args[0] == _TENANT_A
+    assert args[1] == op_sub
+    # The route still threads the request-scoped session through so
+    # the post-write read sees the just-flushed row (the read-your-
+    # own-writes invariant ``_compute_preamble_status`` relies on);
+    # the spy must observe the kwarg.
+    assert "session" in kwargs
+    # And the conventions-only ``preamble_status`` projection stays
+    # correct -- the just-written slug lands in position 1 of the
+    # otherwise empty operational set.
+    ps = resp.json()["preamble_status"]
+    assert ps is not None
+    assert ps["included"] is True
+    assert ps["position"] == 1
+
+
+@pytest.mark.asyncio
+async def test_patch_convention_invokes_detailed_assembler_with_operator_sub(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``PATCH /api/v1/conventions/{slug}`` passes ``operator.sub`` to the detailed assembler.
+
+    G12.4-T2 (#1316) wire-up regression guard for PATCH -- pairs
+    with the POST spy above. ``_compute_preamble_status`` is invoked
+    once per write; the PATCH route's call site must forward
+    ``operator.sub`` so the post-update preview reflects the calling
+    operator's MCP session shape (priming included). Verify across
+    the create + update lifecycle so a refactor that dropped the sub
+    on either route would fail.
+    """
+    from meho_backplane.api.v1 import conventions as conventions_module
+
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-priming-patch-spy")
+    op_sub = "op-priming-patch-spy"
+    token = mint_token(
+        key,
+        sub=op_sub,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+    )
+
+    captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    real_detailed = conventions_module.assemble_preamble_detailed
+
+    async def _spy_detailed(*args: Any, **kwargs: Any) -> Any:
+        captured.append((args, dict(kwargs)))
+        return await real_detailed(*args, **kwargs)
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # Seed an operational row first WITHOUT the spy so the POST
+        # call's invocation isn't captured -- the spy is installed
+        # after the create.
+        create_resp = _post_convention(
+            client,
+            token,
+            slug="priming-wired-patch",
+            body="Original body for PATCH wire-up check.",
+            kind="operational",
+            priority=10,
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        monkeypatch.setattr(
+            conventions_module,
+            "assemble_preamble_detailed",
+            _spy_detailed,
+        )
+        patch_resp = client.patch(
+            "/api/v1/conventions/priming-wired-patch",
+            json={"body": "Updated body for PATCH wire-up check."},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert patch_resp.status_code == 200, patch_resp.text
+    # Exactly one detailed-assembler call from the PATCH route
+    # (the seeding POST predates the spy installation).
+    assert len(captured) == 1, captured
+    args, kwargs = captured[0]
+    assert len(args) >= 2, args
+    assert args[0] == _TENANT_A
+    assert args[1] == op_sub
+    assert "session" in kwargs
+    ps = patch_resp.json()["preamble_status"]
+    assert ps is not None
+    assert ps["included"] is True
+    assert ps["position"] == 1

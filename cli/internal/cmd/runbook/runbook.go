@@ -2,10 +2,13 @@
 // Copyright (c) 2026 evoila Group
 
 // Package runbook hosts the cobra commands under `meho runbook ...`
-// for G12.5-T1 (#1318) of Initiative #1200. T1 ships the chassis
-// (root cobra command, output formatting, error rendering, YAML
-// parsing for the import verbs) plus the six template verbs that
-// wrap the G12.2 REST surface (#1297):
+// for G12.5-T1 (#1318) + G12.5-T2 (#1319) of Initiative #1200. T1 ships
+// the chassis (root cobra command, output formatting, error rendering,
+// YAML parsing for the import verbs) plus the six template verbs that
+// wrap the G12.2 REST surface (#1297); T2 extends it with the five
+// run verbs that wrap the G12.3 REST surface (#1311):
+//
+// Template-side verbs (T1):
 //
 //   - `meho runbook list-templates [--status S] [--target-kind K]
 //     [--limit N] [--json]` — list templates in the operator's tenant
@@ -28,9 +31,32 @@
 //     mark a published version as deprecated via POST
 //     /api/v1/runbooks/templates/{slug}/deprecate. Role: tenant_admin.
 //
-// G12.5-T2 (#1319) extends the same parent with the five run verbs
-// (start / next / abort / reassign / runs); G12.5-T3 (#1320) ships
-// the operator-facing CLI docs.
+// Run-side verbs (T2):
+//
+//   - `meho runbook start <slug> --target T [--param k=v ...] [--json]`
+//     — begin a new run via POST /api/v1/runbooks/runs. Role: operator.
+//   - `meho runbook next <run_id> [--verify-response yes|no|escalate]
+//     [--json]` — advance the run one step via POST
+//     /api/v1/runbooks/runs/{run_id}/next. Role: operator (assignee).
+//   - `meho runbook abort <run_id> [--reason "<text>"] [--json]` —
+//     terminate the run via POST /api/v1/runbooks/runs/{run_id}/abort.
+//     Role: operator (assignee or tenant_admin).
+//   - `meho runbook reassign <run_id> --to <sub> [--json]` — transfer
+//     ownership via POST /api/v1/runbooks/runs/{run_id}/reassign.
+//     Role: tenant_admin.
+//   - `meho runbook runs [--assignee S] [--status S]
+//     [--template-slug S] [--limit N] [--json]` — list runs via GET
+//     /api/v1/runbooks/runs. Role: operator (sees own); admin sees all.
+//
+// G12.5-T3 (#1320) ships the operator-facing CLI docs.
+//
+// Opacity contract: the run-side verbs are the human-surface end of
+// the substrate opacity contract (#1313, #1301). `start` and `next`
+// render ONLY the current step's body — never the full template,
+// never future steps. The CLI rendering function only reads field
+// paths corresponding to “current_step“, so even a backend bug
+// that leaked future-step contents into the response envelope would
+// still result in a single-step render at the human surface.
 //
 // Every verb wraps one G12.2 route and drives the generated
 // `api.ClientWithResponses` directly via `api.NewAuthedClient`. The
@@ -59,9 +85,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
@@ -75,18 +103,23 @@ import (
 //
 // T1 (#1318) registers six template verbs; T2 (#1319) extends the
 // parent with five run verbs (start / next / abort / reassign /
-// runs) in a follow-up PR.
+// runs) -- eleven verbs total under one parent.
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "runbook",
-		Short: "Author and operate runbook templates (list/show/draft/edit/publish/deprecate)",
-		Long: "Operate runbook templates from the operator shell. " +
-			"Authors (tenant_admin) draft, edit, publish, and deprecate " +
-			"templates; operators list-templates and (post-completion) " +
-			"show-template after a run finishes. Read verbs are " +
-			"operator-level by default; write verbs and unconditional " +
+		Short: "Author and operate runbook templates and runs",
+		Long: "Operate runbook templates and runs from the operator " +
+			"shell. Authors (tenant_admin) draft, edit, publish, and " +
+			"deprecate templates; operators list-templates, start runs, " +
+			"and advance through them step-by-step via `next`. Read " +
+			"verbs are operator-level by default; reassign requires " +
+			"tenant_admin; write template verbs and unconditional " +
 			"show-template require tenant_admin. Tenant scoping is " +
-			"enforced server-side via the JWT.",
+			"enforced server-side via the JWT.\n\n" +
+			"OPACITY CONTRACT: `start` and `next` render ONLY the " +
+			"current step's body -- never the full template, never " +
+			"future steps. The CLI proves the opacity contract end-to-" +
+			"end through the human surface (per #1301 / #1313).",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newListTemplatesCmd())
@@ -95,6 +128,11 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newEditTemplateCmd())
 	cmd.AddCommand(newPublishTemplateCmd())
 	cmd.AddCommand(newDeprecateTemplateCmd())
+	cmd.AddCommand(newStartRunCmd())
+	cmd.AddCommand(newNextRunCmd())
+	cmd.AddCommand(newAbortRunCmd())
+	cmd.AddCommand(newReassignRunCmd())
+	cmd.AddCommand(newRunsCmd())
 	return cmd
 }
 
@@ -364,4 +402,30 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen-1]) + "…"
+}
+
+// stdinIsTTY is the injectable seam test code uses to fake the
+// presence (or absence) of a real terminal on stdin. The default
+// implementation interrogates os.Stdin's file descriptor via
+// golang.org/x/term, the canonical Go answer for "is this an
+// interactive shell?" (devops_best_practices.md §CLI conventions:
+// interactive prompts only on TTY).
+//
+// The seam is a package-level var rather than a parameter on every
+// run-verb's options struct because (a) the test surface is small
+// enough that a single override per test is the right granularity,
+// and (b) wiring an "isTTY" bool through five verbs would add
+// plumbing that says nothing about the verb's contract. The
+// var-with-override pattern matches how `confirmPrompt` in
+// `cli/internal/cmd/kb/kb.go` already supports its EOF-as-no test
+// path, just one level higher up.
+var stdinIsTTY = defaultStdinIsTTY
+
+// defaultStdinIsTTY returns true when stdin is a real terminal. The
+// indirection through a named function (not a literal inside the
+// `stdinIsTTY` var initializer) lets tests reset the var to its
+// production behaviour after they override it, without re-importing
+// `golang.org/x/term` from every test file.
+func defaultStdinIsTTY() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }

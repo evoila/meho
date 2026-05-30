@@ -111,7 +111,26 @@ connector-related release-notes line.
   every shipped connector so a future drift fails CI rather than
   surfacing on the next dogfood cycle. RDC #789 Finding 6.
 
+- **Fresh SSE broadcast-feed connections no longer die at ~5 s with a
+  spurious `feed_error` frame (G0.18-T1 #1354, RDC #789 N1).** The
+  single process-wide broadcast client pinned `socket_timeout=5.0`
+  for the fail-fast readiness probe, but redis-py 7.4 resolves
+  `xread`'s read-timeout from `socket_timeout` when no per-call
+  override is supplied — so every `XREAD BLOCK 30000` against a
+  quiet stream raised `redis.TimeoutError` at ~5 s and the SSE
+  generator yielded a `broadcast_subsystem_unavailable` frame. The
+  fix splits the substrate into two cached clients: `get_broadcast_client()`
+  (`socket_timeout=5 s`, for the readiness `PING` / publish hot path
+  / SSE backlog prelude) and `get_broadcast_blocking_client()`
+  (`socket_timeout=35 s` = 30 s BLOCK + 5 s buffer, for every
+  blocking-XREAD caller — SSE feed, UI SSE bridge,
+  `meho.broadcast.watch` MCP tool, agent approval-wait loop). A
+  quiet BLOCK now returns `None` (the natural keepalive) and the
+  generator emits a heartbeat; only genuine transport failures past
+  the 35 s window still raise the T11 error frame. The readiness
+  probe's 5 s SLO is explicitly preserved.
 
+## [0.8.1] - 2026-05-29
 
 ### Added
 

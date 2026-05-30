@@ -67,8 +67,10 @@ from meho_backplane.broadcast import (
     BROADCAST_EVENTS_PUBLISHED_TOTAL,
     BROADCAST_PUBLISH_ERRORS_TOTAL,
     BroadcastEvent,
+    dispose_broadcast_blocking_client,
     dispose_broadcast_client,
     publish_event,
+    reset_broadcast_blocking_client_for_testing,
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.mcp.resources.tenant_feed import _tenant_feed_handler
@@ -260,15 +262,24 @@ async def _sse_consumer(
       has hit Valkey and the consumer's BLOCK XREAD wakes within
       milliseconds with the frame. The "saw all 750 events" path is
       the steady-state exit.
-    * **Generator stalls past 5 s of quiet** — redis-py's
-      ``socket_timeout=5.0`` (pinned in ``broadcast/client.py:77``)
-      raises :class:`redis.exceptions.TimeoutError` from inside the
-      BLOCK XREAD when no entries arrive within the socket-read
-      window. Absorbed here as the "drained" signal; the assertion
-      below catches any genuinely missed events with a clear count
-      delta. Latent inconsistency with the SSE generator's
-      ``_XREAD_BLOCK_MS=30_000`` window — recorded as an adjacent
-      finding in the PR body.
+    * **External timeout cancels the gather** — the harness wraps
+      this consumer in :func:`asyncio.wait_for` (see the test body);
+      when the producer finishes and the consumer is still short of
+      its expected count, the wait_for timeout cancels the
+      ``async for`` and the ``finally`` arm closes the generator.
+      The assertion below catches any genuinely missed events with a
+      clear count delta.
+
+    Post RDC #789 N1 / Initiative #1353, the generator no longer
+    raises :class:`redis.exceptions.TimeoutError` on a quiet stream —
+    the blocking client's 35 s ``socket_timeout`` exceeds the 30 s
+    BLOCK window, so a quiet ``XREAD`` returns ``None`` and the
+    generator emits a heartbeat instead. ``_parse_frame`` returns
+    ``None`` on heartbeat frames so the ``continue`` arm drops them
+    silently. The :class:`redis.exceptions.TimeoutError` catch arm is
+    retained as a defensive safety net: any genuine transport failure
+    past the 35 s window still surfaces, and the test should not crash
+    on it (the count assertion below carries the real signal).
 
     The generator's ``aclose()`` runs via the ``finally`` arm so the
     redis-py BLOCK is cancelled cleanly when the consumer exits early.
@@ -297,9 +308,9 @@ async def _sse_consumer(
                 if seen >= expected:
                     break
         except redis.exceptions.TimeoutError:
-            # 5 s of quiet on the per-tenant stream — production
-            # XREAD BLOCK was 30 s but the redis-py socket_timeout
-            # caps reads at 5 s. Drained.
+            # Defensive: any genuine transport failure past the
+            # blocking client's 35 s socket_timeout. The count
+            # assertion below catches the missed-events signal.
             pass
     finally:
         await gen.aclose()
@@ -351,8 +362,13 @@ class TestBroadcastLoad:
         Mirrors :class:`tests.test_broadcast_publisher.TestBroadcastIntegration`'s
         fixture verbatim — same image override env var, same env-var
         pinning shape, same cache-clear ordering. The MCP / SSE
-        consumers both call :func:`get_broadcast_client` which honours
-        ``BROADCAST_REDIS_URL``.
+        consumers both call :func:`get_broadcast_blocking_client` for
+        the ``XREAD BLOCK`` path and :func:`get_broadcast_client` for
+        the fast path (``XADD``, ``XREVRANGE``, ``PING``); both honour
+        ``BROADCAST_REDIS_URL`` — see
+        :mod:`meho_backplane.broadcast.client` for the two-client
+        rationale. Both clients are reset / disposed here so the
+        next test starts from a clean slate.
         """
         from testcontainers.redis import RedisContainer
 
@@ -368,10 +384,12 @@ class TestBroadcastLoad:
             monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
             get_settings.cache_clear()
             reset_broadcast_client_for_testing()
+            reset_broadcast_blocking_client_for_testing()
             try:
                 yield url
             finally:
                 await dispose_broadcast_client()
+                await dispose_broadcast_blocking_client()
                 get_settings.cache_clear()
 
     async def test_50_rps_30s_1500_events(self, valkey_url: str) -> None:

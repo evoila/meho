@@ -237,12 +237,15 @@ def _stub_broadcast_client(
     monkeypatch: pytest.MonkeyPatch,
     decision_entry: tuple[str, dict[str, str]],
 ) -> AsyncMock:
-    """Replace :func:`get_broadcast_client` with a one-shot Valkey stub.
+    """Stub the long-poll client (RDC #789 N1 / #1353) with a one-shot Valkey fake.
 
     The first ``xread`` call yields ``decision_entry``; subsequent calls
     idle by honouring the BLOCK window (matching the
     ``test_agent_approval_resume`` stub shape — see
     ``_stub_broadcast_client_with_decision`` there for the same idiom).
+    Both the agent module's binding and the
+    :mod:`meho_backplane.broadcast.client` module's binding are patched
+    so callers via either path see the same fake.
     """
     stream_key = f"meho:feed:{_TENANT_ID}"
     call_state = {"n": 0}
@@ -259,11 +262,11 @@ def _stub_broadcast_client(
     client = AsyncMock()
     client.xread = AsyncMock(side_effect=_xread_side_effect)
     monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_client",
+        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
         lambda: client,
     )
     monkeypatch.setattr(
-        "meho_backplane.broadcast.client.get_broadcast_client",
+        "meho_backplane.broadcast.client.get_broadcast_blocking_client",
         lambda: client,
     )
     return client

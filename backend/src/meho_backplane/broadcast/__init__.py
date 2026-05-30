@@ -14,8 +14,12 @@ from meho_backplane.broadcast.agent_events import (
     AgentAnnouncementEvent,
 )
 from meho_backplane.broadcast.client import (
+    BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS,
+    dispose_broadcast_blocking_client,
     dispose_broadcast_client,
+    get_broadcast_blocking_client,
     get_broadcast_client,
+    reset_broadcast_blocking_client_for_testing,
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.broadcast.events import (
@@ -49,6 +53,7 @@ from meho_backplane.broadcast.publisher import (
 __all__ = [
     "ACTIVITY_MAX_CHARS",
     "BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL",
+    "BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS",
     "BROADCAST_EVENTS_PUBLISHED_TOTAL",
     "BROADCAST_MAXLEN",
     "BROADCAST_PUBLISH_ERRORS_TOTAL",
@@ -60,7 +65,9 @@ __all__ = [
     "broadcast_readiness_probe",
     "classify_op",
     "compute_effective_broadcast_detail",
+    "dispose_broadcast_blocking_client",
     "dispose_broadcast_client",
+    "get_broadcast_blocking_client",
     "get_broadcast_client",
     "invalidate_tenant_cache",
     "list_recent_events_fail_soft",
@@ -69,6 +76,7 @@ __all__ = [
     "publish_event",
     "read_request_override",
     "redact_payload",
+    "reset_broadcast_blocking_client_for_testing",
     "reset_broadcast_client_for_testing",
     "reset_overrides_cache_for_testing",
 ]

@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- The `?envelope=v2` list-envelope opt-in now works on all five §2 list
+  endpoints: `GET /api/v1/connectors`, `GET /api/v1/conventions`,
+  `GET /api/v1/audit/my-recent`, and `GET /api/v1/broadcast/overrides`
+  join `targets` and the topology `dependents`/`dependencies` endpoints
+  in returning the unified `{items, next_cursor?, …sidecars}` shape when
+  the param is passed; omitting it keeps the v0.8.0 default shape so no
+  client breaks. Completes #1312 acceptance A (the deferred
+  "A-remainder"). (#1356 — RDC #789 Finding 3,
+  `list-endpoint-envelope-asymmetry`)
+
 ## [0.8.1] - 2026-05-29
 
 ### Added

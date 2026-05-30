@@ -130,6 +130,30 @@ connector-related release-notes line.
   the 35 s window still raise the T11 error frame. The readiness
   probe's 5 s SLO is explicitly preserved.
 
+<<<<<<< HEAD
+=======
+- **Ingest LLM-grouping docs + `composite_l2_missing` envelope —
+  honest "build-time-only" framing, dead `#405` reference removed
+  (G0.18-T7 #1360, RDC #789 N9).** The previous wording cited
+  `T5 (#405)` / "production Anthropic adapter lands with G0.7-T5"
+  in multiple docstrings (`operations/ingest/pipeline.py`,
+  `api/v1/connectors_ingest.py`, `mcp/tools/connector_admin.py`,
+  `docs/codebase/spec-ingestion.md`, two test files), but `#405`
+  was G0.7-T5 = CLI verbs (CLOSED) and never tracked an LLM
+  adapter — and `settings.anthropic_api_key` flows only to the
+  agent runtime, so non-dry-run `meho connector ingest --catalog
+  <product>/<version>` 503s on every deploy (the chassis
+  `LlmClient` factory is fail-closed by default and FastAPI
+  lifespan startup has no caller for `set_llm_client_factory`).
+  The `composite_l2_missing` error envelope's escape-hatch hint
+  now names the limitation explicitly so operators don't follow
+  the suggested catalog command into a silent 503. New
+  `docs/codebase/spec-ingestion.md` §"LLM-client wiring (build-
+  time-only today)" documents the gap. Wiring a production
+  `LlmClient` adapter at lifespan startup remains the
+  operator-side follow-up.
+
+>>>>>>> dc15ec2 (docs(ingest): G0.18-T7 fix dead #405 reference + document build-time-only LLM-client wiring)
 ## [0.8.1] - 2026-05-29
 
 ### Added

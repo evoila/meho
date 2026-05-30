@@ -56,5 +56,18 @@ def catalog_command_for_vmware_rest(version: str) -> str:
     can run this verbatim; operators using ``POST
     /api/v1/connectors/ingest`` directly should land T9 (#1150)
     ``{"catalog_entry": "vmware/<version>"}`` instead.
+
+    Build-time-only caveat (G0.18-T7 #1360): non-dry-run ingest of an
+    un-grouped catalog entry needs an injected ``LlmClient`` for the
+    grouping pass, and the chassis ships no production adapter
+    today -- on deployed backplanes the returned command fails closed
+    with HTTP 503 / ``LlmClientUnavailable`` until an operator wires
+    :func:`meho_backplane.api.v1.connectors_ingest.set_llm_client_factory`
+    at FastAPI lifespan startup. The
+    :func:`~meho_backplane.operations._errors.result_composite_l2_missing`
+    envelope's human message names this limitation so operators don't
+    follow the suggested command into the 503; see
+    ``docs/codebase/spec-ingestion.md`` section "LLM-client wiring
+    (build-time-only today)".
     """
     return f"meho connector ingest --catalog vmware/{version}"

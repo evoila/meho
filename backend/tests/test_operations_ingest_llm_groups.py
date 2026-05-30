@@ -993,13 +993,18 @@ async def test_run_llm_grouping_with_real_claude_haiku(
 
     Note: this test exercises only the public surface; it does not
     pull the Anthropic SDK at import time. A concrete LlmClient
-    backed by ``anthropic.AsyncAnthropic`` lives in the chassis (when
-    that lands at T5 #405 or later); for v0.2 this test stays
-    as a manual sanity hook.
+    backed by ``anthropic.AsyncAnthropic`` does **not** yet ship in
+    the chassis -- ``set_llm_client_factory`` is the wire-up seam
+    but FastAPI lifespan startup has no caller for it (see
+    ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring (build-
+    time-only today)" + G0.18-T7 #1360). For v0.2 this test stays as
+    a manual sanity hook.
     """
     pytest.skip(
         "real-LLM integration adapter not yet wired; "
-        "T5 (#405) lands the chassis LlmClient implementation",
+        "no production LlmClient ships in the chassis "
+        "(set_llm_client_factory has no lifespan caller). "
+        "Tracked under G0.18-T7 #1360.",
     )
 
 

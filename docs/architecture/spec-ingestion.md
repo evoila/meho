@@ -317,7 +317,7 @@ Resolution path: add a T3 enhancement pass that generates per-op `llm_instructio
 
 ### Gap 2 — live-LLM canary validation
 
-The G0.7 canary is currently stub-LLM-only — the acceptance test ships a deterministic path-prefix classifier so the suite stays reproducible and fast (~5 s ingest + ~1–2 s per benchmark query). A live-LLM variant gated on `MEHO_G07_CANARY_LIVE_LLM=1` is reserved for the day [Task #467](https://github.com/evoila/meho/issues/467) (Anthropic chassis adapter) lands. Once #467 ships, re-run the canary against harder queries (snapshot revert, performance-metrics query, host-network atomic mutation) that the path-prefix stub cannot trivially classify.
+The G0.7 canary is currently stub-LLM-only — the acceptance test ships a deterministic path-prefix classifier so the suite stays reproducible and fast (~5 s ingest + ~1–2 s per benchmark query). A live-LLM variant gated on `MEHO_G07_CANARY_LIVE_LLM=1` is reserved for the day a production Anthropic `LlmClient` adapter wires itself at FastAPI lifespan startup. **No such adapter ships today** — the previously-cited `Task #467` was [G8.1-T3 audit CLI verbs (CLOSED)](https://github.com/evoila/meho/issues/467), never the chassis adapter; the cleanup landed in [G0.18-T7 #1360](https://github.com/evoila/meho/issues/1360), and the build-time-only operator-facing framing now lives in [`docs/codebase/spec-ingestion.md`](../codebase/spec-ingestion.md#llm-client-wiring-build-time-only-today). Once an operator-installed adapter is wired (via `meho_backplane.api.v1.connectors_ingest.set_llm_client_factory(...)`), re-run the canary against harder queries (snapshot revert, performance-metrics query, host-network atomic mutation) that the path-prefix stub cannot trivially classify.
 
 ## References
 

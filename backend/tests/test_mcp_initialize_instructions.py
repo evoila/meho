@@ -269,8 +269,10 @@ async def test_initialize_against_default_tenant_carries_no_consumer_tokens(
     seeds the ``default`` tenant + 2 illustrative conventions. This
     test rebinds the fixture operator's tenant to the seeded
     ``default`` row's id so the ``_initialize`` handler's
-    ``assemble_preamble(operator.tenant_id)`` resolves the seeded
-    conventions; it then issues a real ``initialize`` JSON-RPC call
+    ``assemble_preamble(operator.tenant_id, operator.sub)`` resolves
+    the seeded conventions (per G12.4-T2 #1316, the signature now
+    requires the operator's sub for runbook priming); it then issues
+    a real ``initialize`` JSON-RPC call
     through the FastAPI TestClient and scans the returned
     ``instructions`` text for the forbidden token list.
     """

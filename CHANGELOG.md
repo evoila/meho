@@ -130,8 +130,6 @@ connector-related release-notes line.
   the 35 s window still raise the T11 error frame. The readiness
   probe's 5 s SLO is explicitly preserved.
 
-<<<<<<< HEAD
-=======
 - **Ingest LLM-grouping docs + `composite_l2_missing` envelope —
   honest "build-time-only" framing, dead `#405` reference removed
   (G0.18-T7 #1360, RDC #789 N9).** The previous wording cited
@@ -153,7 +151,6 @@ connector-related release-notes line.
   `LlmClient` adapter at lifespan startup remains the
   operator-side follow-up.
 
->>>>>>> dc15ec2 (docs(ingest): G0.18-T7 fix dead #405 reference + document build-time-only LLM-client wiring)
 ## [0.8.1] - 2026-05-29
 
 ### Added

@@ -1,0 +1,5 @@
+{
+  "metadata": {"name": "web", "namespace": "demo", "resourceVersion": "8842", "uid": "w-uid-1", "creationTimestamp": "2026-05-31T10:00:00Z"},
+  "spec": {"replicas": 5},
+  "status": {"readyReplicas": 5}
+}

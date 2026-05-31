@@ -81,7 +81,10 @@ from meho_backplane.api.v1.feed import (
     _resolve_cursor,
     _validate_cursor_or_400,
 )
-from meho_backplane.broadcast import get_broadcast_client
+from meho_backplane.broadcast import (
+    get_broadcast_blocking_client,
+    get_broadcast_client,
+)
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 
 __all__ = ["build_stream_router"]
@@ -141,8 +144,21 @@ async def _ui_feed_generator(
     :class:`asyncio.CancelledError` into the pending ``xread`` await;
     we log and re-raise per the asyncio cancellation contract (Sonar
     S7497 -- swallowing it breaks the task tree's unwind invariants).
+
+    Two clients, two contracts -- mirrors the API edge. The backlog
+    prelude reads via the short-timeout fast client
+    (:func:`get_broadcast_client`, ``socket_timeout=5 s``) because
+    ``XREVRANGE`` is a non-blocking one-shot read; the BLOCK loop
+    reads via the long-timeout blocking client
+    (:func:`get_broadcast_blocking_client`, ``socket_timeout=35 s``)
+    so a 30 s ``XREAD BLOCK`` against a quiet stream returns ``None``
+    instead of raising ``redis.TimeoutError`` at 5 s. See
+    :mod:`meho_backplane.broadcast.client` for the two-client
+    rationale and RDC #789 N1 / Initiative #1353 for the consumer
+    repro.
     """
-    client = get_broadcast_client()
+    fast_client = get_broadcast_client()
+    blocking_client = get_broadcast_blocking_client()
     stream_key = _stream_key(tenant_id)
     last_heartbeat = time.monotonic()
 
@@ -157,7 +173,7 @@ async def _ui_feed_generator(
         # connection and ``EventSource`` reconnects per its spec.
         if cursor == _LIVE_TAIL_CURSOR:
             prelude_frames, prelude_last_id = await _emit_backlog_prelude(
-                client,
+                fast_client,
                 stream_key=stream_key,
                 op_class=op_class,
                 principal=principal,
@@ -170,7 +186,7 @@ async def _ui_feed_generator(
             if prelude_frames:
                 last_heartbeat = time.monotonic()
         while True:
-            entries = await client.xread(
+            entries = await blocking_client.xread(
                 {stream_key: cursor},
                 block=_XREAD_BLOCK_MS,
                 count=_XREAD_COUNT,

@@ -77,6 +77,12 @@ const (
 	Yes      ConfirmVerifyResponseAnswer = "yes"
 )
 
+// Defines values for ConnectorSpecEntryCatalogIngest.
+const (
+	SpecOnly  ConnectorSpecEntryCatalogIngest = "spec-only"
+	Supported ConnectorSpecEntryCatalogIngest = "supported"
+)
+
 // Defines values for ConventionKind.
 const (
 	Operational ConventionKind = "operational"
@@ -1579,16 +1585,20 @@ type ConnectorReviewPayload struct {
 // the CLI's “ingest --catalog“ path (#915) refuses such an entry rather
 // than POSTing an empty “specs“ list.
 type ConnectorSpecEntry struct {
-	ImplId                     string    `json:"impl_id"`
-	Notes                      *string   `json:"notes,omitempty"`
-	Product                    string    `json:"product"`
-	RequiresConnectorClass     string    `json:"requires_connector_class"`
-	Sha256                     *string   `json:"sha256"`
-	SpecInfoVersion            *string   `json:"spec_info_version"`
-	SpecInfoVersionsCompatible *[]string `json:"spec_info_versions_compatible"`
-	Upstream                   *[]string `json:"upstream"`
-	Version                    string    `json:"version"`
+	CatalogIngest              *ConnectorSpecEntryCatalogIngest `json:"catalog_ingest,omitempty"`
+	ImplId                     string                           `json:"impl_id"`
+	Notes                      *string                          `json:"notes,omitempty"`
+	Product                    string                           `json:"product"`
+	RequiresConnectorClass     string                           `json:"requires_connector_class"`
+	Sha256                     *string                          `json:"sha256"`
+	SpecInfoVersion            *string                          `json:"spec_info_version"`
+	SpecInfoVersionsCompatible *[]string                        `json:"spec_info_versions_compatible"`
+	Upstream                   *[]string                        `json:"upstream"`
+	Version                    string                           `json:"version"`
 }
+
+// ConnectorSpecEntryCatalogIngest defines model for ConnectorSpecEntry.CatalogIngest.
+type ConnectorSpecEntryCatalogIngest string
 
 // Convention Full-row representation returned by GET-single / POST / PATCH.
 //

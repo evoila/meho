@@ -102,9 +102,18 @@ against the **two-spec dual-plane VCFA corpus**:
   (T5, #486). The connector CLI talks to the REST API at
   `http(s)://<backplane>/api/v1/connectors/ingest`.
 
-- **An LLM client configured for the grouping pass.** Production
-  deploys wire the Anthropic Messages-API adapter under
-  `IngestionPipelineService(..., llm_client_factory=...)`.
+- **An LLM client configured for the grouping pass.** **No
+  production `LlmClient` adapter ships in the chassis today** —
+  `set_llm_client_factory` is the wire-up seam but FastAPI
+  lifespan startup has no caller for it, so non-dry-run ingest
+  returns HTTP 503 / `LlmClientUnavailable` on stock deploys.
+  Operators install a real adapter (Anthropic Messages-API or
+  provider-routed via G11.5) and pass it via
+  `IngestionPipelineService(..., llm_client_factory=...)` to
+  unblock the canary on a live backplane; see
+  [`docs/codebase/spec-ingestion.md` §"LLM-client wiring
+  (build-time-only today)"](../codebase/spec-ingestion.md#llm-client-wiring-build-time-only-today)
+  for the operator-facing framing.
 
 - **A Vault path holding the VCFA service-account credentials.**
   The `VcfAutomationConnector.credentials_loader` resolves

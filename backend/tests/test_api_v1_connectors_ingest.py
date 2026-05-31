@@ -713,6 +713,22 @@ async def test_list_surfaces_register_connector_v2_only_entries(
       rows. When DB rows land under the parser-derived product the
       row transitions cleanly from ``state="registered"`` to
       ``state="ingested"`` without a ``connector_id`` change.
+
+    G0.18-T2 (#1355) — the parser-derived ``"sddc"`` token the
+    listing emits is bridged to the registry's canonical
+    ``"sddc-manager"`` by the
+    :data:`~meho_backplane.connectors.registry.PRODUCT_ALIASES`
+    map at the write surface (see
+    :func:`~meho_backplane.connectors.registry.canonical_product_token`).
+    So an operator copying ``product`` out of this listing into
+    ``POST /api/v1/targets`` succeeds: the alias normalises ``"sddc"``
+    to the canonical ``"sddc-manager"`` before the registered-product
+    validator runs, and the canonical token is what gets stored.
+    The listing keeps emitting ``"sddc"`` (not ``"sddc-manager"``)
+    because that is the parser-derived token, load-bearing for the
+    #773 connector_id round-trip; the round-trip closure for the
+    operator is now end-to-end (closes #1312 acceptance B,
+    re-flagged by RDC #789 Finding 6).
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -740,6 +756,11 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     sddc = by_id["sddc-rest-9.0"]
     # The listing emits the parser-derived product ("sddc"), not the
     # v2 registry's "sddc-manager" — see test docstring for rationale.
+    # G0.18-T2 (#1355): the value below is what an operator copies
+    # into POST /api/v1/targets; round-trip closure is proved by
+    # ``test_create_target_accepts_sddc_listing_alias`` in
+    # ``test_api_v1_targets.py`` (the alias bridges this listing
+    # token to the canonical "sddc-manager" before validation).
     assert sddc["product"] == "sddc"
     assert sddc["impl_id"] == "sddc-rest"
     assert sddc["version"] == "9.0"
@@ -821,7 +842,7 @@ async def test_list_registered_row_carries_catalog_next_step_hint(
     client: TestClient,
     _registered_class_only_connectors: None,
 ) -> None:
-    """Catalog-hit branch: ``state="registered"`` rows carry the ``--catalog`` verb.
+    """Catalog-hit + ``catalog_ingest="supported"``: row carries the ``--catalog`` verb.
 
     G0.13-T3 (#1133) AC #1 + #3 (catalog-hit half):
     rows with ``state="registered"`` include a ``next_step`` field with
@@ -829,11 +850,13 @@ async def test_list_registered_row_carries_catalog_next_step_hint(
     has it" — the verb points at ``meho connector ingest --catalog
     <product>/<version>``.
 
-    SDDC is the load-bearing case: the listing emits ``product="sddc"``
-    (parser-derived), but the catalog stores ``product="sddc-manager"``
-    (registry-side). The hint must use the catalog's native key, i.e.
-    ``--catalog sddc-manager/9.0`` not ``--catalog sddc/9.0``. Harbor
-    exercises the trivial case where registry and parsed product agree.
+    Harbor exercises the catalog-supported branch: its row's
+    ``catalog_ingest`` defaults to ``"supported"`` (the upstream is
+    `raw.githubusercontent.com` JSON, directly fetchable), so the hint
+    points at the ``--catalog`` verb. The SDDC-as-catalog-hit case has
+    moved to ``test_list_registered_row_spec_only_catalog_entry_points_at_spec``
+    after G0.18-T8 (#1361) reclassified VCF-family rows as
+    ``catalog_ingest: spec-only``.
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -850,13 +873,59 @@ async def test_list_registered_row_carries_catalog_next_step_hint(
     assert "catalog" in harbor["next_step"]["rationale"]
     assert "ingest" in harbor["next_step"]["rationale"]
 
+
+@pytest.mark.asyncio
+async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
+    client: TestClient,
+    _registered_class_only_connectors: None,
+) -> None:
+    """Catalog-hit + ``catalog_ingest="spec-only"``: row carries the ``--spec`` verb.
+
+    G0.18-T8 (#1361) / RDC #789 N8. The VCF-family rows
+    (``vmware/9.0``, ``sddc-manager/9.0``, ``nsx/4.2``) ship with
+    ``catalog_ingest: spec-only`` because their upstream URLs are
+    Broadcom Developer Portal HTML landing pages (vmware, sddc-manager)
+    or fqdn-templated appliance URLs (nsx) — neither shape can drive
+    ``meho connector ingest --catalog`` server-side. The previous hint
+    ("spec available in catalog; run ingest") sent operators into a
+    422; the refined hint points at the explicit-quadruple ``--spec``
+    form using the catalog's native triple so the verb still
+    copies-and-runs once the operator has the spec file in hand.
+
+    SDDC is the load-bearing case: the listing emits the parser-derived
+    ``product="sddc"`` but the catalog's native triple is
+    ``("sddc-manager", "9.0", "sddc-rest")``; the hint uses the
+    catalog's spelling so the operator's ``--product`` flag matches the
+    registered class (canonical_product_token handles the
+    listing-vs-registry split at write-time via PRODUCT_ALIASES, but
+    the manual-mode ingest path takes the catalog's spelling
+    verbatim).
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+
     sddc = by_id["sddc-rest-9.0"]
     assert sddc["state"] == "registered"
     assert sddc["next_step"] is not None
-    # Catalog lookup must use the *registry's* product ("sddc-manager"),
-    # not the parsed product ("sddc") — see _next_step_for_registered.
-    assert sddc["next_step"]["verb"] == "meho connector ingest --catalog sddc-manager/9.0"
-    assert "catalog" in sddc["next_step"]["rationale"]
+    verb = sddc["next_step"]["verb"]
+    # The refined hint must NOT promise the broken ``--catalog`` path.
+    assert "--catalog" not in verb
+    # And must direct the operator at ``--spec`` with the catalog's
+    # native triple (so the registered class resolves at ingest time).
+    assert "--product sddc-manager" in verb
+    assert "--version 9.0" in verb
+    assert "--impl sddc-rest" in verb
+    assert "--spec" in verb
+    rationale = sddc["next_step"]["rationale"]
+    # Rationale names the reason so an operator (or LLM agent) knows
+    # the catalog row isn't broken, it's just upstream-shape-bound.
+    assert "HTML-portal" in rationale or "fqdn-templated" in rationale
+    assert "--spec" in rationale
 
 
 @pytest.mark.asyncio

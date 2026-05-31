@@ -33,8 +33,11 @@ The pipeline is broken into work items per Initiative #389:
   each op to a group in batches of 50. Proposed groups land
   `review_status='staged'`; each per-op `group_id` is set in the same
   transaction as the audit row. The LLM is injected as the
-  :class:`LlmClient` Protocol; production T5 wires the chassis
-  Anthropic adapter, tests inject a deterministic stub.
+  :class:`LlmClient` Protocol; tests inject a deterministic stub,
+  and **no production adapter is wired today** — see
+  [LLM-client wiring (build-time-only today)](#llm-client-wiring-build-time-only-today)
+  below for the lifespan-startup gap (G0.18-T7 / #1360) that keeps
+  non-dry-run `--catalog` ingest 503ing on deployed backplanes.
 * **T4 — Review-queue state machine** (`ingest/service.py`). Operators
   move connectors through `staged → enabled` (and `disabled` for
   regression rollback) before any op becomes dispatchable.
@@ -366,11 +369,19 @@ across T5's CLI verbs, T6's REST routes, and T7's admin MCP tools.
 
 The `LlmClient` Protocol is injected via a factory parameter so the
 chassis can lazy-resolve it; the default factory raises
-`LlmClientUnavailable` and the REST layer maps it onto HTTP 503. T5
-(#405) replaces the default with the production Anthropic-Messages-
-API adapter. The `embedding_service` parameter is the test seam to
-inject `AsyncMock` so unit tests don't pull the fastembed ONNX
-model from huggingface.co.
+`LlmClientUnavailable` and the REST layer maps it onto HTTP 503.
+**No production adapter ships today** — `set_llm_client_factory`
+(in `api/v1/connectors_ingest.py`) is the wire-up seam, but FastAPI
+lifespan startup has no caller for it and `settings.anthropic_api_key`
+flows only to the agent runtime (`agent/run.py:432`). See
+[LLM-client wiring (build-time-only today)](#llm-client-wiring-build-time-only-today)
+for the operator-facing framing; G0.18-T7 (#1360) tracks the doc
+cleanup and the build-time-only caveat in the
+`composite_l2_missing` envelope text.
+
+The `embedding_service` parameter is the test seam to inject
+`AsyncMock` so unit tests don't pull the fastembed ONNX model from
+huggingface.co.
 
 `ingest(..., dry_run=True)` short-circuits both the DB writes and
 the LLM call: parses every spec and returns the parser's
@@ -529,7 +540,7 @@ Regression test:
 asserts the contract over a seeded DB that includes a stale-rename
 row and a class-side-only opless connector.
 
-#### `next_step` workflow-completion hint (G0.13-T3 / #1133)
+#### `next_step` workflow-completion hint (G0.13-T3 / #1133, G0.18-T8 / #1361)
 
 `state="registered"` rows carry a `next_step: NextStep` object that
 points at the verb that closes the workflow gap surfaced by the
@@ -541,16 +552,37 @@ operator action remaining.
 
 The hint comes from `_next_step_for_registered` in `list_connectors.py`.
 It consults the connector-spec catalog (`ingest/catalog.py`, #743) and
-emits one of two verb shapes:
+branches on the catalog entry's declarative
+`catalog_ingest: "supported" | "spec-only"` field (default
+`"supported"`; the VCF-family rows opt into `"spec-only"` —
+G0.18-T8 / #1361, RDC #789 N8). Three branches:
 
-* **Catalog hit** — verb points at `meho connector ingest --catalog
-  <product>/<version>`. Rationale says the spec is available in the
-  catalog. The CLI's `meho connector ingest --catalog ...` form
-  (G0.7-T5 / #405) drives the rest of the workflow.
+* **Catalog hit, `catalog_ingest="supported"`** — verb points at
+  `meho connector ingest --catalog <product>/<version>`. Rationale
+  says the spec is available in the catalog. The CLI's
+  `meho connector ingest --catalog ...` form (G0.7-T5 / #405) drives
+  the rest of the workflow.
+* **Catalog hit, `catalog_ingest="spec-only"`** — verb points at the
+  explicit-quadruple manual-mode form `meho connector ingest
+  --product <p> --version <v> --impl <i> --spec <concrete-openapi-uri>`
+  using the catalog's native `(product, version, impl_id)` triple.
+  Rationale calls out that the catalog row exists but its upstream
+  is HTML-portal or fqdn-templated, so a `--catalog` POST would
+  422 on the route's `catalog_entry_upstream_not_spec` /
+  `catalog_entry_templated_upstream` branches — the operator must
+  fetch the raw OpenAPI spec from the appliance themselves. The
+  three VCF-family rows (`vmware/9.0`, `sddc-manager/9.0`, `nsx/4.2`)
+  ride this branch; the previous "spec available in catalog; run
+  ingest" hint over-promised for all three. The triple matches what
+  the operator would have used after a successful `--catalog`
+  resolve, so the verb still copies-and-runs once the operator
+  sources the spec URI.
 * **Catalog miss** — verb points at `meho connector ingest --product
   <p> --version <v> --impl <i> --spec <upstream-openapi-uri>`.
   Rationale calls out the missing catalog entry so the operator
-  knows they need to source the OpenAPI spec themselves.
+  knows they need to source the OpenAPI spec themselves. Manual
+  mode is the same path G0.7-T5 already supports for one-off /
+  not-yet-curated specs (see `ingest.go`'s mode dispatch).
 
 The catalog lookup uses the **registry's** `(product, version)`, not
 the parser-derived shortening. The SDDC case is canonical: the
@@ -568,7 +600,12 @@ path.
 
 Regression tests:
 `tests/test_api_v1_connectors_ingest.py::test_list_registered_row_carries_catalog_next_step_hint`
-(catalog-hit branch incl. SDDC's registry-vs-parsed asymmetry),
+(catalog-hit / `supported` branch incl. SDDC's registry-vs-parsed
+asymmetry),
+`::test_list_registered_row_spec_only_catalog_entry_points_at_spec`
+(catalog-hit / `spec-only` branch — pins the explicit-quadruple
+`--spec` verb + the upstream-shape rationale for VCF-family rows;
+G0.18-T8 / #1361),
 `::test_list_registered_row_without_catalog_entry_points_at_manual_mode`
 (catalog-miss branch), and
 `::test_list_ingested_row_omits_next_step_hint`
@@ -642,9 +679,12 @@ under the `TENANT_ADMIN` role).
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)
 round-trip through URL routing intact. The route module's
-`set_llm_client_factory(factory)` helper lets the production
-bootstrap (G0.7-T5) install the Anthropic adapter and lets tests
-inject deterministic stubs.
+`set_llm_client_factory(factory)` helper is the wire-up seam a
+future production bootstrap would call to install a real
+:class:`LlmClient` adapter; today only tests call it, so non-dry-
+run ingest grouping is build-time-only — see
+[LLM-client wiring (build-time-only today)](#llm-client-wiring-build-time-only-today)
+for the operator-facing framing.
 
 ### `parse_openapi(spec_path_or_uri, *, spec_source=None)` (`ingest/openapi.py`)
 
@@ -867,8 +907,63 @@ whose pod died was never going to finish. Durable cross-restart
 jobs are a v0.9 follow-up (the same migration that lands
 operator-cancellable jobs).
 
+## LLM-client wiring (build-time-only today)
+
+The grouping pass (T3, `run_llm_grouping` in
+`operations/ingest/llm_groups.py`) needs an injected `LlmClient`
+Protocol implementation. The chassis exposes the wire-up seam
+(`set_llm_client_factory` in
+[`api/v1/connectors_ingest.py`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py))
+and the fail-closed default (`default_llm_client_factory` in
+[`operations/ingest/pipeline.py`](../../backend/src/meho_backplane/operations/ingest/pipeline.py)),
+but **no production caller invokes the seam at FastAPI lifespan
+startup**. `settings.anthropic_api_key` is read only by the agent
+runtime (`agent/run.py:432`) — never by the ingest pipeline.
+
+Operationally this means non-dry-run ingest of an un-grouped
+connector — whether via the CLI (`meho connector ingest --catalog
+<product>/<version>`), the REST route
+(`POST /api/v1/connectors/ingest`), or the admin MCP tool
+(`meho.connector.ingest`) — fails closed with HTTP 503 (the route
+maps `LlmClientUnavailable` onto 503; the CLI / MCP surfaces
+render their own operator-facing variant). The grouping pass only
+runs in CI / build contexts where the test fixture is in scope
+and the suite injects a deterministic stub via
+`IngestionPipelineService(..., llm_client_factory=...)`. From an
+operator's perspective, **`--catalog` ingest grouping is build-
+time-only today**.
+
+The `composite_l2_missing` error envelope
+(`operations/_errors.py:result_composite_l2_missing`) surfaces a
+catalog-ingest command as the escape hatch from a missing L2 sub-
+op; on current deploys that escape hatch returns 503 rather than
+completing the ingest, until a production adapter is wired. The
+envelope text and `docs/codebase/api-shape-conventions.md` §1's
+escape-hatch framing call out this limitation so operators don't
+walk into the 503 expecting success.
+
+**Operator action to take.** Wiring is a deploy-time concern, not
+a chassis bug — the pipeline accepts an injected factory as its
+documented extension point. Installing a production adapter
+(`AnthropicLlmClient` against the Messages API, or a provider-
+routed shape via G11.5) and calling `set_llm_client_factory(...)`
+once during FastAPI lifespan startup is the unblock path. There
+is no upstream tracking issue for this wire-up at the time of
+G0.18-T7 (#1360); an operator-filed Task under Goal #221 is the
+expected next step. Until then, treat `--catalog` ingest as a
+build-only path.
+
 ## Known issues
 
+* **`--catalog` ingest grouping is build-time-only on deployed
+  backplanes.** See
+  [LLM-client wiring (build-time-only today)](#llm-client-wiring-build-time-only-today)
+  above — no production `LlmClient` adapter ships in the chassis,
+  so non-dry-run ingest fails closed with 503 / `LlmClientUnavailable`
+  on every deploy until an operator wires
+  `set_llm_client_factory(...)` at FastAPI lifespan startup.
+  Tracked in G0.18-T7 (#1360, doc cleanup); the actual adapter
+  wire-up is the operator-side follow-up.
 * **Async-mode jobs don't survive pod restart.** The G0.16-T1
   `IngestJobRegistry` lives in process memory. A pod restart
   during a long-running ingest leaves the operator's client

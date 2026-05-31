@@ -35,9 +35,13 @@ from fastapi.testclient import TestClient
 from redis import exceptions as redis_exceptions
 
 from meho_backplane.broadcast import (
+    BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS,
     broadcast_readiness_probe,
+    dispose_broadcast_blocking_client,
     dispose_broadcast_client,
+    get_broadcast_blocking_client,
     get_broadcast_client,
+    reset_broadcast_blocking_client_for_testing,
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.health import (
@@ -64,15 +68,19 @@ def _isolated_registry() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _isolated_broadcast_client() -> Iterator[None]:
-    """Clear the cached client around every test.
+    """Clear the cached fast + blocking clients around every test.
 
     Tests that monkey-patch ``BROADCAST_REDIS_URL`` and then call
-    :func:`get_broadcast_client` need to observe the patched value;
-    without the cache reset, the first test's client lingers.
+    :func:`get_broadcast_client` (or
+    :func:`get_broadcast_blocking_client`) need to observe the
+    patched value; without the cache reset, the first test's client
+    lingers.
     """
     reset_broadcast_client_for_testing()
+    reset_broadcast_blocking_client_for_testing()
     yield
     reset_broadcast_client_for_testing()
+    reset_broadcast_blocking_client_for_testing()
 
 
 @pytest.fixture
@@ -225,6 +233,68 @@ class TestClientLifecycle:
         # Cache cleared: next get builds a fresh client rather than
         # handing back the broken one.
         assert get_broadcast_client() is not client
+
+
+class TestBlockingClientLifecycle:
+    """Singleton + dispose semantics for the long-poll client (RDC #789 N1 / #1353)."""
+
+    def test_singleton_returns_same_instance(self, _broadcast_env: None) -> None:
+        first = get_broadcast_blocking_client()
+        second = get_broadcast_blocking_client()
+        assert first is second
+
+    def test_fast_and_blocking_are_distinct_instances(
+        self,
+        _broadcast_env: None,
+    ) -> None:
+        """The two getters return separate clients with separate pools.
+
+        Load-bearing contract: a hung Valkey on the blocking client's
+        XREAD must not contaminate the fast client's readiness PING,
+        and vice versa. Separate ``redis.Redis`` instances with
+        separate ``ConnectionPool`` objects keep the failure modes
+        partitioned.
+        """
+        fast = get_broadcast_client()
+        blocking = get_broadcast_blocking_client()
+        assert fast is not blocking
+        assert fast.connection_pool is not blocking.connection_pool
+
+    def test_socket_timeouts_partitioned_per_contract(
+        self,
+        _broadcast_env: None,
+    ) -> None:
+        """Fast client pinned at 5 s; blocking client pinned at ≥ 30 s + buffer.
+
+        The exact value comes from
+        :data:`BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS` (the
+        exported constant); the assertion compares against the
+        exported value rather than the literal so a future tuning
+        change lands in one place.
+        """
+        fast_kwargs = get_broadcast_client().connection_pool.connection_kwargs
+        blocking_kwargs = get_broadcast_blocking_client().connection_pool.connection_kwargs
+        assert fast_kwargs.get("socket_timeout") == 5.0
+        assert blocking_kwargs.get("socket_timeout") == BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS
+        # The blocking timeout must exceed the SSE BLOCK window
+        # (30 s, declared in feed.py) — the whole point of the split.
+        # Asserting on the constant value, not the import, keeps this
+        # test honest if BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS is
+        # ever lowered below the SSE BLOCK window in error.
+        assert BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS > 30.0
+
+    async def test_dispose_calls_aclose_and_clears_cache(
+        self,
+        _broadcast_env: None,
+    ) -> None:
+        client = get_broadcast_blocking_client()
+        with patch.object(client, "aclose", new=AsyncMock()) as aclose:
+            await dispose_broadcast_blocking_client()
+        aclose.assert_awaited_once()
+        assert get_broadcast_blocking_client() is not client
+
+    async def test_dispose_before_first_get_is_noop(self) -> None:
+        await dispose_broadcast_blocking_client()  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -412,10 +482,12 @@ class TestBroadcastIntegration:
             monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
             get_settings.cache_clear()
             reset_broadcast_client_for_testing()
+            reset_broadcast_blocking_client_for_testing()
             try:
                 yield url
             finally:
                 await dispose_broadcast_client()
+                await dispose_broadcast_blocking_client()
                 get_settings.cache_clear()
 
     async def test_probe_ok_against_real_valkey(self, valkey_url: str) -> None:
@@ -443,10 +515,12 @@ class TestBroadcastIntegration:
         monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
         get_settings.cache_clear()
         reset_broadcast_client_for_testing()
+        reset_broadcast_blocking_client_for_testing()
         try:
             result = await broadcast_readiness_probe()
         finally:
             await dispose_broadcast_client()
+            await dispose_broadcast_blocking_client()
             get_settings.cache_clear()
 
         assert result.ok is False

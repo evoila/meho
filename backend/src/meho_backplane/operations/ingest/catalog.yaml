@@ -56,6 +56,14 @@ entries:
     upstream:
       - "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/"
       - "https://developer.broadcom.com/xapis/virtual-infrastructure-json-api/latest/"
+    # G0.18-T8 (#1361, RDC #789 N8): the Broadcom Developer Portal
+    # landing pages above still serve text/html (rechecked
+    # 2026-05-31), so catalog-driven ingest 422s
+    # ``catalog_entry_upstream_not_spec``. Operators must fetch the
+    # raw specs from the appliance and pass via the explicit-
+    # quadruple ``--spec`` shape; ``GET /api/v1/connectors``
+    # surfaces that via the ``next_step`` hint.
+    catalog_ingest: spec-only
     spec_info_version: null
     # G0.16-T6 Finding H (#1312). vSphere ships its spec under the
     # explicit-quadruple ``info.version="9.0.0.0"`` form while the
@@ -92,6 +100,11 @@ entries:
     requires_connector_class: SddcManagerConnector
     upstream:
       - "https://developer.broadcom.com/xapis/sddc-manager-api/latest/"
+    # G0.18-T8 (#1361, RDC #789 N8): same Broadcom Developer Portal
+    # text/html landing page as vmware/9.0 (rechecked 2026-05-31);
+    # catalog-driven ingest 422s. Operators fetch from the appliance
+    # and pass via ``--spec``.
+    catalog_ingest: spec-only
     spec_info_version: null
     sha256: null
     notes: >-
@@ -128,6 +141,12 @@ entries:
     upstream:
       - "https://<nsx-mgr-fqdn>/api/v1/spec/openapi/nsx_api.yaml"
       - "https://developer.broadcom.com/xapis/nsx-t-data-center-rest-api/latest/"
+    # G0.18-T8 (#1361, RDC #789 N8): the first upstream is fqdn-
+    # templated (placeholder ``<nsx-mgr-fqdn>``); the second is the
+    # Broadcom Developer Portal text/html landing page. Neither
+    # supports catalog-driven ingest server-side. Operators fetch
+    # from the appliance and pass via ``--spec``.
+    catalog_ingest: spec-only
     spec_info_version: null
     sha256: null
     notes: >-

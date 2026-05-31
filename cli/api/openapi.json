@@ -10994,6 +10994,15 @@
             "maxLength": 2048,
             "title": "Notes",
             "default": ""
+          },
+          "catalog_ingest": {
+            "type": "string",
+            "enum": [
+              "supported",
+              "spec-only"
+            ],
+            "title": "Catalog Ingest",
+            "default": "supported"
           }
         },
         "additionalProperties": false,

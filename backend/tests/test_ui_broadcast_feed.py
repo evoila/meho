@@ -52,7 +52,9 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.broadcast import (
     BroadcastEvent,
+    get_broadcast_blocking_client,
     get_broadcast_client,
+    reset_broadcast_blocking_client_for_testing,
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.db.engine import reset_engine_for_testing
@@ -116,6 +118,7 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_verifier_store_for_testing()
     reset_templating_for_testing()
     reset_broadcast_client_for_testing()
+    reset_broadcast_blocking_client_for_testing()
     clear_discovery_cache()
     clear_jwks_cache()
     reset_engine_for_testing()
@@ -125,6 +128,7 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_verifier_store_for_testing()
     reset_templating_for_testing()
     reset_broadcast_client_for_testing()
+    reset_broadcast_blocking_client_for_testing()
     clear_discovery_cache()
     clear_jwks_cache()
     reset_engine_for_testing()
@@ -430,7 +434,7 @@ class TestBroadcastStreamGenerator:
     async def test_basic_event_yield_uses_session_tenant_stream(self) -> None:
         """One event → one SSE frame; the stream key is the session tenant."""
         event = _make_event(tenant_id=_TENANT_A)
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         mock = _xread_returning([event])
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _ui_feed_generator(
@@ -465,7 +469,7 @@ class TestBroadcastStreamGenerator:
         query parameter, so a tenant-B operator's stream key is
         ``meho:feed:{B}`` -- it can never read tenant-A's stream.
         """
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         # Idle mock: returns one empty batch then sleeps + returns None on
         # every later call. The sleep is the load-bearing part -- a bare
         # ``AsyncMock(return_value=None)`` never suspends to the event loop,
@@ -498,7 +502,7 @@ class TestBroadcastStreamGenerator:
         started on ``/api/v1/feed`` replays identically through the
         bridge.
         """
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         # Idle mock with a real yield point (see the tenant-B test above for
         # why a bare ``AsyncMock(return_value=None)`` hangs the generator).
         mock = _xread_returning([])
@@ -521,7 +525,7 @@ class TestBroadcastStreamGenerator:
         """A non-None op_class filter narrows the yielded frames."""
         read_event = _make_event(op_class="read", op_id="vsphere.vm.list")
         write_event = _make_event(op_class="write", op_id="vsphere.vm.create")
-        broadcast_client = get_broadcast_client()
+        broadcast_client = get_broadcast_blocking_client()
         mock = _xread_returning([read_event, write_event])
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _ui_feed_generator(
@@ -564,14 +568,18 @@ class TestBroadcastStreamGenerator:
             ("1715600000011-0", {"event": events[1].model_dump_json()}),
             ("1715600000010-0", {"event": events[0].model_dump_json()}),
         ]
-        broadcast_client = get_broadcast_client()
+        # Two-client split per RDC #789 N1 / Initiative #1353: prelude
+        # XREVRANGE on the fast (5 s) client; BLOCK XREAD on the
+        # long-poll (35 s) client.
+        fast_client = get_broadcast_client()
+        blocking_client = get_broadcast_blocking_client()
         prelude = AsyncMock(return_value=xrevrange_items)
         # Idle XREAD with a yield point — see :func:`_xread_returning`'s
         # docstring for the cancellation rationale.
         idle_xread = _xread_returning([])
         with (
-            patch.object(broadcast_client, "xrevrange", new=prelude),
-            patch.object(broadcast_client, "xread", new=idle_xread),
+            patch.object(fast_client, "xrevrange", new=prelude),
+            patch.object(blocking_client, "xread", new=idle_xread),
         ):
             gen = _ui_feed_generator(
                 tenant_id=_TENANT_A,
@@ -613,14 +621,15 @@ class TestBroadcastStreamGenerator:
         EventSource already saw and produce duplicate frames on
         reconnect.
         """
-        broadcast_client = get_broadcast_client()
+        fast_client = get_broadcast_client()
+        blocking_client = get_broadcast_blocking_client()
         prelude = AsyncMock(return_value=[])
         # Idle XREAD with a yield point — see :func:`_xread_returning`'s
         # docstring for the cancellation rationale.
         idle_xread = _xread_returning([])
         with (
-            patch.object(broadcast_client, "xrevrange", new=prelude),
-            patch.object(broadcast_client, "xread", new=idle_xread),
+            patch.object(fast_client, "xrevrange", new=prelude),
+            patch.object(blocking_client, "xread", new=idle_xread),
         ):
             gen = _ui_feed_generator(
                 tenant_id=_TENANT_A,

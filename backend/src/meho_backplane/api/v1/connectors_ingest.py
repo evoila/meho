@@ -101,10 +101,17 @@ LLM-client injection
 The ingest route uses a module-level
 :data:`_llm_client_factory_dep` FastAPI dependency that resolves the
 :class:`LlmClientFactory` for the :class:`IngestionPipelineService`.
-Production wiring sets this via :func:`set_llm_client_factory` at
-app-startup time (G0.7-T5 will land the Anthropic adapter wire-up);
-tests inject a stub. The default factory raises
-:class:`LlmClientUnavailable`, which the route maps to 503.
+Production wiring would set this via :func:`set_llm_client_factory`
+at app-startup time, but **no production adapter is wired today** —
+``settings.anthropic_api_key`` flows only to the agent runtime
+(``agent/run.py``), not here. Tests inject a deterministic stub via
+the same hook (or via :class:`IngestionPipelineService`'s
+``llm_client_factory`` constructor argument). The default factory
+raises :class:`LlmClientUnavailable`, which the route maps to 503;
+on deployed backplanes that means non-dry-run ingest of an
+un-grouped connector fails closed and ``--catalog`` ingest grouping
+is build-time-only. See G0.18-T7 (#1360) for the doc cleanup and
+the operator-facing build-time-only framing.
 """
 
 from __future__ import annotations
@@ -205,9 +212,16 @@ def set_llm_client_factory(factory: LlmClientFactory) -> LlmClientFactory:
     """Install a new LLM-client factory; return the previous one.
 
     The previous factory is returned so callers can restore it after
-    a test or a feature-flagged deploy. Production wiring at app
-    startup (G0.7-T5) calls this once with the Anthropic adapter
-    factory; tests call it from their fixture setup.
+    a test or a feature-flagged deploy. **No production caller exists
+    today** — the chassis exposes this as the wire-up seam for a
+    production adapter (Anthropic Messages API or provider-routed via
+    G11.5), but FastAPI lifespan startup never invokes it and
+    ``settings.anthropic_api_key`` flows only to the agent runtime
+    (``agent/run.py``). Tests call this from their fixture setup with
+    a deterministic stub; without that, the chassis default
+    (:func:`default_llm_client_factory`) raises
+    :class:`LlmClientUnavailable` → HTTP 503. See G0.18-T7 (#1360)
+    for the doc cleanup and the build-time-only framing.
 
     The mutation is intentional rather than a FastAPI ``dependency_
     overrides`` entry: this factory needs to be reachable both from

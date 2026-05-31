@@ -28,7 +28,7 @@ What the tests deliberately do NOT do
   the unit of interest (the loop just calls it). Driving a real
   ``FunctionModel`` would add ~1s per case for zero coverage gain; the
   parallel suite ``test_agent_invoke.py`` already exercises the loop wiring.
-* They do NOT hit Valkey — ``get_broadcast_client`` is stubbed with an
+* They do NOT hit Valkey — ``get_broadcast_blocking_client`` is stubbed with an
   AsyncMock whose ``xread`` returns a single seeded entry once and then
   idles (the BLOCK-timeout shape the existing UI feed tests use).
 * They do NOT cover process-restart resume — that's an explicit out-of-scope
@@ -173,13 +173,15 @@ def _stub_broadcast_client_with_decision(
     monkeypatch: pytest.MonkeyPatch,
     decision_entry: tuple[str, dict[str, str]],
 ) -> AsyncMock:
-    """Replace :func:`get_broadcast_client` with an AsyncMock that yields *decision_entry* once.
+    """Stub the agent's blocking-client getter; yield *decision_entry* once, then idle.
 
     Subsequent ``xread`` calls return ``None`` (the BLOCK-timeout shape) so
     the wait loop idles cleanly until the test completes or the wall-clock
-    cap fires. Patches **both** ``broadcast.client.get_broadcast_client``
-    and ``agent.approval_wait.get_broadcast_client`` because the latter
-    holds a re-exported binding read at import time by Python.
+    cap fires. Patches the agent's ``get_broadcast_blocking_client``
+    (the long-poll client switched in for RDC #789 N1 / Initiative
+    #1353) and the module-level binding on
+    :mod:`meho_backplane.broadcast.client` so callers via either path
+    see the same fake.
 
     Returns the AsyncMock so callers can assert against its ``xread`` call
     history.
@@ -201,11 +203,11 @@ def _stub_broadcast_client_with_decision(
     client = AsyncMock()
     client.xread = AsyncMock(side_effect=_xread_side_effect)
     monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_client",
+        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
         lambda: client,
     )
     monkeypatch.setattr(
-        "meho_backplane.broadcast.client.get_broadcast_client",
+        "meho_backplane.broadcast.client.get_broadcast_blocking_client",
         lambda: client,
     )
     return client
@@ -300,7 +302,7 @@ async def test_wait_times_out_when_no_decision_arrives(
     client = AsyncMock()
     client.xread = AsyncMock(return_value=None)
     monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_client",
+        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
         lambda: client,
     )
 
@@ -327,7 +329,7 @@ async def test_wait_fail_open_on_broadcast_error(
     client = AsyncMock()
     client.xread = AsyncMock(side_effect=RedisConnectionError("valkey unreachable"))
     monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_client",
+        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
         lambda: client,
     )
 
@@ -595,7 +597,7 @@ async def test_resume_surfaces_timeout_with_distinct_error_code(
     client = AsyncMock()
     client.xread = AsyncMock(return_value=None)
     monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_client",
+        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
         lambda: client,
     )
 
@@ -662,7 +664,7 @@ async def test_wait_skips_malformed_entry(monkeypatch: pytest.MonkeyPatch) -> No
     client = AsyncMock()
     client.xread = AsyncMock(side_effect=_xread_side_effect)
     monkeypatch.setattr(
-        "meho_backplane.agent.approval_wait.get_broadcast_client",
+        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
         lambda: client,
     )
 

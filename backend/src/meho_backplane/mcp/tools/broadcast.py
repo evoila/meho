@@ -90,7 +90,7 @@ from meho_backplane.broadcast import (
     OP_CLASS_ENUM,
     AgentAnnouncementEvent,
     InvalidSinceError,
-    get_broadcast_client,
+    get_broadcast_blocking_client,
     list_recent_events_strict,
     publish_agent_announcement,
 )
@@ -559,8 +559,17 @@ async def _xread_or_cancelled(
     *since_cursor* is passed to ``xread`` verbatim; XREAD reads entries
     strictly past the cursor (its "last id seen" semantics are
     exclusive, unlike XRANGE's inclusive ``min``).
+
+    Reads via the long-timeout blocking client
+    (:func:`get_broadcast_blocking_client`, ``socket_timeout=35 s``) so
+    a 30 s BLOCK against a quiet stream returns ``None`` (the natural
+    "nothing for us" branch :func:`_xread_items_or_none` already
+    handles) instead of raising ``redis.TimeoutError`` from the socket
+    layer at 5 s -- the spurious ``feed_error`` shape catalogued in
+    RDC #789 N1 / Initiative #1353 on the SSE surface. See
+    :mod:`meho_backplane.broadcast.client` for the two-client rationale.
     """
-    client = get_broadcast_client()
+    client = get_broadcast_blocking_client()
     try:
         return await client.xread(
             {stream_key: since_cursor},

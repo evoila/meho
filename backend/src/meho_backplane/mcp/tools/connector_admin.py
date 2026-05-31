@@ -184,8 +184,14 @@ async def _ingest_handler(
     :meth:`IngestionPipelineService.ingest`. The handler installs
     :func:`default_llm_client_factory` so a misconfigured chassis
     surfaces :class:`LlmClientUnavailable` rather than crashing
-    mid-grouping — the production Anthropic adapter wires its own
-    factory at the FastAPI lifespan layer once T5 (#405) lands.
+    mid-grouping. **No production adapter wires itself at the FastAPI
+    lifespan layer today** — a future operator-installed adapter
+    (Anthropic Messages API or provider-routed via G11.5) would call
+    :func:`meho_backplane.api.v1.connectors_ingest.set_llm_client_factory`
+    once at startup; until then, non-dry-run ingest of an un-grouped
+    connector via this MCP tool fails closed with
+    :class:`LlmClientUnavailable`. See G0.18-T7 (#1360) for the doc
+    cleanup and the operator-facing build-time-only framing.
 
     The response is the canonical :class:`IngestResponse` shape the
     REST route at ``POST /api/v1/connectors/ingest`` also returns.

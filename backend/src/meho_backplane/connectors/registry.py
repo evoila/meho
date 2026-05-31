@@ -40,9 +40,11 @@ import structlog
 from meho_backplane.connectors.base import Connector
 
 __all__ = [
+    "PRODUCT_ALIASES",
     "_eager_import_connectors",
     "all_connectors",
     "all_connectors_v2",
+    "canonical_product_token",
     "clear_registry",
     "get_connector",
     "list_connector_impls",
@@ -52,6 +54,31 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+# Product-token aliases — non-canonical spellings the operator-facing
+# write surfaces accept and normalise to the registry's canonical
+# product token. G0.18-T2 (#1355, RDC #789 Finding 6; closes #1312
+# acceptance B). One entry per concept that is spelled two ways across
+# MEHO's surfaces:
+#
+# * ``"sddc" -> "sddc-manager"`` — the connector listing emits
+#   ``product="sddc"`` (the value
+#   :func:`~meho_backplane.operations._lookup.parse_connector_id`
+#   derives from ``"sddc-rest-9.0"``, load-bearing for the #773
+#   connector_id round-trip contract), while the v2 registry, the
+#   spec catalog, and the ``TargetCreate`` validator all use
+#   ``"sddc-manager"``. The alias makes the listed token
+#   accept-equivalent at ``POST /api/v1/targets`` so an operator who
+#   copies ``product`` straight out of ``meho connector list`` into a
+#   target create no longer hits a 422; the value is normalised to the
+#   canonical ``"sddc-manager"`` before storage and resolution.
+#
+# The map is keyed by the non-canonical token and valued by the
+# canonical registry token. A canonical token is never an alias key
+# (so :func:`canonical_product_token` is idempotent).
+PRODUCT_ALIASES: dict[str, str] = {
+    "sddc": "sddc-manager",
+}
 
 # v1 single-product registry — shipped in G0.2-T2 (#241). Stays as the
 # authoritative table for the pre-G0.6 dispatch path; v2 is the layer
@@ -211,6 +238,33 @@ def registered_product_tokens() -> set[str]:
     PR description).
     """
     return {product for (product, _version, _impl_id) in _REGISTRY_V2 if product}
+
+
+def canonical_product_token(product: str) -> str:
+    """Normalise a product token to its canonical registry spelling.
+
+    G0.18-T2 (#1355, RDC #789 Finding 6; closes #1312 acceptance B).
+    Maps a non-canonical product spelling — one the connector listing
+    or an operator may legitimately type — to the canonical token the
+    v2 registry, the spec catalog, and the ``TargetCreate`` validator
+    all agree on, using :data:`PRODUCT_ALIASES`. A token that is not an
+    alias key (including every canonical token) is returned verbatim,
+    so the function is idempotent: ``canonical_product_token(
+    canonical_product_token(x)) == canonical_product_token(x)``.
+
+    This is the single reconciliation point for the ``sddc`` /
+    ``sddc-manager`` split RDC #789 Finding 6 re-flagged: the listing
+    emits ``product="sddc"`` (load-bearing for the #773 connector_id
+    round-trip contract) while the registry / validator use
+    ``"sddc-manager"``. Operator-facing write paths
+    (:func:`~meho_backplane.api.v1.targets.create_target`,
+    :func:`~meho_backplane.api.v1.targets.update_target`) canonicalise
+    the incoming token through here before validating against
+    :func:`registered_product_tokens` and before storing the row, so a
+    value copied straight out of ``meho connector list`` is
+    accept-equivalent at ``POST /api/v1/targets``.
+    """
+    return PRODUCT_ALIASES.get(product, product)
 
 
 def _eager_import_connectors() -> None:

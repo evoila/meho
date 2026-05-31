@@ -30,6 +30,8 @@ The locked decision (#7 in [v0.2-decisions.md](../planning/v0.2-decisions.md)) w
 
 **Streamable HTTP**, not stdio. MEHO is a hosted server, not a local subprocess. The `/mcp` route accepts JSON-RPC 2.0 POST requests with a single envelope per body (batch arrays are unsupported — MCP Streamable HTTP transport mandates single envelopes).
 
+> **Why `/mcp` is root-mounted and not under `/api/v1/*`.** The MCP endpoint is the lone, deliberate route-prefix carve-out from MEHO's `/api/v1/*` chassis convention — root-mounted, unversioned, single-path — because MCP clients use the bare server URL, the OAuth `aud` claim is bound to `${BACKPLANE_URL}/mcp`, and RFC 9728 protected-resource discovery assumes that exact URI. Tool names (`query_topology`, `call_operation`, …) are JSON-RPC body params, **never URL path segments**, so `/api/v1/mcp` and `/api/v1/query/topology` are phantom paths that have never existed in any tag. Full convention + phantom-path callout: [`docs/codebase/api-shape-conventions.md` §13](../codebase/api-shape-conventions.md#13-route-prefix-placement-apiv1-vs-the-mcp-carve-out).
+
 ### Session id issuance + capture (audit correlation)
 
 Per the spec's *Session Management* section, a server MAY assign a session id at `initialize` by returning it in an `Mcp-Session-Id` **response header** on the `InitializeResult`; the client MUST then include the header on every subsequent HTTP POST to the MCP endpoint. The handshake is strictly **server-driven** — clients do not invent session ids, they only relay what the server gave them. MEHO runs **no** stateful session store in v0.2 — the id exists purely for **audit correlation** so per-session replay (`meho audit replay <session-id>`, G8.2) can reconstruct one agent's full operation trace.

@@ -118,9 +118,25 @@ verbatim from `api/v1/feed.py`.
 ## Dependencies
 
 - `redis.asyncio` (redis-py 7.4) — Valkey 9.x is wire-compatible with
-  Redis 7.2.4; the same redis-py driver speaks both. Connection pool
-  per-process, cached via `broadcast/client.py`'s
-  `get_broadcast_client()`.
+  Redis 7.2.4; the same redis-py driver speaks both. **Two connection
+  pools per process**, partitioned by read-timeout expectations
+  (`broadcast/client.py`):
+  - `get_broadcast_client()` — fast client, `socket_timeout=5 s`.
+    Used by the readiness probe (`PING`), the publish hot path
+    (`XADD`), and the SSE backlog prelude (`XREVRANGE`). A hung
+    Valkey on this client raises `redis.TimeoutError` at 5 s so the
+    `/ready` poll surfaces it.
+  - `get_broadcast_blocking_client()` — long-poll client,
+    `socket_timeout=35 s` (the 30 s `XREAD BLOCK` window + 5 s
+    buffer). Used by every blocking `XREAD` caller: the SSE feed
+    (`api/v1/feed.py`), the UI SSE bridge
+    (`ui/routes/broadcast/stream.py`), the
+    `meho.broadcast.watch` MCP tool, and the agent approval-wait
+    loop (`agent/approval_wait.py`). The longer timeout lets a quiet
+    BLOCK expire naturally (`xread` returns `None`) instead of
+    raising `redis.TimeoutError` from the socket layer at 5 s, which
+    would otherwise produce a spurious `feed_error` frame on every
+    fresh SSE connection (RDC #789 N1 / Initiative #1353).
 - `BROADCAST_REDIS_URL` env var — production points at the Helm
   chart's `redis://{{ .Release.Name }}-broadcast:6379/0` Service.
   Dev default is `redis://localhost:6379`. Schemes other than
@@ -132,6 +148,69 @@ verbatim from `api/v1/feed.py`.
   `broadcast_agent_announcements_total{phase}`.
 
 ## Known issues
+
+### `claude-rdc-hetzner-dc#789` N1 — fresh SSE connections die at ~5 s with a spurious error frame (FIXED v0.9.0, #1354)
+
+**Symptom.** Every fresh `GET /api/v1/feed` (Bearer JWT) or
+`/ui/broadcast/stream` (session cookie) SSE connection on a quiet
+tenant died at ~5 s with a `feed_error` frame
+(`code="broadcast_subsystem_unavailable"`) even when the substrate
+was healthy. After #1305 the **first-byte** problem was fixed (the
+backlog prelude surfaced ~50 entries on connect) but the **live tail
+never survived one BLOCK cycle**: the post-prelude `XREAD BLOCK 30000`
+raised `redis.TimeoutError` at ~5 s and the generator yielded the T11
+error frame.
+
+**Root cause.** The single process-wide broadcast client had
+`socket_timeout=5.0` pinned for the fail-fast readiness probe. redis-py
+7.4 resolves `xread`'s read-timeout from the connection's
+`socket_timeout` when the caller passes no per-call timeout (see
+`redis/asyncio/connection.py` `AbstractConnection.read_response`).
+With `BLOCK=30000` but `socket_timeout=5.0`, every quiet BLOCK hit
+the socket-layer `asyncio.TimeoutError` at 5 s and redis-py raised it
+as `redis.TimeoutError` — well before the 30 s BLOCK window
+expired. The generator's `except RedisError` arm caught it and
+yielded `broadcast_subsystem_unavailable` (the unit test at
+`test_api_v1_feed.py:866-909` even *asserted the bug as correct*).
+
+A bare global removal of `socket_timeout` would have been wrong: the
+same client serves the readiness `PING` (`broadcast/probe.py`), which
+intentionally caps at 5 s so a hung Valkey can't block `/ready`
+indefinitely.
+
+**Fix.** Split the single client into two clients
+(`broadcast/client.py`), each with its own connection pool:
+
+- `get_broadcast_client()` — `socket_timeout=5 s`. Readiness probe,
+  publish hot path, SSE backlog prelude (`XREVRANGE`).
+- `get_broadcast_blocking_client()` — `socket_timeout=35 s` (30 s
+  BLOCK + 5 s buffer). Every blocking `XREAD` caller: the SSE feed,
+  the UI SSE bridge, the `meho.broadcast.watch` MCP tool, and the
+  agent approval-wait loop.
+
+Now on a quiet tenant, `XREAD BLOCK 30000` returns `None` after the
+BLOCK window expires (the natural keepalive path), the generator's
+`_consume_xread_batch` falls through to the heartbeat path, and the
+SSE consumer sees a `: heartbeat\n\n` line instead of a `feed_error`
+frame. A genuine transport failure — socket dead past the 35 s
+window — still raises `redis.TimeoutError` and still produces the
+T11 error frame (the operator-side remediation is the same).
+
+**Acceptance tests** live in `backend/tests/test_api_v1_feed.py`
+under `TestFeedGenerator`:
+
+- `test_quiet_stream_block_timeout_yields_no_error_frame` — quiet
+  BLOCK returns `None` → heartbeat, NOT `feed_error`.
+- `test_fresh_dollar_quiet_stream_survives_past_fast_socket_timeout`
+  — direct repro of the consumer signal: fresh `$` connection
+  survives a window longer than the fast client's 5 s timeout and
+  emits a heartbeat.
+- `test_transport_timeout_mid_stream_emits_feed_error_after_prior_events`
+  — `redis.TimeoutError` (now a genuine transport failure
+  post-fix) still produces the T11 error frame.
+- `test_broadcast_client.py:TestBlockingClientLifecycle` —
+  asserts the fast / blocking split, distinct pools, and the
+  ≥30 s socket_timeout invariant on the blocking client.
 
 ### `claude-rdc-hetzner-dc#771` Finding 14 — SSE feed delivers zero bytes (FIXED v0.9.0, #1305)
 
@@ -214,10 +293,13 @@ investigation. #1305 is the closing fix.
 
 ## References
 
-- Source: `claude-rdc-hetzner-dc#771` Finding 14, signal draft
-  `sse-feed-delivers-zero-events-despite-stream-writes`.
-- Parent Initiative: #1302 (G0.16 — v0.8.0 closed-loop dogfood
-  hardening). Parent Goal: #221.
+- Sources:
+  - `claude-rdc-hetzner-dc#789` N1 — fresh SSE connections die at
+    ~5 s (v0.8.1 cycle, fixed in #1354).
+  - `claude-rdc-hetzner-dc#771` Finding 14 — SSE feed delivers zero
+    bytes (v0.8.0 cycle, fixed in #1305).
+- Parent Initiatives: #1353 (G0.18 — v0.8.1 closed-loop dogfood
+  hardening); #1302 (G0.16 — v0.8.0). Parent Goal: #221.
 - Related closed: #1216 (G0.15-T7 BFF audit-thread — UI session is
   correctly tenant-scoped).
 - ADR 0005 — Valkey 9.x as the broadcast substrate.

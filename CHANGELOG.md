@@ -102,6 +102,122 @@ connector-related release-notes line.
   "A-remainder"). (#1356 — RDC #789 Finding 3,
   `list-endpoint-envelope-asymmetry`)
 
+### Fixed
+
+- **`POST /api/v1/targets` accepts the `meho connector list` SDDC
+  product token (G0.18-T2 #1355).** Closes #1312 acceptance B, which
+  had been marked "already aligned" but the split persisted:
+  `meho connector list` emits `product="sddc"` (parser-derived from
+  `sddc-rest-9.0`, load-bearing for the #773 connector_id
+  round-trip), while the v2 registry, the spec catalog, and the
+  `TargetCreate` validator all use the canonical `sddc-manager`.
+  An operator copying the listing token into a create now succeeds:
+  a `PRODUCT_ALIASES` map in
+  `meho_backplane.connectors.registry` normalises `sddc` →
+  `sddc-manager` at the write surface (`POST` + `PATCH
+  /api/v1/targets`) before the registered-product validator runs,
+  and the canonical token is what gets stored — so the resolver,
+  audit log, and every list / detail read see one spelling
+  regardless of which the operator typed. A new structural test in
+  `test_operations_ingest_catalog.py` pins the round-trip for
+  every shipped connector so a future drift fails CI rather than
+  surfacing on the next dogfood cycle. RDC #789 Finding 6.
+
+- **Fresh SSE broadcast-feed connections no longer die at ~5 s with a
+  spurious `feed_error` frame (G0.18-T1 #1354, RDC #789 N1).** The
+  single process-wide broadcast client pinned `socket_timeout=5.0`
+  for the fail-fast readiness probe, but redis-py 7.4 resolves
+  `xread`'s read-timeout from `socket_timeout` when no per-call
+  override is supplied — so every `XREAD BLOCK 30000` against a
+  quiet stream raised `redis.TimeoutError` at ~5 s and the SSE
+  generator yielded a `broadcast_subsystem_unavailable` frame. The
+  fix splits the substrate into two cached clients: `get_broadcast_client()`
+  (`socket_timeout=5 s`, for the readiness `PING` / publish hot path
+  / SSE backlog prelude) and `get_broadcast_blocking_client()`
+  (`socket_timeout=35 s` = 30 s BLOCK + 5 s buffer, for every
+  blocking-XREAD caller — SSE feed, UI SSE bridge,
+  `meho.broadcast.watch` MCP tool, agent approval-wait loop). A
+  quiet BLOCK now returns `None` (the natural keepalive) and the
+  generator emits a heartbeat; only genuine transport failures past
+  the 35 s window still raise the T11 error frame. The readiness
+  probe's 5 s SLO is explicitly preserved.
+
+- **Ingest LLM-grouping docs + `composite_l2_missing` envelope —
+  honest "build-time-only" framing, dead `#405` reference removed
+  (G0.18-T7 #1360, RDC #789 N9).** The previous wording cited
+  `T5 (#405)` / "production Anthropic adapter lands with G0.7-T5"
+  in multiple docstrings (`operations/ingest/pipeline.py`,
+  `api/v1/connectors_ingest.py`, `mcp/tools/connector_admin.py`,
+  `docs/codebase/spec-ingestion.md`, two test files), but `#405`
+  was G0.7-T5 = CLI verbs (CLOSED) and never tracked an LLM
+  adapter — and `settings.anthropic_api_key` flows only to the
+  agent runtime, so non-dry-run `meho connector ingest --catalog
+  <product>/<version>` 503s on every deploy (the chassis
+  `LlmClient` factory is fail-closed by default and FastAPI
+  lifespan startup has no caller for `set_llm_client_factory`).
+  The `composite_l2_missing` error envelope's escape-hatch hint
+  now names the limitation explicitly so operators don't follow
+  the suggested catalog command into a silent 503. New
+  `docs/codebase/spec-ingestion.md` §"LLM-client wiring (build-
+  time-only today)" documents the gap. Wiring a production
+  `LlmClient` adapter at lifespan startup remains the
+  operator-side follow-up.
+
+- **VCF-family catalog rows + `GET /api/v1/connectors` `next_step`
+  hints no longer over-promise `--catalog` ingest (G0.18-T8 #1361,
+  RDC #789 N8).** Rechecked the upstreams against G0.15-T2 (#1211):
+  `vmware/9.0` and `sddc-manager/9.0` still serve `text/html` from
+  the Broadcom Developer Portal (no regression — the catalog notes
+  already document the unusability, the route's
+  `catalog_entry_upstream_not_spec` 422 still fires). `nsx/4.2`
+  is still fqdn-templated (`<nsx-mgr-fqdn>`) under
+  `catalog_entry_templated_upstream`. The over-promising was
+  isolated to the listing's hint: for any `state="registered"`
+  row whose catalog entry exists, the hint blindly said "spec
+  available in catalog; run ingest" and pointed at
+  `--catalog <product>/<version>` — which 422'd for all three
+  VCF-family rows. Added a declarative `catalog_ingest:
+  "supported" | "spec-only"` field on `ConnectorSpecEntry`
+  (default `"supported"` for back-compat; the three VCF rows
+  opt into `"spec-only"`); the listing's `next_step` hint now
+  branches on it and emits the explicit-quadruple `--product …
+  --version … --impl … --spec <concrete-openapi-uri>` verb plus
+  a rationale calling out the upstream-shape limitation when
+  the row is spec-only. Route validation behaviour is unchanged
+  (the existing 422 envelopes still fire on direct catalog-shape
+  POSTs against these rows); the hint is now an honest
+  precursor instead of pointing operators at a broken verb.
+  Docs: [`connector-catalog.md`](docs/cross-repo/connector-catalog.md)
+  §"Spec-only entries" + entry-schema table.
+
+### Documentation
+
+- **`/mcp` root-mount carve-out documented + `/api/v1/mcp`
+  phantom-path confusion closed (G0.18-T9 #1362, RDC #789
+  mcp-route).** A new §13 in `docs/codebase/api-shape-conventions.md`
+  ("Route-prefix placement: `/api/v1/*` vs the `/mcp` carve-out")
+  codifies the convention that every chassis HTTP surface lives
+  under `/api/v1/*` while the MCP endpoint is the lone, deliberate
+  root-mount at `/mcp` — required by the MCP 2025-06-18 transport
+  contract (clients use the bare server URL), RFC 9728
+  protected-resource discovery (`resource` claim binds to
+  `${BACKPLANE_URL}/mcp`), and the OAuth `aud` audience binding
+  the same. The section also pins the tool-name-≠-path-segment rule
+  (`query_topology` is a JSON-RPC body parameter, never a URL
+  segment — the REST sister is `/api/v1/topology/*`, not
+  `/api/v1/query/topology`) and ships a phantom-paths-that-never-
+  existed table so future consumer probe scripts stop deriving
+  `/api/v1/mcp` from the `/api/v1/*` pattern. One-line cross-links
+  from `docs/architecture/mcp.md` (Transport) and
+  `docs/cross-repo/mcp-client-setup.md` (Why this doc exists)
+  point at §13. No code change; a 308 alias from
+  `/api/v1/mcp` → `/mcp` was considered and rejected because the
+  OAuth `aud` is bound to `/mcp` so a client following the
+  redirect would 401 post-redirect with `invalid_audience`. The
+  three v0.8.x dogfood cycles' recurring "mcp-route moved" finding
+  was INVALID-as-framed every time; the routes are correct and
+  stable since v0.2.0 (#266).
+
 ## [0.8.1] - 2026-05-29
 
 ### Added

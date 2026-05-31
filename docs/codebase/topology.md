@@ -783,11 +783,17 @@ SSE / Slack feed.
 
 1. Validate `kind` against `_GRAPH_NODE_KINDS` (raise
    `InvalidNodeKindError` *before* any DB read).
-2. `async with session.begin()` — one transaction wraps the
-   lookup + upsert + audit write.
-3. Look up the existing row for the `(tenant_id, kind, name)` unique
+2. Pre-allocate `audit_id = uuid.uuid4()` (chassis "audit-id
+   pre-allocation" pattern shared with `refresh` / `annotate` —
+   the same uuid is threaded into the `audit_log` row and the
+   `graph_node_history` row so the temporal-query verbs can join
+   history back against audit to recover the causing principal).
+3. `async with session.begin()` — one transaction wraps the
+   lookup + upsert + history write + audit write.
+4. Look up the existing row for the `(tenant_id, kind, name)` unique
    tuple (the `graph_node_tenant_kind_name_idx` index). Found
-   → merge the four manual-seed property keys (`note`,
+   → capture `node_snapshot(existing)` as `before` *first*, then
+   merge the four manual-seed property keys (`note`,
    `evidence_url`, `seeded_by`, `seeded_at`) onto the existing JSONB
    (auto-discovered keys like `status`, `phase` are preserved),
    refresh `last_seen`, and promote `discovered_by` to the operator
@@ -796,17 +802,42 @@ SSE / Slack feed.
    with `discovered_by=operator.sub`, `target_id=None` (manual seeds
    never adopt onto a target — only the refresh service does that),
    `properties={note, evidence_url, seeded_by, seeded_at}`,
-   `first_seen = last_seen = now`.
-4. Add one `audit_log` row in the same session
+   `first_seen = last_seen = now`; `before` is `None`.
+5. Diff-on-write hook (G9.3-T2 #857; create_node side added by
+   G0.18-T6 #1359). Call `record_node_change` to add one
+   `graph_node_history` row per *meaningful* call (CREATED on fresh
+   insert; UPDATED on promotion or property change). An idempotent
+   re-seed with the same `(note, evidence_url)` and no promotion is
+   heartbeat-only (the `seeded_at` ISO timestamp and `last_seen`
+   change every call regardless of intent) and skips the emit per
+   `_create_node_is_meaningful` — same heartbeat-strip discipline
+   `annotate._annotate_curated_is_meaningful` and
+   `refresh._update_existing_node`'s `is_meaningful_update` use.
+   The row carries the pre-allocated `audit_id` from step 2.
+6. Add one `audit_log` row in the same session
    (`method="CREATE_NODE"`, `path="topology.create_node"`,
    `payload={op_id, op_class:"write", node_id, kind, name,
    was_created, note, evidence_url}`, `target_id` = the seeded
    node's own `target_id` when non-null, else `None`).
-5. Commit. Then publish one `BroadcastEvent` (`op_class="write"` —
+7. Commit. Then publish one `BroadcastEvent` (`op_class="write"` —
    set explicitly because the `.create_node` suffix is not in
    `_WRITE_SUFFIXES`; same rationale as `.annotate` /
    `.unannotate`). Publish is fail-open: a publish exception is
    logged, never raised.
+
+**Manual seeds are visible to `kind=history` / `kind=timeline`.**
+Before G0.18-T6 (#1359) the create_node hook wrote audit_log +
+broadcast but no `graph_node_history` row, so `query_topology
+kind=history <manually-seeded-node>` returned empty and
+`kind=timeline` omitted the seed even though it surfaced in
+`query_audit` — an audit-vs-graph-history asymmetry first surfaced
+in RDC #789 finding F-A. The hook now emits one history row per
+meaningful call so both verbs reflect manual seeds the same way
+they reflect auto-refresh changes. The atomicity contract
+`history.py` documents holds: a failure anywhere in the
+`session.begin()` block rolls the live row, the history row, and
+the audit row back together — the graph and the history table
+can never disagree about which mutations committed.
 
 **Idempotency invariant.** A repeat call with the same
 `(kind, name)` always returns `was_created=False` after the first

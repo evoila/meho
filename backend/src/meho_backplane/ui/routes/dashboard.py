@@ -105,6 +105,12 @@ _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
         "href": "/ui/memory",
         "icon": "\U0001f9e0",  # brain
     },
+    {
+        "title": "Runbooks",
+        "summary": "Browse runbook templates + lifecycle state.",
+        "href": "/ui/runbooks",
+        "icon": "\U0001f4d8",  # blue book
+    },
 )
 
 

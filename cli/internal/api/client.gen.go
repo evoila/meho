@@ -370,9 +370,9 @@ const (
 
 // Defines values for ListTemplatesApiV1RunbooksTemplatesGetParamsStatus.
 const (
-	Deprecated ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "deprecated"
-	Draft      ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "draft"
-	Published  ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "published"
+	ListTemplatesApiV1RunbooksTemplatesGetParamsStatusDeprecated ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "deprecated"
+	ListTemplatesApiV1RunbooksTemplatesGetParamsStatusDraft      ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "draft"
+	ListTemplatesApiV1RunbooksTemplatesGetParamsStatusPublished  ListTemplatesApiV1RunbooksTemplatesGetParamsStatus = "published"
 )
 
 // Defines values for ListTriggersApiV1SchedulerTriggersGetParamsKind.
@@ -388,6 +388,20 @@ const (
 	ListTriggersApiV1SchedulerTriggersGetParamsStatusCancelled ListTriggersApiV1SchedulerTriggersGetParamsStatus = "cancelled"
 	ListTriggersApiV1SchedulerTriggersGetParamsStatusFired     ListTriggersApiV1SchedulerTriggersGetParamsStatus = "fired"
 	ListTriggersApiV1SchedulerTriggersGetParamsStatusPaused    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "paused"
+)
+
+// Defines values for RunbooksIndexUiRunbooksGetParamsStatus.
+const (
+	RunbooksIndexUiRunbooksGetParamsStatusDeprecated RunbooksIndexUiRunbooksGetParamsStatus = "deprecated"
+	RunbooksIndexUiRunbooksGetParamsStatusDraft      RunbooksIndexUiRunbooksGetParamsStatus = "draft"
+	RunbooksIndexUiRunbooksGetParamsStatusPublished  RunbooksIndexUiRunbooksGetParamsStatus = "published"
+)
+
+// Defines values for RunbooksListUiRunbooksListGetParamsStatus.
+const (
+	Deprecated RunbooksListUiRunbooksListGetParamsStatus = "deprecated"
+	Draft      RunbooksListUiRunbooksListGetParamsStatus = "draft"
+	Published  RunbooksListUiRunbooksListGetParamsStatus = "published"
 )
 
 // AbortRunRequest Request body for “runbook_abort“ -- terminate the run mid-flight.
@@ -5508,6 +5522,29 @@ type UiMemoryListUiMemoryGetParams struct {
 	Tag   *string `form:"tag,omitempty" json:"tag,omitempty"`
 }
 
+// RunbooksIndexUiRunbooksGetParams defines parameters for RunbooksIndexUiRunbooksGet.
+type RunbooksIndexUiRunbooksGetParams struct {
+	Status     *RunbooksIndexUiRunbooksGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TargetKind *string                                 `form:"target_kind,omitempty" json:"target_kind,omitempty"`
+}
+
+// RunbooksIndexUiRunbooksGetParamsStatus defines parameters for RunbooksIndexUiRunbooksGet.
+type RunbooksIndexUiRunbooksGetParamsStatus string
+
+// RunbooksListUiRunbooksListGetParams defines parameters for RunbooksListUiRunbooksListGet.
+type RunbooksListUiRunbooksListGetParams struct {
+	Status     *RunbooksListUiRunbooksListGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TargetKind *string                                    `form:"target_kind,omitempty" json:"target_kind,omitempty"`
+}
+
+// RunbooksListUiRunbooksListGetParamsStatus defines parameters for RunbooksListUiRunbooksListGet.
+type RunbooksListUiRunbooksListGetParamsStatus string
+
+// RunbooksDetailUiRunbooksSlugGetParams defines parameters for RunbooksDetailUiRunbooksSlugGet.
+type RunbooksDetailUiRunbooksSlugGetParams struct {
+	Version *int `form:"version,omitempty" json:"version,omitempty"`
+}
+
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
 	Sort *MehoBackplaneUiRoutesTopologyTableSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
@@ -6980,6 +7017,15 @@ type ClientInterface interface {
 	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBody(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunbooksIndexUiRunbooksGet request
+	RunbooksIndexUiRunbooksGet(ctx context.Context, params *RunbooksIndexUiRunbooksGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunbooksListUiRunbooksListGet request
+	RunbooksListUiRunbooksListGet(ctx context.Context, params *RunbooksListUiRunbooksListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunbooksDetailUiRunbooksSlugGet request
+	RunbooksDetailUiRunbooksSlugGet(ctx context.Context, slug string, params *RunbooksDetailUiRunbooksSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -9453,6 +9499,42 @@ func (c *Client) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBody(ctx c
 
 func (c *Client) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBody(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithFormdataBody(c.Server, scope, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksIndexUiRunbooksGet(ctx context.Context, params *RunbooksIndexUiRunbooksGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksIndexUiRunbooksGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksListUiRunbooksListGet(ctx context.Context, params *RunbooksListUiRunbooksListGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksListUiRunbooksListGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksDetailUiRunbooksSlugGet(ctx context.Context, slug string, params *RunbooksDetailUiRunbooksSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksDetailUiRunbooksSlugGetRequest(c.Server, slug, params)
 	if err != nil {
 		return nil, err
 	}
@@ -18550,6 +18632,192 @@ func NewUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostRequestWithBody(server 
 	return req, nil
 }
 
+// NewRunbooksIndexUiRunbooksGetRequest generates requests for RunbooksIndexUiRunbooksGet
+func NewRunbooksIndexUiRunbooksGetRequest(server string, params *RunbooksIndexUiRunbooksGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TargetKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target_kind", runtime.ParamLocationQuery, *params.TargetKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRunbooksListUiRunbooksListGetRequest generates requests for RunbooksListUiRunbooksListGet
+func NewRunbooksListUiRunbooksListGetRequest(server string, params *RunbooksListUiRunbooksListGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks/list")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TargetKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target_kind", runtime.ParamLocationQuery, *params.TargetKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRunbooksDetailUiRunbooksSlugGetRequest generates requests for RunbooksDetailUiRunbooksSlugGet
+func NewRunbooksDetailUiRunbooksSlugGetRequest(server string, slug string, params *RunbooksDetailUiRunbooksSlugGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Version != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "version", runtime.ParamLocationQuery, *params.Version); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiTopologyTableUiTopologyGetRequest generates requests for UiTopologyTableUiTopologyGet
 func NewUiTopologyTableUiTopologyGetRequest(server string, params *UiTopologyTableUiTopologyGetParams) (*http.Request, error) {
 	var err error
@@ -19452,6 +19720,15 @@ type ClientWithResponsesInterface interface {
 	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse, error)
 
 	UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostWithFormdataBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, body UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse, error)
+
+	// RunbooksIndexUiRunbooksGetWithResponse request
+	RunbooksIndexUiRunbooksGetWithResponse(ctx context.Context, params *RunbooksIndexUiRunbooksGetParams, reqEditors ...RequestEditorFn) (*RunbooksIndexUiRunbooksGetResponse, error)
+
+	// RunbooksListUiRunbooksListGetWithResponse request
+	RunbooksListUiRunbooksListGetWithResponse(ctx context.Context, params *RunbooksListUiRunbooksListGetParams, reqEditors ...RequestEditorFn) (*RunbooksListUiRunbooksListGetResponse, error)
+
+	// RunbooksDetailUiRunbooksSlugGetWithResponse request
+	RunbooksDetailUiRunbooksSlugGetWithResponse(ctx context.Context, slug string, params *RunbooksDetailUiRunbooksSlugGetParams, reqEditors ...RequestEditorFn) (*RunbooksDetailUiRunbooksSlugGetResponse, error)
 
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
@@ -22839,6 +23116,72 @@ func (r UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse) StatusCode() 
 	return 0
 }
 
+type RunbooksIndexUiRunbooksGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksIndexUiRunbooksGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksIndexUiRunbooksGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunbooksListUiRunbooksListGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksListUiRunbooksListGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksListUiRunbooksListGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunbooksDetailUiRunbooksSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksDetailUiRunbooksSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksDetailUiRunbooksSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiTopologyTableUiTopologyGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -24697,6 +25040,33 @@ func (c *ClientWithResponses) UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostW
 		return nil, err
 	}
 	return ParseUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse(rsp)
+}
+
+// RunbooksIndexUiRunbooksGetWithResponse request returning *RunbooksIndexUiRunbooksGetResponse
+func (c *ClientWithResponses) RunbooksIndexUiRunbooksGetWithResponse(ctx context.Context, params *RunbooksIndexUiRunbooksGetParams, reqEditors ...RequestEditorFn) (*RunbooksIndexUiRunbooksGetResponse, error) {
+	rsp, err := c.RunbooksIndexUiRunbooksGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksIndexUiRunbooksGetResponse(rsp)
+}
+
+// RunbooksListUiRunbooksListGetWithResponse request returning *RunbooksListUiRunbooksListGetResponse
+func (c *ClientWithResponses) RunbooksListUiRunbooksListGetWithResponse(ctx context.Context, params *RunbooksListUiRunbooksListGetParams, reqEditors ...RequestEditorFn) (*RunbooksListUiRunbooksListGetResponse, error) {
+	rsp, err := c.RunbooksListUiRunbooksListGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksListUiRunbooksListGetResponse(rsp)
+}
+
+// RunbooksDetailUiRunbooksSlugGetWithResponse request returning *RunbooksDetailUiRunbooksSlugGetResponse
+func (c *ClientWithResponses) RunbooksDetailUiRunbooksSlugGetWithResponse(ctx context.Context, slug string, params *RunbooksDetailUiRunbooksSlugGetParams, reqEditors ...RequestEditorFn) (*RunbooksDetailUiRunbooksSlugGetResponse, error) {
+	rsp, err := c.RunbooksDetailUiRunbooksSlugGet(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksDetailUiRunbooksSlugGetResponse(rsp)
 }
 
 // UiTopologyTableUiTopologyGetWithResponse request returning *UiTopologyTableUiTopologyGetResponse
@@ -29172,6 +29542,84 @@ func ParseUiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse(rsp *http.Re
 	}
 
 	response := &UiMemoryPromoteSubmitUiMemoryScopeSlugPromotePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksIndexUiRunbooksGetResponse parses an HTTP response from a RunbooksIndexUiRunbooksGetWithResponse call
+func ParseRunbooksIndexUiRunbooksGetResponse(rsp *http.Response) (*RunbooksIndexUiRunbooksGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksIndexUiRunbooksGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksListUiRunbooksListGetResponse parses an HTTP response from a RunbooksListUiRunbooksListGetWithResponse call
+func ParseRunbooksListUiRunbooksListGetResponse(rsp *http.Response) (*RunbooksListUiRunbooksListGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksListUiRunbooksListGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksDetailUiRunbooksSlugGetResponse parses an HTTP response from a RunbooksDetailUiRunbooksSlugGetWithResponse call
+func ParseRunbooksDetailUiRunbooksSlugGetResponse(rsp *http.Response) (*RunbooksDetailUiRunbooksSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksDetailUiRunbooksSlugGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

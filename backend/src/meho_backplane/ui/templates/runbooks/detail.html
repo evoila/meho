@@ -1,0 +1,174 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbook template detail page: header (title / description / target_kind
+  / status) + ordered steps + verify gates. Opacity-floor-aware: an
+  operator without a completed run sees the summary plus a restricted
+  notice instead of the steps.
+
+  Initiative #1381 (G10.6 Runbooks UI), Task #1382 (T1).
+
+  Context variables:
+    template       -- ShowTemplateResponse: the resolved template (or a
+                      minimal restricted placeholder for an operator
+                      probing an unresolvable slug)
+    restricted     -- bool: True when steps are withheld (opacity floor)
+    steps_rendered -- list[{step, body_html}]: pre-rendered step bodies
+                      (empty when restricted)
+    is_admin       -- bool: caller is tenant_admin
+    code_css       -- str: pygments CSS for highlighted step-body code
+
+  Template blocks:
+    * ``page_title`` — overrides the ``<title>`` suffix.
+    * ``content`` — overrides the base.html main pane.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ template.slug }} &middot; Runbooks{% endblock %}
+
+{% block content %}
+<section class="space-y-6">
+  {# ---------- Header ---------- #}
+  <header class="space-y-2">
+    <div class="flex flex-wrap items-center gap-3">
+      <a href="/ui/runbooks" class="btn btn-ghost btn-sm" aria-label="Back to runbooks catalog">
+        &larr; Catalog
+      </a>
+      <h1 class="font-mono text-2xl font-semibold">{{ template.slug }}</h1>
+      <span class="font-mono opacity-60">v{{ template.version }}</span>
+      {% if template.status == "published" %}
+        <span class="badge badge-success badge-outline" aria-label="Status: published">
+          published
+        </span>
+      {% elif template.status == "draft" %}
+        <span class="badge badge-warning badge-outline" aria-label="Status: draft">draft</span>
+      {% else %}
+        <span class="badge badge-ghost badge-outline" aria-label="Status: deprecated">
+          deprecated
+        </span>
+      {% endif %}
+    </div>
+    {% if not restricted %}
+      <p class="text-lg">{{ template.title }}</p>
+      {% if template.description %}
+        <p class="max-w-3xl opacity-70">{{ template.description }}</p>
+      {% endif %}
+      {% if template.target_kind %}
+        <p class="text-sm opacity-60">
+          Target kind: <code class="font-mono">{{ template.target_kind }}</code>
+        </p>
+      {% endif %}
+    {% endif %}
+  </header>
+
+  {% if restricted %}
+    {# ---------- Opacity-floor restricted notice ---------- #}
+    <div role="alert" class="alert alert-warning">
+      <span aria-hidden="true">&#128274;</span>
+      <div>
+        <h2 class="font-semibold">Step details are restricted</h2>
+        <p class="text-sm">
+          Step details are restricted until you complete a run of this
+          template. Once you have a completed (or abandoned) run of
+          <code class="font-mono">{{ template.slug }}</code>, the full
+          steps unlock here for post-run review. A tenant administrator
+          can see them at any time.
+        </p>
+      </div>
+    </div>
+  {% else %}
+    {# ---------- Steps ---------- #}
+    <div class="space-y-4">
+      <h2 class="text-xl font-semibold">
+        Steps
+        <span class="text-sm font-normal opacity-60">({{ steps_rendered | length }})</span>
+      </h2>
+      {% if steps_rendered %}
+        <ol class="space-y-4" role="list">
+          {% for item in steps_rendered %}
+            {%- set step = item.step -%}
+            <li class="card bg-base-100 border-base-300 border shadow-sm">
+              <div class="card-body space-y-3 py-4">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="badge badge-neutral">{{ loop.index }}</span>
+                  <h3 class="card-title font-mono text-base">{{ step.id }}</h3>
+                  {% if step.type == "operation_call" %}
+                    <span class="badge badge-info badge-outline" aria-label="Step kind: operation call">
+                      operation_call
+                    </span>
+                  {% else %}
+                    <span class="badge badge-ghost badge-outline" aria-label="Step kind: manual">
+                      manual
+                    </span>
+                  {% endif %}
+                </div>
+                <p class="font-medium">{{ step.title }}</p>
+
+                {# Step body — server-rendered Markdown (shared KB renderer). #}
+                <div class="prose prose-sm max-w-none">{{ item.body_html }}</div>
+
+                {# operation_call steps carry an op_id + params payload. #}
+                {% if step.type == "operation_call" %}
+                  <div class="bg-base-200 rounded-box space-y-1 p-3 text-sm">
+                    <div>
+                      <span class="opacity-60">Operation:</span>
+                      <code class="font-mono">{{ step.op_id }}</code>
+                    </div>
+                    {% if step.params %}
+                      <div>
+                        <span class="opacity-60">Params:</span>
+                        <pre class="overflow-x-auto text-xs"><code>{{ step.params | tojson(indent=2) }}</code></pre>
+                      </div>
+                    {% endif %}
+                  </div>
+                {% endif %}
+
+                {# Verify gate — confirm prompt OR operation_call match. #}
+                {%- set verify = step.verify -%}
+                <div class="border-base-300 border-t pt-2">
+                  <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
+                  {% if verify.type == "confirm" %}
+                    <p class="text-sm">
+                      <span class="badge badge-sm badge-outline mr-1">confirm</span>
+                      {{ verify.prompt }}
+                    </p>
+                  {% else %}
+                    <div class="space-y-1 text-sm">
+                      <p>
+                        <span class="badge badge-sm badge-outline mr-1">operation_call</span>
+                        <code class="font-mono">{{ verify.op_id }}</code>
+                      </p>
+                      {% if verify.params %}
+                        <div>
+                          <span class="opacity-60">Params:</span>
+                          <pre class="overflow-x-auto text-xs"><code>{{ verify.params | tojson(indent=2) }}</code></pre>
+                        </div>
+                      {% endif %}
+                      <div>
+                        <span class="opacity-60">Expect:</span>
+                        <pre class="overflow-x-auto text-xs"><code>{{ verify.expect | tojson(indent=2) }}</code></pre>
+                      </div>
+                    </div>
+                  {% endif %}
+                </div>
+              </div>
+            </li>
+          {% endfor %}
+        </ol>
+      {% else %}
+        <div class="card bg-base-100 border-base-300 border shadow-sm">
+          <div class="card-body py-8 text-center">
+            <p class="opacity-60">This template has no steps.</p>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
+</section>
+
+{# Pygments CSS for any highlighted code in step bodies (shared KB style). #}
+{% if code_css %}
+  <style>{{ code_css | safe }}</style>
+{% endif %}
+{% endblock %}

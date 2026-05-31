@@ -1,0 +1,4 @@
+[
+  {"path": "approval.request", "operator_sub": "operator:alice"},
+  {"path": "approval.decision", "operator_sub": "operator:bob"}
+]

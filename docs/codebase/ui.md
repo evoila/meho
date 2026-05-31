@@ -1924,4 +1924,128 @@ a 500.
 * `backend/src/meho_backplane/ui/templates/connectors/import.html` — full-page paste-box + upload form.
 * `backend/src/meho_backplane/ui/templates/connectors/_import_preview.html` — preview table fragment (CREATE/UPDATE badges + per-entry warnings + confirm form, or an inline parse error).
 * `backend/src/meho_backplane/ui/templates/connectors/_import_result.html` — result summary fragment (N created, M updated).
+
+## Runbooks surface (G10.6)
+
+Initiative [#1381](https://github.com/evoila/meho/issues/1381) (G10.6
+Runbooks UI). The console surface over the G12.2 runbook template layer —
+the catalog, the opacity-floor-aware detail view, the `tenant_admin`
+authoring editor, and the publish / deprecate lifecycle controls.
+Landed across three tasks: T1 (#1382) the read surface, T2 (#1383) the
+authoring editor, T3 (#1384) the lifecycle controls. The surface consumes
+the REST runbook-template layer (`/api/v1/runbooks/templates/*`,
+`backend/src/meho_backplane/api/v1/runbook_templates.py`) through the same
+`RunbookTemplateService` the REST routes and the `meho runbook` CLI use —
+no parallel data path. The runbooks stub registered in the T5 #866
+chassis is retired by this surface the same way broadcast / topology /
+memory / connectors retired theirs (the real router is mounted ahead of
+the stubs aggregate, first-match-wins).
+
+### Routes
+
+| Method | Path | Auth | Purpose |
+| ------ | ---- | ---- | ------- |
+| `GET` | `/ui/runbooks` | `require_ui_session` | Catalog page. Lists the latest version of each template slug for the operator's tenant (slug / version / title / status / target_kind / edited_at) as DaisyUI rows with status badges. `HX-Request: true` returns only the `runbooks/_list.html` fragment; a direct navigation returns the full page. |
+| `GET` | `/ui/runbooks/list` | `require_ui_session` | HTMX filter partial. Same projection as the catalog, parameterised by the `status` (`draft` / `published` / `deprecated`, a closed `Literal`) and `target_kind` query params the filter controls carry. An out-of-vocab `status` trips a clean 422 at the query boundary. Registered **before** `/ui/runbooks/{slug}` so the literal `list` segment is not swallowed as a slug. |
+| `GET` | `/ui/runbooks/{slug}` | `require_ui_session` | Template detail. Renders title / description / target_kind / status + the ordered steps (`manual` vs `operation_call`, op_id / params) and verify gates (`confirm` prompt vs `operation_call` op_id / params / expect). Step bodies are server-rendered Markdown via the shared KB renderer. Opacity-floor-gated (see below). `?version=<n>` pins a specific version. |
+| `GET` | `/ui/runbooks/new` | `require_ui_admin` | (T2 #1383) Blank-draft editor page. |
+| `POST` | `/ui/runbooks/new` | `require_ui_admin` | (T2 #1383) Create a draft from the editor form (mirrors REST `POST /api/v1/runbooks/templates`). Success → 204 + `HX-Redirect: /ui/runbooks/<slug>`; a duplicate slug / invalid body re-renders the editor inline (422) preserving entered data. |
+| `POST` | `/ui/runbooks/preview` | `require_ui_admin` | (T2 #1383) HTMX Markdown live-preview partial for one step's `body` (max 64 KiB), rendered via the shared KB renderer. |
+| `GET` | `/ui/runbooks/{slug}/edit` | `require_ui_admin` | (T2 #1383) Editor pre-loaded with the template's latest version. Missing / cross-tenant slug → 404. |
+| `POST` | `/ui/runbooks/{slug}/edit` | `require_ui_admin` | (T2 #1383) Edit-in-place (draft) / fork-on-edit (published → new draft), mirroring REST `PATCH`. The detail page surfaces how many runs are still pinned to the source version (the fork leaves them bound) via `count_in_flight_runs`. |
+| `POST` | `/ui/runbooks/{slug}/publish` | `require_ui_admin` | (T3 #1384) Promote `(slug, version)` draft → published (mirrors REST publish: 200 idempotent / 400 not-draft / 404). The body carries the integer `version` (the slug is the URL's job) so a stale catalog row acts on the version it was rendered against, not the latest. |
+| `POST` | `/ui/runbooks/{slug}/deprecate` | `require_ui_admin` | (T3 #1384) Retire `(slug, version)` published → deprecated (200 idempotent / 400 not-published / 404). Same version-in-body posture as publish. |
+
+**Route ordering.** The literal `list` / `new` / `preview` / `publish` /
+`deprecate` segments are registered **before** `/ui/runbooks/{slug}` in
+`build_runbooks_router()` so FastAPI's first-match-wins routing does not
+bind them to the slug path parameter.
+
+### Module layout
+
+* `backend/src/meho_backplane/ui/routes/runbooks/__init__.py` — exports the `build_runbooks_router` factory the umbrella `build_router()` mounts.
+* `backend/src/meho_backplane/ui/routes/runbooks/routes.py` — the read surface (T1). The catalog + filter-fragment + opacity-floor detail handlers, the `_resolve_role` / `_is_admin` role-lift helpers, and the factory itself (which calls `register_editor_routes` + `register_lifecycle_routes` before the `{slug}` catch-all).
+* `backend/src/meho_backplane/ui/routes/runbooks/editor.py` — the authoring form (de)serialisation + service calls (T2): `build_editor_context`, `handle_editor_submit`, `template_to_form_steps`, the CSRF cookie helper.
+* `backend/src/meho_backplane/ui/routes/runbooks/editor_routes.py` — thin FastAPI wiring for the T2 editor routes (`require_ui_admin`-gated). Split from `editor.py` so neither file crosses the code-quality size gate.
+* `backend/src/meho_backplane/ui/routes/runbooks/lifecycle.py` — the T3 publish / deprecate handler bodies + route wiring (`require_ui_admin`-gated). Maps the typed service errors (`TemplateNotDraftError` / `TemplateNotPublishedError`) to inline DaisyUI alerts, a missing version to 404, and a tampered `version` field to 422.
+* `backend/src/meho_backplane/ui/templates/runbooks/` — `index.html` (catalog page), `_list.html` (filter fragment), `detail.html` + `_detail_actions.html` (detail page + lifecycle action row), `editor.html` + `_step_fields.html` + `_editor_preview.html` (authoring editor), `_row_alert.html` (catalog row-action alert slot).
+
+### RBAC gating (`require_ui_session` vs `require_ui_admin`)
+
+The read routes gate on `require_ui_session` (any authenticated operator)
+— `UISessionContext` carries `operator_sub` + `tenant_id` only, so it
+omits the tenant role to keep read paths free of a JWT-decode round-trip.
+The write routes (author / edit / preview / publish / deprecate) chain
+`require_ui_admin`, which loads the `DecryptedSession`, re-verifies the
+session's access token via `verify_jwt_for_audience`, and raises HTTP 403
+(`detail="tenant_admin_required"`) for `operator` / `read_only`. The
+server is the single source of truth for the authoring privilege: the
+client-side controls are hidden for non-admins optimistically, but a
+forged POST still hits the 403 at the dependency before the handler body
+runs. A forged POST missing the double-submit CSRF token is blocked
+earlier still, by `CSRFMiddleware` (403 at the CSRF gate).
+
+The detail render needs the admin-vs-operator distinction the opacity
+floor turns on, even though its route only requires a session. It
+resolves it via `_resolve_role` — the same access-token re-verification
+`require_ui_admin` performs, but **fails soft**: any hiccup (the session
+row vanished mid-request, JWKS transiently unreachable, a token/session
+identity mismatch) returns `None`, and the caller treats the request as a
+plain operator. The restricted-detail render is the safe default; an
+unavailable role lift never 5xx-es the read surface. This mirrors
+`connectors.operator.resolve_role_probe`.
+
+### Opacity floor (restricted detail, not a raw 403)
+
+The G12.3-T4 (#1309) carve-out the REST `show` route enforces is mirrored
+on the console. A `tenant_admin` always sees the full steps. An
+`operator` sees the full steps only when they have a `completed` or
+`abandoned` run against the resolved `(slug, version)` — the
+`RunbookRunService.can_show_template_post_completion` predicate. An
+operator with no such run (or only an in-flight run) is **not** shown a
+raw 403: the detail view renders the catalog-level summary (title /
+description / target_kind / status / step count) plus a clear "step
+details are restricted until you complete a run of this template" notice,
+withholding the step internals. This matches the REST surface's
+`403 detail="opacity_floor"` posture while keeping the console a navigable
+page rather than an error.
+
+A missing / cross-tenant slug collapses to that same restricted page for
+an operator (anti-enumeration — existence never leaks via a status-code
+differential), and to a 404 for an admin. The restricted placeholder
+carries only the slug the operator typed and epoch-sentinel timestamps —
+no real template metadata leaks.
+
+### Lifecycle fragment + HTMX wiring
+
+Each publish / deprecate action posts via HTMX. On the **detail** page it
+targets `#runbook-lifecycle` and swaps the re-rendered
+`runbooks/_detail_actions.html` fragment — which carries the action row
+valid for the new state, an `hx-swap-oob` copy of the status badge (so the
+header badge flips without a full-page reload), and an inline alert region
+(a typed 400 renders as `alert-error`; an idempotent re-action just
+refreshes the badge). On the **catalog** row the action targets a per-row
+`#runbook-row-alert-…` slot and gets the minimal `_row_alert.html`
+fragment instead (the detail-shaped action row + OOB badge would be
+nonsense swapped into a list row); the handler branches on the
+`HX-Target` header. The CSRF cookie is re-minted + refreshed on every
+fragment render so the next action carries a token whose cookie still
+matches — a missing refresh would 403 the second interaction at the
+double-submit check.
+
+### Cross-tenant isolation
+
+Every handler derives tenant identity from `UISessionContext`; no query
+parameter or form field overrides it. The `RunbookTemplateService` tenant
+filter makes another tenant's row invisible, so a cross-tenant slug probe
+surfaces as the restricted state (operator) or a 404 (admin / lifecycle /
+editor) — the same anti-enumeration posture the `/api/v1/runbooks/templates`
+surface uses.
+
+### Tests
+
+* `backend/tests/test_ui_runbooks_list.py` — the T1 read surface: auth boundary, catalog render + status badges, empty state, HTMX fragment branch, `status` / `target_kind` filters, the 422 on an out-of-vocab status, admin full-step detail (both step + verify kinds, Markdown-rendered), the opacity-floor branches (no run / in-progress run → restricted; completed run → full steps; missing slug → restricted for operator, 404 for admin), cross-tenant isolation, dashboard tile + sidebar link.
+* `backend/tests/test_ui_runbooks_editor.py` — the T2 authoring editor: admin renders (new / edit), operator 403, draft create round-trip (both step + verify kinds), server-side validation re-renders (duplicate slug, bad step id, disallowed substitution) preserving entered data, fork-on-edit from published, in-place edit of a draft, the Markdown live-preview (admin-only).
+* `backend/tests/test_ui_runbooks_lifecycle.py` — the T3 lifecycle controls: admin publish / deprecate flips status + swaps the OOB badge, operator forged POST → 403, missing-CSRF → 403, the typed-400 inline alerts (publishing a non-draft, deprecating a non-published version), idempotent re-actions, the catalog-row vs detail-page fragment branch, version-in-body targeting.
+* `backend/tests/test_ui_runbooks_acceptance.py` — the **cross-cutting** end-to-end acceptance (T4 #1385): one test exercises the surface as a whole against a single app instance — operator browse (catalog + filters) → operator opacity-floor restricted-detail (not a raw 403) → `tenant_admin` author (draft) → publish → deprecate round-trip with status transitions read back through the read surface → operator blocked (403) from author / publish / deprecate → sidebar link + dashboard tile render. A companion test pins the post-completion operator crossing the floor (completed run → full steps).
 * `backend/tests/test_ui_connectors_import.py` — `build_plan` mapping / classification unit tests (extras spill, explicit-extras merge, fingerprint drop, sparse UPDATE) + behavioural tests: auth / RBAC (403 operator, 403 missing CSRF), preview (paste + upload + parse error + missing-field error + schema-invalid-value inline error), confirm (in-process create + update, sparse PATCH preserves omitted columns, malformed-YAML no-write, schema-invalid entry 422 + zero writes), cross-tenant isolation (import lands in caller tenant only; same-name in another tenant does not flip CREATE→UPDATE).

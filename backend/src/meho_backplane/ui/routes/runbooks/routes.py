@@ -111,6 +111,7 @@ from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_sessi
 from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
+from meho_backplane.ui.routes.runbooks.editor_routes import register_editor_routes
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_runbooks_router"]
@@ -368,6 +369,14 @@ def build_runbooks_router() -> APIRouter:
         target_kind: str | None = Query(default=None, max_length=_MAX_TARGET_KIND_LENGTH),
     ) -> HTMLResponse:
         return await _render_list_fragment(request, session, status, target_kind)
+
+    # The T2 (#1383) authoring routes (``/ui/runbooks/new`` GET/POST +
+    # ``/ui/runbooks/preview`` POST + ``/ui/runbooks/{slug}/edit`` GET/POST)
+    # are registered here -- BEFORE ``/ui/runbooks/{slug}`` so FastAPI's
+    # first-match-wins routing does not swallow the literal ``new`` /
+    # ``preview`` segments as slug parameters. Their handlers + the form
+    # (de)serialisation live in ``runbooks.editor``.
+    register_editor_routes(router)
 
     @router.get("/ui/runbooks/{slug}", response_class=HTMLResponse)
     async def runbooks_detail(

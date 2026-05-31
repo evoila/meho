@@ -38,6 +38,12 @@
         Browse the tenant's runbook templates and their lifecycle state.
       </p>
     </div>
+    {# Authoring entry point. The route is ``require_ui_admin``-gated, so an
+       operator who follows it gets a 403 from the server (the link is shown
+       to everyone — the server is the privilege boundary, not the markup). #}
+    <a href="/ui/runbooks/new" class="btn btn-primary btn-sm" aria-label="Author a new runbook template">
+      + New runbook
+    </a>
   </header>
 
   {# ---------- Filter bar ---------- #}

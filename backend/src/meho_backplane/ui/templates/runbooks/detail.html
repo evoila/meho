@@ -48,6 +48,17 @@
           deprecated
         </span>
       {% endif %}
+      {# Authoring entry point — tenant_admin only (the POST handler also gates
+         server-side). Editing a published template forks a new draft. #}
+      {% if is_admin %}
+        <a
+          href="/ui/runbooks/{{ template.slug }}/edit"
+          class="btn btn-outline btn-sm ml-auto"
+          aria-label="Edit template {{ template.slug }}"
+        >
+          Edit
+        </a>
+      {% endif %}
     </div>
     {% if not restricted %}
       <p class="text-lg">{{ template.title }}</p>

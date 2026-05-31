@@ -1,4 +1,5 @@
 [
   {"path": "approval.request", "operator_sub": "operator:alice"},
-  {"path": "approval.decision", "operator_sub": "operator:bob"}
+  {"path": "approval.decision", "operator_sub": "operator:bob"},
+  {"path": "k8s.scale", "operator_sub": "operator:alice", "method": "DISPATCH"}
 ]

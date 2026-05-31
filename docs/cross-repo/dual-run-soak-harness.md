@@ -56,7 +56,7 @@ connector script produces the evidence bundle; the driver grades it.
 | 1 | **Dry-run / read-back parity** — MEHO resolves the same target + params + **plan** as the wrapper (`kubectl apply --dry-run=server` vs `meho k8s apply --dry-run`; VCF task-preview / DRS recommendation). Diverging plans fail before anything writes. | ✅ `parity_diff` | core |
 | 2 | **Dual-run on a disposable target** — both wrapper and MEHO op run against the same scratch target (holodeck, k3d/CI cluster, scratch Vault path), same operator workflow. Capture each side's **effect**, not stdout. | Orchestrated (driver + consumer hooks) | driver |
 | 3 | **State diff, not framing** — read post-op state back via the **already-shipped READ ops**, normalising cosmetic diffs (timestamps, generated UIDs, MEHO's reduced envelope). Idempotent ops run twice to prove no drift. Any semantic divergence is a blocker with recorded rationale. | ✅ `state_diff` + `idempotency_drift` | core |
-| 4 | **Audit + broadcast + approval completeness** — exactly one audit row + one broadcast event AND (being `dangerous` + `requires_approval`) exactly the **two synchronous approval audit rows** (`approval.request` + `approval.decision`, the #817 invariant), with the op not returning until the decision row commits. Redacted-class ops never leak a credential to the feed. | ✅ `assert_approval_completeness` | core |
+| 4 | **Audit + broadcast + approval completeness** — exactly one **dispatch audit row** (`path == op_id`, the durable write-record the dispatcher writes once the op executes) + one broadcast event AND (being `dangerous` + `requires_approval`) exactly the **two synchronous approval audit rows** (`approval.request` + `approval.decision`, the #817 invariant), with the op not returning until the decision row commits. A rejected decision never executes → zero dispatch rows + zero write broadcasts. Redacted-class ops never leak a credential to the feed. | ✅ `assert_approval_completeness` | core |
 | 5 | **Bounded live soak** — MEHO + wrapper in parallel on the **real** target for a bounded window (~2 weeks / N≥10 real invocations per op), wrapper authoritative. The scorecard write column moves 🟡→✅ only after a clean soak. | Documented protocol (below) | runbook |
 
 ## The evidence bundle (consumer wiring contract)
@@ -72,7 +72,7 @@ an `--evidence-dir`, **before** invoking the driver:
 | `wrapper-state.json` | 3 | post-op read-back of the wrapper's effect (via a READ op / `kubectl get -o json` / etc.) |
 | `meho-state.json` | 3 | post-op read-back of MEHO's effect (via the **shipped MEHO READ op**) |
 | `meho-state-2.json` | 3 | (only with `--idempotent`) read-back after a **second** MEHO run |
-| `audit-rows.json` | 4 | array of `audit_log` rows for the op window (`[{path, operator_sub}, …]`) |
+| `audit-rows.json` | 4 | array of `audit_log` rows for the op window — the two `approval.*` rows **and** the dispatch row with `path == op_id` (`[{path, operator_sub}, …]`) |
 | `broadcast-events.json` | 4 | array of broadcast events for the window (`[{op_id, op_class, payload}, …]`) |
 | `meta.json` | 4 | `{"returned_after_decision": bool, "decision": "approved"｜"rejected"}` |
 

@@ -355,22 +355,30 @@ def assert_approval_completeness(
     3. The op did **not** return before the decision row committed
        (*returned_after_decision* — the driver proves this by ordering
        the dispatch return against the decision-row timestamp).
-    4. **Exactly one** non-approval broadcast event for the op
+    4. **Exactly one** ``audit_log`` row whose ``path`` equals *op_id* —
+       the single dispatch audit row the dispatcher writes for the
+       executed write (``_audit.py`` writes it with ``path=op_id`` once
+       the op runs). This is the durable write-record half of the #817
+       invariant the approval rows bracket. A rejected decision never
+       executes, so it produces **zero** such rows.
+    5. **Exactly one** non-approval broadcast event for the op
        (the publish-on-write hook's single event). Approval-lifecycle
        broadcast events (``approval.*``) are counted separately and not
        required to be exactly one.
-    5. If *op_id* classifies as a redacted class
+    6. If *op_id* classifies as a redacted class
        (:func:`op_is_redacted`), **no** broadcast event for the op may
        carry a ``params`` key — the credential must never reach the
        feed.
 
     Each failed sub-check is a blocker. A rejected decision
-    (``decision="rejected"``) relaxes check 4: a rejected op never
-    executes, so it produces no write-effect broadcast — the check then
-    requires *zero* op broadcast events instead of one.
+    (``decision="rejected"``) relaxes checks 4 and 5: a rejected op
+    never executes, so it produces no dispatch audit row and no
+    write-effect broadcast — both checks then require *zero* op rows /
+    events instead of one.
     """
     findings: list[dict[str, Any]] = []
     findings += _check_approval_audit_rows(audit_rows, returned_after_decision)
+    findings += _check_write_audit_row(op_id, audit_rows, decision)
     findings += _check_op_broadcast(op_id, broadcast_events, decision)
 
     passed = not any(f["severity"] == Severity.BLOCKER.value for f in findings)
@@ -410,6 +418,31 @@ def _check_approval_audit_rows(
                 "premature_return",
                 "the op returned before its approval.decision row committed "
                 "(synchronous-decision invariant violated)",
+            )
+        )
+    return findings
+
+
+def _check_write_audit_row(
+    op_id: str, audit_rows: Sequence[Mapping[str, Any]], decision: str
+) -> list[dict[str, Any]]:
+    """The single dispatch audit row half of the stage-4 invariant.
+
+    The dispatcher writes exactly one ``audit_log`` row whose ``path``
+    equals the op-id when the op executes (``_audit.py``). The two
+    ``approval.*`` rows bracket it; this row is the durable record that
+    the write itself ran. A rejected decision never executes, so the
+    expected count is zero.
+    """
+    findings: list[dict[str, Any]] = []
+    write_rows = [r for r in audit_rows if r.get("path") == op_id]
+    expected = 0 if decision == "rejected" else 1
+    if len(write_rows) != expected:
+        findings.append(
+            _blocker(
+                "write_audit_row_count",
+                f"expected exactly {expected} audit_log row with path == {op_id!r} "
+                f"(decision={decision}), got {len(write_rows)}",
             )
         )
     return findings
@@ -477,8 +510,13 @@ def scorecard_cell(report: SoakReport, *, soak_clean: bool) -> ScorecardCell:
     bounded window (~2 weeks / N≥10 invocations) with zero unexplained
     diffs and zero governance gaps — the harness cannot derive it from a
     single run, so the runbook's documented procedure supplies it.
+
+    An **empty report** (no stages ran) fails closed to ``BLOCKED``:
+    ``all([])`` is vacuously ``True``, so without this guard a degenerate
+    report with zero evidence would read as a pass and promote an op the
+    harness never actually exercised. No evidence is a gap, not a pass.
     """
-    if report.has_blocker or not report.all_passed:
+    if not report.stages or report.has_blocker or not report.all_passed:
         return ScorecardCell.BLOCKED
     if not soak_clean:
         return ScorecardCell.SHADOW

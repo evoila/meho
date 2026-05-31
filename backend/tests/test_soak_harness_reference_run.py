@@ -218,12 +218,15 @@ async def test_reference_soak_run_human_cycle(monkeypatch: pytest.MonkeyPatch) -
     assert resumed.result["scaled"] is True
 
     # ---- Capture the real audit rows the cycle wrote ----
+    # Include the dispatcher's own path==op_id dispatch row alongside the
+    # two approval.* rows so stage 4 can assert the full #817 invariant
+    # (the durable write-record clause, B1).
     async with get_sessionmaker()() as fresh:
         rows = (
             (
                 await fresh.execute(
                     select(AuditLog).where(
-                        AuditLog.path.in_(["approval.request", "approval.decision"])
+                        AuditLog.path.in_(["approval.request", "approval.decision", _OP_ID])
                     )
                 )
             )
@@ -253,6 +256,9 @@ async def test_reference_soak_run_human_cycle(monkeypatch: pytest.MonkeyPatch) -
     # exactly one approval.request + one approval.decision row landed
     assert sum(r["path"] == "approval.request" for r in audit_rows) == 1
     assert sum(r["path"] == "approval.decision" for r in audit_rows) == 1
+    # exactly one dispatch row for the executed write (path == op_id) — the
+    # durable write-record clause stage 4 now asserts (B1).
+    assert sum(r["path"] == _OP_ID for r in audit_rows) == 1
     # the request row is attributed to the requester, the decision to the approver
     req_row = next(r for r in audit_rows if r["path"] == "approval.request")
     dec_row = next(r for r in audit_rows if r["path"] == "approval.decision")

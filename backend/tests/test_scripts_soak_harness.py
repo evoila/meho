@@ -139,11 +139,17 @@ def _decision_row() -> dict[str, str]:
     return {"path": "approval.decision", "operator_sub": "operator:bob"}
 
 
+def _write_row(op_id: str = "k8s.scale") -> dict[str, str]:
+    # The single dispatch audit row the dispatcher writes with path == op_id
+    # once the approved op executes (_audit.py).
+    return {"path": op_id, "operator_sub": "operator:alice", "method": "DISPATCH"}
+
+
 class TestStage4ApprovalCompleteness:
     def test_clean_dangerous_write_passes(self) -> None:
         res = assert_approval_completeness(
             "k8s.scale",
-            audit_rows=[_request_row(), _decision_row()],
+            audit_rows=[_request_row(), _decision_row(), _write_row()],
             broadcast_events=[
                 {"op_id": "approval.request"},
                 {"op_id": "approval.decision"},
@@ -156,7 +162,7 @@ class TestStage4ApprovalCompleteness:
     def test_missing_decision_row_blocks(self) -> None:
         res = assert_approval_completeness(
             "k8s.scale",
-            audit_rows=[_request_row()],
+            audit_rows=[_request_row(), _write_row()],
             broadcast_events=[{"op_id": "k8s.scale", "payload": {}}],
             returned_after_decision=True,
         )
@@ -164,10 +170,38 @@ class TestStage4ApprovalCompleteness:
         kinds = {f["kind"] for f in res.blockers}
         assert "approval_decision_row_count" in kinds
 
+    def test_missing_write_audit_row_blocks(self) -> None:
+        # The two approval rows are present but the dispatcher's own
+        # path==op_id dispatch row is absent — the #817 invariant's
+        # durable write-record clause fails closed.
+        res = assert_approval_completeness(
+            "k8s.scale",
+            audit_rows=[_request_row(), _decision_row()],
+            broadcast_events=[
+                {"op_id": "k8s.scale", "payload": {"op_class": "write", "result_status": "ok"}},
+            ],
+            returned_after_decision=True,
+        )
+        assert not res.passed
+        assert any(f["kind"] == "write_audit_row_count" for f in res.blockers)
+
+    def test_duplicate_write_audit_row_blocks(self) -> None:
+        # Two dispatch rows for one op means the write ran twice — a gap.
+        res = assert_approval_completeness(
+            "k8s.scale",
+            audit_rows=[_request_row(), _decision_row(), _write_row(), _write_row()],
+            broadcast_events=[
+                {"op_id": "k8s.scale", "payload": {"op_class": "write", "result_status": "ok"}},
+            ],
+            returned_after_decision=True,
+        )
+        assert not res.passed
+        assert any(f["kind"] == "write_audit_row_count" for f in res.blockers)
+
     def test_duplicate_request_row_blocks(self) -> None:
         res = assert_approval_completeness(
             "k8s.scale",
-            audit_rows=[_request_row(), _request_row(), _decision_row()],
+            audit_rows=[_request_row(), _request_row(), _decision_row(), _write_row()],
             broadcast_events=[{"op_id": "k8s.scale", "payload": {}}],
             returned_after_decision=True,
         )
@@ -177,7 +211,7 @@ class TestStage4ApprovalCompleteness:
     def test_premature_return_blocks(self) -> None:
         res = assert_approval_completeness(
             "k8s.scale",
-            audit_rows=[_request_row(), _decision_row()],
+            audit_rows=[_request_row(), _decision_row(), _write_row()],
             broadcast_events=[{"op_id": "k8s.scale", "payload": {}}],
             returned_after_decision=False,
         )
@@ -187,7 +221,7 @@ class TestStage4ApprovalCompleteness:
     def test_two_broadcast_events_for_op_blocks(self) -> None:
         res = assert_approval_completeness(
             "k8s.scale",
-            audit_rows=[_request_row(), _decision_row()],
+            audit_rows=[_request_row(), _decision_row(), _write_row()],
             broadcast_events=[
                 {"op_id": "k8s.scale", "payload": {}},
                 {"op_id": "k8s.scale", "payload": {}},
@@ -198,7 +232,8 @@ class TestStage4ApprovalCompleteness:
         assert any(f["kind"] == "broadcast_event_count" for f in res.blockers)
 
     def test_rejected_op_requires_zero_op_broadcasts(self) -> None:
-        # A rejected op never executes → zero write-effect broadcasts is correct.
+        # A rejected op never executes → zero write-effect broadcasts AND
+        # zero path==op_id dispatch rows is correct.
         res = assert_approval_completeness(
             "k8s.scale",
             audit_rows=[_request_row(), _decision_row()],
@@ -208,12 +243,25 @@ class TestStage4ApprovalCompleteness:
         )
         assert res.passed, res.findings
 
+    def test_rejected_op_with_write_audit_row_blocks(self) -> None:
+        # A rejected op that nonetheless emitted a dispatch row means the
+        # write executed despite the rejection — a governance gap.
+        res = assert_approval_completeness(
+            "k8s.scale",
+            audit_rows=[_request_row(), _decision_row(), _write_row()],
+            broadcast_events=[{"op_id": "approval.decision"}],
+            returned_after_decision=True,
+            decision="rejected",
+        )
+        assert not res.passed
+        assert any(f["kind"] == "write_audit_row_count" for f in res.blockers)
+
     def test_credential_write_leak_in_broadcast_blocks(self) -> None:
         # k8s.secret.create classifies credential_write (#1401) — a params
         # key on its broadcast event means the secret reached the feed.
         res = assert_approval_completeness(
             "k8s.secret.create",
-            audit_rows=[_request_row(), _decision_row()],
+            audit_rows=[_request_row(), _decision_row(), _write_row("k8s.secret.create")],
             broadcast_events=[
                 {
                     "op_id": "k8s.secret.create",
@@ -228,7 +276,7 @@ class TestStage4ApprovalCompleteness:
     def test_credential_write_aggregate_only_passes(self) -> None:
         res = assert_approval_completeness(
             "k8s.secret.create",
-            audit_rows=[_request_row(), _decision_row()],
+            audit_rows=[_request_row(), _decision_row(), _write_row("k8s.secret.create")],
             broadcast_events=[
                 {
                     "op_id": "k8s.secret.create",
@@ -275,6 +323,16 @@ def _report(*stages: StageResult) -> SoakReport:
 
 
 class TestScorecardCell:
+    def test_empty_report_fails_closed_to_blocked(self) -> None:
+        # A report with zero stages ran no evidence. all([]) is vacuously
+        # True, so without the guard this would fail OPEN to SHADOW/READY
+        # and promote an op the harness never exercised. No evidence is a
+        # gap, not a pass.
+        empty = _report()
+        assert empty.all_passed is True  # the vacuous-truth trap the guard closes
+        assert scorecard_cell(empty, soak_clean=False) is ScorecardCell.BLOCKED
+        assert scorecard_cell(empty, soak_clean=True) is ScorecardCell.BLOCKED
+
     def test_blocker_pins_to_blocked(self) -> None:
         blocked_stage = StageResult(
             stage=1,

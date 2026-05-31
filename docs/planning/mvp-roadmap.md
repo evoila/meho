@@ -22,7 +22,8 @@ v0.2" framing on the board.
 | **v0.6** | **MVP5** | pfSense + gcloud + Hetzner Robot + tenant conventions | **shipped — tag `v0.6.0` (2026-05-26)** |
 | **v0.7** | **MVP6** | **Agent runtime — floor** (G11.1 runtime + G11.2 identity/RBAC/approval + G11.3 scheduler) | **shipped — tag `v0.7.0` (2026-05-27)** |
 | **v0.8** | **MVP7** | **Consolidated post-v0.7 release** — agent runtime hardening (G11.4–G11.6) + operator web UI (G10.0–G10.5) + topology time-travel (G9.3) + audit replay (G8.2) + Holodeck (G3.8) + github-rest connector (G3.11) + broadcast meta-tools (G6.4) + retrieval enhancements (G4.4) + v0.6/v0.7 dogfood hardening cycles (G0.13/G0.14/G0.15) | **shipped — tag `v0.8.0` (2026-05-28)** |
-| **v0.9** | **MVP8** | **Runbooks** (G12 — schema + template + run lifecycle + session priming + CLI) + CI/test/release hardening (G0.11) + CLI hygiene (G0.12) | **◀ next to ship** — planning; G12 inis filed (0 tasks each, need decomposition); G0.11 8/12; G0.12 0/9 |
+| **v0.9** | **MVP8** | **Runbooks** (G12 — schema + template + run lifecycle + session priming + CLI) + CLI hygiene (G0.12) + v0.8.x consumer closed-loop dogfood hardening (G0.16/G0.17/G0.18) + release-tooling unblock (G0.11 partial: #1126/#1127) | **◀ next to ship** — G12.1/2/4/5 + G0.12 + G0.16/17/18 closed; G12.3 in flight (7/9); rest of G0.11 → v0.10 |
+| **v0.10** | **MVP9** | **Substrate hardening** — remainder of CI/test-infra (G0.11: testcontainers `LogMessageWaitStrategy` #1111, SonarCloud CPD exclusions #292) + next dogfood cycle | planning |
 
 ---
 
@@ -502,25 +503,32 @@ hardening that doesn't earn its own milestone but blocks future velocity.
   already loaded.
 - **Runbook CLI surface** (G12.5) — `meho runbook` verbs (template / run /
   list / show / etc.).
-- **CI + test-infra + release-tooling hardening** (G0.11) — 4 open tasks
-  remaining (8/12). Cuts release-cycle friction.
-- **CLI hygiene** (G0.12) — migrate the remaining hand-rolled HTTP CLI verbs
-  to the generated openapi client (0/9 — needs Phase-0 decomposition into
-  per-verb tasks).
+- **Release-tooling unblock** (G0.11 partial) — the two release-blocking
+  children of #956 ship with v0.9.0: goreleaser `draft: false` (#1127) so the
+  GitHub Release auto-publishes, and the `/release` skill Phase 2/3 fixes
+  (#1126). The rest of G0.11 is deferred to v0.10.
+- **CLI hygiene** (G0.12) — the hand-rolled HTTP CLI verbs migrated to the
+  generated openapi client (#1118, 16/16 ✅).
 
 ### Initiatives
 
 | Initiative | # | State |
 |---|---|---|
-| [G12.1 Runbook schema + dispatcher correlation](https://github.com/evoila/meho/issues/1196) | #1196 | filed; 0 tasks — needs decomposition |
-| [G12.2 Runbook template lifecycle](https://github.com/evoila/meho/issues/1197) | #1197 | filed; 0 tasks |
-| [G12.3 Runbook run lifecycle + adherence floor](https://github.com/evoila/meho/issues/1198) | #1198 | filed; 0 tasks |
-| [G12.4 Runbook session priming](https://github.com/evoila/meho/issues/1199) | #1199 | filed; 0 tasks |
-| [G12.5 Runbook CLI surface](https://github.com/evoila/meho/issues/1200) | #1200 | filed; 0 tasks |
-| [G0.11 CI + test-infra + release-tooling hardening](https://github.com/evoila/meho/issues/956) | #956 | in flight (8/12) |
-| [G0.12 CLI hygiene — generated-client migration](https://github.com/evoila/meho/issues/1118) | #1118 | filed (0/9) |
+| [G12.1 Runbook schema + dispatcher correlation](https://github.com/evoila/meho/issues/1196) | #1196 | ✅ closed (2/2) |
+| [G12.2 Runbook template lifecycle](https://github.com/evoila/meho/issues/1197) | #1197 | ✅ closed (5/5) |
+| [G12.3 Runbook run lifecycle + adherence floor](https://github.com/evoila/meho/issues/1198) | #1198 | in flight (7/9) |
+| [G12.4 Runbook session priming](https://github.com/evoila/meho/issues/1199) | #1199 | ✅ closed (3/3) |
+| [G12.5 Runbook CLI surface](https://github.com/evoila/meho/issues/1200) | #1200 | ✅ closed (3/3) |
+| [G0.12 CLI hygiene — generated-client migration](https://github.com/evoila/meho/issues/1118) | #1118 | ✅ closed (16/16) |
+| [G0.16 v0.8.0 closed-loop dogfood hardening](https://github.com/evoila/meho/issues/1302) | #1302 | ✅ closed (6/6) |
+| [G0.17 v0.9.0 closed-loop dogfood hardening](https://github.com/evoila/meho/issues/1329) | #1329 | ✅ closed (1/1) |
+| [G0.18 v0.8.1 closed-loop dogfood hardening](https://github.com/evoila/meho/issues/1353) | #1353 | ✅ closed (11/11) |
 
-*Phase-0 task decomposition is the immediate next step for G12.1–G12.5.*
+G0.16–G0.18 are the consumer closed-loop dogfood-hardening cycles (RDC #771 /
+#789 feedback) that landed on `main` after the v0.8.x cuts; they ship in v0.9.0.
+**G0.11** (CI / test-infra / release-tooling hardening, #956) is **deferred to
+v0.10** — only its two release-blocking children (#1126, #1127) land with
+v0.9.0. G12.3 (#1198) is the one remaining in-flight Runbooks initiative.
 
 ---
 

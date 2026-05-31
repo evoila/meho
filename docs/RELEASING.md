@@ -86,10 +86,10 @@ This is the step that keeps getting skipped. Do it in the
    ```bash
    PREV=$(git describe --tags --abbrev=0 HEAD)   # last tag
    # PRs merged since the last tag:
-   git log "$PREV"..main --pretty=format:'%s' | grep -oiE '#[0-9]+' | sort -un > /tmp/shipped.txt
+   git log "$PREV"..main --pretty=format:'%s' | grep -oiE '#[0-9]+' | sort -u > /tmp/shipped.txt
    # PR/issue numbers already cited in [Unreleased]:
    awk '/^## \[Unreleased\]/{u=1;next} /^## \[/{u=0} u' CHANGELOG.md \
-     | grep -oiE '#[0-9]+' | sort -un > /tmp/cited.txt
+     | grep -oiE '#[0-9]+' | sort -u > /tmp/cited.txt
    comm -23 /tmp/shipped.txt /tmp/cited.txt   # numbers with NO bullet — backfill these
    ```
 
@@ -150,7 +150,13 @@ gate.
 
 ```bash
 git checkout main && git pull
-git tag vX.Y.Z            # on the merge commit
+# Capture the release-cutting PR's merge commit explicitly — do NOT rely on
+# HEAD. A concurrent merge between the Phase-2 merge and the tag push would
+# otherwise drag unbulleted work into the tag (the exact failure /release
+# exists to prevent). Substitute the PR number:
+REL_SHA=$(gh pr view <phase2-pr#> --repo evoila/meho --json mergeCommit --jq .mergeCommit.oid)
+git merge-base --is-ancestor "$REL_SHA" main || { echo "merge commit not on main — abort"; exit 1; }
+git tag vX.Y.Z "$REL_SHA"   # tag the release-cutting merge commit by SHA, not HEAD
 git push origin vX.Y.Z
 ```
 

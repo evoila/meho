@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -38,6 +39,7 @@ from meho_backplane.targets.resolver import (
     AmbiguousTargetError,
     TargetNotFoundError,
     resolve_target,
+    resolve_target_by_id,
 )
 
 
@@ -441,3 +443,87 @@ async def test_resolve_target_near_misses_exclude_soft_deleted() -> None:
     matches = exc_info.value.detail["matches"]
     names = {m["name"] for m in matches}
     assert names == {"rke2-infra-k8s"}
+
+
+# ---------------------------------------------------------------------------
+# resolve_target_by_id — the approval-queue resume path (G11.7-T1 #1401)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_by_id_returns_live_row() -> None:
+    """A live row resolves by id within the tenant."""
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    target = _make_target(
+        tenant_id=tenant_id, name="prod-vault", product="vault", host="vault.prod.invalid"
+    )
+    target_id = target.id
+
+    async with sessionmaker() as session:
+        session.add(target)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await resolve_target_by_id(session, tenant_id, target_id)
+
+    assert result is not None
+    assert result.id == target_id
+    assert result.name == "prod-vault"
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_by_id_wrong_tenant_returns_none() -> None:
+    """Cross-tenant id is invisible — returns None (tenant isolation)."""
+    sessionmaker = get_sessionmaker()
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    target = _make_target(tenant_id=tenant_a, name="a-only", product="ssh", host="10.0.0.1")
+    target_id = target.id
+
+    async with sessionmaker() as session:
+        session.add(target)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await resolve_target_by_id(session, tenant_b, target_id)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_by_id_missing_returns_none() -> None:
+    """An unknown id returns None rather than raising."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await resolve_target_by_id(session, uuid.uuid4(), uuid.uuid4())
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_by_id_soft_deleted_returns_none() -> None:
+    """A soft-deleted target resolves to None — fail closed on resume.
+
+    A target tombstoned between approval-request and approval-decision
+    must not be revived on the resume re-dispatch; the caller gets None
+    and the dispatch fails closed (structured connector error).
+    """
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    target = _make_target(
+        tenant_id=tenant_id,
+        name="retired-target",
+        product="ssh",
+        host="10.0.0.9",
+        deleted_at=datetime.now(UTC),
+    )
+    target_id = target.id
+
+    async with sessionmaker() as session:
+        session.add(target)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await resolve_target_by_id(session, tenant_id, target_id)
+
+    assert result is None

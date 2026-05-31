@@ -68,12 +68,14 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ParamsMismatchError,
+    SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     approve_request,
     get_request,
     publish_approval_event,
     reject_request,
 )
+from meho_backplane.targets.resolver import resolve_target_by_id
 
 __all__ = ["router"]
 
@@ -188,6 +190,51 @@ def _view(row: ApprovalRequest) -> ApprovalRequestView:
     )
 
 
+async def _resume_dispatch_after_approval(
+    *,
+    operator: Operator,
+    request: ApprovalRequest,
+    params: dict[str, Any],
+) -> Any:
+    """Re-hydrate the stored target and re-dispatch an approved op (G11.7-T1).
+
+    The approval row persists only ``target_id``, not the full target
+    object; a write op whose handler reads ``target.host`` /
+    ``target.name`` / ``target.fqdn`` would mis-resolve (or crash) if
+    re-dispatched with ``target=None``. This loads the live ``Target`` by
+    id (tenant-scoped, ``deleted_at IS NULL``) to restore the original
+    dispatch target. A target soft-deleted between request and approval
+    resolves to ``None``, so the re-dispatch fails closed (structured
+    connector error) rather than reviving a tombstone. Tenant-wide ops
+    (no original target) keep ``target_id IS NULL`` → ``None``.
+
+    The re-dispatch bypasses the policy gate (``_approved=True``): the
+    committed approval decision is the authorization. Without the bypass
+    the re-dispatch would re-queue (a human/service principal now routes
+    ``requires_approval`` to ``needs-approval`` per G11.7-T1; an agent
+    re-hits ``needs-approval``), so the approved op would never execute
+    (#817 DoD: "approval runs the original dispatch").
+    """
+    resolved_target: Any = None
+    if request.target_id is not None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            resolved_target = await resolve_target_by_id(
+                session, operator.tenant_id, request.target_id
+            )
+
+    from meho_backplane.operations.dispatcher import dispatch
+
+    return await dispatch(
+        operator=operator,
+        connector_id=request.connector_id,
+        op_id=request.op_id,
+        target=resolved_target,
+        params=params,
+        _approved=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -283,7 +330,8 @@ async def approve_approval_request(
     HTTP status codes:
 
     * 200 — approved + re-dispatched successfully.
-    * 403 — operator lacks ``operator`` role.
+    * 403 — operator lacks ``operator`` role, **or** the approver is the
+      requester and self-approval break-glass is disabled (G11.7-T1 #1401).
     * 404 — request not found (or belongs to another tenant).
     * 409 — request is already decided.
     * 422 — params hash mismatch.
@@ -322,6 +370,11 @@ async def approve_approval_request(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail="insufficient_role",
         ) from exc
+    except SelfApprovalForbiddenError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="self_approval_forbidden",
+        ) from exc
     except ApprovalRequestAlreadyDecidedError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
@@ -333,21 +386,8 @@ async def approve_approval_request(
             detail="params_hash_mismatch",
         ) from exc
 
-    # Re-dispatch the original op with the approved params, bypassing the
-    # policy gate (``_approved=True``): the human approval recorded above is
-    # the authorization. Without the bypass the re-dispatch would be
-    # hard-denied (the reviewer is a human, denied on requires_approval) or
-    # re-queued (an agent re-hits needs-approval), so the approved op would
-    # never execute (#817 DoD: "approval runs the original dispatch").
-    from meho_backplane.operations.dispatcher import dispatch
-
-    dispatch_result = await dispatch(
-        operator=operator,
-        connector_id=request.connector_id,
-        op_id=request.op_id,
-        target=None,  # target resolved from connector_id; target_id in params if needed
-        params=body.params,
-        _approved=True,
+    dispatch_result = await _resume_dispatch_after_approval(
+        operator=operator, request=request, params=body.params
     )
 
     _log.info(
@@ -533,6 +573,11 @@ async def decide_approval_request(
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail="insufficient_role",
+        ) from exc
+    except SelfApprovalForbiddenError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="self_approval_forbidden",
         ) from exc
     except ApprovalRequestAlreadyDecidedError as exc:
         raise HTTPException(

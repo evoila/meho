@@ -65,6 +65,7 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
+    SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     approve_request,
     get_request,
@@ -363,6 +364,13 @@ async def _approve_handler(
         except ApprovalRequestAlreadyDecidedError as exc:
             raise McpInvalidParamsError(
                 f"approval_request_not_pending: current status is {exc.status!r}"
+            ) from exc
+        except SelfApprovalForbiddenError as exc:
+            # G11.7-T1 #1401: requester != approver. Surfaced as an
+            # invalid-params error so the operator sees the refusal
+            # reason rather than a generic role failure.
+            raise McpInvalidParamsError(
+                "self_approval_forbidden: requester and approver must differ"
             ) from exc
         except UnauthorizedApprovalError as exc:
             raise McpInvalidParamsError(

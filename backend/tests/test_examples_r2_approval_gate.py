@@ -164,10 +164,12 @@ async def session() -> AsyncIterator[AsyncSession]:
 def _make_agent_operator(sub: str = _AGENT_SUB) -> Operator:
     """Construct the agent's :class:`Operator`.
 
-    ``principal_kind=AGENT`` is load-bearing — only agent principals reach
-    the ``needs-approval`` branch of the policy gate; humans / service
-    accounts are hard-denied on a ``requires_approval`` op (the v0.2
-    contract preserved by :func:`policy_gate`).
+    ``principal_kind=AGENT`` here is the requester side of this example.
+    Both agent and human/service principals reach the ``needs-approval``
+    branch of the policy gate on a ``requires_approval`` op — the agent
+    via its per-(principal, op, target) verdict floor, the human/service
+    via the G11.7-T1 (#1401) queue-routing change that replaced the old
+    hard-deny. The reviewer in this test is a distinct human principal.
     """
     return Operator(
         sub=sub,

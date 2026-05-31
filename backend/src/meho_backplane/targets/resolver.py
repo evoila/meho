@@ -56,7 +56,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.targets.schemas import TargetSummary, project_target_to_summary
 
-__all__ = ["AmbiguousTargetError", "TargetNotFoundError", "resolve_target"]
+__all__ = [
+    "AmbiguousTargetError",
+    "TargetNotFoundError",
+    "resolve_target",
+    "resolve_target_by_id",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -211,6 +216,42 @@ async def resolve_target(
     )
     _log.info("target_resolved", target_id=str(target.id), name=target.name)
     return target
+
+
+async def resolve_target_by_id(
+    session: AsyncSession,
+    tenant_id: UUID,
+    target_id: UUID,
+) -> TargetORM | None:
+    """Load a live :class:`TargetORM` row by id, tenant-scoped.
+
+    The approval-queue resume path (G11.7-T1 #1401) stores only the
+    target's ``id`` on the :class:`~meho_backplane.db.models.ApprovalRequest`
+    row, not the full target object. On approve the REST route must
+    re-hydrate the target so a write op whose handler reads
+    ``target.host`` / ``target.name`` / ``target.fqdn`` resolves the
+    correct connector + target instead of silently dispatching against
+    ``target=None``.
+
+    Distinct from :func:`resolve_target` (name-or-alias) — this is the
+    id-keyed lookup the resume path needs. The ``deleted_at IS NULL``
+    filter mirrors the resolver's soft-delete discipline (G0.14-T4
+    #1145): a target soft-deleted between request and approval resolves
+    to ``None`` so the caller fails closed (the re-dispatch returns a
+    structured ``no_connector`` / handler error) rather than reviving a
+    tombstoned target.
+
+    Returns ``None`` when no live row matches the id in *tenant_id* (the
+    caller decides how to surface the miss); cross-tenant ids are
+    invisible by the WHERE clause.
+    """
+    stmt = select(TargetORM).where(
+        TargetORM.id == target_id,
+        TargetORM.tenant_id == tenant_id,
+        TargetORM.deleted_at.is_(None),
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
 
 
 async def _alias_match(

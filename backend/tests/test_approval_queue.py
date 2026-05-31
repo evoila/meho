@@ -53,6 +53,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ParamsMismatchError,
+    SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     approve_request,
     create_pending_request,
@@ -78,6 +79,20 @@ async def _approval_test_dangerous_handler(
 ) -> dict[str, Any]:
     """Module-level handler for ``reject-test.op`` (integration tests)."""
     return {"executed": True}
+
+
+async def _approval_test_target_reading_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Handler that reads ``target.name`` — proves the resume target resolves.
+
+    G11.7-T1 #1401 resume-target hardening: a write op whose handler
+    consumes the target object must receive the re-hydrated target on the
+    approve re-dispatch, not ``None``. This handler echoes the target's
+    name so a test can assert it survived the round-trip; a ``None``
+    target would raise ``AttributeError`` and fail the dispatch.
+    """
+    return {"executed": True, "target_name": target.name, "params": params}
 
 
 # ---------------------------------------------------------------------------
@@ -224,13 +239,16 @@ async def test_create_pending_request_sets_run_id(session: AsyncSession) -> None
 @pytest.mark.asyncio
 async def test_approve_request_flips_status(session: AsyncSession) -> None:
     """approve_request transitions the row to 'approved'."""
-    operator = _make_operator()
+    # Requester != approver so the self-approval guard (G11.7-T1 #1401)
+    # does not fire — this test exercises the happy-path status flip.
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub")
     params = {"name": "test"}
     params_hash = compute_params_hash(params)
 
     pending = await create_pending_request(
         session,
-        operator=operator,
+        operator=requester,
         connector_id="vault-1.x",
         op_id="vault.kv.write",
         target=None,
@@ -240,24 +258,25 @@ async def test_approve_request_flips_status(session: AsyncSession) -> None:
     await session.commit()
 
     async with get_sessionmaker()() as s2:
-        updated = await approve_request(s2, pending.id, operator=operator, params=params)
+        updated = await approve_request(s2, pending.id, operator=reviewer, params=params)
         await s2.commit()
 
     assert updated.status == ApprovalRequestStatus.APPROVED.value
-    assert updated.reviewed_by == operator.sub
+    assert updated.reviewed_by == reviewer.sub
     assert updated.decided_at is not None
 
 
 @pytest.mark.asyncio
 async def test_approve_request_writes_decision_audit_row(session: AsyncSession) -> None:
     """approve_request writes a 'decision' audit row synchronously."""
-    operator = _make_operator()
+    requester = _make_operator(sub="requester-sub")
+    reviewer = _make_operator(sub="reviewer-sub")
     params = {}
     params_hash = compute_params_hash(params)
 
     pending = await create_pending_request(
         session,
-        operator=operator,
+        operator=requester,
         connector_id="vault-1.x",
         op_id="vault.kv.write",
         target=None,
@@ -267,7 +286,7 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
     await session.commit()
 
     async with get_sessionmaker()() as s2:
-        await approve_request(s2, pending.id, operator=operator, params=params)
+        await approve_request(s2, pending.id, operator=reviewer, params=params)
         await s2.commit()
 
     # Two audit rows total: one request + one decision.
@@ -292,13 +311,14 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
 @pytest.mark.asyncio
 async def test_approve_request_raises_on_hash_mismatch(session: AsyncSession) -> None:
     """Supplying different params raises ParamsMismatchError."""
-    operator = _make_operator()
+    requester = _make_operator(sub="requester-sub")
+    operator = _make_operator(sub="reviewer-sub")
     original_params = {"a": 1}
     params_hash = compute_params_hash(original_params)
 
     pending = await create_pending_request(
         session,
-        operator=operator,
+        operator=requester,
         connector_id="vault-1.x",
         op_id="vault.kv.write",
         target=None,
@@ -329,12 +349,13 @@ async def test_approve_request_params_none_skips_hash_check(
     audit row. The agent's REST path keeps supplying params (the swap
     defence stays on the agent branch).
     """
-    operator = _make_operator()
+    requester = _make_operator(sub="requester-sub")
+    operator = _make_operator(sub="reviewer-sub")
     original_params = {"x": 1, "secret": "z"}
     params_hash = compute_params_hash(original_params)
     pending = await create_pending_request(
         session,
-        operator=operator,
+        operator=requester,
         connector_id="vault-1.x",
         op_id="vault.kv.write",
         target=None,
@@ -376,12 +397,13 @@ async def test_publish_approval_event_audit_id_matches_decision_row(
     monkeypatch.setattr("meho_backplane.broadcast.publisher.publish_event", _capture)
     from meho_backplane.operations.approval_queue import publish_approval_event
 
-    operator = _make_operator()
+    requester = _make_operator(sub="requester-sub")
+    operator = _make_operator(sub="reviewer-sub")
     original_params = {"x": 1}
     params_hash = compute_params_hash(original_params)
     pending = await create_pending_request(
         session,
-        operator=operator,
+        operator=requester,
         connector_id="vault-1.x",
         op_id="vault.kv.write",
         target=None,
@@ -415,13 +437,14 @@ async def test_publish_approval_event_audit_id_matches_decision_row(
 @pytest.mark.asyncio
 async def test_approve_request_raises_on_already_decided(session: AsyncSession) -> None:
     """Approving an already-approved row raises ApprovalRequestAlreadyDecidedError."""
-    operator = _make_operator()
+    requester = _make_operator(sub="requester-sub")
+    operator = _make_operator(sub="reviewer-sub")
     params = {}
     params_hash = compute_params_hash(params)
 
     pending = await create_pending_request(
         session,
-        operator=operator,
+        operator=requester,
         connector_id="vault-1.x",
         op_id="vault.kv.write",
         target=None,
@@ -618,6 +641,123 @@ async def test_read_only_operator_cannot_reject(session: AsyncSession) -> None:
     async with get_sessionmaker()() as s2:
         with pytest.raises(UnauthorizedApprovalError):
             await reject_request(s2, pending.id, operator=read_only_op)
+
+
+# ---------------------------------------------------------------------------
+# Self-approval guard (G11.7-T1 #1401)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_self_approval_forbidden_by_default(session: AsyncSession) -> None:
+    """The requester may not approve their own request (default fail-closed).
+
+    ``approval_allow_self_approval`` defaults to ``False`` — the operator
+    who parked the request (``principal_sub``) gets
+    :class:`SelfApprovalForbiddenError` (mapped to 403 at the route
+    layer) when they try to approve it. The role check passes (the
+    requester is an OPERATOR), so this isolates the requester != approver
+    guard.
+    """
+    requester = _make_operator(sub="solo-operator", role=TenantRole.OPERATOR)
+    params = {"name": "test"}
+    params_hash = compute_params_hash(params)
+
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s2, pending.id, operator=requester, params=params)
+
+    # The row stays pending — a refused self-approval is not a decision.
+    async with get_sessionmaker()() as s3:
+        row = await s3.get(ApprovalRequest, pending.id)
+        assert row is not None
+        assert row.status == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_self_approval_allowed_under_break_glass(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Break-glass config lets a single operator self-approve, still audited.
+
+    ``APPROVAL_ALLOW_SELF_APPROVAL=true`` opts into the audited
+    single-operator mode: the self-approval succeeds (status flips) AND
+    still writes its decision audit row, so the break-glass use is
+    forensically visible.
+    """
+    monkeypatch.setenv("APPROVAL_ALLOW_SELF_APPROVAL", "true")
+    get_settings.cache_clear()
+
+    requester = _make_operator(sub="solo-operator", role=TenantRole.OPERATOR)
+    params = {"name": "test"}
+    params_hash = compute_params_hash(params)
+
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        row = await approve_request(s2, pending.id, operator=requester, params=params)
+        await s2.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+    assert row.reviewed_by == requester.sub
+
+    # Decision audit row still landed — break-glass is not silent.
+    async with get_sessionmaker()() as s3:
+        decision_rows = (
+            (await s3.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .all()
+        )
+    assert len(decision_rows) == 1
+    assert decision_rows[0].payload["decision"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_self_reject_is_always_allowed(session: AsyncSession) -> None:
+    """An operator may reject (withdraw) their own request regardless of config.
+
+    Reject is unguarded — withdrawing one's own pending request is never
+    a privilege escalation, so the self-approval guard does not apply to
+    :func:`reject_request`.
+    """
+    requester = _make_operator(sub="solo-operator", role=TenantRole.OPERATOR)
+    params = {"name": "test"}
+    params_hash = compute_params_hash(params)
+
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        row = await reject_request(s2, pending.id, operator=requester, reason="changed my mind")
+        await s2.commit()
+    assert row.status == ApprovalRequestStatus.REJECTED.value
 
 
 # ---------------------------------------------------------------------------
@@ -941,9 +1081,12 @@ async def test_pause_approve_resume_execute(
     assert result1.status == "awaiting_approval"
     approval_request_id = uuid.UUID(result1.extras["approval_request_id"])
 
-    # Step 2: approve the request.
+    # Step 2: approve the request. A distinct human reviewer approves —
+    # the requester (the agent run) may not approve its own request
+    # (self-approval guard, G11.7-T1 #1401).
+    reviewer = _make_operator(sub="human-reviewer-sub", principal_kind=PrincipalKind.USER)
     async with get_sessionmaker()() as s:
-        row = await approve_request(s, approval_request_id, operator=operator, params=params)
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
         await s.commit()
     assert row.status == ApprovalRequestStatus.APPROVED.value
 
@@ -961,6 +1104,173 @@ async def test_pause_approve_resume_execute(
         _approved=True,
     )
     assert result2.status == "ok"
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+# ---------------------------------------------------------------------------
+# Human principal: queue (not hard-deny) + resume with explicit target
+# (G11.7-T1 #1401, integration-style)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_human_requires_approval_queues_not_denies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A USER principal hitting requires_approval is queued, not denied (AC1).
+
+    Pre-G11.7 the policy gate hard-denied a human/service principal on a
+    ``requires_approval`` op (``status=denied``). This drives the full
+    round-trip for a USER principal:
+
+    1. First dispatch → ``awaiting_approval`` (queued + resumable), NOT
+       ``denied``.
+    2. A distinct human reviewer approves the parked request.
+    3. The approve re-dispatch (``_approved=True``) re-hydrates the
+       stored target by id and runs the op — the handler reads
+       ``target.name``, proving the resume target resolved (AC3) rather
+       than passing ``None``.
+    """
+    from unittest.mock import AsyncMock
+
+    import meho_backplane.operations._audit as audit_module
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+    from meho_backplane.db.models import Target as TargetORM
+    from meho_backplane.operations import (
+        dispatch,
+        register_typed_operation,
+        reset_dispatcher_caches,
+    )
+    from meho_backplane.targets.resolver import resolve_target_by_id
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+
+    async def _capture(event: Any) -> None:
+        pass
+
+    monkeypatch.setattr(audit_module, "publish_event", _capture)
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+    class _OkConnector(Connector):
+        product = "humantest"
+        version = "1.x"
+        impl_id = "humantest"
+        priority = 10
+
+        async def fingerprint(self, host: str, port: int | None) -> FingerprintResult:
+            return FingerprintResult(
+                probe=ProbeResult(reachable=True, probe_method="none"),
+                product="humantest",
+                version="1.x",
+            )
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(product="humantest", version="", impl_id="", cls=_OkConnector)
+
+    stub_emb = AsyncMock()
+    stub_emb.encode_one.return_value = [0.1] * 384
+    stub_emb.encode.return_value = [[0.1] * 384]
+    stub_emb.dimension = 384
+
+    await register_typed_operation(
+        product="humantest",
+        version="1.x",
+        impl_id="humantest",
+        op_id="humantest.write",
+        handler=_approval_test_target_reading_handler,
+        summary="Write op requiring approval.",
+        description="Test.",
+        parameter_schema={"type": "object"},
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_emb,
+    )
+
+    # Persist a real Target row so resolve_target_by_id can re-hydrate it
+    # on the resume re-dispatch.
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vault",
+                product="humantest",
+                host="vault.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+
+    # The operator who runs the op is a *human* (USER) principal.
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+
+    class _Target:
+        product = "humantest"
+        id = target_id
+        name = "prod-vault"
+
+    params = {"path": "secret/db"}
+
+    # Step 1: human dispatch → awaiting_approval (NOT denied).
+    result1 = await dispatch(
+        operator=requester,
+        connector_id="humantest-1.x",
+        op_id="humantest.write",
+        target=_Target(),
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert result1.status != "denied"
+    approval_request_id = uuid.UUID(result1.extras["approval_request_id"])
+
+    # The pending row stored the target_id for the resume path.
+    async with get_sessionmaker()() as s:
+        pending_row = await s.get(ApprovalRequest, approval_request_id)
+        assert pending_row is not None
+        assert pending_row.target_id == target_id
+
+    # Step 2: a distinct human reviewer approves.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    # Step 3: resume — re-hydrate the target by id and re-dispatch. The
+    # handler reads target.name, so a None target would crash the op.
+    async with get_sessionmaker()() as s:
+        resolved = await resolve_target_by_id(s, _TENANT_ID, row.target_id)
+    assert resolved is not None
+    assert resolved.name == "prod-vault"
+
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id="humantest-1.x",
+        op_id="humantest.write",
+        target=resolved,
+        params=params,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result is not None
+    assert result2.result["target_name"] == "prod-vault"  # type: ignore[index]
 
     reset_dispatcher_caches()
     clear_registry()

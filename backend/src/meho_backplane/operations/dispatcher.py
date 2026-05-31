@@ -907,11 +907,12 @@ async def dispatch(
     resume path (:mod:`meho_backplane.api.v1.approvals`) after a human
     operator has explicitly approved a parked ``needs-approval`` request.
     It skips the policy gate (Step 4) because the approval decision *is*
-    the authorization — re-running the gate would re-deny (the reviewer is
-    a human, hard-denied on ``requires_approval``) or re-queue (an agent
-    re-hits ``needs-approval``), so an approved op would never execute.
-    It is not part of the public agent/MCP/CLI surface; the gate is the
-    only authorization path for an ordinary dispatch.
+    the authorization — re-running the gate would re-queue the call (a
+    human/service principal now routes ``requires_approval`` to
+    ``needs-approval`` per G11.7-T1 #1401; an agent re-hits the same
+    floor), so the approved op would loop back into the queue and never
+    execute. It is not part of the public agent/MCP/CLI surface; the
+    gate is the only authorization path for an ordinary dispatch.
     """
     started = time.monotonic()
     params_hash = compute_params_hash(params)
@@ -965,9 +966,10 @@ async def dispatch(
         if verdict == PermissionVerdict.NEEDS_APPROVAL:
             # G11.2-T4 (#817): write a durable ApprovalRequest row (+ its
             # synchronous "request" audit row) and return an
-            # awaiting_approval result. Only agent principals reach this
-            # branch — the T3 gate hard-denies requires_approval for
-            # human/service principals.
+            # awaiting_approval result. Reached by an agent principal
+            # whose verdict floors to needs-approval AND (G11.7-T1 #1401)
+            # by a human/service principal hitting a requires_approval op
+            # — both park the call durably for an operator to decide.
             duration_ms = _elapsed_ms(started)
             return await _handle_needs_approval(
                 op_id=op_id,

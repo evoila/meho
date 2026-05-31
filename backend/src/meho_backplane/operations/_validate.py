@@ -97,6 +97,47 @@ def validate_params(
     return out
 
 
+def _non_agent_verdict(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+) -> tuple[PermissionVerdict, str | None]:
+    """Resolve the verdict for a human / service (non-agent) principal.
+
+    Preserves the v0.2 default-allow contract for ordinary ops, but
+    routes a ``requires_approval`` op to ``needs-approval`` (the approval
+    queue) rather than hard-denying it (G11.7-T1 #1401). Self-approval is
+    blocked at decide time by ``approve_request``'s requester != approver
+    guard — the gate's job here is only to park the call.
+    """
+    target_id_str = str(getattr(target, "id", None)) if target is not None else None
+    if descriptor.requires_approval:
+        _log.info(
+            "policy_gate_needs_approval",
+            operator_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+            target_id=target_id_str,
+        )
+        return (
+            PermissionVerdict.NEEDS_APPROVAL,
+            "requires_approval is True; routed to the approval queue (G11.7-T1)",
+        )
+    _log.info(
+        "policy_gate_default_allow",
+        operator_sub=operator.sub,
+        principal_kind=operator.principal_kind.value,
+        tenant_id=str(operator.tenant_id),
+        op_id=descriptor.op_id,
+        safety_level=descriptor.safety_level,
+        target_id=target_id_str,
+    )
+    return PermissionVerdict.AUTO_EXECUTE, None
+
+
 async def policy_gate(
     *,
     operator: Operator,
@@ -117,7 +158,9 @@ async def policy_gate(
       :class:`~meho_backplane.db.models.ApprovalRequest` row and return an
       ``awaiting_approval`` result, via
       :func:`~meho_backplane.operations.approval_queue.create_pending_request`
-      (G11.2-T4, #817). Only agent principals reach this verdict.
+      (G11.2-T4, #817). Reached by both agent principals (verdict floor)
+      and, since G11.7-T1 (#1401), human/service principals on a
+      ``requires_approval`` op.
     * ``deny`` — write an audit row in ``denied`` status, return
       :func:`~meho_backplane.operations._errors.result_denied` with the
       *reason* string so the agent can reason about the refusal.
@@ -131,16 +174,29 @@ async def policy_gate(
     ---------------------
 
     The per-(principal, op, target) agent-permission model gates **agent
-    principals** (``principal_kind == agent``). Human operators and
-    service accounts keep the v0.2 contract — default-allow except an op
-    flagged ``requires_approval`` — so a caution/dangerous op a human
-    has always been able to run does not silently start pending/denying.
-    This is exactly G11.2-T4 (#817)'s stated split: replace the
-    ``requires_approval`` hard-deny with the pending path *for agents*;
-    humans keep current behaviour. The agent path additionally folds
-    ``requires_approval`` into the verdict as a ``needs-approval`` floor,
-    so an op the connector author marked as requiring approval is never
-    auto-executed by an agent regardless of its ``safety_level``.
+    principals** (``principal_kind == agent``) through
+    :func:`~meho_backplane.auth.permissions.resolve_verdict`. Human
+    operators and service accounts keep the v0.2 default-allow contract
+    for ordinary ops, but a ``requires_approval`` op now routes them to
+    the **approval queue** (``needs-approval``) rather than hard-denying.
+
+    G11.7-T1 (#1401) closes the Phase-C gap: ops-team operators
+    authenticate as ``USER`` principals
+    (:func:`meho_backplane.auth.operator`), so the old hard-deny meant
+    every governed connector write returned ``denied`` to the very
+    people meant to run it. Routing them to ``needs-approval`` reuses
+    the already-built queue/approve/resume substrate
+    (:func:`~meho_backplane.operations.approval_queue.create_pending_request`
+    accepts any operator; the REST/MCP/CLI approve surfaces and the
+    ``_approved=True`` resume path are unchanged) — it is a one-branch
+    policy change, not new infrastructure. A non-``requires_approval``
+    op a human has always been able to run still auto-executes, so no
+    existing human-runnable op regresses.
+
+    The agent path additionally folds ``requires_approval`` into the
+    verdict as a ``needs-approval`` floor, so an op the connector author
+    marked as requiring approval is never auto-executed by an agent
+    regardless of its ``safety_level``.
 
     The function is **async** — it opens its own DB session to load the
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
@@ -148,27 +204,9 @@ async def policy_gate(
     The dispatcher's call site changes only in adding ``await``; the
     signature (operator / descriptor / target) stays identical to v0.2.
     """
-    # --- Human / service principals: preserve the v0.2 contract --------
+    # --- Human / service principals: default-allow, queue on approval --
     if operator.principal_kind is not PrincipalKind.AGENT:
-        if descriptor.requires_approval:
-            # v0.2 hard-deny is retained for non-agent principals; the
-            # approval queue (G11.2-T4) routes only agent runs to the
-            # pending path.
-            return (
-                PermissionVerdict.DENY,
-                "requires_approval is True; only agent principals are routed "
-                "to the approval queue (G11.2-T4)",
-            )
-        _log.info(
-            "policy_gate_default_allow",
-            operator_sub=operator.sub,
-            principal_kind=operator.principal_kind.value,
-            tenant_id=str(operator.tenant_id),
-            op_id=descriptor.op_id,
-            safety_level=descriptor.safety_level,
-            target_id=str(getattr(target, "id", None)) if target is not None else None,
-        )
-        return PermissionVerdict.AUTO_EXECUTE, None
+        return _non_agent_verdict(operator=operator, descriptor=descriptor, target=target)
 
     # --- Agent principals: per-(principal, op, target) verdict ----------
     target_id = getattr(target, "id", target) if target is not None else None

@@ -25,6 +25,7 @@ Initiative's CI wiring lands under T6) sets
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -727,3 +728,137 @@ async def test_discover_topology_against_k3s_is_idempotent_when_recalled(
     edge_keys1 = {(e.from_kind, e.from_name, e.to_kind, e.to_name, e.kind) for e in snap1.edges}
     edge_keys2 = {(e.from_kind, e.from_name, e.to_kind, e.to_name, e.kind) for e in snap2.edges}
     assert edge_keys1 == edge_keys2
+
+
+# ---------------------------------------------------------------------------
+# G3.14-T2 (#1404) k8s.exec -- live k3s exercise over the WsApiClient
+# websocket transport. Creates a short-lived busybox pod (which ships a
+# real shell, unlike the distroless k3s system pods), execs against it,
+# and deletes it on teardown.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def busybox_pod(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> AsyncIterator[tuple[KubernetesConnector, _K3sTarget, str]]:
+    """Create a running busybox pod in ``default``; yield its name; delete it.
+
+    busybox is used because the k3s system pods (coredns, traefik,
+    metrics-server) run distroless / scratch images with no shell, so
+    exec'ing ``sh -c`` against them fails. The pod runs ``sleep`` so it
+    stays Running for the duration of the exec calls.
+    """
+    import asyncio as _asyncio
+
+    from kubernetes_asyncio import client as _client
+
+    connector, target = k3s_connector
+    operator = _make_k3d_operator()
+    api_client = await connector._get_api_client(target, operator)
+    v1 = _client.CoreV1Api(api_client)
+
+    pod_name = "meho-exec-it-busybox"
+    namespace = "default"
+    pod_manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": pod_name, "namespace": namespace},
+        "spec": {
+            "restartPolicy": "Never",
+            "containers": [
+                {
+                    "name": "busybox",
+                    "image": os.environ.get("MEHO_TEST_BUSYBOX_IMAGE", "busybox:1.36"),
+                    "command": ["sleep", "600"],
+                }
+            ],
+        },
+    }
+    await v1.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+
+    # Wait for the pod to reach Running (image pull + start). The
+    # container fixture already gated on the API server's readiness, so
+    # this loop only waits on the busybox image pull.
+    for _ in range(60):
+        pod = await v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+        if pod.status is not None and pod.status.phase == "Running":
+            break
+        await _asyncio.sleep(1.0)
+    else:
+        await v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
+        pytest.skip("busybox pod did not reach Running within 60s")
+
+    try:
+        yield connector, target, pod_name
+    finally:
+        # Best-effort teardown -- a delete failure (API blip) should not
+        # mask the test result; the pod is restartPolicy=Never.
+        with contextlib.suppress(Exception):
+            await v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
+
+
+@pytest.mark.asyncio
+async def test_exec_against_k3s_captures_stdout_and_exit_zero(
+    busybox_pod: tuple[KubernetesConnector, _K3sTarget, str],
+) -> None:
+    """``k8s.exec echo`` over the live websocket returns stdout + exit 0."""
+    connector, target, pod_name = busybox_pod
+    result = await connector.exec_command(
+        _make_k3d_operator(),
+        target,
+        {
+            "pod_name": pod_name,
+            "namespace": "default",
+            "command": ["echo", "hello-from-exec"],
+        },
+    )
+    assert result["pod"] == pod_name
+    assert result["container"] == "busybox"
+    assert result["stdout"] == "hello-from-exec\n"
+    assert result["stderr"] == ""
+    assert result["exit_code"] == 0
+    assert result["timed_out"] is False
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_exec_against_k3s_non_zero_exit_parsed_from_status_frame(
+    busybox_pod: tuple[KubernetesConnector, _K3sTarget, str],
+) -> None:
+    """A command that exits non-zero surfaces the code from the status frame."""
+    connector, target, pod_name = busybox_pod
+    result = await connector.exec_command(
+        _make_k3d_operator(),
+        target,
+        {
+            "pod_name": pod_name,
+            "namespace": "default",
+            "command": ["sh", "-c", "echo to-stderr 1>&2; exit 7"],
+        },
+    )
+    assert result["exit_code"] == 7
+    assert "to-stderr" in result["stderr"]
+    assert result["timed_out"] is False
+
+
+@pytest.mark.asyncio
+async def test_exec_against_k3s_timeout_returns_partial_and_timed_out(
+    busybox_pod: tuple[KubernetesConnector, _K3sTarget, str],
+) -> None:
+    """A long-running command is cut off at the deadline with timed_out=true."""
+    connector, target, pod_name = busybox_pod
+    result = await connector.exec_command(
+        _make_k3d_operator(),
+        target,
+        {
+            "pod_name": pod_name,
+            "namespace": "default",
+            "command": ["sh", "-c", "echo started; sleep 30"],
+            "timeout_seconds": 2,
+        },
+    )
+    assert result["timed_out"] is True
+    assert result["exit_code"] is None
+    # The "started" line is emitted immediately, before the sleep.
+    assert "started" in result["stdout"]

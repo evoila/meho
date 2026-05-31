@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — this module accreted the full K8s op-shim
+# surface across G3.2 T1-T5 + G0.6 + G3.14; the G3.14-T2 exec op only adds a
+# ws-client cache + thin handler shim. A split into per-responsibility modules
+# is a behaviour-preserving refactor that belongs in its own Task.
 
 """KubernetesConnector -- fingerprint / probe / dispatcher-shim.
 
@@ -59,6 +63,7 @@ from typing import Any
 import httpx
 import structlog
 from kubernetes_asyncio import client, config
+from kubernetes_asyncio.stream.ws_client import WsApiClient
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
@@ -170,6 +175,19 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "output. Streaming follow-mode ('kubectl logs -f') is "
         "deliberately out of scope -- request bounded chunks."
     ),
+    "exec": (
+        "Use for running a short, bounded command inside a container "
+        "and capturing its output: ``k8s.exec`` runs an explicit argv "
+        "(NOT a shell string) and returns stdout / stderr + the exit "
+        "code. DANGEROUS and approval-gated -- a command can mutate "
+        "container state, so prefer the read-only groups ('logs', "
+        "'workload', 'config') whenever they answer the question. The "
+        "right group only when the operator needs to inspect or probe "
+        "live in-container state that no read-only op exposes (e.g. "
+        "'cat a file the app reads', 'list the running processes'). "
+        "Interactive shells ('kubectl exec -it') are deliberately out "
+        "of scope -- command-and-capture only."
+    ),
 }
 
 
@@ -266,6 +284,13 @@ class KubernetesConnector(Connector):
             kubeconfig_loader if kubeconfig_loader is not None else load_kubeconfig_from_vault
         )
         self._api_clients: dict[str, client.ApiClient] = {}
+        # Parallel cache of websocket-transport clients, keyed the same
+        # way as ``_api_clients`` (``secret_ref``). Only ``k8s.exec``
+        # populates it -- pod exec is an HTTP Upgrade to the
+        # ``v4.channel.k8s.io`` sub-protocol, which the ordinary
+        # ``ApiClient`` cannot speak. Built lazily from the same
+        # operator-identity kubeconfig and closed in :meth:`aclose`.
+        self._ws_api_clients: dict[str, WsApiClient] = {}
         self._lock = asyncio.Lock()
 
     async def fingerprint(
@@ -979,6 +1004,31 @@ class KubernetesConnector(Connector):
 
         return await k8s_logs(self, target, operator, params)
 
+    async def exec_command(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.exec`` op (G3.14-T2 #1404).
+
+        Op-id: ``k8s.exec``. Delegates to
+        :func:`~meho_backplane.connectors.kubernetes.ops_exec.k8s_exec`
+        with ``self`` injected so the handler can reach both the cached
+        read :class:`ApiClient` (for pod/container resolution) and the
+        parallel websocket-transport :class:`WsApiClient` (for the exec
+        itself) via :meth:`_get_api_client` / :meth:`_get_ws_api_client`.
+
+        Dangerous + approval-gated (``requires_approval=True``):
+        command-and-capture only, no interactive PTY. ``operator`` is
+        forwarded so a cold-cache kubeconfig load runs under the
+        operator's identity; see :meth:`about` for the threading
+        rationale.
+        """
+        from meho_backplane.connectors.kubernetes.ops_exec import k8s_exec
+
+        return await k8s_exec(self, target, operator, params)
+
     async def k8s_pod_list(
         self,
         operator: Operator,
@@ -1297,11 +1347,17 @@ class KubernetesConnector(Connector):
         )
 
     async def aclose(self) -> None:
-        """Close every cached :class:`ApiClient`. Idempotent."""
+        """Close every cached client (REST + websocket). Idempotent."""
         async with self._lock:
             for api_client in self._api_clients.values():
                 await api_client.close()
             self._api_clients.clear()
+            # The websocket-transport clients (``k8s.exec``) hold their
+            # own aiohttp connector pool; close them too so no socket is
+            # leaked on connector teardown.
+            for ws_client in self._ws_api_clients.values():
+                await ws_client.close()
+            self._ws_api_clients.clear()
 
     @staticmethod
     def _cache_key(target: KubernetesTargetLike) -> str:
@@ -1366,3 +1422,54 @@ class KubernetesConnector(Connector):
                 host=target.host,
             )
             return api_client
+
+    async def _get_ws_api_client(
+        self,
+        target: KubernetesTargetLike,
+        operator: Operator,
+    ) -> WsApiClient:
+        """Resolve (and cache) the websocket-transport client for *target*.
+
+        Mirrors :meth:`_get_api_client` exactly -- same lock, same
+        :meth:`_cache_key` (``secret_ref``), same operator-identity
+        kubeconfig load -- but builds a
+        :class:`~kubernetes_asyncio.stream.WsApiClient` instead of an
+        ordinary :class:`~kubernetes_asyncio.client.ApiClient`. The ws
+        client is the only transport that can speak the
+        ``v4.channel.k8s.io`` pod-exec sub-protocol; it is built lazily
+        (only ``k8s.exec`` touches it) so read-only targets never pay
+        for a second client.
+
+        The kubeconfig is loaded the same way
+        :func:`~kubernetes_asyncio.config.new_client_from_config_dict`
+        does -- a fresh :class:`~kubernetes_asyncio.client.Configuration`
+        populated by
+        :func:`~kubernetes_asyncio.config.load_kube_config_from_dict` --
+        then handed to the ``WsApiClient`` constructor. Separate
+        ``Configuration`` instances keep the REST and ws clients from
+        sharing mutable auth state.
+        """
+        # Local import: pulled only on the exec path so the read-only
+        # ops don't drag the stream sub-package into every import.
+        from kubernetes_asyncio.client.configuration import Configuration
+        from kubernetes_asyncio.config import load_kube_config_from_dict
+
+        key = self._cache_key(target)
+        async with self._lock:
+            cached = self._ws_api_clients.get(key)
+            if cached is not None:
+                return cached
+            kubeconfig_dict = await self._kubeconfig_loader(target, operator)
+            ws_config = type.__call__(Configuration)
+            await load_kube_config_from_dict(
+                config_dict=kubeconfig_dict,
+                client_configuration=ws_config,
+            )
+            ws_client = WsApiClient(configuration=ws_config)
+            self._ws_api_clients[key] = ws_client
+            _log.info(
+                "kubernetes_ws_api_client_built",
+                target=target.name,
+                host=target.host,
+            )
+            return ws_client

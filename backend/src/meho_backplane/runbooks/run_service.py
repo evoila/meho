@@ -102,6 +102,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
@@ -238,6 +239,28 @@ class MissingParamsError(ValueError):
     catching the gap at start time gives the operator a typed error
     before the run row lands.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class _NextStepInputs:
+    """Pre-dispatch reads :meth:`RunbookRunService.next_step` carries across the gap.
+
+    Captured under the read-only session A and consumed by the
+    sessionless verify dispatch + the write-phase session B. The
+    ``template_body`` / ``current_step`` are pinned at start_run and
+    immutable for the run, so they remain valid after session A closes;
+    ``run`` is re-loaded fresh inside session B (the captured instance
+    is detached once its session closes and is only used for the
+    contextvar-binding read in the dispatch phase).
+    """
+
+    run: RunbookRun
+    template_body: RunbookTemplateBody
+    current_step: Step
+    current_step_id: str
+    current_state: str
+    run_target: str
+    run_params: dict[str, Any]
 
 
 class RunbookRunService:
@@ -380,14 +403,57 @@ class RunbookRunService:
           its ``verify_response``. Raises :class:`PreviousStepFailedError`
           so the caller's next move is :meth:`abort_run` rather than a
           spurious retry on a step the state machine no longer accepts.
+
+        Session lifetime: the method runs in three phases — a read-only
+        session A (:meth:`_load_next_step_inputs`) for the pre-dispatch
+        reads, a **sessionless** verify dispatch (so no pooled connection
+        is pinned across the external ``operation_call``), and a write
+        session B (:meth:`_write_next_step_outcome`) for the outcome. The
+        run + step states are re-loaded and re-validated at the start of
+        session B because a TENANT_ADMIN could have raced the dispatch
+        with :meth:`abort_run` (→ :class:`RunAlreadyTerminalError`) or
+        :meth:`reassign_run` (→ :class:`NotRunAssigneeError`); the
+        single-assignee / no-mutate-terminal invariants must hold at the
+        moment of the write, not just at the start of the call.
+        """
+        inputs = await self._load_next_step_inputs(tenant_id, operator_sub, run_id)
+
+        # Dispatch the verify with NO session checked out.
+        # ``template_body`` / ``current_step`` are pinned at start_run and
+        # immutable for the run, so they survive the gap; the run/step
+        # contextvar binding inside ``_resolve_verify_response`` is
+        # task-local and independent of session lifetime.
+        verify_response = await self._resolve_verify_response(
+            run=inputs.run,
+            current_step=inputs.current_step,
+            request_verify=request.verify_response,
+        )
+
+        return await self._write_next_step_outcome(
+            tenant_id, operator_sub, run_id, inputs, verify_response
+        )
+
+    async def _load_next_step_inputs(
+        self,
+        tenant_id: uuid.UUID,
+        operator_sub: str,
+        run_id: uuid.UUID,
+    ) -> _NextStepInputs:
+        """Phase A: read everything the dispatch + write need, under session A.
+
+        Releases the pooled connection on block exit — SQLAlchemy 2.0's
+        :class:`AsyncSession` holds its checked-out connection for the
+        whole ``async with`` block, so awaiting the connector dispatch
+        inside it would pin the connection for the full (multi-second)
+        call and starve the pool under load.
         """
         sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            run = await self._require_run_assignee(session, tenant_id, run_id, operator_sub)
+        async with sessionmaker() as session_a:
+            run = await self._require_run_assignee(session_a, tenant_id, run_id, operator_sub)
             self._refuse_if_terminal(run)
 
-            template_body = await self._load_pinned_template_body(session, run)
-            step_states = await _load_step_states(session, run_id)
+            template_body = await self._load_pinned_template_body(session_a, run)
+            step_states = await _load_step_states(session_a, run_id)
             current_step_id = self._current_step_id_or_raise(run, step_states)
             current_state = step_states[current_step_id].state
 
@@ -396,34 +462,62 @@ class RunbookRunService:
                     f"previous step {current_step_id!r} is in 'failed' state; abort the run",
                 )
 
-            current_step = _find_step(template_body, current_step_id)
-            verify_response = await self._resolve_verify_response(
+            return _NextStepInputs(
                 run=run,
-                current_step=current_step,
-                request_verify=request.verify_response,
+                template_body=template_body,
+                current_step=_find_step(template_body, current_step_id),
+                current_step_id=current_step_id,
+                current_state=current_state,
+                run_target=run.target,
+                run_params=dict(run.params),
             )
 
-            now = datetime.now(UTC)
+    async def _write_next_step_outcome(
+        self,
+        tenant_id: uuid.UUID,
+        operator_sub: str,
+        run_id: uuid.UUID,
+        inputs: _NextStepInputs,
+        verify_response: VerifyResponse | None,
+    ) -> NextStepResponse:
+        """Phase C: advance + persist the outcome under a fresh session B.
+
+        Re-loads and re-validates the run + step states: a TENANT_ADMIN
+        could have raced the dispatch with :meth:`abort_run` (terminal
+        flip) or :meth:`reassign_run` (assignee change). The
+        single-assignee / no-mutate-terminal invariants must still hold
+        at write time, not just at the start of the call.
+        """
+        now = datetime.now(UTC)
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session_b:
+            run = await self._require_run_assignee(session_b, tenant_id, run_id, operator_sub)
+            self._refuse_if_terminal(run)
+            step_states = await _load_step_states(session_b, run_id)
+            if step_states[inputs.current_step_id].state == _STEP_FAILED:
+                raise PreviousStepFailedError(
+                    f"previous step {inputs.current_step_id!r} is in 'failed' state; abort the run",
+                )
+
             outcome = advance(
-                template_body,
-                current_step_id,
-                current_state,
-                target=run.target,
-                params=dict(run.params),
+                inputs.template_body,
+                inputs.current_step_id,
+                inputs.current_state,
+                target=inputs.run_target,
+                params=inputs.run_params,
                 verify_response=verify_response,
                 completed_at=now,
             )
-            response = await self._apply_outcome(
-                session=session,
+            return await self._apply_outcome(
+                session=session_b,
                 run=run,
-                template_body=template_body,
+                template_body=inputs.template_body,
                 step_states=step_states,
-                current_step_id=current_step_id,
+                current_step_id=inputs.current_step_id,
                 outcome=outcome,
                 now=now,
                 operator_sub=operator_sub,
             )
-        return response
 
     async def _apply_outcome(
         self,
@@ -912,7 +1006,7 @@ class RunbookRunService:
             step_id_var.reset(step_token)
             run_id_var.reset(run_token)
 
-        actual = call_result.get("result") or {}
+        actual = call_result.get("result", {})
         if not isinstance(actual, dict):
             # The verify's _matches() compares dict-shaped expect against
             # dict-shaped actual; a list/scalar result from a typed handler

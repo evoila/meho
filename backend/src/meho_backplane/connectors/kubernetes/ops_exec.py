@@ -315,8 +315,11 @@ async def _drain_exec_socket(
     Stdout / stderr accumulate up to a soft limit (twice ``cap_bytes``)
     each; bytes past that are dropped here so an over-emitting command
     cannot exhaust memory, while the headroom lets the caller report an
-    accurate dropped-byte hint. Front-truncation to ``cap_bytes`` is
-    applied by the caller.
+    accurate dropped-byte hint. The cap is enforced *within* each frame
+    (only the remaining-budget slice of an incoming frame is appended),
+    so a single oversized frame cannot push the accumulator past the
+    soft limit regardless of frame size. Front-truncation to
+    ``cap_bytes`` is applied by the caller.
 
     Writes into the caller-owned ``capture`` rather than returning a
     value so a mid-drain :func:`asyncio.wait_for` cancellation (timeout)
@@ -337,13 +340,25 @@ async def _drain_exec_socket(
         if not payload:
             continue
         if channel == STDOUT_CHANNEL:
-            if len(capture.stdout) < soft_limit:
-                capture.stdout.extend(payload)
+            _append_bounded(capture.stdout, payload, soft_limit)
         elif channel == STDERR_CHANNEL:
-            if len(capture.stderr) < soft_limit:
-                capture.stderr.extend(payload)
+            _append_bounded(capture.stderr, payload, soft_limit)
         elif channel == ERROR_CHANNEL:
             capture.error_frame = payload.decode("utf-8", errors="replace")
+
+
+def _append_bounded(buf: bytearray, payload: bytes, soft_limit: int) -> None:
+    """Append only as many ``payload`` bytes as fit under ``soft_limit``.
+
+    Slicing the incoming frame to the remaining budget (rather than
+    gating on ``len(buf) < soft_limit`` before an unbounded ``extend``)
+    means one oversized frame can add at most ``soft_limit - len(buf)``
+    bytes -- the accumulator can never exceed ``soft_limit`` even when a
+    single frame is larger than the whole budget.
+    """
+    remaining = soft_limit - len(buf)
+    if remaining > 0:
+        buf.extend(payload[:remaining])
 
 
 def _parse_exit_code(error_frame: str | None) -> int | None:
@@ -385,9 +400,15 @@ async def _run_exec_over_ws(
     ``_preload_content=False`` returns the raw aiohttp websocket context
     manager (see module docstring) so we can demux the channels and read
     the ``v4.channel.k8s.io`` status frame ourselves. ``stdin``/``tty``
-    are pinned ``False`` -- command-and-capture only. On timeout the
-    socket is closed explicitly so the server-side exec is torn down and
-    the connection is not leaked; whatever output arrived is returned.
+    are pinned ``False`` -- command-and-capture only.
+
+    The whole socket lifecycle -- the connect/upgrade handshake at
+    ``__aenter__`` *and* the frame drain -- runs under a single
+    :func:`asyncio.wait_for` deadline, so a stalled connect/upgrade is
+    bounded by ``timeout_seconds`` just like a runaway command. On
+    timeout the socket (if it opened) is closed explicitly so the
+    server-side exec is torn down and the connection is not leaked;
+    whatever output arrived is returned.
     """
     capture = _ExecCapture()
     timed_out = False
@@ -410,20 +431,26 @@ async def _run_exec_over_ws(
         _preload_content=False,
     )
 
-    try:
+    # Hold a reference to the opened socket so the timeout branch can tear
+    # it down even when the deadline fires *during* the drain (the
+    # ``async with`` block would otherwise have already exited).
+    opened_ws: Any = None
+
+    async def _open_and_drain() -> None:
+        nonlocal opened_ws
         async with ws_ctx as ws:
-            try:
-                await asyncio.wait_for(
-                    _drain_exec_socket(ws, capture, cap_bytes=MAX_STREAM_BYTES),
-                    timeout=timeout_seconds,
-                )
-            except TimeoutError:
-                timed_out = True
-                await ws.close()
+            opened_ws = ws
+            await _drain_exec_socket(ws, capture, cap_bytes=MAX_STREAM_BYTES)
+
+    try:
+        # A single budget covers the connect/upgrade handshake performed
+        # at ``__aenter__`` and the frame drain that follows, so a
+        # connection-upgrade stall is bounded, not just a hung command.
+        await asyncio.wait_for(_open_and_drain(), timeout=timeout_seconds)
     except TimeoutError:
-        # ``asyncio.wait_for`` can also fire while the context manager is
-        # being entered (connection-upgrade stall); treat the same.
         timed_out = True
+        if opened_ws is not None:
+            await opened_ws.close()
 
     return capture, timed_out
 

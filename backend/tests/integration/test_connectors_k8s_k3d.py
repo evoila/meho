@@ -758,12 +758,14 @@ async def busybox_pod(
     api_client = await connector._get_api_client(target, operator)
     v1 = _client.CoreV1Api(api_client)
 
-    pod_name = "meho-exec-it-busybox"
     namespace = "default"
+    # Server-generated name (generateName) + captured created.metadata.name:
+    # delete_namespaced_pod is async, so a fixed name races AlreadyExists
+    # across the three function-scoped exec tests on re-run / in parallel.
     pod_manifest = {
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": {"name": pod_name, "namespace": namespace},
+        "metadata": {"generateName": "meho-exec-it-busybox-", "namespace": namespace},
         "spec": {
             "restartPolicy": "Never",
             "containers": [
@@ -775,7 +777,8 @@ async def busybox_pod(
             ],
         },
     }
-    await v1.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+    created = await v1.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+    pod_name = created.metadata.name
 
     # Wait for the pod to reach Running (image pull + start). The
     # container fixture already gated on the API server's readiness, so

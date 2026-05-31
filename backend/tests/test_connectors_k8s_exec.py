@@ -31,6 +31,7 @@ Coverage matrix (per #1404 acceptance criteria):
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -159,8 +160,6 @@ class _FakeWebSocket:
             return next(self._iter)
         except StopIteration:
             if self._hang:
-                import asyncio
-
                 await asyncio.Event().wait()  # never returns
             raise StopAsyncIteration from None
 
@@ -176,6 +175,26 @@ class _FakeWsCtx:
 
     async def __aenter__(self) -> _FakeWebSocket:
         return self._ws
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+class _HangingWsCtx:
+    """Async context manager whose ``__aenter__`` never completes.
+
+    Simulates a stalled TCP connect / HTTP Upgrade handshake: the socket
+    open hangs forever, so the deadline must fire while the context
+    manager is being *entered* (before any frame is read). The wrapped
+    socket is never opened, so the timeout branch has nothing to close.
+    """
+
+    def __init__(self, ws: _FakeWebSocket) -> None:
+        self._ws = ws
+
+    async def __aenter__(self) -> _FakeWebSocket:
+        await asyncio.Event().wait()  # never returns -- upgrade stalls
+        return self._ws  # pragma: no cover
 
     async def __aexit__(self, *exc: Any) -> None:
         return None
@@ -199,19 +218,24 @@ def _patch_exec(
     *,
     ws: _FakeWebSocket,
     list_pods: Any = None,
+    ws_ctx: Any = None,
 ) -> tuple[Any, Any, MagicMock]:
     """Patch the kubeconfig clients + CoreV1Api for the exec + resolve path.
 
     Returns ``(config_patch, ws_client_patch, core_v1)``. ``core_v1`` is
     the shared CoreV1Api mock so tests can assert on
-    ``connect_get_namespaced_pod_exec.call_args``.
+    ``connect_get_namespaced_pod_exec.call_args``. ``ws_ctx`` overrides
+    the websocket context manager (defaults to a :class:`_FakeWsCtx`
+    around ``ws``) so a test can inject a stalled-upgrade context.
     """
     api_client_mock = MagicMock(close=AsyncMock())
     core_v1 = MagicMock()
     if list_pods is None:
         list_pods = _pod_list([_pod_obj("web-7c4b8d-x7r2k", ["web"])])
     core_v1.list_namespaced_pod = AsyncMock(return_value=list_pods)
-    core_v1.connect_get_namespaced_pod_exec = AsyncMock(return_value=_FakeWsCtx(ws))
+    if ws_ctx is None:
+        ws_ctx = _FakeWsCtx(ws)
+    core_v1.connect_get_namespaced_pod_exec = AsyncMock(return_value=ws_ctx)
 
     config_patch = patch(
         "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
@@ -357,6 +381,41 @@ async def test_exec_timeout_closes_socket_returns_partial() -> None:
     assert ws.closed is True  # socket torn down on timeout
 
 
+@pytest.mark.asyncio
+async def test_exec_connect_upgrade_stall_times_out() -> None:
+    # The TCP connect + HTTP Upgrade handshake happens at the context
+    # manager's __aenter__; a stall there must be bounded by the same
+    # timeout budget as the drain. _HangingWsCtx never finishes opening,
+    # so without the connect/upgrade being under wait_for this would hang
+    # forever.
+    ws = _FakeWebSocket([])
+    patches, _, _ = _patch_exec(ws=ws, ws_ctx=_HangingWsCtx(ws))
+    connector = _make_connector()
+    with patches[0], patches[1], patches[2]:
+        result = await asyncio.wait_for(
+            k8s_exec(
+                connector,
+                _TARGET,
+                _make_operator(),
+                {
+                    "pod_name": "web",
+                    "namespace": "default",
+                    "command": ["echo", "hi"],
+                    "timeout_seconds": 1,
+                },
+            ),
+            # Outer guard well above the op's own 1s deadline: if the
+            # connect/upgrade were unbounded the op would never return and
+            # this would raise instead, failing the test.
+            timeout=10,
+        )
+    assert result["timed_out"] is True
+    assert result["exit_code"] is None
+    assert result["stdout"] == ""
+    # The socket never opened, so there was nothing to close.
+    assert ws.closed is False
+
+
 # ---------------------------------------------------------------------------
 # 1 MiB cap
 # ---------------------------------------------------------------------------
@@ -364,10 +423,14 @@ async def test_exec_timeout_closes_socket_returns_partial() -> None:
 
 @pytest.mark.asyncio
 async def test_exec_oversize_stdout_truncated_from_front() -> None:
-    big = b"A" * (MAX_STREAM_BYTES + 4096)
+    # Distinguishable head/tail markers so the assertion proves the cap
+    # kept the most-recent bytes and dropped the *front* -- a uniform
+    # payload would pass whether the handler kept the head or the tail.
+    head = b"A" * 4096
+    tail = b"B" * MAX_STREAM_BYTES
     ws = _FakeWebSocket(
         [
-            _frame(STDOUT_CHANNEL, big),
+            _frame(STDOUT_CHANNEL, head + tail),
             _frame(ERROR_CHANNEL, _success_status_frame()),
         ]
     )
@@ -382,8 +445,41 @@ async def test_exec_oversize_stdout_truncated_from_front() -> None:
         )
     assert result["truncated"] is True
     assert result["stdout_truncated_byte_count"] == 4096
-    assert len(result["stdout"].encode("utf-8")) == MAX_STREAM_BYTES
+    # The front 4096 'A' bytes were dropped; the tail (most-recent
+    # MAX_STREAM_BYTES 'B' bytes) is retained in full.
+    assert result["stdout"].encode("utf-8") == tail
     assert result["exit_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_exec_single_oversized_frame_is_bounded() -> None:
+    # A single frame far larger than the soft limit (2 * MAX_STREAM_BYTES)
+    # must not blow the in-memory accumulator: the cap is enforced within
+    # frame handling, so the captured stdout stays bounded regardless of
+    # one frame's size.
+    soft_limit = MAX_STREAM_BYTES * 2
+    big = b"C" * (soft_limit * 4)  # one frame, 4x the soft cap
+    ws = _FakeWebSocket(
+        [
+            _frame(STDOUT_CHANNEL, big),
+            _frame(ERROR_CHANNEL, _success_status_frame()),
+        ]
+    )
+    patches, _, _ = _patch_exec(ws=ws)
+    connector = _make_connector()
+    with patches[0], patches[1], patches[2]:
+        result = await k8s_exec(
+            connector,
+            _TARGET,
+            _make_operator(),
+            {"pod_name": "web", "namespace": "default", "command": ["cat", "/huge"]},
+        )
+    # After the soft cap (2 MiB) the front-truncation to MAX_STREAM_BYTES
+    # leaves exactly the cap; the dropped count reflects only what was
+    # admitted past the cap, never the whole oversized frame.
+    assert result["truncated"] is True
+    assert len(result["stdout"].encode("utf-8")) == MAX_STREAM_BYTES
+    assert result["stdout_truncated_byte_count"] == MAX_STREAM_BYTES
 
 
 # ---------------------------------------------------------------------------

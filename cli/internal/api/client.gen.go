@@ -4911,8 +4911,11 @@ type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostParams struct {
 
 // MyRecentApiV1AuditMyRecentGetParams defines parameters for MyRecentApiV1AuditMyRecentGet.
 type MyRecentApiV1AuditMyRecentGetParams struct {
-	Since         *string `form:"since,omitempty" json:"since,omitempty"`
-	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Since *string `form:"since,omitempty" json:"since,omitempty"`
+	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -4941,7 +4944,10 @@ type WhoTouchedApiV1AuditWhoTouchedTargetGetParams struct {
 // ListOverridesApiV1BroadcastOverridesGetParams defines parameters for ListOverridesApiV1BroadcastOverridesGet.
 type ListOverridesApiV1BroadcastOverridesGetParams struct {
 	// OpIdPattern Exact-match filter on op_id_pattern (not a glob match).
-	OpIdPattern   *string `form:"op_id_pattern,omitempty" json:"op_id_pattern,omitempty"`
+	OpIdPattern *string `form:"op_id_pattern,omitempty" json:"op_id_pattern,omitempty"`
+
+	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -4957,8 +4963,11 @@ type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams struct {
 
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
 type ListEndpointApiV1ConnectorsGetParams struct {
-	Status        *ListEndpointApiV1ConnectorsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	Authorization *string                                     `json:"authorization,omitempty"`
+	Status *ListEndpointApiV1ConnectorsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // ListEndpointApiV1ConnectorsGetParamsStatus defines parameters for ListEndpointApiV1ConnectorsGet.
@@ -5007,8 +5016,11 @@ type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams struct {
 // ListConventionsApiV1ConventionsGetParams defines parameters for ListConventionsApiV1ConventionsGet.
 type ListConventionsApiV1ConventionsGetParams struct {
 	// Kind Filter by kind (operational / workflow / reference).
-	Kind          *ConventionKind `form:"kind,omitempty" json:"kind,omitempty"`
-	Authorization *string         `json:"authorization,omitempty"`
+	Kind *ConventionKind `form:"kind,omitempty" json:"kind,omitempty"`
+
+	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // CreateConventionApiV1ConventionsPostParams defines parameters for CreateConventionApiV1ConventionsPost.
@@ -10925,6 +10937,22 @@ func NewMyRecentApiV1AuditMyRecentGetRequest(server string, params *MyRecentApiV
 
 		}
 
+		if params.Envelope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -11256,6 +11284,22 @@ func NewListOverridesApiV1BroadcastOverridesGetRequest(server string, params *Li
 
 		}
 
+		if params.Envelope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -11411,6 +11455,22 @@ func NewListEndpointApiV1ConnectorsGetRequest(server string, params *ListEndpoin
 		if params.Status != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Envelope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -11906,6 +11966,22 @@ func NewListConventionsApiV1ConventionsGetRequest(server string, params *ListCon
 		if params.Kind != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Envelope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -20105,9 +20181,13 @@ func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) StatusCod
 type ListEndpointApiV1ConnectorsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *map[string][]map[string]interface{}
-	JSON422      *HTTPValidationError
+	JSON200      *struct {
+		union json.RawMessage
+	}
+	JSON422 *HTTPValidationError
 }
+type ListEndpointApiV1ConnectorsGet2000 map[string][]map[string]interface{}
+type ListEndpointApiV1ConnectorsGet2001 map[string]interface{}
 
 // Status returns HTTPResponse.Status
 func (r ListEndpointApiV1ConnectorsGetResponse) Status() string {
@@ -25638,7 +25718,9 @@ func ParseListEndpointApiV1ConnectorsGetResponse(rsp *http.Response) (*ListEndpo
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest map[string][]map[string]interface{}
+		var dest struct {
+			union json.RawMessage
+		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

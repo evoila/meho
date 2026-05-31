@@ -51,7 +51,7 @@ from typing import Annotated, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -86,6 +86,12 @@ from meho_backplane.mcp.server import RESOURCES_SUBSCRIBE_ENABLED
 
 __all__ = ["router"]
 
+
+from meho_backplane.api.v1._envelope import (
+    ENVELOPE_QUERY,
+    EnvelopeVersion,
+    wrap_v2_envelope,
+)
 
 router = APIRouter(prefix="/api/v1/conventions", tags=["conventions"])
 
@@ -423,13 +429,25 @@ async def list_conventions(
         ConventionKind | None,
         Query(description="Filter by kind (operational / workflow / reference)."),
     ] = None,
-) -> ConventionListResponse:
+    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
+) -> ConventionListResponse | JSONResponse:
     """List the operator's tenant's conventions, optionally filtered by kind.
 
     Returns the lighter :class:`ConventionSummary` shape (no full
     ``body``). Ordering is ``priority DESC, created_at ASC`` --
     the same key T4's preamble assembler uses for packing, so the
     list view surfaces conventions in T4's consideration order.
+
+    The default response is the v0.8.0 keyed
+    :class:`ConventionListResponse` shape (``entries`` +
+    ``budget_status``). Passing ``?envelope=v2`` returns the unified
+    ``{"items": [...], "next_cursor": null, "budget_status": {...}}``
+    shape per ``docs/codebase/api-shape-conventions.md`` §2 -- the
+    convention list is unpaginated, so ``next_cursor`` is always
+    ``null`` and ``budget_status`` rides as a top-level sidecar
+    (not nested under ``meta``). Omitting the param keeps the v0.8.0
+    default so no client breaks (G0.18-T3 #1356, completing #1312
+    acceptance A).
 
     The response also carries ``budget_status`` (T7 #1094): the
     preamble budget arithmetic for the operator's tenant, computed
@@ -490,8 +508,17 @@ async def list_conventions(
         dropped_slugs=preamble.dropped_slugs,
     )
 
+    entries = [ConventionSummary.model_validate(row) for row in rows]
+    if envelope == "v2":
+        return JSONResponse(
+            wrap_v2_envelope(
+                [entry.model_dump(mode="json") for entry in entries],
+                next_cursor=None,
+                budget_status=budget_status.model_dump(mode="json"),
+            )
+        )
     return ConventionListResponse(
-        entries=[ConventionSummary.model_validate(row) for row in rows],
+        entries=entries,
         budget_status=budget_status,
     )
 

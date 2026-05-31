@@ -2428,7 +2428,7 @@
           "connectors"
         ],
         "summary": "List Endpoint",
-        "description": "List ingested connectors visible to the operator.\n\nVisibility scope (per\n:func:`list_ingested_connectors`): operator's-tenant rows +\nbuilt-ins. The optional ``status`` filter narrows by aggregated\nreview status; ``all`` (or omission) returns everything.\n\nThe response is wrapped in ``{\"connectors\": [...]}`` so future\npaging / cursor fields can land non-breakingly. The route builds\nthe payload by calling :meth:`ConnectorListItem.model_dump`\n(with ``mode=\"json\"``) on each item returned by\n:func:`list_ingested_connectors` rather than annotating\n``response_model=ConnectorListResponse`` \u2014 per-item ``tenant_id``\nUUIDs need to render as strings in JSON, and the per-item\n``mode=\"json\"`` dump is the simplest way to get that without\nintroducing a custom serializer.",
+        "description": "List ingested connectors visible to the operator.\n\nVisibility scope (per\n:func:`list_ingested_connectors`): operator's-tenant rows +\nbuilt-ins. The optional ``status`` filter narrows by aggregated\nreview status; ``all`` (or omission) returns everything.\n\nThe default response is wrapped in ``{\"connectors\": [...]}`` so\nfuture paging / cursor fields can land non-breakingly. The route\nbuilds the payload by calling :meth:`ConnectorListItem.model_dump`\n(with ``mode=\"json\"``) on each item returned by\n:func:`list_ingested_connectors` rather than annotating\n``response_model=ConnectorListResponse`` \u2014 per-item ``tenant_id``\nUUIDs need to render as strings in JSON, and the per-item\n``mode=\"json\"`` dump is the simplest way to get that without\nintroducing a custom serializer.\n\nPassing ``?envelope=v2`` returns the unified ``{\"items\": [...],\n\"next_cursor\": ...}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is\nnot cursor-paginated, so ``next_cursor`` is always ``None`` under\nthe opt-in. Omitting the param keeps the v0.8.0 default shape so\nno client breaks (G0.18-T3 #1356, completing #1312 acceptance A).",
         "operationId": "list_endpoint_api_v1_connectors_get",
         "parameters": [
           {
@@ -2448,6 +2448,19 @@
             }
           },
           {
+            "name": "envelope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "v2",
+              "type": "string",
+              "nullable": true,
+              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "title": "Envelope"
+            },
+            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
+          },
+          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -2464,14 +2477,22 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "array",
-                    "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": true
+                        }
+                      }
+                    },
+                    {
                       "type": "object",
                       "additionalProperties": true
                     }
-                  },
+                  ],
                   "title": "Response List Endpoint Api V1 Connectors Get"
                 }
               }
@@ -4331,7 +4352,7 @@
           "audit"
         ],
         "summary": "My Recent",
-        "description": "Audit rows the calling operator produced within the *since* window.\n\nPrincipal is taken from ``operator.sub`` (the JWT subject); an\noperator cannot see another operator's recent activity through\nthis route \u2014 for that, the full POST surface filters on\n``principal``.",
+        "description": "Audit rows the calling operator produced within the *since* window.\n\nPrincipal is taken from ``operator.sub`` (the JWT subject); an\noperator cannot see another operator's recent activity through\nthis route \u2014 for that, the full POST surface filters on\n``principal``.\n\nThe default response is the v0.8.0 :class:`AuditQueryResult` shape\n(``rows`` + ``next_cursor``). Passing ``?envelope=v2`` returns the\nunified ``{\"items\": [...], \"next_cursor\": ...}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72, carrying the same\nforward-only cursor. Omitting the param keeps the v0.8.0 default so\nno client breaks (G0.18-T3 #1356, completing #1312 acceptance A).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so the\ndocumented OpenAPI 200 schema, and the typed CLI client generated\nfrom it) as the named :class:`AuditQueryResult` while still letting\nthe opt-in branch return the unified shape.",
         "operationId": "my_recent_api_v1_audit_my_recent_get",
         "parameters": [
           {
@@ -4356,6 +4377,19 @@
               "default": 100,
               "title": "Limit"
             }
+          },
+          {
+            "name": "envelope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "v2",
+              "type": "string",
+              "nullable": true,
+              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "title": "Envelope"
+            },
+            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -4506,7 +4540,7 @@
           "broadcast"
         ],
         "summary": "List Overrides",
-        "description": "List override rules owned by the operator's tenant.",
+        "description": "List override rules owned by the operator's tenant.\n\nThe default response is the v0.8.0 bare list of\n:class:`BroadcastOverrideRead`. Passing ``?envelope=v2`` returns\nthe unified ``{\"items\": [...], \"next_cursor\": null}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``null`` under the\nopt-in. Omitting the param keeps the v0.8.0 default so no client\nbreaks (G0.18-T3 #1356, completing #1312 acceptance A).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so the\ndocumented OpenAPI 200 schema, and the typed CLI client generated\nfrom it) as ``list[BroadcastOverrideRead]`` while still letting the\nopt-in branch return the unified shape.",
         "operationId": "list_overrides_api_v1_broadcast_overrides_get",
         "parameters": [
           {
@@ -4521,6 +4555,19 @@
               "title": "Op Id Pattern"
             },
             "description": "Exact-match filter on op_id_pattern (not a glob match)."
+          },
+          {
+            "name": "envelope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "v2",
+              "type": "string",
+              "nullable": true,
+              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "title": "Envelope"
+            },
+            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -6178,7 +6225,7 @@
           "conventions"
         ],
         "summary": "List Conventions",
-        "description": "List the operator's tenant's conventions, optionally filtered by kind.\n\nReturns the lighter :class:`ConventionSummary` shape (no full\n``body``). Ordering is ``priority DESC, created_at ASC`` --\nthe same key T4's preamble assembler uses for packing, so the\nlist view surfaces conventions in T4's consideration order.\n\nThe response also carries ``budget_status`` (T7 #1094): the\npreamble budget arithmetic for the operator's tenant, computed\nby a call to :func:`~meho_backplane.conventions.preamble.assemble_preamble`.\nThe ``--kind`` query filter narrows the ``entries`` list only;\n``budget_status`` always reflects the full ``operational``\nset (a ``--kind=workflow`` list call still wants the truthful\nbudget signal). The assembler runs an indexed SELECT + an\nin-memory pack -- O(N) per call where N is the tenant's\noperational-convention count (~10-20 in practice), so the\ncost is negligible against the list round-trip.",
+        "description": "List the operator's tenant's conventions, optionally filtered by kind.\n\nReturns the lighter :class:`ConventionSummary` shape (no full\n``body``). Ordering is ``priority DESC, created_at ASC`` --\nthe same key T4's preamble assembler uses for packing, so the\nlist view surfaces conventions in T4's consideration order.\n\nThe default response is the v0.8.0 keyed\n:class:`ConventionListResponse` shape (``entries`` +\n``budget_status``). Passing ``?envelope=v2`` returns the unified\n``{\"items\": [...], \"next_cursor\": null, \"budget_status\": {...}}``\nshape per ``docs/codebase/api-shape-conventions.md`` \u00a72 -- the\nconvention list is unpaginated, so ``next_cursor`` is always\n``null`` and ``budget_status`` rides as a top-level sidecar\n(not nested under ``meta``). Omitting the param keeps the v0.8.0\ndefault so no client breaks (G0.18-T3 #1356, completing #1312\nacceptance A).\n\nThe response also carries ``budget_status`` (T7 #1094): the\npreamble budget arithmetic for the operator's tenant, computed\nby a call to :func:`~meho_backplane.conventions.preamble.assemble_preamble`.\nThe ``--kind`` query filter narrows the ``entries`` list only;\n``budget_status`` always reflects the full ``operational``\nset (a ``--kind=workflow`` list call still wants the truthful\nbudget signal). The assembler runs an indexed SELECT + an\nin-memory pack -- O(N) per call where N is the tenant's\noperational-convention count (~10-20 in practice), so the\ncost is negligible against the list round-trip.",
         "operationId": "list_conventions_api_v1_conventions_get",
         "parameters": [
           {
@@ -6192,6 +6239,19 @@
               "title": "Kind"
             },
             "description": "Filter by kind (operational / workflow / reference)."
+          },
+          {
+            "name": "envelope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "v2",
+              "type": "string",
+              "nullable": true,
+              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "title": "Envelope"
+            },
+            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",

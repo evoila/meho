@@ -362,7 +362,7 @@ connector-related release-notes line.
     `meho.scheduler.list.status`.
   - `meho.scheduler.list.{limit,offset}` and
     `meho.approvals.list.{limit,offset}` declare their defaults
-    in-schema (50/0 and 100/0 respectively) so schema-driven MCP
+    in-schema (100/0 and 50/0 respectively) so schema-driven MCP
     clients render the documented values.
   - `meho.agent_principals.register.name` carries the documented
     safe-alphabet `pattern` plus `minLength`/`maxLength` at the

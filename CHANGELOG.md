@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-31
+
 ### Added
 
 - The `?envelope=v2` list-envelope opt-in now works on all five §2 list
@@ -132,6 +134,53 @@ connector-related release-notes line.
   rejected at PR-build time. Closes the chart-side gap that prevented
   operators from enabling agents on a Helm deploy without a manual
   `extraEnv` workaround.
+
+<!-- bulk roll-up (per-PR bullets authored at release time) -->
+- G0.12-T2 operation verbs use generated typed client (#1275)
+- G12.1-T1 migration 0034 + SQLAlchemy models + audit_log run_id/step_id columns (#1327)
+- G12.1-T2 run_id_var + step_id_var contextvar plumbing for runbook correlation (#1328)
+- G12.2-T1 runbook template Pydantic schemas + step-shape discriminated-union validation (#1331)
+- G12.2-T2 runbook template service layer — CRUD + fork-from-published + in_flight_run_count (#1333)
+- G12.2-T4 runbook template MCP tools — runbook_*_template × 6 (#1335)
+- G12.2-T3 runbook template REST routes under `/api/v1/runbooks/templates` (#1336)
+- G12.3-T1 run-side Pydantic schemas — opacity-shaped single-step response (#1338)
+- G12.3-T2 step-execution engine + runtime substitution helper (#1339)
+- G12.3-T3 run service layer — start/next/abort/reassign/list + post-completion check (#1340)
+- G12.3-T4 post-completion show_template carve-out (#1341)
+- G12.3-T6 runbook run MCP tools — start/next/abort/reassign/list × 5 (#1343)
+- G12.3-T5 runbook run REST routes under `/api/v1/runbooks/runs` (#1342)
+- G12.4-T1 runbook priming helper (#1346)
+- G12.4-T2 wire runbook priming into MCP initialize preamble (#1347)
+- G12.5-T1 meho runbook CLI chassis + 6 template verbs (#1349)
+- G12.5-T2 meho runbook CLI run verbs — start/next/abort/reassign/runs (#1350)
+- G0.18-T10 helm chart first-class agent-runtime secret wiring (#1373)
+
+### Changed
+
+- G0.12-T1 migrate to generated typed client (#1276)
+- G0.12-T3 migrate cmd/agent/ to the generated typed client (#1277)
+- G0.12-T4 migrate cmd/agent-principal/ to typed client (#1262 #1279)
+- G0.12-T6 migrate to generated typed client (#1264 #1280)
+- G0.12-T7 migrate cmd/connector/ to typed client (#1265 #1283)
+- G0.12-T8 migrate cmd/conventions/ to typed client (#1266 #1284)
+- G0.12-T9 migrate cmd/kb/ to typed client (#1267 #1282)
+- G0.12-T10 migrate cmd/memory/ to typed client (#1268 #1287)
+- G0.12-T11 migrate cmd/migrate/ to typed client (#1269 #1285)
+- G0.12-T12 migrate cmd/retrieval/ to typed client (#1270 #1286)
+- G0.12-T13 migrate cmd/scheduler/ to typed client (#1271 #1291)
+- G0.12-T14 migrate list/describe/probe/discover to the generated typed client (#1272 #1289)
+- G0.12-T15 migrate cmd/topology/ to typed client (#1273 #1290)
+- G0.12-T16 promote dispatch.Connector to own typed transport (#1274 #1293)
+- G0.12-T5 migrate to generated typed client (#1263 #1281)
+- refresh shipped status — v0.6/v0.7/v0.8 → shipped (#1288)
+- add api-shape-conventions.md — SEV-4 sweep + curated-daily-driver framing (#1310)
+- §10 intra-connector list-op request-shape parity (#1334)
+- G12.2-T5 multi-session drafting authoring guide at docs/runbooks/authoring.md (#1337)
+- record v0.8.1 release on main (#1344)
+- G12.3-T7 runbook architecture doc at docs/architecture/runbooks.md (#1345)
+- G12.4-T3 document runbook session priming in mcp.md (#1348)
+- G12.5-T3 meho runbook operator CLI reference (#1351)
+- unblock v0.9.0 release tooling + reconcile roadmap (#1379)
 
 ### Fixed
 
@@ -282,6 +331,19 @@ connector-related release-notes line.
   edges until non-k8s populators ship. Full non-k8s
   `discover_topology` populators stay out of scope for this Task
   (a larger follow-up Initiative).
+
+<!-- bulk roll-up (per-PR bullets authored at release time) -->
+- G0.16-T3 backlog prelude on fresh SSE connections (#1321)
+- G0.16-T2 gh-rest auth_model reconciliation (Vault-payload discriminator) (#1322)
+- G0.16-T1 — async ingest must not crash pod on large specs (#1303 #1323)
+- G0.16-T4 probe-route Vault OIDC fingerprint convergence (#1326)
+- G0.16-T5 gh/3 catalog label-vs-spec drift opt-in (#1324)
+- G0.17-T1 k8s list-op request-shape parity (#1330 #1332)
+- accept sddc product alias at create/update validator (#1365)
+- G0.18-T6 create_node writes graph_node_history so manual seeds surface to kind=history/timeline (#1372)
+- G0.18-T5 tools/list shape-consistency sweep (#1358 #1374)
+- G12.3-T3 follow-up — release DB session across verify dispatch + preserve falsy forensics (#1377)
+- emit Pydantic-list 422 detail to match OpenAPI schema (#1378)
 
 ### Documentation
 

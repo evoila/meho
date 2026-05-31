@@ -891,3 +891,127 @@ segment.
   carries no prefix override. Both anchors are CI-grep-able; before
   re-filing a "route moved" finding, confirm against these files
   directly.
+
+## 14. Intra-MCP `tools/list` shape parity
+
+**Sibling MCP tools share one convention per concept across the 51-tool
+surface — no per-tool wire-shape dialect.**
+
+`claude-rdc-hetzner-dc#789` N4 (the v0.8.1 dogfood cycle) catalogued
+seven sibling-tool drifts on the MCP `tools/list` surface — the MCP-
+side analogue of the REST/MCP sweep §1–§9 close for `/api/v1`. None
+were breaking (every drift was an agent-ergonomics papercut), but the
+aggregate forced a schema-driven agent to write per-tool plumbing for
+shapes that wanted to be one.
+
+G0.18-T5 (#1358) reconciled the seven drifts and pinned the
+conventions structurally in
+[`backend/tests/test_mcp_tools_list_shape_conventions.py`](../../backend/tests/test_mcp_tools_list_shape_conventions.py)
+so a future regression fails CI rather than surfacing as the next
+RDC dogfood-cycle finding.
+
+### §14.1 — `op_class` enum: one source per filtering surface
+
+Every MCP tool that filters by audit / broadcast `op_class` declares
+the value set as a JSON-Schema `enum` sourced from the canonical
+[`OP_CLASS_ENUM`](../../backend/src/meho_backplane/broadcast/history.py)
+tuple. The v0.8.0 drift was prose-only on `query_audit.op_class`
+(five values, missing `credential_mint`) vs JSON-enum on
+`meho.broadcast.recent`/`watch` (six values). Convention: one
+import, one tuple, one enum on every surface that filters on it.
+Adjacent finding (not in scope here): `tool_call` is a recent
+classify_op return value missing from `OP_CLASS_ENUM`; harmonising
+the broadcast tuple with the dispatcher classifier output is a
+follow-up.
+
+### §14.2 — Forward-cursor parameter named `cursor` everywhere
+
+Every MCP read tool that paginates forward names the cursor
+parameter `cursor`. The v0.8.0 wire shape spelled the same concept
+three ways: `since` (`meho.broadcast.recent`), `since_cursor`
+(`meho.broadcast.watch`), `cursor` (`query_audit` / `query_topology` /
+`list_targets`). The reconciled name is `cursor` (the lexical
+shortest, present on four of the six tools); `since` and
+`since_cursor` survive as **deprecated aliases** marked
+`deprecated: true` in the schema. The handler enforces XOR — passing
+both names rejects with `-32602`. New callers use `cursor`.
+
+Migration shape mirrors §2's `?envelope=v2` discipline: the
+alias-and-deprecate path keeps v0.8.0 callers working through the
+v0.9.0 → v0.10.0 cycle; the next sweep drops the aliases.
+
+### §14.3 — `<noun>_id` UUID parameter convention
+
+Every MCP tool that names a resource UUID uses the `<noun>_id`
+form: `trigger_id` (`meho.scheduler.cancel`), `agent_session_id`
+(`query_audit`), `audit_id` (`query_audit`), `approval_request_id`
+(`meho.approvals.*`). The v0.8.0 `meho.approvals.{get,approve,reject}`
+used a bare `id` — the only sibling-drift left after the previous
+sweeps. Canonical name post-G0.18-T5: `approval_request_id`; bare
+`id` survives as a deprecated alias.
+
+### §14.4 — Cross-tenant scope parameter named `tenant_id`
+
+Every MCP tool that exposes a cross-tenant scope parameter names it
+`tenant_id`. The v0.8.0 `list_targets` spelled the same concept
+`tenant`; the admin tools (`meho.connector.*`, `meho.scheduler.create`)
+spelled it `tenant_id`. Reconciled: `tenant_id` everywhere;
+`list_targets.tenant` survives as a deprecated alias.
+
+**Accepted-shape asymmetry, documented explicitly:**
+`list_targets.tenant_id` accepts a slug OR a UUID, while the admin
+tools accept UUID-only. The asymmetry is deliberate —
+`list_targets` opens a session to resolve the slug via the
+`tenants` table (slug → UUID before scoping the query), while the
+admin tools' service layer doesn't expect a session for tenant
+resolution (their REST counterparts pre-resolve). Migrating the
+admin tools to accept slugs would require widening the service-
+layer signature; out of scope for the sweep. The asymmetry is one
+wire field with two accepted shapes on one tool, not two wire fields.
+
+### §14.5 — `limit` / `offset` defaults declared in-schema
+
+Every paginating list tool declares `default: <N>` on its `limit`
+and `offset` (and on `cursor` when applicable). The v0.8.0 surface
+had `default` declared in-schema for some (`meho.approvals.*`,
+`query_audit`, `list_targets`, `search_operations`) but prose-only
+for others (`meho.scheduler.list`, `query_topology.limit`). A
+schema-driven MCP client renders the documented default; prose-
+only defaults force the client to guess. Canonical: in-schema.
+
+### §14.6 — `*.list.status` is a JSON enum
+
+Every MCP list tool that filters by status declares the allowed
+values as a JSON-Schema `enum`, not in prose. `meho.scheduler.list`
+already did; `meho.approvals.list` did not (`status` was a bare
+`type: string` with prose-listed values). Canonical: `enum` +
+`default` on every list-tool `status` filter.
+
+### §14.7 — Documented name alphabets are JSON-Schema patterns
+
+When a tool's `name` field documents an alphabet (`agent identity
+name (letters, digits, hyphen, underscore, dot)`), the JSON-Schema
+declares that alphabet via `pattern` so an MCP client schema-
+validating ahead of the call sees the constraint before the
+service-layer regex fires. `meho.agents.create.name` already
+carried the pattern; `meho.agent_principals.register.name` did
+not. Canonical: `pattern` declared at the schema layer matches
+the service-side regex.
+
+### §14.8 — Every list tool paginates
+
+Every list-shaped MCP tool exposes pagination knobs (`limit` +
+`cursor` for keyset, `limit` + `offset` for offset). The v0.8.0
+`list_operation_groups` was unpaginated (no `limit`, no `cursor`,
+no `next_cursor`) while its sibling `list_targets` was keyset-
+paginated. Convention: keyset on the natural sort key (`group_key`
+for `list_operation_groups`, `name` for `list_targets`) with the
+same `next_cursor` shape on the response.
+
+### Code reference
+
+The pack of regression tests in
+[`backend/tests/test_mcp_tools_list_shape_conventions.py`](../../backend/tests/test_mcp_tools_list_shape_conventions.py)
+exercises every convention above. A future drift on any of them
+fails CI rather than surfacing as the next RDC dogfood-cycle
+finding.

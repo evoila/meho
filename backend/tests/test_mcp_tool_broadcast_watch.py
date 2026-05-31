@@ -203,11 +203,23 @@ def test_tools_list_exposes_watch_for_operator(
     schema = watch_def["inputSchema"]
     assert schema["type"] == "object"
     assert schema["additionalProperties"] is False
-    assert "since_cursor" in schema["properties"]
+    assert "cursor" in schema["properties"]
+    assert "since_cursor" in schema["properties"]  # deprecated alias
     assert "filter" in schema["properties"]
     assert "timeout_ms" in schema["properties"]
-    # ``since_cursor`` is required at the schema layer.
-    assert schema["required"] == ["since_cursor"]
+    # NOTE: `anyOf` is stripped from the wire copy by
+    # ``_wire_safe_input_schema`` (Anthropic Messages API rejects
+    # top-level combinators). The handler-side XOR enforcement runs
+    # against the full ``defn.inputSchema`` and is covered by
+    # ``test_handler_rejects_both_cursor_and_since_cursor`` below;
+    # ``tests/test_mcp_tools_list_shape_conventions.py`` asserts the
+    # internal-shape ``anyOf`` directly off the registry.
+    assert "anyOf" not in schema, "wire shape must not expose top-level anyOf"
+    assert "required" not in schema
+    # The deprecated alias carries the `deprecated: true` flag so a
+    # schema-driven client renders the migration nudge.
+    assert schema["properties"]["since_cursor"].get("deprecated") is True
+    assert "deprecated" not in schema["properties"]["cursor"]
     # ``timeout_ms`` bounds are wired.
     assert schema["properties"]["timeout_ms"]["minimum"] == _WATCH_MIN_TIMEOUT_MS
     assert schema["properties"]["timeout_ms"]["maximum"] == _WATCH_MAX_TIMEOUT_MS
@@ -285,14 +297,34 @@ def test_empty_since_cursor_rejects_with_invalid_params(
 
 
 async def test_handler_directly_rejects_non_string_since_cursor() -> None:
-    """Handler-side typed-contract: non-string ``since_cursor`` raises -32602.
+    """Handler-side typed-contract: non-string cursor raises -32602.
 
     Belt-and-suspenders over the schema -- a future schema relaxation
-    wouldn't silently widen what the handler accepts.
+    wouldn't silently widen what the handler accepts. Post-G0.18-T5
+    #1358 the error message names ``cursor`` (the canonical wire
+    name); both alias names route through the same handler reject
+    branch.
     """
     op = build_operator(TenantRole.OPERATOR)
-    with pytest.raises(McpInvalidParamsError, match="since_cursor"):
+    with pytest.raises(McpInvalidParamsError, match="cursor"):
         await _handler_watch(op, {"since_cursor": 12345})
+    with pytest.raises(McpInvalidParamsError, match="cursor"):
+        await _handler_watch(op, {"cursor": 12345})
+
+
+async def test_handler_rejects_both_cursor_and_since_cursor() -> None:
+    """Passing both alias names rejects with -32602 (G0.18-T5 #1358).
+
+    The wire layer accepts both spellings to ease the v0.8.0 → v0.9.0
+    migration, but exactly one must be supplied per call — passing both
+    is an unambiguous client bug that surfaces at the handler boundary.
+    """
+    op = build_operator(TenantRole.OPERATOR)
+    with pytest.raises(McpInvalidParamsError, match=r"cursor.*since_cursor"):
+        await _handler_watch(
+            op,
+            {"cursor": _SINCE_FIXTURE, "since_cursor": _SINCE_FIXTURE},
+        )
 
 
 # ---------------------------------------------------------------------------

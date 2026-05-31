@@ -182,11 +182,15 @@ def test_tools_list_exposes_recent_for_operator(
     schema = recent_def["inputSchema"]
     assert schema["type"] == "object"
     assert schema["additionalProperties"] is False
-    assert "since" in schema["properties"]
+    assert "cursor" in schema["properties"]
+    assert "since" in schema["properties"]  # deprecated alias kept for backward compat
     assert "filter" in schema["properties"]
     assert "limit" in schema["properties"]
     assert schema["properties"]["limit"]["minimum"] == 1
     assert schema["properties"]["limit"]["maximum"] == 1000
+    # Migration nudge: the deprecated alias carries the schema flag.
+    assert schema["properties"]["since"].get("deprecated") is True
+    assert "deprecated" not in schema["properties"]["cursor"]
 
 
 def test_tools_list_hides_recent_from_read_only(

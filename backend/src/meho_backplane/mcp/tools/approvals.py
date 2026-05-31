@@ -83,6 +83,56 @@ _OP_IDS: Final[dict[str, str]] = {
     "reject": "approval.reject",
 }
 
+#: Allowed ``status`` filter values on ``meho.approvals.list``. Mirrors
+#: :class:`~meho_backplane.db.models.ApprovalRequestStatus` plus the
+#: ``"all"`` sentinel that means "no filter". Pinning the enum here (and
+#: in the inputSchema below) brings ``meho.approvals.list.status`` into
+#: parity with ``meho.scheduler.list.status``: both surface the allowed
+#: vocabulary as a JSON-Schema ``enum`` rather than prose, so a schema-
+#: driven MCP client renders the same dropdown shape for sibling list
+#: filters (RDC #789 N4 / G0.18-T5 #1358).
+_LIST_STATUS_VALUES: Final[tuple[str, ...]] = (
+    "pending",
+    "approved",
+    "rejected",
+    "expired",
+    "all",
+)
+
+#: Shared ``approval_request_id`` schema fragment with the deprecated
+#: ``id`` alias. ``additionalProperties: false`` plus the explicit
+#: alias declaration keeps the wire surface honest: a future schema
+#: tweak adds a new field by name, never by silent passthrough.
+_APPROVAL_REQUEST_ID_PROPERTY: Final[dict[str, Any]] = {
+    "type": "string",
+    "format": "uuid",
+    "description": (
+        "Approval request UUID. Canonical name "
+        "(G0.18-T5 #1358); matches the `<noun>_id` convention used "
+        "by every other MCP tool that names a resource UUID."
+    ),
+}
+
+#: Deprecated ``id`` alias kept for backward compat with v0.8.0 callers.
+_APPROVAL_LEGACY_ID_PROPERTY: Final[dict[str, Any]] = {
+    "type": "string",
+    "format": "uuid",
+    "description": (
+        "DEPRECATED alias for `approval_request_id` (v0.8.0 wire "
+        "shape). Accepted for backward compatibility; new callers "
+        "SHOULD use `approval_request_id`. Mutually exclusive with "
+        "`approval_request_id`; passing both rejects with -32602."
+    ),
+    "deprecated": True,
+}
+
+#: Either alias satisfies the "id required" constraint; the handler
+#: enforces the XOR. Shared across get / approve / reject.
+_APPROVAL_ID_ANYOF: Final[list[dict[str, Any]]] = [
+    {"required": ["approval_request_id"]},
+    {"required": ["id"]},
+]
+
 
 def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     """Render an :class:`ApprovalRequest` as a JSON-serialisable dict.
@@ -109,13 +159,30 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
 
 
 def _require_id(arguments: dict[str, Any]) -> uuid.UUID:
-    raw = arguments.get("id")
+    """Resolve the approval-request UUID from the wire arguments.
+
+    Accepts the canonical ``approval_request_id`` (G0.18-T5 #1358) and
+    the deprecated ``id`` (v0.8.0 wire shape) as aliases — exactly one
+    must be supplied. Passing both rejects with -32602. The
+    ``<noun>_id`` rename aligns with every other MCP tool that names a
+    resource UUID (``trigger_id`` / ``audit_id`` / ``agent_session_id``);
+    ``id`` is retained for one cycle so v0.8.0 callers continue to work.
+    """
+    canonical = arguments.get("approval_request_id")
+    legacy = arguments.get("id")
+    if canonical is not None and legacy is not None:
+        raise McpInvalidParamsError(
+            "pass either `approval_request_id` (canonical) or `id` (deprecated alias), not both",
+        )
+    raw = canonical if canonical is not None else legacy
     if not isinstance(raw, str) or not raw:
-        raise McpInvalidParamsError("id is required and must be a non-empty UUID string")
+        raise McpInvalidParamsError(
+            "approval_request_id is required and must be a non-empty UUID string",
+        )
     try:
         return uuid.UUID(raw)
     except ValueError as exc:
-        raise McpInvalidParamsError("id must be a valid UUID") from exc
+        raise McpInvalidParamsError("approval_request_id must be a valid UUID") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -175,13 +242,29 @@ register_mcp_tool(
             "properties": {
                 "status": {
                     "type": "string",
+                    "enum": list(_LIST_STATUS_VALUES),
+                    "default": "pending",
                     "description": (
-                        "Filter by status: 'pending' (default), 'approved', "
-                        "'rejected', 'expired', or 'all'."
+                        "Filter by status. 'all' is the sentinel meaning "
+                        "'no filter'. Vocabulary mirrors "
+                        "`meho.scheduler.list.status` (both surface the "
+                        "allowed values as a JSON enum, not prose) — "
+                        "RDC #789 N4 / G0.18-T5."
                     ),
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
-                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                    "description": "Page size. Default 50; max 200.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Rows to skip before the first returned row. Default 0.",
+                },
             },
             "additionalProperties": False,
         },
@@ -227,14 +310,17 @@ register_mcp_tool(
             "Operator-level. Returns the full detail including "
             "proposed_effect (human-readable description of what the op "
             "would do) so an operator can decide before approving. "
-            "Cross-tenant / absent ids return approval_request_not_found."
+            "Cross-tenant / absent ids return approval_request_not_found. "
+            "Pass either `approval_request_id` (canonical name; "
+            "G0.18-T5 #1358) or the deprecated `id` alias."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Approval request UUID."},
+                "approval_request_id": _APPROVAL_REQUEST_ID_PROPERTY,
+                "id": _APPROVAL_LEGACY_ID_PROPERTY,
             },
-            "required": ["id"],
+            "anyOf": _APPROVAL_ID_ANYOF,
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
@@ -304,14 +390,17 @@ register_mcp_tool(
             "re-dispatches the approved op (with the params it has + the "
             "_approved gate-bypass) — this MCP tool captures the operator "
             "decision durably. Only pending requests may be approved; any "
-            "other status returns approval_request_not_pending."
+            "other status returns approval_request_not_pending. Pass "
+            "either `approval_request_id` (canonical name; G0.18-T5 "
+            "#1358) or the deprecated `id` alias."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Approval request UUID to approve."},
+                "approval_request_id": _APPROVAL_REQUEST_ID_PROPERTY,
+                "id": _APPROVAL_LEGACY_ID_PROPERTY,
             },
-            "required": ["id"],
+            "anyOf": _APPROVAL_ID_ANYOF,
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
@@ -376,18 +465,21 @@ register_mcp_tool(
             "Operator-level. Flips the request to 'rejected', writes the "
             "decision audit row, and announces approval_decided on the "
             "broadcast feed. The original op is not executed. Only "
-            "pending requests may be rejected."
+            "pending requests may be rejected. Pass either "
+            "`approval_request_id` (canonical name; G0.18-T5 #1358) or "
+            "the deprecated `id` alias."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Approval request UUID to reject."},
+                "approval_request_id": _APPROVAL_REQUEST_ID_PROPERTY,
+                "id": _APPROVAL_LEGACY_ID_PROPERTY,
                 "reason": {
                     "type": "string",
                     "description": "Optional rationale recorded on the decision audit row.",
                 },
             },
-            "required": ["id"],
+            "anyOf": _APPROVAL_ID_ANYOF,
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,

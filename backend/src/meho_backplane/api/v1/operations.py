@@ -96,6 +96,27 @@ async def get_groups(
         description=_CONNECTOR_ID_DESCRIPTION,
         openapi_examples=_CONNECTOR_ID_EXAMPLES,
     ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description=(
+            "Page size. Default 100; max 500. Matches `list_targets` "
+            "paging — sibling list surfaces share one ceiling "
+            "(G0.18-T5 #1358)."
+        ),
+    ),
+    cursor: str | None = Query(
+        default=None,
+        max_length=256,
+        description=(
+            "Keyset-pagination cursor: pass the last `group_key` from "
+            "the previous page to fetch the next. Results are ordered "
+            "by `group_key` ascending. A `null` `next_cursor` in the "
+            "response means this page is the end of the listing "
+            "(G0.18-T5 #1358)."
+        ),
+    ),
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
     """List enabled operation groups for *connector_id*.
@@ -105,10 +126,18 @@ async def get_groups(
     is a ``404`` — not an empty ``200``: the empty-catalog trap was
     that a mis-shaped id looked identical to an empty connector. A
     *known* connector with zero enabled groups still returns
-    ``{"groups": []}`` (that empty is operationally meaningful).
+    ``{"groups": [], "next_cursor": null}`` (that empty is
+    operationally meaningful).
+
+    Pagination is keyset on ``group_key`` (G0.18-T5 #1358); the
+    response carries ``next_cursor`` set to the last returned
+    ``group_key`` when a page is full, ``null`` otherwise.
     """
     try:
-        return await list_operation_groups(operator, {"connector_id": connector_id})
+        return await list_operation_groups(
+            operator,
+            {"connector_id": connector_id, "limit": limit, "cursor": cursor},
+        )
     except UnknownConnectorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

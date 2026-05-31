@@ -1014,16 +1014,36 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
             ),
             "maxLength": 256,
         },
-        "tenant": {
+        "tenant_id": {
             "type": ["string", "null"],
             "description": (
                 "Cross-tenant scope. Omit / null → the operator's own "
                 "tenant (the only choice for the `operator` role). A "
-                "tenant slug or UUID selects another tenant's targets "
-                "and REQUIRES the `tenant_admin` role; an `operator`-role "
-                "caller passing this gets -32602."
+                "tenant slug OR UUID selects another tenant's targets "
+                "and REQUIRES the `tenant_admin` role; an `operator`-"
+                "role caller passing this gets -32602. Canonical name "
+                "(G0.18-T5 #1358); matches `tenant_id` on "
+                "`meho.connector.*` / `meho.scheduler.create`. "
+                "NOTE: `list_targets.tenant_id` accepts a slug OR a "
+                "UUID; the connector / scheduler tools accept UUID-"
+                "only because they cannot resolve slugs from inside "
+                "their service layer (cross-tenant slug resolution "
+                "requires a session). The accepted-shape asymmetry "
+                "is documented in "
+                "`docs/codebase/api-shape-conventions.md` §14."
             ),
             "maxLength": 256,
+        },
+        "tenant": {
+            "type": ["string", "null"],
+            "description": (
+                "DEPRECATED alias for `tenant_id` (v0.8.0 wire shape). "
+                "Accepted for backward compatibility; new callers "
+                "SHOULD use `tenant_id`. Mutually exclusive with "
+                "`tenant_id`; passing both rejects with -32602."
+            ),
+            "maxLength": 256,
+            "deprecated": True,
         },
         "limit": {
             "type": "integer",
@@ -1065,20 +1085,20 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
 async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> Any:
     """Resolve the tenant id to scope the listing to.
 
-    No ``tenant`` argument → the operator's own tenant (the only path
-    open to an ``operator``-role caller). A ``tenant`` argument is a
-    cross-tenant request: it requires ``tenant_admin`` and is resolved
-    by slug first then UUID. An unknown tenant, or a non-admin passing
-    ``tenant``, surfaces as ``-32602`` (operator-actionable input
-    problem) rather than silently falling back to the own-tenant scope
-    — a silent fallback would make a typo'd cross-tenant query look
-    like an empty tenant.
+    No ``tenant_id`` argument → the operator's own tenant (the only
+    path open to an ``operator``-role caller). A ``tenant_id``
+    argument is a cross-tenant request: it requires ``tenant_admin``
+    and is resolved by slug first then UUID. An unknown tenant, or a
+    non-admin passing ``tenant_id``, surfaces as ``-32602``
+    (operator-actionable input problem) rather than silently falling
+    back to the own-tenant scope — a silent fallback would make a
+    typo'd cross-tenant query look like an empty tenant.
     """
     if tenant_arg is None:
         return operator.tenant_id
     if operator.tenant_role != TenantRole.TENANT_ADMIN:
         raise McpInvalidParamsError(
-            "list_targets: the `tenant` argument (cross-tenant scope) "
+            "list_targets: the `tenant_id` argument (cross-tenant scope) "
             "requires the tenant_admin role",
         )
     sessionmaker = get_sessionmaker()
@@ -1126,8 +1146,24 @@ async def _list_targets_handler(
     Soft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)
     are excluded — same filter the REST list route applies so MCP and
     REST never disagree about which targets are visible to a tenant.
+
+    Tenant-argument aliasing (G0.18-T5 #1358)
+    -----------------------------------------
+
+    ``tenant_id`` is the canonical cross-tenant scope argument; matches
+    the field name on ``meho.connector.*`` / ``meho.scheduler.create``.
+    ``tenant`` (v0.8.0 wire shape) is retained as a deprecated alias;
+    the two are mutually exclusive (passing both rejects with -32602).
     """
-    scope_tenant_id = await _resolve_tenant_scope(operator, arguments.get("tenant"))
+    tenant_id_arg = arguments.get("tenant_id")
+    legacy_tenant_arg = arguments.get("tenant")
+    if tenant_id_arg is not None and legacy_tenant_arg is not None:
+        raise McpInvalidParamsError(
+            "list_targets: pass either `tenant_id` (canonical) or "
+            "`tenant` (deprecated alias), not both",
+        )
+    tenant_arg = tenant_id_arg if tenant_id_arg is not None else legacy_tenant_arg
+    scope_tenant_id = await _resolve_tenant_scope(operator, tenant_arg)
 
     stmt = select(TargetORM).where(
         TargetORM.tenant_id == scope_tenant_id,

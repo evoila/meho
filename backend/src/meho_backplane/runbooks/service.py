@@ -365,6 +365,26 @@ class RunbookTemplateService:
             slug=request.slug, version=request.version, status="deprecated"
         )
 
+    async def count_in_flight_runs(
+        self,
+        tenant_id: uuid.UUID,
+        slug: str,
+        version: int,
+    ) -> int:
+        """Count ``in_progress`` runs pinned to ``(tenant_id, slug, version)``.
+
+        The same projection :meth:`update_or_fork` reports in
+        :attr:`~meho_backplane.runbooks.schemas.ForkInfo.in_flight_run_count`,
+        exposed as a standalone read so the console's published-template
+        detail view can surface how many runs are still bound to the
+        version *before* an admin forks it (forking leaves those runs
+        pinned to the source). Tenant-scoped; a cross-tenant / missing
+        ``(slug, version)`` simply has zero matching runs and returns ``0``.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            return await _count_in_flight_runs(session, tenant_id, slug, version)
+
     async def list_templates(
         self,
         tenant_id: uuid.UUID,

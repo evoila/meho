@@ -1,0 +1,160 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbook detail lifecycle action row + status badge + inline alert.
+
+  Initiative #1381 (G10.6 Runbooks UI), Task #1384 (T3). Rendered two ways:
+
+    * {% include %}-d into ``detail.html`` for the initial page render, and
+    * returned standalone by the publish / deprecate POST handlers
+      (``lifecycle.register_lifecycle_routes``) and swapped into
+      ``#runbook-lifecycle`` by HTMX after an action.
+
+  The wrapping ``#runbook-lifecycle`` element is the HTMX swap target. When
+  this fragment is returned from a POST, ``swap_badge`` is True so an
+  ``hx-swap-oob`` copy of the status badge also refreshes the header badge in
+  ``detail.html`` (which carries ``id="runbook-status-badge"``) without a
+  full-page reload.
+
+  Context variables:
+    template            -- ShowTemplateResponse: the resolved template, in its
+                           CURRENT (post-action, or pre-action on error) state
+    is_admin            -- bool: caller is tenant_admin (controls hidden for
+                           operators; the POST handlers re-check server-side)
+    in_flight_run_count -- int: in-progress runs pinned to this published
+                           version (surfaced on the fork-on-edit affordance)
+    lifecycle_error     -- str | None: typed-400 message -> inline alert-error
+    csrf_token          -- str: double-submit token echoed via hx-headers
+    swap_badge          -- bool: emit the hx-swap-oob header-badge refresh
+                           (True only on the POST re-render, not the include)
+-#}
+{%- macro status_badge(status, oob=False) -%}
+  {%- if status == "published" -%}
+    <span class="badge badge-success badge-outline" aria-label="Status: published"
+          {% if oob %}id="runbook-status-badge" hx-swap-oob="true"{% endif %}>published</span>
+  {%- elif status == "draft" -%}
+    <span class="badge badge-warning badge-outline" aria-label="Status: draft"
+          {% if oob %}id="runbook-status-badge" hx-swap-oob="true"{% endif %}>draft</span>
+  {%- else -%}
+    <span class="badge badge-ghost badge-outline" aria-label="Status: deprecated"
+          {% if oob %}id="runbook-status-badge" hx-swap-oob="true"{% endif %}>deprecated</span>
+  {%- endif -%}
+{%- endmacro -%}
+
+<div id="runbook-lifecycle" class="space-y-3"
+     x-data="{ confirm: '' }">
+
+  {# OOB header-badge refresh — only emitted from the POST re-render so the
+     header badge in detail.html flips in place after an action. #}
+  {% if swap_badge %}{{ status_badge(template.status, oob=True) }}{% endif %}
+
+  {# ---------- Inline lifecycle alert (typed 400) ---------- #}
+  {% if lifecycle_error %}
+    <div role="alert" class="alert alert-error text-sm" aria-live="assertive">
+      <span aria-hidden="true">&#9888;</span>
+      <span>{{ lifecycle_error }}</span>
+    </div>
+  {% endif %}
+
+  {% if is_admin %}
+    {# ---------- Lifecycle action row (tenant_admin only) ---------- #}
+    <div class="flex flex-wrap items-center gap-2">
+      {% if template.status == "draft" %}
+        {# Publish — promotes this draft version to published. #}
+        <button
+          type="button"
+          class="btn btn-success btn-sm"
+          x-on:click="confirm = 'publish'"
+          aria-label="Publish {{ template.slug }} v{{ template.version }}"
+        >
+          Publish
+        </button>
+      {% elif template.status == "published" %}
+        {# Deprecate — retires this published version. #}
+        <button
+          type="button"
+          class="btn btn-warning btn-sm"
+          x-on:click="confirm = 'deprecate'"
+          aria-label="Deprecate {{ template.slug }} v{{ template.version }}"
+        >
+          Deprecate
+        </button>
+        {# Edit (forks draft) — editing a published template forks a new draft
+           (reuses the T2 PATCH path via the editor route). Surface how many
+           runs are still pinned to this version so the admin knows what the
+           fork will leave behind. #}
+        <a
+          href="/ui/runbooks/{{ template.slug }}/edit"
+          class="btn btn-outline btn-sm"
+          aria-label="Edit {{ template.slug }} (forks a new draft)"
+        >
+          Edit (forks draft)
+        </a>
+        <span class="text-xs opacity-60" aria-live="polite">
+          {{ in_flight_run_count }} in-flight run{{ "" if in_flight_run_count == 1 else "s" }}
+          pinned to v{{ template.version }}
+        </span>
+      {% else %}
+        {# deprecated — terminal; no lifecycle action, but editing forks a
+           fresh draft from the latest version. #}
+        <a
+          href="/ui/runbooks/{{ template.slug }}/edit"
+          class="btn btn-outline btn-sm"
+          aria-label="Edit {{ template.slug }} (forks a new draft)"
+        >
+          Edit (forks draft)
+        </a>
+      {% endif %}
+    </div>
+
+    {# ---------- Alpine confirmation dialog (names slug + version) ---------- #}
+    {% if template.status in ("draft", "published") %}
+      {%- set action = "publish" if template.status == "draft" else "deprecate" -%}
+      <div
+        x-show="confirm === '{{ action }}'"
+        x-cloak
+        class="modal modal-open"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Confirm {{ action }}"
+      >
+        <div class="modal-box">
+          <h3 class="text-lg font-semibold">
+            {{ "Publish" if action == "publish" else "Deprecate" }} this template?
+          </h3>
+          <p class="py-3 text-sm">
+            {% if action == "publish" %}
+              Promote <code class="font-mono">{{ template.slug }}</code>
+              <span class="font-mono">v{{ template.version }}</span> from draft to
+              <strong>published</strong>. Published versions are immutable; further
+              edits fork a new draft.
+            {% else %}
+              Retire <code class="font-mono">{{ template.slug }}</code>
+              <span class="font-mono">v{{ template.version }}</span> to
+              <strong>deprecated</strong>. New runs can no longer start against it.
+            {% endif %}
+          </p>
+          <div class="modal-action">
+            <button type="button" class="btn btn-ghost btn-sm" x-on:click="confirm = ''">
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm {{ 'btn-success' if action == 'publish' else 'btn-warning' }}"
+              hx-post="/ui/runbooks/{{ template.slug }}/{{ action }}"
+              hx-vals='{"version": "{{ template.version }}"}'
+              hx-target="#runbook-lifecycle"
+              hx-swap="outerHTML"
+              hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'
+              x-on:click="confirm = ''"
+            >
+              {{ "Publish" if action == "publish" else "Deprecate" }}
+            </button>
+          </div>
+        </div>
+        <div class="modal-backdrop" x-on:click="confirm = ''"></div>
+      </div>
+    {% endif %}
+  {% endif %}
+</div>

@@ -37,30 +37,26 @@
       </a>
       <h1 class="font-mono text-2xl font-semibold">{{ template.slug }}</h1>
       <span class="font-mono opacity-60">v{{ template.version }}</span>
+      {# Header status badge. ``id`` is the hx-swap-oob target the lifecycle
+         fragment refreshes after a publish / deprecate action. #}
       {% if template.status == "published" %}
-        <span class="badge badge-success badge-outline" aria-label="Status: published">
-          published
-        </span>
+        <span id="runbook-status-badge" class="badge badge-success badge-outline"
+              aria-label="Status: published">published</span>
       {% elif template.status == "draft" %}
-        <span class="badge badge-warning badge-outline" aria-label="Status: draft">draft</span>
+        <span id="runbook-status-badge" class="badge badge-warning badge-outline"
+              aria-label="Status: draft">draft</span>
       {% else %}
-        <span class="badge badge-ghost badge-outline" aria-label="Status: deprecated">
-          deprecated
-        </span>
-      {% endif %}
-      {# Authoring entry point — tenant_admin only (the POST handler also gates
-         server-side). Editing a published template forks a new draft. #}
-      {% if is_admin %}
-        <a
-          href="/ui/runbooks/{{ template.slug }}/edit"
-          class="btn btn-outline btn-sm ml-auto"
-          aria-label="Edit template {{ template.slug }}"
-        >
-          Edit
-        </a>
+        <span id="runbook-status-badge" class="badge badge-ghost badge-outline"
+              aria-label="Status: deprecated">deprecated</span>
       {% endif %}
     </div>
+
+    {# Lifecycle controls — publish / deprecate / fork-on-edit. tenant_admin
+       only (the fragment hides them for operators; the POST handlers re-check
+       server-side via require_ui_admin). Withheld on the opacity-floor
+       restricted view (no metadata to act on). #}
     {% if not restricted %}
+      {% include "runbooks/_detail_actions.html" %}
       <p class="text-lg">{{ template.title }}</p>
       {% if template.description %}
         <p class="max-w-3xl opacity-70">{{ template.description }}</p>

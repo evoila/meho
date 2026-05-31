@@ -727,3 +727,257 @@ async def test_discover_topology_against_k3s_is_idempotent_when_recalled(
     edge_keys1 = {(e.from_kind, e.from_name, e.to_kind, e.to_name, e.kind) for e in snap1.edges}
     edge_keys2 = {(e.from_kind, e.from_name, e.to_kind, e.to_name, e.kind) for e in snap2.edges}
     assert edge_keys1 == edge_keys2
+
+
+# ---------------------------------------------------------------------------
+# G3.14-T1 (#1403) single-call write ops -- live k3s exercise.
+#
+# These talk to the real API server: they create + mutate + delete real
+# objects, so each test cleans up the namespace it touches. The redaction
+# assertions cross-check classify_op/redact_payload (the #1401 broadcast
+# contract) against the live secret/job bodies.
+# ---------------------------------------------------------------------------
+
+
+_WRITE_NS = "meho-write-test"
+
+
+@pytest.fixture
+async def write_namespace(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> Any:
+    """Create the scratch namespace via ``k8s.namespace.create`` and tear it down."""
+    from kubernetes_asyncio import client as _client
+
+    connector, target = k3s_connector
+    op = _make_k3d_operator()
+    created = await connector.k8s_namespace_create(op, target, {"name": _WRITE_NS})
+    assert created["created"] is True
+    try:
+        yield connector, target, op
+    finally:
+        import contextlib
+
+        api_client = await connector._get_api_client(target, op)
+        core_v1 = _client.CoreV1Api(api_client)
+        with contextlib.suppress(Exception):
+            await core_v1.delete_namespace(name=_WRITE_NS)
+
+
+@pytest.mark.asyncio
+async def test_namespace_create_is_idempotent_against_k3s(
+    write_namespace: Any,
+) -> None:
+    """A second create against the existing namespace reports created=False."""
+    connector, target, op = write_namespace
+    again = await connector.k8s_namespace_create(op, target, {"name": _WRITE_NS})
+    assert again["created"] is False
+    assert again["already_existed"] is True
+
+
+@pytest.mark.asyncio
+async def test_apply_server_dry_run_then_real_against_k3s(
+    write_namespace: Any,
+) -> None:
+    """Server-dry-run previews without persisting; the real apply creates it."""
+    from kubernetes_asyncio import client as _client
+
+    connector, target, op = write_namespace
+    manifest = (
+        "apiVersion: apps/v1\n"
+        "kind: Deployment\n"
+        "metadata:\n"
+        f"  name: nginx\n  namespace: {_WRITE_NS}\n"
+        "spec:\n"
+        "  replicas: 1\n"
+        "  selector:\n    matchLabels:\n      app: nginx\n"
+        "  template:\n"
+        "    metadata:\n      labels:\n        app: nginx\n"
+        "    spec:\n      containers:\n      - name: nginx\n        image: nginx:1.27-alpine\n"
+    )
+    # Dry-run preview: returns the would-be object but persists nothing.
+    preview = await connector.k8s_apply(op, target, {"manifest": manifest, "dry_run": "server"})
+    assert preview["dry_run"] is True
+    assert preview["applied"][0]["kind"] == "Deployment"
+
+    api_client = await connector._get_api_client(target, op)
+    apps_v1 = _client.AppsV1Api(api_client)
+    from kubernetes_asyncio.client.exceptions import ApiException
+
+    with pytest.raises(ApiException) as exc:
+        await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    assert exc.value.status == 404, "dry-run must not have persisted the Deployment"
+
+    # Real apply now creates it.
+    applied = await connector.k8s_apply(op, target, {"manifest": manifest})
+    assert applied["dry_run"] is False
+    live = await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    assert live.metadata.name == "nginx"
+
+    # Scale it and confirm before/after.
+    scaled = await connector.k8s_scale(
+        op, target, {"name": "nginx", "namespace": _WRITE_NS, "replicas": 3}
+    )
+    assert scaled["replicas_before"] == 1
+    assert scaled["replicas_after"] == 3
+
+    # Annotate + label, then read back off the live object.
+    await connector.k8s_annotate(
+        op,
+        target,
+        {
+            "kind": "deployment",
+            "name": "nginx",
+            "namespace": _WRITE_NS,
+            "annotations": {"meho.test/owner": "platform"},
+        },
+    )
+    await connector.k8s_label(
+        op,
+        target,
+        {"kind": "deployment", "name": "nginx", "namespace": _WRITE_NS, "labels": {"tier": "web"}},
+    )
+    refreshed = await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    assert refreshed.metadata.annotations.get("meho.test/owner") == "platform"
+    assert refreshed.metadata.labels.get("tier") == "web"
+
+    # Rollout restart stamps the pod-template annotation.
+    restart = await connector.k8s_rollout_restart(
+        op, target, {"name": "nginx", "namespace": _WRITE_NS}
+    )
+    rolled = await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    stamped = rolled.spec.template.metadata.annotations.get("kubectl.kubernetes.io/restartedAt")
+    assert stamped == restart["restarted_at"]
+
+
+@pytest.mark.asyncio
+async def test_secret_create_redacts_values_against_k3s(
+    write_namespace: Any,
+) -> None:
+    """A live Secret carries the value in-cluster but never in the broadcast.
+
+    Positively asserts the secret material is ABSENT from the broadcast
+    payload the publisher would ship (classify_op → credential_write →
+    aggregate-only), per the #1403 acceptance criterion.
+    """
+    import base64
+
+    from kubernetes_asyncio import client as _client
+
+    from meho_backplane.broadcast.events import classify_op, redact_payload
+
+    connector, target, op = write_namespace
+    raw_params = {
+        "name": "db-creds",
+        "namespace": _WRITE_NS,
+        "string_data": {"password": "live-hunter2"},
+    }
+    summary = await connector.k8s_secret_create(op, target, dict(raw_params))
+    # The handler response is value-free.
+    assert "live-hunter2" not in str(summary)
+    assert summary["data_keys"] == ["password"]
+
+    # The value DID reach the cluster.
+    api_client = await connector._get_api_client(target, op)
+    core_v1 = _client.CoreV1Api(api_client)
+    live = await core_v1.read_namespaced_secret(name="db-creds", namespace=_WRITE_NS)
+    assert base64.b64decode(live.data["password"]).decode() == "live-hunter2"
+
+    # The broadcast the publisher would emit is aggregate-only -- the
+    # secret never reaches the SSE stream / Slack mirror.
+    op_class = classify_op("k8s.secret.create")
+    payload = redact_payload(op_class, {"params": raw_params}, "ok")
+    assert "live-hunter2" not in str(payload)
+    assert payload == {"op_class": "credential_write", "result_status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_job_create_then_delete_redacts_env_secret_against_k3s(
+    write_namespace: Any,
+) -> None:
+    """A live Job's inline env secret never reaches the broadcast; delete reaps it."""
+    from meho_backplane.broadcast.events import classify_op, redact_payload
+
+    connector, target, op = write_namespace
+    job_params = {
+        "name": "echo-job",
+        "namespace": _WRITE_NS,
+        "spec": {
+            "backoffLimit": 0,
+            "template": {
+                "spec": {
+                    "restartPolicy": "Never",
+                    "containers": [
+                        {
+                            "name": "echo",
+                            "image": "busybox:1.36",
+                            "command": ["sh", "-c", "echo done"],
+                            "env": [{"name": "TOKEN", "value": "job-topsecret"}],
+                        }
+                    ],
+                }
+            },
+        },
+    }
+    created = await connector.k8s_job_create(op, target, dict(job_params))
+    assert created == {"name": "echo-job", "namespace": _WRITE_NS, "created": True}
+    assert "job-topsecret" not in str(created)
+
+    # Broadcast redaction: aggregate-only, no env secret.
+    payload = redact_payload(classify_op("k8s.job.create"), {"params": job_params}, "ok")
+    assert "job-topsecret" not in str(payload)
+    assert payload == {"op_class": "credential_write", "result_status": "ok"}
+
+    # Delete the Job (Background cascade reaps its pods).
+    deleted = await connector.k8s_delete(
+        op,
+        target,
+        {
+            "kind": "job",
+            "name": "echo-job",
+            "namespace": _WRITE_NS,
+            "propagation_policy": "Background",
+        },
+    )
+    assert deleted["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_namespace_kind_against_k3s(
+    write_namespace: Any,
+) -> None:
+    """The v1 delete scope refuses namespace deletion even on a live cluster."""
+    from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
+        UndeletableKindError,
+    )
+
+    connector, target, op = write_namespace
+    with pytest.raises(UndeletableKindError):
+        await connector.k8s_delete(
+            op,
+            target,
+            {"kind": "namespace", "name": _WRITE_NS, "namespace": _WRITE_NS},
+        )
+
+
+@pytest.mark.asyncio
+async def test_cordon_uncordon_node_against_k3s(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """Cordon then uncordon the single k3s node; reversible + eviction-free."""
+    from kubernetes_asyncio import client as _client
+
+    connector, target = k3s_connector
+    op = _make_k3d_operator()
+    api_client = await connector._get_api_client(target, op)
+    core_v1 = _client.CoreV1Api(api_client)
+    nodes = await core_v1.list_node()
+    node_name = nodes.items[0].metadata.name
+    try:
+        cordoned = await connector.k8s_cordon(op, target, {"name": node_name})
+        assert cordoned["unschedulable"] is True
+        live = await core_v1.read_node(name=node_name)
+        assert live.spec.unschedulable is True
+    finally:
+        uncordoned = await connector.k8s_cordon(op, target, {"name": node_name, "uncordon": True})
+        assert uncordoned["unschedulable"] is False

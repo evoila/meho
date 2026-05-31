@@ -120,12 +120,16 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
 #:   leak — see ``docs/codebase/connectors-vault.md``).
 #: * ``k8s.secret.create`` — the Secret ``data`` / ``stringData`` is in
 #:   ``params``.
+#: * ``k8s.job.create`` — the Job ``spec`` carries a pod template whose
+#:   inline ``env`` entries can hold credential material in ``params``
+#:   (G3.14-T1 #1403).
 _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
     {
         "vault.auth.userpass.write",
         "vault.auth.userpass.update_password",
         "vault.kv.put",
         "k8s.secret.create",
+        "k8s.job.create",
     }
 )
 

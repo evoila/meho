@@ -756,3 +756,64 @@ def test_shipped_catalog_only_gh_and_vmware_rows_opt_in() -> None:
         assert entry.spec_info_versions_compatible is None, (
             f"{entry.product}/{entry.version} unexpectedly opts in"
         )
+
+
+# ---------------------------------------------------------------------------
+# catalog_ingest classifier (G0.18-T8 #1361 / RDC #789 N8) — declarative
+# input the listing's next_step hint reads to avoid over-promising
+# --catalog ingest against HTML-portal / fqdn-templated upstreams.
+# ---------------------------------------------------------------------------
+
+
+def test_entry_defaults_to_catalog_ingest_supported() -> None:
+    """``catalog_ingest`` defaults to ``"supported"`` for back-compat.
+
+    Pre-G0.18-T8 catalog rows never named the field; their semantics
+    were "upstream is fetchable -> --catalog works". The default
+    preserves that — only rows that explicitly opt into ``"spec-only"``
+    nudge the listing toward the manual-mode verb.
+    """
+    assert _entry().catalog_ingest == "supported"
+
+
+def test_entry_accepts_catalog_ingest_spec_only() -> None:
+    """An entry can opt into ``"spec-only"`` explicitly."""
+    entry = _entry(catalog_ingest="spec-only")
+    assert entry.catalog_ingest == "spec-only"
+
+
+def test_entry_rejects_unknown_catalog_ingest_value() -> None:
+    """Pydantic Literal-typing rejects values outside the two-element set."""
+    with pytest.raises(ValidationError):
+        _entry(catalog_ingest="maybe")  # type: ignore[arg-type]
+
+
+def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
+    """vmware/9.0, sddc-manager/9.0, nsx/4.2 ship ``catalog_ingest: spec-only``.
+
+    G0.18-T8 (#1361, RDC #789 N8). All three upstreams fundamentally
+    cannot drive ``meho connector ingest --catalog`` server-side:
+
+    * ``vmware/9.0`` + ``sddc-manager/9.0`` — Broadcom Developer Portal
+      ``text/html`` landing pages; the route's existing
+      ``catalog_entry_upstream_not_spec`` 422 fires.
+    * ``nsx/4.2`` — first upstream is fqdn-templated
+      (``<nsx-mgr-fqdn>``); the route's
+      ``catalog_entry_templated_upstream`` 422 fires.
+
+    Marking these rows ``"spec-only"`` is what lets the listing emit
+    an honest ``--spec`` ``next_step`` hint instead of the previous
+    "spec available in catalog; run ingest" line that sent operators
+    into a 422.
+    """
+    spec_only_pairs = {("vmware", "9.0"), ("sddc-manager", "9.0"), ("nsx", "4.2")}
+    for entry in load_catalog().entries:
+        if (entry.product, entry.version) in spec_only_pairs:
+            assert entry.catalog_ingest == "spec-only", (
+                f"{entry.product}/{entry.version} should be catalog_ingest: spec-only "
+                "because its upstream is HTML-portal or fqdn-templated"
+            )
+        else:
+            assert entry.catalog_ingest == "supported", (
+                f"{entry.product}/{entry.version} should default to catalog_ingest: supported"
+            )

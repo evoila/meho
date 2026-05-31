@@ -61,19 +61,20 @@ Each entry is validated by `ConnectorSpecEntry`:
 | `spec_info_versions_compatible` | **Optional label-vs-spec opt-in.** List of patterns the validator widens against. Each entry is either a glob (`"1.x"`, `"9.0.x"`) or a PEP 440 specifier set (`">=1.0,<2.0"`). When set, the ingest validator accepts a spec whose `info.version` matches any pattern even if it differs from this row's `version` label. `null` (default) preserves the historical verbatim/major-band check. See "Label-vs-spec decoupling" below. |
 | `sha256` | Advisory content hash MEHO smoke-tested against; optional, not enforced. |
 | `notes` | Operator context: sharp edges, version quirks, appliance-served vs portal-hosted, curation status. |
+| `catalog_ingest` | **Whether `meho connector ingest --catalog` actually works for this row.** `"supported"` (default) — the upstream serves an OpenAPI spec directly; `--catalog` runs end-to-end. `"spec-only"` — the upstream is an HTML developer-portal landing page or an fqdn-templated appliance URL the catalog can't dereference server-side; the operator must fetch the spec and pass via `--spec`. `GET /api/v1/connectors` reads this field to emit an honest `next_step` hint (G0.18-T8 #1361). See "Spec-only entries" below. |
 
 ## Current entries
 
-| Product / version | Shape | Spec source |
-|---|---|---|
-| `vmware` 9.0 | generic | `vcenter.yaml` + `vi-json.yaml` (appliance-served at `https://<vcenter-fqdn>/`; mirrored on the Broadcom Developer Portal) |
-| `sddc-manager` 9.0 | generic | SDDC Manager API (appliance-served; Broadcom Developer Portal) |
-| `harbor` 2.x | generic | `goharbor` `api/v2.0/swagger.yaml` — **Swagger 2.0**, needs conversion to OpenAPI 3.x before ingest |
-| `nsx` 4.2 | generic | `/api/v1/spec/openapi/nsx_api.yaml` (appliance-served; Broadcom Developer Portal mirror) |
-| `gh` v3 | generic | `rest-api-description/main/descriptions/api.github.com/api.github.com.json` — OpenAPI 3.0.3, direct-resolvable, `info.version` 1.1.4 (in compat band `1.x.x` — see Label-vs-spec decoupling below), ~700 paths / ~40 tags. Auth: GitHub App installation tokens (or fine-grained PAT). First-day on-ramp: [`github-connector.md`](./github-connector.md); credential setup: [`github-app-credential.md`](./github-app-credential.md). |
-| `vault` 1.x | typed | none (hand-coded connector) |
-| `k8s` 1.x | typed | none (typed; per-minor OpenAPI ingest is a future Goal #214 investigation) |
-| `bind9` 9.x | typed | none (SSH-only; no REST surface) |
+| Product / version | Shape | `catalog_ingest` | Spec source |
+|---|---|---|---|
+| `vmware` 9.0 | generic | `spec-only` | `vcenter.yaml` + `vi-json.yaml` (appliance-served at `https://<vcenter-fqdn>/`; mirrored on the Broadcom Developer Portal, which serves `text/html`) |
+| `sddc-manager` 9.0 | generic | `spec-only` | SDDC Manager API (appliance-served; Broadcom Developer Portal mirror is `text/html`) |
+| `harbor` 2.x | generic | `supported` | `goharbor` `api/v2.0/swagger.yaml` — **Swagger 2.0**, needs conversion to OpenAPI 3.x before ingest |
+| `nsx` 4.2 | generic | `spec-only` | `/api/v1/spec/openapi/nsx_api.yaml` (appliance-served, `<nsx-mgr-fqdn>`-templated; Broadcom Developer Portal mirror is `text/html`) |
+| `gh` v3 | generic | `supported` | `rest-api-description/main/descriptions/api.github.com/api.github.com.json` — OpenAPI 3.0.3, direct-resolvable, `info.version` 1.1.4 (in compat band `1.x.x` — see Label-vs-spec decoupling below), ~700 paths / ~40 tags. Auth: GitHub App installation tokens (or fine-grained PAT). First-day on-ramp: [`github-connector.md`](./github-connector.md); credential setup: [`github-app-credential.md`](./github-app-credential.md). |
+| `vault` 1.x | typed | n/a (typed) | none (hand-coded connector) |
+| `k8s` 1.x | typed | n/a (typed) | none (typed; per-minor OpenAPI ingest is a future Goal #214 investigation) |
+| `bind9` 9.x | typed | n/a (typed) | none (SSH-only; no REST surface) |
 
 `spec_info_version` and `sha256` are populated only after a connector's
 spec has been ingest-verified through MEHO, not from desk research. The
@@ -219,6 +220,68 @@ fall through to the historical verbatim check — the opt-in is PEP
 
 The choice is per-connector-family and lives in
 [`docs/codebase/api-shape-conventions.md` §9](../codebase/api-shape-conventions.md).
+
+## Spec-only entries (`catalog_ingest: spec-only`)
+
+A handful of upstreams in the curated catalog **cannot drive
+`--catalog` ingest end-to-end** even though the row's
+`(product, version, impl_id)` is correct. Two distinct shapes:
+
+1. **HTML developer-portal landing pages** — `vmware/9.0` and
+   `sddc-manager/9.0` cite the Broadcom Developer Portal
+   (`https://developer.broadcom.com/xapis/...`). Those URLs serve
+   `text/html`, not OpenAPI YAML/JSON; the route's
+   `catalog_entry_upstream_not_spec` 422 fires on any catalog-driven
+   ingest. The spec really is published by Broadcom (and served
+   directly by a deployed vCenter / SDDC Manager appliance), but the
+   public reference page is a portal, not the raw artefact.
+2. **Fqdn-templated appliance URLs** — `nsx/4.2`'s first upstream is
+   `https://<nsx-mgr-fqdn>/api/v1/spec/openapi/nsx_api.yaml`, with a
+   placeholder the backplane can't dereference server-side
+   (`catalog_entry_templated_upstream` 422). The Broadcom mirror
+   listed alongside it is again `text/html`.
+
+For these rows the catalog row sets `catalog_ingest: spec-only`.
+That has two operator-visible consequences:
+
+- **`GET /api/v1/connectors`** — the `state="registered"` row's
+  `next_step` hint points at `meho connector ingest --product <p>
+  --version <v> --impl <i> --spec <concrete-openapi-uri>` instead
+  of the previous `--catalog <product>/<version>` (which would
+  422). The rationale calls out the upstream-shape limitation so
+  an operator or LLM agent reading the listing understands the
+  catalog row isn't broken — the public spec source just isn't
+  fetchable.
+- **`POST /api/v1/connectors/ingest`** — unchanged from the
+  existing G0.14-T9 / G0.15-T2 contract. The route's structured
+  422 envelopes (`catalog_entry_upstream_not_spec`,
+  `catalog_entry_templated_upstream`) still fire if a caller
+  POSTs the catalog-driven shape against a spec-only row. The
+  `catalog_ingest` field is the declarative input the **hint**
+  reads, not a new validation gate; route behaviour is unchanged.
+
+**Operator workflow for spec-only entries.** Fetch the raw spec
+from the appliance the connector targets (vCenter, SDDC Manager,
+or NSX Manager) — typically `https://<appliance-fqdn>/api/...` or
+`https://<appliance-fqdn>/v1/...`. Save it locally
+(`/tmp/vcenter.yaml`, etc.) and pass via the explicit `--spec`
+flag:
+
+```bash
+meho connector ingest \
+    --product vmware --version 9.0 --impl vmware-rest \
+    --spec /tmp/vcenter.yaml --spec /tmp/vi-json.yaml
+```
+
+The `--product`/`--version`/`--impl` triple is what the catalog
+row carries (the `next_step` hint pre-fills it).
+
+**Curator workflow.** A new catalog row whose upstream is a
+developer portal page or carries `<placeholder>` characters
+should ship `catalog_ingest: spec-only`. If a vendor later
+publishes the raw spec at a directly-fetchable URL, flip the
+field back to `supported` (or omit it; the default is
+`supported`) and update the `upstream` URL in the same commit.
 
 ## Adding or updating an entry
 

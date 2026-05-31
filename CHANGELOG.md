@@ -151,6 +151,33 @@ connector-related release-notes line.
   `LlmClient` adapter at lifespan startup remains the
   operator-side follow-up.
 
+- **VCF-family catalog rows + `GET /api/v1/connectors` `next_step`
+  hints no longer over-promise `--catalog` ingest (G0.18-T8 #1361,
+  RDC #789 N8).** Rechecked the upstreams against G0.15-T2 (#1211):
+  `vmware/9.0` and `sddc-manager/9.0` still serve `text/html` from
+  the Broadcom Developer Portal (no regression — the catalog notes
+  already document the unusability, the route's
+  `catalog_entry_upstream_not_spec` 422 still fires). `nsx/4.2`
+  is still fqdn-templated (`<nsx-mgr-fqdn>`) under
+  `catalog_entry_templated_upstream`. The over-promising was
+  isolated to the listing's hint: for any `state="registered"`
+  row whose catalog entry exists, the hint blindly said "spec
+  available in catalog; run ingest" and pointed at
+  `--catalog <product>/<version>` — which 422'd for all three
+  VCF-family rows. Added a declarative `catalog_ingest:
+  "supported" | "spec-only"` field on `ConnectorSpecEntry`
+  (default `"supported"` for back-compat; the three VCF rows
+  opt into `"spec-only"`); the listing's `next_step` hint now
+  branches on it and emits the explicit-quadruple `--product …
+  --version … --impl … --spec <concrete-openapi-uri>` verb plus
+  a rationale calling out the upstream-shape limitation when
+  the row is spec-only. Route validation behaviour is unchanged
+  (the existing 422 envelopes still fire on direct catalog-shape
+  POSTs against these rows); the hint is now an honest
+  precursor instead of pointing operators at a broken verb.
+  Docs: [`connector-catalog.md`](docs/cross-repo/connector-catalog.md)
+  §"Spec-only entries" + entry-schema table.
+
 ### Documentation
 
 - **`/mcp` root-mount carve-out documented + `/api/v1/mcp`

@@ -540,7 +540,7 @@ Regression test:
 asserts the contract over a seeded DB that includes a stale-rename
 row and a class-side-only opless connector.
 
-#### `next_step` workflow-completion hint (G0.13-T3 / #1133)
+#### `next_step` workflow-completion hint (G0.13-T3 / #1133, G0.18-T8 / #1361)
 
 `state="registered"` rows carry a `next_step: NextStep` object that
 points at the verb that closes the workflow gap surfaced by the
@@ -552,16 +552,37 @@ operator action remaining.
 
 The hint comes from `_next_step_for_registered` in `list_connectors.py`.
 It consults the connector-spec catalog (`ingest/catalog.py`, #743) and
-emits one of two verb shapes:
+branches on the catalog entry's declarative
+`catalog_ingest: "supported" | "spec-only"` field (default
+`"supported"`; the VCF-family rows opt into `"spec-only"` —
+G0.18-T8 / #1361, RDC #789 N8). Three branches:
 
-* **Catalog hit** — verb points at `meho connector ingest --catalog
-  <product>/<version>`. Rationale says the spec is available in the
-  catalog. The CLI's `meho connector ingest --catalog ...` form
-  (G0.7-T5 / #405) drives the rest of the workflow.
+* **Catalog hit, `catalog_ingest="supported"`** — verb points at
+  `meho connector ingest --catalog <product>/<version>`. Rationale
+  says the spec is available in the catalog. The CLI's
+  `meho connector ingest --catalog ...` form (G0.7-T5 / #405) drives
+  the rest of the workflow.
+* **Catalog hit, `catalog_ingest="spec-only"`** — verb points at the
+  explicit-quadruple manual-mode form `meho connector ingest
+  --product <p> --version <v> --impl <i> --spec <concrete-openapi-uri>`
+  using the catalog's native `(product, version, impl_id)` triple.
+  Rationale calls out that the catalog row exists but its upstream
+  is HTML-portal or fqdn-templated, so a `--catalog` POST would
+  422 on the route's `catalog_entry_upstream_not_spec` /
+  `catalog_entry_templated_upstream` branches — the operator must
+  fetch the raw OpenAPI spec from the appliance themselves. The
+  three VCF-family rows (`vmware/9.0`, `sddc-manager/9.0`, `nsx/4.2`)
+  ride this branch; the previous "spec available in catalog; run
+  ingest" hint over-promised for all three. The triple matches what
+  the operator would have used after a successful `--catalog`
+  resolve, so the verb still copies-and-runs once the operator
+  sources the spec URI.
 * **Catalog miss** — verb points at `meho connector ingest --product
   <p> --version <v> --impl <i> --spec <upstream-openapi-uri>`.
   Rationale calls out the missing catalog entry so the operator
-  knows they need to source the OpenAPI spec themselves.
+  knows they need to source the OpenAPI spec themselves. Manual
+  mode is the same path G0.7-T5 already supports for one-off /
+  not-yet-curated specs (see `ingest.go`'s mode dispatch).
 
 The catalog lookup uses the **registry's** `(product, version)`, not
 the parser-derived shortening. The SDDC case is canonical: the
@@ -579,7 +600,12 @@ path.
 
 Regression tests:
 `tests/test_api_v1_connectors_ingest.py::test_list_registered_row_carries_catalog_next_step_hint`
-(catalog-hit branch incl. SDDC's registry-vs-parsed asymmetry),
+(catalog-hit / `supported` branch incl. SDDC's registry-vs-parsed
+asymmetry),
+`::test_list_registered_row_spec_only_catalog_entry_points_at_spec`
+(catalog-hit / `spec-only` branch — pins the explicit-quadruple
+`--spec` verb + the upstream-shape rationale for VCF-family rows;
+G0.18-T8 / #1361),
 `::test_list_registered_row_without_catalog_entry_points_at_manual_mode`
 (catalog-miss branch), and
 `::test_list_ingested_row_omits_next_step_hint`

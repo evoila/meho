@@ -459,12 +459,15 @@ async def test_resume_re_dispatches_on_approval_via_decide_path(
     assert first.status == "awaiting_approval"
     approval_request_id = uuid.UUID(first.extras["approval_request_id"])
 
-    # Step 2: operator approves via the operator-decision path. This is the
-    # path /decide (REST) and meho.approvals.approve (MCP) take -- the
-    # ``approve_request`` call by id alone, **without** the params
-    # re-dispatch the legacy REST /approve+params route does.
+    # Step 2: a distinct human operator approves via the operator-decision
+    # path. This is the path /decide (REST) and meho.approvals.approve
+    # (MCP) take -- the ``approve_request`` call by id alone, **without**
+    # the params re-dispatch the legacy REST /approve+params route does.
+    # The reviewer must differ from the agent requester (self-approval
+    # guard, G11.7-T1 #1401).
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
     async with get_sessionmaker()() as s:
-        row = await approve_request(s, approval_request_id, operator=operator, params=None)
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=None)
         await s.commit()
     assert row.status == "approved"
 

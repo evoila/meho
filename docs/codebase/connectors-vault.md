@@ -84,7 +84,7 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
 | `vault.kv.read` | `read_secret_version` | safe | `credential_read` |
 | `vault.kv.list` | `list_secrets` | safe | `credential_read` |
 | `vault.kv.versions` | `read_secret_metadata` | safe | `read` |
-| `vault.kv.put` | `create_or_update_secret` | caution | `write` |
+| `vault.kv.put` | `create_or_update_secret` | caution | `credential_write` |
 | `vault.kv.delete` | `delete_secret_versions` | dangerous | `write` |
 
 All five register into operation group `kv`.
@@ -120,16 +120,26 @@ The G6 broadcast publisher emits an aggregate-only payload for
 `credential_read` and `audit_query` ops. The sensitivity class is
 derived **from the op-id**, not a per-descriptor field:
 `broadcast.events.classify_op` consults the `_CREDENTIAL_READ_OPS`
-allowlist (currently `{vault.kv.read, vault.kv.list}`) and the
-`_WRITE_SUFFIXES` / `_READ_SUFFIXES` tuples. The shipped G0.6
-`endpoint_descriptor` table has **no `op_class` column** — decision #3
-locks the classifier on the op-id, so the register-time signal is the
-op-id itself. `vault.kv.versions` reads only version metadata (never
-secret values) and is deliberately a plain `read`, not
-`credential_read`. The `.put` / `.versions` suffixes were added to the
-write / read suffix tuples by #545 — without that, `vault.kv.put`
-would have classified `other` and broadcast the written secret to
-every operator (the credential-leak fix).
+allowlist (currently `{vault.kv.read, vault.kv.list}`), the
+`_CREDENTIAL_WRITE_OPS` allowlist (G11.7-T1 #1401 — `{vault.kv.put,
+vault.auth.userpass.write, vault.auth.userpass.update_password,
+k8s.secret.create}`), and the `_WRITE_SUFFIXES` / `_READ_SUFFIXES`
+tuples. The shipped G0.6 `endpoint_descriptor` table has **no
+`op_class` column** — decision #3 locks the classifier on the op-id, so
+the register-time signal is the op-id itself. `vault.kv.versions` reads
+only version metadata (never secret values) and is deliberately a plain
+`read`, not `credential_read`.
+
+`vault.kv.put` classifies `credential_write` (G11.7-T1 #1401): the
+secret `data` is in the *request params*, and the broadcast ships
+params, so it must collapse to aggregate-only. It previously
+classified plain `write` via the `.put` write-suffix (#545), which kept
+it out of the `other` class but still broadcast the written secret in
+full — the `credential_write` reclassification closes that. Response-side
+secret-mint ops (`vault.token.create`,
+`vault.auth.approle.generate_secret_id`) classify `credential_mint`
+alongside `harbor.robot.create`. See `docs/codebase/broadcast.md` for
+the full sensitivity taxonomy.
 
 ## Approval gating
 
@@ -253,7 +263,8 @@ and a real Postgres audit store (reusing the integration conftest's
   unwrap → dispatcher → audit → broadcast path runs unchanged.
 - **Assertions.** Each op asserts the live response shape, a single
   synchronously-committed `audit_log` row (postulate 7), and the
-  broadcast `op_class` — `write` for `kv.put` / `kv.delete`,
+  broadcast `op_class` — `credential_write` for `kv.put` (G11.7-T1
+  #1401) and `write` for `kv.delete`,
   `credential_read` for `kv.read` / `kv.list`, `read` for the
   KV-v2 / sys metadata reads and the `.list` auth ops
   (`auth.userpass.list` / `auth.approle.list`), and `other` for the

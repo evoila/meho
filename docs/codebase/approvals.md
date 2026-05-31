@@ -1,12 +1,15 @@
-# Approvals (G11.2-T4 + T5)
+# Approvals (G11.2-T4 + T5; G11.7-T1 policy hardening)
 
-**Initiative:** #803 — G11.2 Agent identity + RBAC + approval
-**Tasks:** #817 (T4 — durable approval queue) + #818 (T5 — operator surfacing channel)
+**Initiative:** #803 — G11.2 Agent identity + RBAC + approval;
+#1397 — G11.7 Approval-policy hardening
+**Tasks:** #817 (T4 — durable approval queue) + #818 (T5 — operator
+surfacing channel) + #1401 (G11.7-T1 — queue humans, self-approval
+guard, resume-target fix, write-op secret redaction)
 
 ## Overview
 
 The approval substrate parks `requires_approval` / `caution` / `dangerous`
-agent dispatches durably and lets an operator approve or reject them
+dispatches durably and lets an operator approve or reject them
 across **REST, MCP, and CLI** transports. Two layers, one source of
 truth:
 
@@ -27,6 +30,61 @@ truth:
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
 
+## G11.7-T1 policy hardening (#1401)
+
+Phase C of the wrapper-retirement effort moves connector **writes**
+behind this queue, and ops-team operators run those writes as **human**
+(`USER`) principals. Four policy changes harden the gate for that — all
+reusing the existing queue/approve/resume substrate (no new table,
+model, or resume endpoint):
+
+1. **Queue humans, don't hard-deny.** `policy_gate`
+   (`backend/src/meho_backplane/operations/_validate.py`) returns
+   `NEEDS_APPROVAL` — not `DENY` — when a non-agent principal hits a
+   `requires_approval=True` op. The op is parked + resumable, not
+   denied to the operator meant to run it. Non-`requires_approval` ops a
+   human has always been able to run still auto-execute (the v0.2
+   default-allow is preserved), so no existing human-runnable op
+   regresses.
+2. **Self-approval guard (requester != approver).** `approve_request`
+   raises `SelfApprovalForbiddenError` (→ HTTP 403 `self_approval_forbidden`
+   on REST, invalid-params on MCP) when `operator.sub ==
+   request.principal_sub`, unless the audited break-glass switch
+   `APPROVAL_ALLOW_SELF_APPROVAL=true`
+   (`Settings.approval_allow_self_approval`, default `False` =
+   fail-closed) is set. Even under break-glass the self-approval writes
+   its decision audit row, so the use is forensically visible. **Reject
+   is unguarded** — withdrawing one's own pending request is never a
+   privilege escalation. The guard runs after the role check and before
+   the params-hash check, so a self-approver gets the precise refusal
+   reason.
+3. **Resume target re-hydration.** The REST `…/approve` route persists
+   only `target_id` on the row, so it re-loads the live `Target` by id
+   (`targets.resolver.resolve_target_by_id`, tenant-scoped, `deleted_at
+   IS NULL`) before the `_approved=True` re-dispatch. A write op whose
+   handler reads `target.host` / `target.name` / `target.fqdn` now
+   resolves the correct target instead of `None`. A target soft-deleted
+   between request and approval resolves to `None`, so the re-dispatch
+   fails closed (structured connector error) rather than reviving a
+   tombstone. Tenant-wide ops (no original target) keep `target_id IS
+   NULL` → `None`.
+4. **Write-op secret redaction.** The broadcast/audit sensitivity
+   classifier gained two op-id classes so the new Phase-C write ops'
+   secrets never land in an audit row or broadcast frame —
+   `credential_write` for request-param secrets (`vault.kv.put`,
+   `vault.auth.userpass.write` / `update_password`, `k8s.secret.create`)
+   and `credential_mint` extended for response secrets
+   (`vault.token.create`, `vault.auth.approle.generate_secret_id`). Both
+   collapse to aggregate-only and are **non-upgradeable** — no per-call
+   or per-tenant override may surface the credential on the feed. See
+   `docs/codebase/broadcast.md`.
+
+The `_approved=True` re-dispatch gate-bypass (the resume authorization)
+is unchanged in mechanism but now matters for humans too: with humans
+routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
+the call instead of executing it, so the bypass is what lets the
+approved op run.
+
 ## Transports
 
 ### REST (`backend/src/meho_backplane/api/v1/approvals.py`)
@@ -35,7 +93,7 @@ The durable state is one `approval_request` row (table created by
 |---|---|---|---|
 | `GET` | `/api/v1/approvals` | operator | List, filtered by `status` (default: `pending`). |
 | `GET` | `/api/v1/approvals/{id}` | operator | **Inspect one request** (T5). 404 on cross-tenant. |
-| `POST` | `/api/v1/approvals/{id}/approve` | operator | Approve. Requires `params` (hash-verified) → re-dispatches the approved op with `dispatch(..., _approved=True)`. |
+| `POST` | `/api/v1/approvals/{id}/approve` | operator | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1). |
 | `POST` | `/api/v1/approvals/{id}/reject` | operator | Reject. The op never executes. |
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)

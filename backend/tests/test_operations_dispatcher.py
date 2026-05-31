@@ -28,8 +28,9 @@ Coverage matrix (G0.6-T5 / Task #396 acceptance criteria):
 * Pass-through reducer: the dispatcher invokes the reducer; the v0.2
   default returns the response unchanged + a ``None`` handle.
 * Handler-import error -> ``handler_unreachable`` error code.
-* Policy gate -- ``requires_approval=True`` -> ``denied`` with the
-  default-allow policy in v0.2.
+* Policy gate -- ``requires_approval=True`` routes a human/service
+  principal to the approval queue (``awaiting_approval``), not a
+  hard-deny (G11.7-T1 #1401); agents floor to ``needs-approval``.
 
 The audit + broadcast assertions read the actual ``audit_log`` rows
 written by the dispatcher (the conftest autouse fixture runs the
@@ -1587,15 +1588,18 @@ async def test_dispatch_human_caution_op_auto_executes(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_human_requires_approval_op_denied(
+async def test_dispatch_human_requires_approval_op_queues(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``requires_approval=True`` still hard-denies a **human** (v0.2 contract).
+    """``requires_approval=True`` queues a **human**, not hard-deny (G11.7-T1 #1401).
 
-    The approval queue (G11.2-T4) routes only agent runs to the pending
-    path; human/service principals retain the v0.2 hard-deny so the
-    enforcement signal does not silently disappear.
+    Pre-G11.7 the policy gate hard-denied a human/service principal on a
+    ``requires_approval`` op. G11.7-T1 (#1401) routes them to the
+    approval queue instead — ops-team operators are exactly the humans
+    Phase C expects to run governed writes, so a hard-deny defeated the
+    point. The op is parked + resumable (``awaiting_approval``), not
+    ``denied``.
     """
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await register_typed_operation(
@@ -1605,7 +1609,7 @@ async def test_dispatch_human_requires_approval_op_denied(
         op_id="vault.kv.human_approval",
         handler=_module_handler_returning_dict,
         summary="Safe op flagged requires_approval.",
-        description="requires_approval stays enforced for humans.",
+        description="requires_approval routes humans to the queue.",
         parameter_schema={"type": "object"},
         safety_level="safe",
         requires_approval=True,
@@ -1620,8 +1624,9 @@ async def test_dispatch_human_requires_approval_op_denied(
         target=_FakeTarget(product="vault"),
         params={},
     )
-    assert result.status == "denied"
-    assert result.extras["error_code"] == "denied"
+    assert result.status == "awaiting_approval", result.error
+    assert result.status != "denied"
+    assert "approval_request_id" in result.extras
 
 
 @pytest.mark.asyncio

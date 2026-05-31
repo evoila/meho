@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -52,7 +53,7 @@ from fastapi.testclient import TestClient
 
 import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -159,3 +160,124 @@ def test_read_only_role_is_rejected_with_insufficient_role(
         response = client.request(method, path, headers=headers, json=body)
     assert response.status_code == 403, response.text
     assert response.json() == {"detail": "insufficient_role"}
+
+
+# ---------------------------------------------------------------------------
+# G11.7-T1 (#1401) — resume-target hardening must fail closed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_when_pinned_target_no_longer_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A soft-deleted / unresolvable resume target is refused, not executed.
+
+    The approval row pins a concrete ``target_id``. If that target is
+    soft-deleted (or revoked) between request and approval,
+    ``resolve_target_by_id`` returns ``None``. The resume path must
+    **fail closed** — return a structured ``denied`` result and never
+    call ``dispatch`` — rather than dispatching with ``target=None``,
+    which would let a typed handler that derives its connection from
+    ``connector_id`` / ``params`` execute the approved privileged write
+    outside the original target scope (G11.7-T1 #1401, B1).
+    """
+    from meho_backplane.api.v1 import approvals as approvals_module
+
+    target_id = uuid.uuid4()
+    operator = Operator(
+        sub="op-resume-test",
+        name="Resume Test Operator",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
+    # Minimal stand-in for the ApprovalRequest ORM row: the resume helper
+    # only reads id / target_id / op_id / connector_id off it.
+    request = SimpleNamespace(
+        id=uuid.uuid4(),
+        target_id=target_id,
+        op_id="vault.kv.put",
+        connector_id="vault-1.x",
+    )
+
+    # The pinned target no longer resolves (soft-deleted between request
+    # and approval).
+    async def _resolve_none(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(approvals_module, "resolve_target_by_id", _resolve_none)
+
+    # Spy on dispatch — it must NOT be reached on the fail-closed path.
+    dispatch_calls: list[dict[str, Any]] = []
+
+    async def _dispatch_spy(**kwargs: Any) -> Any:
+        dispatch_calls.append(kwargs)
+        raise AssertionError("dispatch must not run when the pinned target is unresolvable")
+
+    import meho_backplane.operations.dispatcher as dispatcher_module
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _dispatch_spy)
+
+    result = await approvals_module._resume_dispatch_after_approval(
+        operator=operator,
+        request=request,  # type: ignore[arg-type]
+        params={"path": "secret/x", "value": "s3cr3t"},
+    )
+
+    assert dispatch_calls == [], "dispatch was called despite an unresolvable target"
+    assert result.status == "denied", result
+    assert result.op_id == "vault.kv.put"
+    assert str(target_id) in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_resume_dispatches_when_no_target_was_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tenant-wide op (``target_id IS NULL``) still re-dispatches normally.
+
+    The fail-closed branch must fire only when a concrete ``target_id``
+    was pinned at request time. An approval whose request had no target
+    (tenant-wide op) must reach ``dispatch`` with ``target=None`` as
+    before — the hardening must not regress that path.
+    """
+    from meho_backplane.api.v1 import approvals as approvals_module
+
+    operator = Operator(
+        sub="op-resume-test",
+        name="Resume Test Operator",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
+    request = SimpleNamespace(
+        id=uuid.uuid4(),
+        target_id=None,
+        op_id="some.tenant_wide.op",
+        connector_id="some-1.x",
+    )
+
+    seen: dict[str, Any] = {}
+
+    async def _dispatch_spy(**kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return SimpleNamespace(status="ok", op_id=kwargs["op_id"], result={}, error=None)
+
+    import meho_backplane.operations.dispatcher as dispatcher_module
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _dispatch_spy)
+
+    result = await approvals_module._resume_dispatch_after_approval(
+        operator=operator,
+        request=request,  # type: ignore[arg-type]
+        params={"k": "v"},
+    )
+
+    assert result.status == "ok"
+    assert seen["target"] is None
+    assert seen["_approved"] is True

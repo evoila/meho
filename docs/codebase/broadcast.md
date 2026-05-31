@@ -57,6 +57,29 @@ Three layers, separated for traceability:
   Fields: `tenant_id`, `principal_sub`, `activity`, `target`,
   `scope`, `phase`. `event_kind = "agent_announcement"` discriminator
   so readers can dispatch on the kind.
+- `op_class` sensitivity taxonomy (`classify_op` / `redact_payload` in
+  `broadcast/events.py`) — derived from the op-id (no per-descriptor
+  column), drives how `payload` is redacted before publish:
+  - `read` / `write` — full detail (params pass through).
+  - `credential_read` (`vault.kv.read` / `.list`) — aggregate-only;
+    even the path string is withheld.
+  - `audit_query` (`audit.*` / `meho.audit.*`) — aggregate-only +
+    `row_count`; the query filter never broadcasts.
+  - `credential_mint` (`harbor.robot.create`, `vault.token.create`,
+    `vault.auth.approle.generate_secret_id`) — **response** carries a
+    freshly-minted secret; aggregate-only.
+  - `credential_write` (`vault.kv.put`, `vault.auth.userpass.write` /
+    `.update_password`, `k8s.secret.create`, G11.7-T1 #1401) —
+    **request params** carry the secret; aggregate-only.
+  - `other` — full detail.
+
+  `credential_read` and `audit_query` are *upgradeable*: a per-call or
+  per-tenant override may surface full detail to an operator who already
+  has the right to see the path/filter (G6.3 #379). `credential_mint`
+  and `credential_write` are *non-upgradeable* — they carry secret
+  material, so no override path (`compute_effective_broadcast_detail` in
+  `broadcast/overrides.py`) may upgrade them to full; a `full` tenant
+  rule on these classes is clamped back to aggregate.
 - `Operator` (`auth/operator.py`) — the JWT-bound principal the SSE
   feed reads its `tenant_id` from. UUID.
 - `UISessionContext` (`ui/auth/middleware.py`) — the session-cookie

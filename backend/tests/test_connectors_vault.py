@@ -818,7 +818,12 @@ async def test_execute_vault_kv_list_malformed_payload_is_structured_error(
         ("vault.kv.read", "credential_read"),
         ("vault.kv.list", "credential_read"),
         ("vault.kv.versions", "read"),
-        ("vault.kv.put", "write"),
+        # G11.7-T1 #1401 — ``vault.kv.put`` carries the secret ``data`` in
+        # its request params, so it now classifies ``credential_write``
+        # (aggregate-only broadcast) rather than plain ``write`` (which
+        # broadcast the written secret in full). ``vault.kv.delete``
+        # carries no secret and stays ``write``.
+        ("vault.kv.put", "credential_write"),
         ("vault.kv.delete", "write"),
     ],
 )
@@ -827,10 +832,12 @@ def test_kv_op_ids_classify_per_decision_3(op_id: str, expected_class: str) -> N
 
     The shipped G0.6 substrate has no per-row ``op_class`` column on
     ``endpoint_descriptor``; decision #3 locks the sensitivity
-    classifier on the op-id via ``_CREDENTIAL_READ_OPS``. This pins
-    the register-time contract the DoD asks for: ``vault.kv.read`` and
-    ``vault.kv.list`` are ``credential_read`` (aggregate-only
-    broadcast); ``vault.kv.versions`` is a plain metadata ``read``;
-    the mutating verbs are ``write``.
+    classifier on the op-id via ``_CREDENTIAL_READ_OPS`` /
+    ``_CREDENTIAL_WRITE_OPS``. This pins the register-time contract the
+    DoD asks for: ``vault.kv.read`` and ``vault.kv.list`` are
+    ``credential_read`` (aggregate-only broadcast); ``vault.kv.versions``
+    is a plain metadata ``read``; ``vault.kv.put`` is
+    ``credential_write`` (its secret ``data`` is in params); the
+    secret-free mutating verbs are ``write``.
     """
     assert classify_op(op_id) == expected_class

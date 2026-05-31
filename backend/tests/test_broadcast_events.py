@@ -186,6 +186,47 @@ class TestClassifyOp:
     @pytest.mark.parametrize(
         "op_id",
         [
+            "harbor.robot.create",
+            "vault.token.create",
+            "vault.auth.approle.generate_secret_id",
+        ],
+    )
+    def test_credential_mint_allowlist(self, op_id: str) -> None:
+        """Response-secret ops classify ``credential_mint`` (G11.7-T1 #1401).
+
+        ``vault.token.create`` / ``vault.auth.approle.generate_secret_id``
+        end in ``.create`` / a write-shaped verb but the allowlist is
+        consulted before the write-suffix branch, so the freshly-minted
+        secret in the response collapses to aggregate-only rather than
+        broadcasting under the plain ``write`` class.
+        """
+        assert classify_op(op_id) == "credential_mint"
+
+    @pytest.mark.parametrize(
+        "op_id",
+        [
+            "vault.auth.userpass.write",
+            "vault.auth.userpass.update_password",
+            "vault.kv.put",
+            "k8s.secret.create",
+        ],
+    )
+    def test_credential_write_allowlist(self, op_id: str) -> None:
+        """Request-secret write ops classify ``credential_write`` (G11.7-T1 #1401).
+
+        These ops carry the secret in their *request params*. The
+        allowlist is consulted before the ``.write`` / ``.put`` /
+        ``.create`` suffix branch so the broadcast (which ships params)
+        collapses to aggregate-only instead of leaking the written
+        credential under the plain ``write`` class. ``vault.kv.put``
+        moved here from ``write`` — it shipped pre-G11.7 broadcasting its
+        secret ``data`` in full.
+        """
+        assert classify_op(op_id) == "credential_write"
+
+    @pytest.mark.parametrize(
+        "op_id",
+        [
             "audit.query",
             "audit.show",
             "audit.recent",
@@ -255,10 +296,6 @@ class TestClassifyOp:
             ("vsphere.vm.update", "write"),
             ("vsphere.vm.delete", "write"),
             ("k8s.deployment.patch", "write"),
-            # KV-v2 write verb (G3.3-T1 #545). Without ``.put`` in the
-            # write-suffix tuple this would fall through to ``other``
-            # and broadcast the full secret payload.
-            ("vault.kv.put", "write"),
             # bind9 record-write verbs (G3.4-T3 #589). The bind9
             # connector uses ``.add`` / ``.remove`` to match the
             # consumer wrapper's verb shape; without these suffixes
@@ -338,6 +375,33 @@ class TestRedactPayload:
         assert result == {"op_class": "credential_read", "result_status": "ok"}
         assert "path" not in result
         assert "key" not in result
+
+    def test_credential_write_drops_secret_params(self) -> None:
+        """G11.7-T1 #1401 — a request-secret write redacts to aggregate-only.
+
+        The written credential lives in ``params``; the broadcast ships
+        params, so ``credential_write`` must collapse to
+        ``{op_class, result_status}`` with no trace of the secret.
+        """
+        result = redact_payload(
+            "credential_write",
+            {"path": "secret/db", "data": {"password": "s3kr3t-sentinel"}},
+            "ok",
+        )
+        assert result == {"op_class": "credential_write", "result_status": "ok"}
+        assert "s3kr3t-sentinel" not in str(result)
+        assert "data" not in result
+        assert "params" not in result
+
+    def test_credential_mint_drops_response_secret(self) -> None:
+        """G11.7-T1 #1401 — a response-secret mint redacts to aggregate-only."""
+        result = redact_payload(
+            "credential_mint",
+            {"token": "hvs.minted-sentinel", "role": "ci"},
+            "ok",
+        )
+        assert result == {"op_class": "credential_mint", "result_status": "ok"}
+        assert "hvs.minted-sentinel" not in str(result)
 
     def test_audit_query_drops_filter(self) -> None:
         """AC #7 — filter never reaches the stream; row_count is allowed."""

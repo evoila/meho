@@ -79,6 +79,7 @@ __all__ = [
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ParamsMismatchError",
+    "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
     "approve_request",
     "create_pending_request",
@@ -146,6 +147,32 @@ class ParamsMismatchError(ApprovalError):
         super().__init__(
             f"params hash mismatch on approval_request {request_id}; "
             "original params must be supplied unchanged"
+        )
+
+
+class SelfApprovalForbiddenError(ApprovalError):
+    """The approver is the same principal that requested the approval.
+
+    Raised by :func:`approve_request` when
+    ``operator.sub == request.principal_sub`` and the deployment has not
+    enabled the audited single-operator break-glass mode
+    (``Settings.approval_allow_self_approval``). Enforces the
+    requester != approver invariant (G11.7-T1 #1401): a single account
+    must not be able to both request and grant a privileged connector
+    write. The route layer maps this to 403.
+
+    Reject is deliberately *not* guarded — an operator withdrawing their
+    own pending request is not a privilege escalation.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, principal_sub: str) -> None:
+        self.request_id = request_id
+        self.principal_sub = principal_sub
+        super().__init__(
+            f"operator {principal_sub!r} may not approve approval_request "
+            f"{request_id}: requester and approver must differ "
+            "(set APPROVAL_ALLOW_SELF_APPROVAL=true for audited "
+            "single-operator break-glass)"
         )
 
 
@@ -335,7 +362,14 @@ async def approve_request(
     1. The row exists and belongs to ``operator.tenant_id`` (else 404).
     2. The operator holds at least the ``operator`` role (else 403).
     3. The row is still ``pending`` (else 409).
-    4. If *params* is supplied, ``compute_params_hash(params)`` matches
+    4. The approver is not the requester — ``operator.sub !=
+       request.principal_sub`` — unless the deployment enabled the
+       audited single-operator break-glass mode
+       (``Settings.approval_allow_self_approval``). Else 403,
+       :class:`SelfApprovalForbiddenError` (G11.7-T1 #1401). Checked
+       before the hash check so a self-approver learns *why* they are
+       refused rather than being told their params mismatch.
+    5. If *params* is supplied, ``compute_params_hash(params)`` matches
        the stored ``params_hash`` (else 422, :class:`ParamsMismatchError`).
        The hash check is **skipped** when *params* is ``None`` — the
        operator-decision path (G11.2-T5 MCP/CLI surface) approves by
@@ -372,20 +406,14 @@ async def approve_request(
         ApprovalNotFoundError: No row for *request_id* in this tenant.
         UnauthorizedApprovalError: Operator lacks ``operator`` role.
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
+        SelfApprovalForbiddenError: Approver is the requester and
+            break-glass is disabled (G11.7-T1 #1401).
         ParamsMismatchError: Hash of *params* != stored ``params_hash``
             (only raised when *params* is supplied).
     """
-    _check_reviewer_role(operator)
-
-    request = await _load_for_tenant(session, request_id, operator.tenant_id)
-
-    if request.status != ApprovalRequestStatus.PENDING.value:
-        raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
-
-    if params is not None:
-        incoming_hash = compute_params_hash(params)
-        if incoming_hash != request.params_hash:
-            raise ParamsMismatchError(request_id)
+    request = await _load_pending_for_approval(
+        session, request_id, operator=operator, params=params
+    )
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -580,6 +608,65 @@ def _check_reviewer_role(operator: Operator) -> None:
             operator_sub=operator.sub,
             role=operator.tenant_role.value,
         )
+
+
+def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
+    """Raise :class:`SelfApprovalForbiddenError` on a self-approval.
+
+    Enforces requester != approver (G11.7-T1 #1401): the principal that
+    parked the request (``request.principal_sub``) may not also approve
+    it unless the deployment enabled the audited single-operator
+    break-glass mode (``Settings.approval_allow_self_approval``). The
+    comparison is on the stable ``sub`` claim, so a renamed display name
+    cannot launder a self-approval.
+
+    Imported lazily to keep the queue module decoupled from settings at
+    import time (mirrors the local ``TenantRole`` import in
+    :func:`_check_reviewer_role`).
+    """
+    if operator.sub != request.principal_sub:
+        return
+
+    from meho_backplane.settings import get_settings
+
+    if get_settings().approval_allow_self_approval:
+        _log.warning(
+            "approval_self_approval_break_glass",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+        )
+        return
+
+    raise SelfApprovalForbiddenError(request.id, principal_sub=operator.sub)
+
+
+async def _load_pending_for_approval(
+    session: AsyncSession,
+    request_id: uuid.UUID,
+    *,
+    operator: Operator,
+    params: dict[str, Any] | None,
+) -> ApprovalRequest:
+    """Load + validate a row for approval, raising on any precondition failure.
+
+    Runs the full approve precondition ladder in order so callers learn
+    the most specific reason first: role gate → tenant-scoped load →
+    pending guard → self-approval guard (G11.7-T1 #1401) → params-hash
+    check (only when *params* is supplied). Returns the validated
+    pending row; the caller flips status + writes the decision audit row.
+    """
+    _check_reviewer_role(operator)
+    request = await _load_for_tenant(session, request_id, operator.tenant_id)
+    if request.status != ApprovalRequestStatus.PENDING.value:
+        raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
+    _check_self_approval(operator, request)
+    if params is not None:
+        incoming_hash = compute_params_hash(params)
+        if incoming_hash != request.params_hash:
+            raise ParamsMismatchError(request_id)
+    return request
 
 
 async def _load_for_tenant(

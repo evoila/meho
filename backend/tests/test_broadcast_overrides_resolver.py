@@ -202,6 +202,79 @@ class TestPrecedenceLadder:
         assert origin == "request_override"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("op_id", "expected_class"),
+        [
+            ("vault.kv.put", "credential_write"),
+            ("vault.auth.userpass.write", "credential_write"),
+            ("vault.token.create", "credential_mint"),
+            ("vault.auth.approle.generate_secret_id", "credential_mint"),
+        ],
+    )
+    async def test_request_override_cannot_upgrade_secret_material_class(
+        self, op_id: str, expected_class: str
+    ) -> None:
+        """``request_override="full"`` is ignored on secret-material classes (G11.7-T1 #1401).
+
+        ``credential_write`` (request secret) and ``credential_mint``
+        (response secret) are non-upgradeable: no per-call override may
+        surface the credential on the feed. The resolver stays at the
+        aggregate default with ``origin="default"`` — the upgrade branch
+        is skipped entirely.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            tenant_id = await _seed_tenant(session, slug=f"noupgrade-{expected_class}-{op_id[-6:]}")
+
+        op_class, detail, origin = await compute_effective_broadcast_detail(
+            op_id=op_id,
+            tenant_id=tenant_id,
+            raw_params={"data": {"password": "leak-me"}},
+            request_override="full",
+        )
+        assert op_class == expected_class
+        assert detail == "aggregate"
+        assert origin == "default"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("op_id", "expected_class"),
+        [
+            ("vault.kv.put", "credential_write"),
+            ("vault.token.create", "credential_mint"),
+        ],
+    )
+    async def test_tenant_rule_cannot_upgrade_secret_material_class(
+        self, op_id: str, expected_class: str
+    ) -> None:
+        """A ``detail="full"`` tenant rule is clamped to aggregate on secret-material classes.
+
+        Even an explicit per-tenant override row may not surface a
+        minted/written credential on the feed (G11.7-T1 #1401); the
+        resolver clamps the rule's ``full`` back to ``aggregate`` while
+        still attributing the matched rule in ``origin``.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            tenant_id = await _seed_tenant(session, slug=f"clamp-{expected_class}-{op_id[-6:]}")
+            rule_id = await _seed_override(
+                session,
+                tenant_id=tenant_id,
+                op_id_pattern=op_id,
+                detail="full",
+            )
+
+        op_class, detail, origin = await compute_effective_broadcast_detail(
+            op_id=op_id,
+            tenant_id=tenant_id,
+            raw_params={"data": {"password": "leak-me"}},
+            request_override=None,
+        )
+        assert op_class == expected_class
+        assert detail == "aggregate"
+        assert origin == f"tenant_rule:{rule_id}"
+
+    @pytest.mark.asyncio
     async def test_request_override_ignored_on_non_sensitive_class(self) -> None:
         """``request_override="full"`` on a ``read`` op is a no-op (already full).
 

@@ -118,8 +118,10 @@ func NewRootCmd() *cobra.Command {
 			"the tenant's edges (list-edges). Read verbs are operator-" +
 			"level; annotate / unannotate require tenant_admin. Tenant " +
 			"scoping is enforced server-side via the JWT — no surface " +
-			"accepts a tenant id, and cross-tenant queries return the " +
-			"same empty/404 shape as a node that does not exist.",
+			"accepts a tenant id, and cross-tenant queries surface as " +
+			"node_untracked (the dependents / dependencies routes' " +
+			"404 — distinguishes 'anchor not in this tenant's graph' " +
+			"from 'tracked, nothing depends on me' per G0.18-T4 #1357).",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newRefreshCmd())
@@ -477,6 +479,19 @@ type ambiguousNodeDetail struct {
 	Kinds []string `json:"kinds"`
 }
 
+// nodeUntrackedDetail mirrors the 404 body topology.py's
+// _node_untracked_http emits on the closure routes:
+// {"error":"node_untracked","name":"<n>","kind":"<k>"}. G0.18-T4
+// (#1357). Distinct slug from the annotate flow's `node_not_found`
+// because the operator action differs: closure → "register or
+// refresh the target / annotate the relationship"; annotate →
+// "seed the endpoint first with meho topology create-node".
+type nodeUntrackedDetail struct {
+	Error string `json:"error"`
+	Name  string `json:"name"`
+	Kind  string `json:"kind,omitempty"`
+}
+
 // decodeDetailString pulls the `detail` field out of a FastAPI error
 // body when it's a plain string. Falls back to the raw body when the
 // JSON shape doesn't match — better to surface the raw error than to
@@ -498,6 +513,27 @@ func decodeDetailString(body string) string {
 func formatNotFound(body string) string {
 	var env detailEnvelope
 	if err := json.Unmarshal([]byte(body), &env); err == nil {
+		// node_untracked first — the closure-route 404 envelope
+		// (G0.18-T4 #1357). Distinct from refresh's no_target because
+		// the operator action diverges: refresh's near-miss list says
+		// "did you typo a target name?"; node_untracked says "the
+		// anchor isn't in the topology graph yet — register / refresh
+		// the target or annotate the relationship." Auto-discovery is
+		// k8s-only today, so every registered non-k8s target lands
+		// here until non-k8s populators or a curated annotation ship.
+		var untracked nodeUntrackedDetail
+		if jerr := json.Unmarshal(env.Detail, &untracked); jerr == nil && untracked.Error == "node_untracked" {
+			suffix := ""
+			if untracked.Kind != "" {
+				suffix = fmt.Sprintf(" (kind=%s)", untracked.Kind)
+			}
+			return fmt.Sprintf(
+				"node %q is not tracked in the topology graph%s — run "+
+					"`meho topology refresh <target>` (k8s targets) or "+
+					"`meho topology annotate` to assert relationships "+
+					"(non-k8s targets, until non-k8s populators land)",
+				untracked.Name, suffix)
+		}
 		var detail resolverDetail
 		if jerr := json.Unmarshal(env.Detail, &detail); jerr == nil && detail.Error != "" {
 			if len(detail.Matches) == 0 {

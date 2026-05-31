@@ -338,6 +338,91 @@ def test_dependents_ambiguous_node_returns_409(client: TestClient) -> None:
     assert detail["kinds"] == ["target", "vm"]
 
 
+def test_dependents_untracked_node_returns_404_node_untracked(
+    client: TestClient,
+) -> None:
+    """G0.18-T4 (#1357, RDC #789 N2). Closure verb on an anchor with no
+    matching ``graph_node`` returns 404 ``node_untracked`` rather than
+    an empty 200 list. The distinct slug separates this case from the
+    annotate-flow ``node_not_found`` so the CLI can render the
+    closure-specific "register / refresh first" diagnostic.
+    """
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(side_effect=NodeNotFoundError("vault-prod"))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.find_dependents", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/dependents/vault-prod",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 404, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "node_untracked"
+    assert detail["name"] == "vault-prod"
+    assert "kind" not in detail  # No kind pin was supplied.
+
+
+def test_dependencies_untracked_node_returns_404_node_untracked(
+    client: TestClient,
+) -> None:
+    """The dependencies verb mirrors the dependents 404 contract.
+
+    Same G0.18-T4 (#1357) translation: an untracked anchor surfaces as
+    404 ``node_untracked``. Includes the ``kind`` echo when the caller
+    supplied a ``kind=`` query pin so the diagnostic is
+    self-contained.
+    """
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(side_effect=NodeNotFoundError("vc-prod", kind="target"))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.find_dependencies", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/dependencies/vc-prod?kind=target",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 404, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "node_untracked"
+    assert detail["name"] == "vc-prod"
+    assert detail["kind"] == "target"
+
+
+def test_dependents_tracked_node_with_no_dependents_returns_one_element_root(
+    client: TestClient,
+) -> None:
+    """A tracked-but-no-dependents anchor stays a 200 with ``[root]``.
+
+    Companion to ``test_dependents_untracked_node_returns_404_...`` —
+    the two together prove the G0.18-T4 (#1357) untracked-vs-empty
+    distinction the false-negative RDC #789 N2 hinged on. The
+    substrate's depth-0 anchor row is what makes this case
+    structurally distinct from the untracked one (which raises before
+    the CTE runs).
+    """
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=[_make_node("ns-prod-foo", "namespace", 0)])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.find_dependents", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/dependents/ns-prod-foo",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["name"] == "ns-prod-foo"
+    assert body[0]["depth"] == 0
+
+
 # ---------------------------------------------------------------------------
 # path — wrap find_path; null when unreachable
 # ---------------------------------------------------------------------------

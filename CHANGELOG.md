@@ -242,6 +242,39 @@ connector-related release-notes line.
   Docs: [`connector-catalog.md`](docs/cross-repo/connector-catalog.md)
   §"Spec-only entries" + entry-schema table.
 
+- **Topology blast-radius distinguishes untracked from
+  no-dependents; `annotate` §6 over-warning softened (G0.18-T4
+  #1357, RDC #789 N2 + N7).** Pre-fix, `query_topology
+  {kind: dependents}` returned `[]` for both "the anchor isn't in
+  the graph at all" and "the anchor is tracked but nothing depends
+  on it." Auto-discovery is k8s-only — only
+  `KubernetesConnector` overrides `Connector.discover_topology`;
+  every other shipped connector inherits the no-op ABC default —
+  so every registered `vault` / `vcenter` / `nsx` /
+  `sddc-manager` / `gh` target started life untracked, and the
+  pre-destructive blast-radius use case read the `[]` as "safe to
+  delete." `find_dependents` / `find_dependencies` now resolve the
+  anchor via `resolvers.resolve_node` up front and raise
+  `NodeNotFoundError` on a miss; the REST front maps that to
+  **404 `node_untracked`** (distinct slug from the annotate
+  flow's `node_not_found` because the operator action diverges —
+  closure: register / refresh the target or annotate the
+  relationship; annotate: seed the endpoint via
+  `meho.topology.create_node`), the MCP front returns the typed
+  `{kind, status: "node_untracked", name, nodes: []}` envelope,
+  and the CLI renders an operator-actionable line. A
+  tracked-but-no-dependents anchor still returns the one-element
+  `[root]`. Separately, the `annotate` tool description's blanket
+  warning that asserting `runs-on` / `mounts` / `routes-through`
+  / `belongs-to` always lands as a §6 conflict marker was
+  softened: §6 fires *only when a competing auto edge already
+  exists for that pair*, so a curated `runs-on` on a non-k8s pair
+  no probe covers inserts clean (`source: curated,
+  conflicts: []`) and is the current right way to assert these
+  edges until non-k8s populators ship. Full non-k8s
+  `discover_topology` populators stay out of scope for this Task
+  (a larger follow-up Initiative).
+
 ### Documentation
 
 - **`/mcp` root-mount carve-out documented + `/api/v1/mcp`

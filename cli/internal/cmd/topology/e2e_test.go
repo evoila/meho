@@ -217,27 +217,34 @@ func TestDependentsAmbiguousNode409(t *testing.T) {
 	}
 }
 
-// TestDependentsCrossTenantEmpty — a node name that exists only in
-// another tenant returns an empty list (200), rendered as the
-// not-found line, never the other tenant's node. Tenant-boundary
-// acceptance criterion for the read verbs.
-func TestDependentsCrossTenantEmpty(t *testing.T) {
+// TestDependentsCrossTenantNodeUntracked — G0.18-T4 (#1357, RDC #789
+// N2). A node name that exists only in another tenant surfaces as
+// HTTP 404 `node_untracked` (not the empty 200 list the
+// pre-G0.18-T4 contract returned). The CLI renders the
+// "not tracked in the topology graph" operator-actionable line via
+// `formatNotFound`; tenant-boundary acceptance still holds (the
+// other tenant's node is never visible).
+func TestDependentsCrossTenantNodeUntracked(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/topology/dependents/tenant-b-node", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[]`))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"detail":{"error":"node_untracked","name":"tenant-b-node"}}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, stdout, stderr := newRunCmd(t)
+	cmd, _, stderr := newRunCmd(t)
 	err := runClosure(cmd, closureOptions{Verb: "dependents", Name: "tenant-b-node", BackplaneOverride: srv.URL})
-	if err != nil {
-		t.Fatalf("runClosure: %v; stderr=%s", err, stderr.String())
+	if err == nil {
+		t.Fatalf("expected error for cross-tenant 404; stderr=%s", stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "no node named") {
-		t.Errorf("cross-tenant query should render not-found; got %q", stdout.String())
+	if !strings.Contains(stderr.String(), "not tracked in the topology graph") {
+		t.Errorf("cross-tenant query should render node_untracked; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "tenant-b-node") {
+		t.Errorf("cross-tenant query should echo anchor name; got %q", stderr.String())
 	}
 }
 

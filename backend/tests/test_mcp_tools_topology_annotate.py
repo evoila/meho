@@ -1002,20 +1002,30 @@ def test_edges_facet_schema_rejects_limit_above_edges_ceiling(
 # ---------------------------------------------------------------------------
 
 
-def test_annotate_description_warns_against_auto_kinds() -> None:
-    """The annotate description steers operators away from auto-discoverable kinds.
+def test_annotate_description_scopes_auto_kind_warning_to_actual_conflict() -> None:
+    """The annotate description scopes the §6 warning correctly.
 
-    Initiative #364 / G9.2 narrative: annotating an edge probes already
-    discover is noise — the next refresh will mark the assertion as a §6
-    conflict marker and clutter the inventory. The tool description must
-    say so explicitly (the "WHEN TO CALL" + "DO NOT" pair the AI-engineering
-    best-practices anchor recommends).
+    G0.18-T4 (#1357, RDC #789 N7). Pre-G0.18-T4 the description told
+    operators "DO NOT use to annotate edges the probes already
+    discover," but the §6 conflict only fires when a competing **auto**
+    edge already exists for the pair — and auto-discovery is k8s-only
+    today. The blanket warning steered operators away from the
+    legitimate path of asserting `runs-on` against non-k8s targets
+    (vault / vcenter / nsx / sddc-manager / gh) until non-k8s
+    populators ship. The description now scopes the §6 warning to
+    "when a competing auto edge already exists" and explicitly names
+    the non-k8s "right way" path.
     """
     entry = get_tool("meho.topology.annotate")
     assert entry is not None
     desc = entry[0].description
     assert "WHEN TO CALL" in desc
-    assert "DO NOT" in desc
+    assert "AUTO-DISCOVERABLE KINDS" in desc
+    # The §6 caveat must be scoped to the "competing auto edge already exists" case.
+    assert "auto** edge already exists" in desc
+    # The new "right way" guidance for non-k8s pairs.
+    assert "non-k8s" in desc
+    assert "conflicts: []" in desc
     # Names at least the canonical cross-system kinds.
     assert "authenticates-via" in desc
     assert "tenant_admin" in desc

@@ -30,11 +30,18 @@ func newDependentsCmd() *cobra.Command {
 		Long: "dependents calls GET /api/v1/topology/dependents/<name> " +
 			"and renders the reverse closure — every node that depends " +
 			"on the anchor, depth-ordered. The anchor itself is row 0 " +
-			"so an operator can tell \"node exists, no dependents\" " +
-			"(one row) from \"node not in this tenant\" (zero rows); a " +
-			"cross-tenant name reads as the zero-row case, never " +
-			"leaking another tenant's graph. --kind restricts the walk " +
-			"to one edge kind; --depth caps the walk (1..64, server " +
+			"so a one-row response means 'tracked, no dependents'. An " +
+			"anchor that is not in the tenant's topology graph " +
+			"surfaces as HTTP 404 node_untracked (G0.18-T4 #1357) — " +
+			"the CLI renders 'not tracked in the topology graph — run " +
+			"meho topology refresh or annotate' rather than a " +
+			"misleading empty list. Cross-tenant names land in the " +
+			"same 404 case (the substrate never leaks another tenant's " +
+			"graph). Auto-discovery is k8s-only today, so every " +
+			"registered non-k8s target (vault, vcenter, nsx, " +
+			"sddc-manager, gh) starts as untracked until a populator " +
+			"or curated annotation lands. --kind restricts the walk to " +
+			"one edge kind; --depth caps the walk (1..64, server " +
 			"default 16). If the bare name is ambiguous across node " +
 			"kinds the backend returns a 409 naming the kinds; re-run " +
 			"with --node-kind <one of them>.",

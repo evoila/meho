@@ -21522,10 +21522,26 @@ type DependenciesApiV1TopologyDependenciesNameGetResponse struct {
 	JSON200      *struct {
 		union json.RawMessage
 	}
+	JSON404 *struct {
+		Detail struct {
+			Error DependenciesApiV1TopologyDependenciesNameGet404DetailError `json:"error"`
+			Kind  *string                                                    `json:"kind,omitempty"`
+			Name  string                                                     `json:"name"`
+		} `json:"detail"`
+	}
+	JSON409 *struct {
+		Detail struct {
+			Error DependenciesApiV1TopologyDependenciesNameGet409DetailError `json:"error"`
+			Kinds []string                                                   `json:"kinds"`
+			Name  string                                                     `json:"name"`
+		} `json:"detail"`
+	}
 	JSON422 *HTTPValidationError
 }
 type DependenciesApiV1TopologyDependenciesNameGet2000 = []TopologyNode
 type DependenciesApiV1TopologyDependenciesNameGet2001 map[string]interface{}
+type DependenciesApiV1TopologyDependenciesNameGet404DetailError string
+type DependenciesApiV1TopologyDependenciesNameGet409DetailError string
 
 // Status returns HTTPResponse.Status
 func (r DependenciesApiV1TopologyDependenciesNameGetResponse) Status() string {
@@ -21549,10 +21565,26 @@ type DependentsApiV1TopologyDependentsNameGetResponse struct {
 	JSON200      *struct {
 		union json.RawMessage
 	}
+	JSON404 *struct {
+		Detail struct {
+			Error DependentsApiV1TopologyDependentsNameGet404DetailError `json:"error"`
+			Kind  *string                                                `json:"kind,omitempty"`
+			Name  string                                                 `json:"name"`
+		} `json:"detail"`
+	}
+	JSON409 *struct {
+		Detail struct {
+			Error DependentsApiV1TopologyDependentsNameGet409DetailError `json:"error"`
+			Kinds []string                                               `json:"kinds"`
+			Name  string                                                 `json:"name"`
+		} `json:"detail"`
+	}
 	JSON422 *HTTPValidationError
 }
 type DependentsApiV1TopologyDependentsNameGet2000 = []TopologyNode
 type DependentsApiV1TopologyDependentsNameGet2001 map[string]interface{}
+type DependentsApiV1TopologyDependentsNameGet404DetailError string
+type DependentsApiV1TopologyDependentsNameGet409DetailError string
 
 // Status returns HTTPResponse.Status
 func (r DependentsApiV1TopologyDependentsNameGetResponse) Status() string {
@@ -27577,6 +27609,32 @@ func ParseDependenciesApiV1TopologyDependenciesNameGetResponse(rsp *http.Respons
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest struct {
+			Detail struct {
+				Error DependenciesApiV1TopologyDependenciesNameGet404DetailError `json:"error"`
+				Kind  *string                                                    `json:"kind,omitempty"`
+				Name  string                                                     `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest struct {
+			Detail struct {
+				Error DependenciesApiV1TopologyDependenciesNameGet409DetailError `json:"error"`
+				Kinds []string                                                   `json:"kinds"`
+				Name  string                                                     `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -27611,6 +27669,32 @@ func ParseDependentsApiV1TopologyDependentsNameGetResponse(rsp *http.Response) (
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest struct {
+			Detail struct {
+				Error DependentsApiV1TopologyDependentsNameGet404DetailError `json:"error"`
+				Kind  *string                                                `json:"kind,omitempty"`
+				Name  string                                                 `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest struct {
+			Detail struct {
+				Error DependentsApiV1TopologyDependentsNameGet409DetailError `json:"error"`
+				Kinds []string                                               `json:"kinds"`
+				Name  string                                                 `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

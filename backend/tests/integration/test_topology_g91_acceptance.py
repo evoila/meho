@@ -95,6 +95,7 @@ from meho_backplane.mcp.tools import topology as _tool_topology
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.topology.query import find_dependencies, find_dependents, find_path
 from meho_backplane.topology.refresh import refresh_target_topology
+from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.scheduler import _run_one_sweep, _SchedulerState
 from tests._oidc_jwt_helpers import (
     make_rsa_keypair,
@@ -317,10 +318,14 @@ async def test_scenario1_tenant_boundary_overlapping_names(
         "rdc-vcenter": 2,
     }
 
-    # Tenant B has not refreshed — its query is empty, NOT tenant A's
-    # closure leaking across the boundary.
-    b_dep = await find_dependents(_operator(TENANT_B_ID), "host-rdc-vcenter")
-    assert b_dep == []
+    # Tenant B has not refreshed — its query raises NodeNotFoundError
+    # rather than returning an empty list (the T4 untracked-vs-empty
+    # distinction, RDC #789 N2). The resolve-first check scopes the
+    # anchor lookup to the caller's tenant, so a node that exists only
+    # in tenant A's graph reads as untracked from tenant B, never as
+    # "tracked but no dependents".
+    with pytest.raises(NodeNotFoundError):
+        await find_dependents(_operator(TENANT_B_ID), "host-rdc-vcenter")
 
     a_nodes_before, a_edges_before = await _count_rows(TENANT_A_ID)
 

@@ -46,6 +46,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.db.models import Tenant
 from meho_backplane.mcp.registry import all_tools_for, get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import TopologyNode, TopologyPath
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -361,6 +362,122 @@ def test_query_topology_dependencies_passes_filters_through(
         "depth": 4,
         "kind_filter": "runs-on",
     }
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_dependents_untracked_returns_typed_envelope(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """G0.18-T4 (#1357, RDC #789 N2). When the substrate raises
+    :class:`NodeNotFoundError` for an untracked anchor the closure
+    verb returns a successful tool call with a typed
+    ``{status: "node_untracked"}`` envelope rather than -32602.
+
+    Pre-fix behaviour treated the miss as an operator input error and
+    raised -32602; the agent retried with corrections instead of
+    rendering "the anchor isn't in the topology graph yet — refresh
+    or annotate first." The new envelope is what lets an agent stop
+    misreading an empty closure as "safe to delete" for the
+    blast-radius use case.
+    """
+    client, _op = client_with_operator
+    mock_dep = AsyncMock(side_effect=NodeNotFoundError("vault-prod"))
+    with patch(_DEPENDENTS_PATCH, new=mock_dep):
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_topology",
+                    "arguments": {
+                        "kind": "dependents",
+                        "target": "vault-prod",
+                    },
+                },
+            },
+        )
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["kind"] == "dependents"
+    assert payload["status"] == "node_untracked"
+    assert payload["name"] == "vault-prod"
+    assert payload["nodes"] == []
+    assert "node_kind" not in payload  # no kind pin was supplied
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_dependencies_untracked_echoes_node_kind_when_supplied(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The ``node_untracked`` envelope echoes ``node_kind`` when the
+    caller supplied one — same self-contained-diagnostic discipline
+    the REST 404 follows.
+    """
+    client, _op = client_with_operator
+    mock_deps = AsyncMock(side_effect=NodeNotFoundError("vc-prod", kind="target"))
+    with patch(_DEPENDENCIES_PATCH, new=mock_deps):
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_topology",
+                    "arguments": {
+                        "kind": "dependencies",
+                        "target": "vc-prod",
+                        "node_kind": "target",
+                    },
+                },
+            },
+        )
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["kind"] == "dependencies"
+    assert payload["status"] == "node_untracked"
+    assert payload["name"] == "vc-prod"
+    assert payload["node_kind"] == "target"
+    assert payload["nodes"] == []
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_dependents_tracked_no_deps_omits_status(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A tracked-but-no-dependents anchor keeps the historical
+    ``{kind, nodes: [root]}`` shape — no ``status`` field, no
+    envelope drift. Pin G0.18-T4 (#1357)'s structural distinction
+    between untracked (status set) and tracked-empty (status omitted).
+    """
+    client, _op = client_with_operator
+    mock_dep = AsyncMock(return_value=[_node("ns-prod-foo", "namespace", 0, None)])
+    with patch(_DEPENDENTS_PATCH, new=mock_dep):
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_topology",
+                    "arguments": {
+                        "kind": "dependents",
+                        "target": "ns-prod-foo",
+                    },
+                },
+            },
+        )
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["kind"] == "dependents"
+    assert "status" not in payload
+    assert [n["name"] for n in payload["nodes"]] == ["ns-prod-foo"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

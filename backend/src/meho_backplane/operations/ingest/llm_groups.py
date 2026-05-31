@@ -42,18 +42,19 @@ pass + operator review (T4) is what produces that surface.
 
 The LLM client itself is injected as a :class:`LlmClient` Protocol so
 the chassis can swap in a real Anthropic Messages-API adapter without
-re-plumbing T3. **No production adapter ships today** —
-``set_llm_client_factory`` (in
-:mod:`meho_backplane.api.v1.connectors_ingest`) is the wire-up seam,
-but FastAPI lifespan startup has no caller for it; ``meho connector
-ingest`` (CLI / REST / MCP) on a stock deploy returns HTTP 503 /
-``LlmClientUnavailable`` for any non-dry-run ingest until an
-operator-installed adapter (a Sonnet/Haiku-backed implementation, or
-a provider-routed shape via G11.5) is wired. Tests inject a
-deterministic stub via the same hook. There is no module-level
-singleton -- every call site passes a client. See G0.18-T7 (#1360)
-and ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring
-(build-time-only today)" for the operator-facing framing.
+re-plumbing T3. The production adapter
+(:func:`~meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`)
+is wired at FastAPI lifespan startup via ``set_llm_client_factory``
+(in :mod:`meho_backplane.api.v1.connectors_ingest`), reusing
+``settings.anthropic_api_key`` (#1386); ``meho connector ingest``
+(CLI / REST / MCP) on a deploy with the key set groups non-dry-run
+ingests for real, and a deploy with no key fails closed with HTTP
+503 / ``LlmClientUnavailable``. Routing through a provider-agnostic
+shape (G11.5) for air-gapped deploys is the remaining follow-up.
+Tests inject a deterministic stub via the same hook. There is no
+module-level singleton -- every call site passes a client. See
+``docs/codebase/spec-ingestion.md`` §"LLM-client wiring" for the
+operator-facing framing.
 """
 
 from __future__ import annotations

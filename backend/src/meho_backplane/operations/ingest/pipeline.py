@@ -29,27 +29,25 @@ LLM-client injection
 --------------------
 
 The grouping pass requires an :class:`LlmClient` Protocol
-implementation. **No production adapter ships yet** — the chassis
-exposes :func:`set_llm_client_factory`
-(:mod:`meho_backplane.api.v1.connectors_ingest`) as the wire-up
-seam, but FastAPI lifespan startup has no caller for it, and
-``settings.anthropic_api_key`` flows only to the agent runtime
-(``agent/run.py``), not here. To keep T6's REST surface workable
-both in tests and once a production adapter lands, the pipeline
-accepts an injectable factory at construction time; the default
-factory raises :class:`LlmClientUnavailable` so calling
-``POST /api/v1/connectors/ingest`` against a backplane that hasn't
-configured an LLM client returns 503 rather than crashing. Sibling
-tests inject their own deterministic stub via
+implementation. The production adapter ships and is wired at FastAPI
+lifespan startup (#1386):
+:func:`~meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`
+is installed via :func:`set_llm_client_factory`
+(:mod:`meho_backplane.api.v1.connectors_ingest`), reading
+``settings.anthropic_api_key`` (the same key the agent runtime uses)
+into a real Anthropic Messages-API client. To keep T6's REST surface
+workable in tests as well, the pipeline accepts an injectable factory
+at construction time; the fail-closed default factory raises
+:class:`LlmClientUnavailable` so calling
+``POST /api/v1/connectors/ingest`` against a backplane that configured
+no key returns 503 rather than crashing. Sibling tests inject their
+own deterministic stub via
 ``IngestionPipelineService(..., llm_client_factory=...)``; the
-CLI / REST / MCP surfaces all use the same fail-closed default,
-so ``meho connector ingest --catalog <product>/<version>`` is
-**build-time-only** on current deploys (CI fixtures inject the
-stub; deployed backplanes get the 503). Wiring a production
-adapter at lifespan startup — reading ``anthropic_api_key`` from
-settings into a real :class:`LlmClient` implementation — is the
-outstanding follow-up; see G0.18-T7 (#1360) for the doc/reference
-cleanup and the operator-facing build-time-only framing.
+CLI / REST / MCP surfaces all read the same lifespan-wired factory,
+so ``meho connector ingest --catalog <product>/<version>`` groups for
+real on a deploy with ``ANTHROPIC_API_KEY`` set and fails closed with
+503 on one without. See G0.18-T7 (#1360) for the prior build-time-only
+framing this replaces.
 
 Multi-spec merge
 ----------------
@@ -152,30 +150,33 @@ LlmClientFactory = Callable[[], LlmClient]
 
 
 def default_llm_client_factory() -> LlmClient:
-    """Fail-closed default — no production LLM adapter is wired yet.
+    """Fail-closed default for when no LLM-client factory is injected.
 
     Public so that sibling consumers (REST routes at T6, CLI verbs at
     T5, admin MCP tools at T7) can import the same fallback factory
     from :mod:`meho_backplane.operations.ingest` without reaching
     across the underscore boundary.
 
-    The detail message names the wire-up seam
-    (:func:`set_llm_client_factory`) rather than a tracking-issue
-    number — the previously-cited ``G0.7-T5 (#405)`` was the CLI verb
-    tree, not an LLM-adapter task, and ``settings.anthropic_api_key``
-    is read only by the agent runtime today. See G0.18-T7 (#1360)
-    for the dead-reference cleanup and the build-time-only framing.
+    This is the *unwired* fallback. Production deploys override it at
+    FastAPI lifespan startup (#1386):
+    :func:`~meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`
+    is installed via
+    :func:`meho_backplane.api.v1.connectors_ingest.set_llm_client_factory`,
+    reusing ``settings.anthropic_api_key``. This default is what runs
+    only when an :class:`IngestionPipelineService` is constructed with
+    no explicit factory and the lifespan wiring has not run (CI / unit
+    tests, which inject their own deterministic stub instead).
     """
     raise LlmClientUnavailable(
-        "no LLM client configured for spec-ingestion grouping; "
-        "no production adapter is wired today. Tests inject a "
+        "no LLM client configured for spec-ingestion grouping; this is "
+        "the fail-closed default that runs when no factory was injected "
+        "and FastAPI lifespan startup did not wire one. Tests inject a "
         "deterministic stub via "
         "IngestionPipelineService(..., llm_client_factory=...); "
-        "deployed backplanes require an operator to install a real "
-        "LlmClient at lifespan startup via "
-        "meho_backplane.api.v1.connectors_ingest.set_llm_client_factory(...). "
-        "Until that wiring lands, --catalog ingest grouping is "
-        "build-time-only.",
+        "production deploys wire build_anthropic_ingest_llm_client at "
+        "lifespan startup (#1386) — if you hit this on a real deploy, "
+        "lifespan startup did not run or ANTHROPIC_API_KEY drove a "
+        "different LlmClientUnavailable from the production factory.",
     )
 
 

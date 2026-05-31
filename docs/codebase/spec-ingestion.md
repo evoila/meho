@@ -33,11 +33,11 @@ The pipeline is broken into work items per Initiative #389:
   each op to a group in batches of 50. Proposed groups land
   `review_status='staged'`; each per-op `group_id` is set in the same
   transaction as the audit row. The LLM is injected as the
-  :class:`LlmClient` Protocol; tests inject a deterministic stub,
-  and **no production adapter is wired today** — see
-  [LLM-client wiring (build-time-only today)](#llm-client-wiring-build-time-only-today)
-  below for the lifespan-startup gap (G0.18-T7 / #1360) that keeps
-  non-dry-run `--catalog` ingest 503ing on deployed backplanes.
+  :class:`LlmClient` Protocol; tests inject a deterministic stub, and
+  FastAPI lifespan startup wires the production Anthropic-backed client
+  (#1386) — see [LLM-client wiring](#llm-client-wiring) below for the
+  `ANTHROPIC_API_KEY` requirement that gates non-dry-run `--catalog`
+  ingest on deployed backplanes.
 * **T4 — Review-queue state machine** (`ingest/service.py`). Operators
   move connectors through `staged → enabled` (and `disabled` for
   regression rollback) before any op becomes dispatchable.
@@ -368,16 +368,15 @@ the originating operator's identity); the same instance is reused
 across T5's CLI verbs, T6's REST routes, and T7's admin MCP tools.
 
 The `LlmClient` Protocol is injected via a factory parameter so the
-chassis can lazy-resolve it; the default factory raises
+chassis can lazy-resolve it; the fail-closed default factory raises
 `LlmClientUnavailable` and the REST layer maps it onto HTTP 503.
-**No production adapter ships today** — `set_llm_client_factory`
-(in `api/v1/connectors_ingest.py`) is the wire-up seam, but FastAPI
-lifespan startup has no caller for it and `settings.anthropic_api_key`
-flows only to the agent runtime (`agent/run.py:432`). See
-[LLM-client wiring (build-time-only today)](#llm-client-wiring-build-time-only-today)
-for the operator-facing framing; G0.18-T7 (#1360) tracks the doc
-cleanup and the build-time-only caveat in the
-`composite_l2_missing` envelope text.
+FastAPI lifespan startup installs the production factory
+(`build_anthropic_ingest_llm_client`) via `set_llm_client_factory` (in
+`api/v1/connectors_ingest.py`), reusing `settings.anthropic_api_key`
+(#1386) — so a deploy with the key set groups for real, and a keyless
+deploy keeps the 503. See
+[LLM-client wiring](#llm-client-wiring)
+for the operator-facing framing and the resolver-routing follow-up.
 
 The `embedding_service` parameter is the test seam to inject
 `AsyncMock` so unit tests don't pull the fastembed ONNX model from
@@ -679,11 +678,12 @@ under the `TENANT_ADMIN` role).
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)
 round-trip through URL routing intact. The route module's
-`set_llm_client_factory(factory)` helper is the wire-up seam a
-future production bootstrap would call to install a real
-:class:`LlmClient` adapter; today only tests call it, so non-dry-
-run ingest grouping is build-time-only — see
-[LLM-client wiring (build-time-only today)](#llm-client-wiring-build-time-only-today)
+`set_llm_client_factory(factory)` helper is the wire-up seam the
+FastAPI lifespan startup calls to install the production
+:class:`LlmClient` adapter (`build_anthropic_ingest_llm_client`,
+#1386); tests call it too with a deterministic stub. The route reads
+the active factory via the `get_llm_client_factory` dependency — see
+[LLM-client wiring](#llm-client-wiring)
 for the operator-facing framing.
 
 ### `parse_openapi(spec_path_or_uri, *, spec_source=None)` (`ingest/openapi.py`)
@@ -907,63 +907,69 @@ whose pod died was never going to finish. Durable cross-restart
 jobs are a v0.9 follow-up (the same migration that lands
 operator-cancellable jobs).
 
-## LLM-client wiring (build-time-only today)
+## LLM-client wiring
 
 The grouping pass (T3, `run_llm_grouping` in
 `operations/ingest/llm_groups.py`) needs an injected `LlmClient`
 Protocol implementation. The chassis exposes the wire-up seam
 (`set_llm_client_factory` in
 [`api/v1/connectors_ingest.py`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py))
-and the fail-closed default (`default_llm_client_factory` in
-[`operations/ingest/pipeline.py`](../../backend/src/meho_backplane/operations/ingest/pipeline.py)),
-but **no production caller invokes the seam at FastAPI lifespan
-startup**. `settings.anthropic_api_key` is read only by the agent
-runtime (`agent/run.py:432`) — never by the ingest pipeline.
+and a fail-closed default (`default_llm_client_factory` in
+[`operations/ingest/pipeline.py`](../../backend/src/meho_backplane/operations/ingest/pipeline.py)).
+As of #1386, **FastAPI lifespan startup wires a production
+`LlmClient`**: `build_anthropic_ingest_llm_client` (in
+[`operations/ingest/anthropic_client.py`](../../backend/src/meho_backplane/operations/ingest/anthropic_client.py))
+reuses `settings.anthropic_api_key` — the same key the agent runtime
+reads — and the same `_split_model_id(settings.agent_default_model)`
+prefix handling, talking to the Anthropic Messages API directly (the
+one-shot `system + user -> raw JSON` shape the grouping pass wants,
+rather than the pydantic-ai `Model` the agent loop uses).
 
 Operationally this means non-dry-run ingest of an un-grouped
 connector — whether via the CLI (`meho connector ingest --catalog
 <product>/<version>`), the REST route
 (`POST /api/v1/connectors/ingest`), or the admin MCP tool
-(`meho.connector.ingest`) — fails closed with HTTP 503 (the route
-maps `LlmClientUnavailable` onto 503; the CLI / MCP surfaces
-render their own operator-facing variant). The grouping pass only
-runs in CI / build contexts where the test fixture is in scope
-and the suite injects a deterministic stub via
-`IngestionPipelineService(..., llm_client_factory=...)`. From an
-operator's perspective, **`--catalog` ingest grouping is build-
-time-only today**.
+(`meho.connector.ingest`) — **groups successfully on a deploy with
+`ANTHROPIC_API_KEY` set**. All three surfaces read the same
+lifespan-wired factory: the REST route via the
+`get_llm_client_factory` dependency, the MCP tool by calling
+`get_llm_client_factory()` directly (it does not pin the default), and
+the CLI through the REST route. A deploy that configured **no key**
+keeps the fail-closed posture: `build_anthropic_ingest_llm_client`
+raises `LlmClientUnavailable`, which the route maps onto HTTP 503 and
+the CLI / MCP surfaces render as their own operator-facing variant.
+CI / unit tests inject a deterministic stub via
+`IngestionPipelineService(..., llm_client_factory=...)` (or
+`set_llm_client_factory(...)`) so the grouping pass stays hermetic.
 
 The `composite_l2_missing` error envelope
 (`operations/_errors.py:result_composite_l2_missing`) surfaces a
-catalog-ingest command as the escape hatch from a missing L2 sub-
-op; on current deploys that escape hatch returns 503 rather than
-completing the ingest, until a production adapter is wired. The
-envelope text and `docs/codebase/api-shape-conventions.md` §1's
-escape-hatch framing call out this limitation so operators don't
-walk into the 503 expecting success.
+catalog-ingest command as the escape hatch from a missing L2 sub-op;
+that escape hatch now completes the ingest when the key is set, and
+its envelope text names the `ANTHROPIC_API_KEY` requirement (and the
+503 a keyless deploy still gets) so operators know the prerequisite.
 
-**Operator action to take.** Wiring is a deploy-time concern, not
-a chassis bug — the pipeline accepts an injected factory as its
-documented extension point. Installing a production adapter
-(`AnthropicLlmClient` against the Messages API, or a provider-
-routed shape via G11.5) and calling `set_llm_client_factory(...)`
-once during FastAPI lifespan startup is the unblock path. There
-is no upstream tracking issue for this wire-up at the time of
-G0.18-T7 (#1360); an operator-filed Task under Goal #221 is the
-expected next step. Until then, treat `--catalog` ingest as a
-build-only path.
+**Out of scope (#1386).** The grouping pass talks to Anthropic
+directly rather than routing through the G11.5 per-tenant model
+resolver (Bedrock / vLLM / VCF PAIF, egress-aware). Ingest grouping is
+a build-time operator action with no per-tenant tier or egress context
+today, and the resolver returns pydantic-ai `Model`s shaped for the
+agent tool-use loop, not the `generate_json` seam — so routing ingest
+through it is a separate, larger change. A keyless air-gapped deploy
+(agent runtime on an on-prem backend, no Anthropic key) therefore still
+gets the 503 on `--catalog` grouping until that work lands.
 
 ## Known issues
 
-* **`--catalog` ingest grouping is build-time-only on deployed
-  backplanes.** See
-  [LLM-client wiring (build-time-only today)](#llm-client-wiring-build-time-only-today)
-  above — no production `LlmClient` adapter ships in the chassis,
-  so non-dry-run ingest fails closed with 503 / `LlmClientUnavailable`
-  on every deploy until an operator wires
-  `set_llm_client_factory(...)` at FastAPI lifespan startup.
-  Tracked in G0.18-T7 (#1360, doc cleanup); the actual adapter
-  wire-up is the operator-side follow-up.
+* **`--catalog` ingest grouping requires `ANTHROPIC_API_KEY`.** The
+  grouping pass reuses the agent runtime's Anthropic key (wired at
+  lifespan startup, #1386 — see
+  [LLM-client wiring](#llm-client-wiring) above). A deploy that set no
+  key fails closed with 503 / `LlmClientUnavailable`. Air-gapped
+  deploys that route the agent runtime to an on-prem backend (no
+  Anthropic key) cannot group spec ingests until grouping is routed
+  through the G11.5 resolver — tracked as the out-of-scope follow-up
+  noted above.
 * **Async-mode jobs don't survive pod restart.** The G0.16-T1
   `IngestJobRegistry` lives in process memory. A pod restart
   during a long-running ingest leaves the operator's client

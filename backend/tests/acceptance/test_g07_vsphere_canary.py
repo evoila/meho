@@ -119,13 +119,13 @@ every CI run. The default stub returns deterministic group proposals
 ranks every canonical op in the top-3", not "the LLM produces good
 groups" (the latter is a manual operator-review step). An opt-in
 ``ANTHROPIC_API_KEY``-gated live-LLM run via
-``MEHO_G07_CANARY_LIVE_LLM=1`` would exercise the real Anthropic
-adapter once a production ``LlmClient`` adapter is wired at
-FastAPI lifespan startup. **No production adapter ships today** —
-see ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring
-(build-time-only today)" and G0.18-T7 (#1360) for the doc cleanup;
-the live-LLM variant is parked until an operator wires the
-adapter via ``set_llm_client_factory``.
+``MEHO_G07_CANARY_LIVE_LLM=1`` exercises the real Anthropic adapter.
+The production ``LlmClient`` (``build_anthropic_ingest_llm_client``)
+is wired at FastAPI lifespan startup, reusing
+``settings.anthropic_api_key`` (#1386) — see
+``docs/codebase/spec-ingestion.md`` §"LLM-client wiring". The
+live-LLM variant remains a manual, key-gated sanity hook (CI never
+runs it — no key in the sandbox).
 """
 
 from __future__ import annotations
@@ -1476,20 +1476,20 @@ async def test_canary_live_llm_grouping_produces_named_groups(
         "anthropic",
         reason="anthropic SDK not installed; live-LLM variant is opt-in",
     )
-    # No production LlmClient adapter wires itself at FastAPI
-    # lifespan startup today -- the previously-cited ``Task #467``
-    # was G8.1-T3 (audit CLI verbs, CLOSED), never the Anthropic
-    # adapter. Keep this stub-skip so operators running the canary
-    # manually see a clear pointer rather than a silent skip. See
-    # G0.18-T7 (#1360) for the dead-reference cleanup +
-    # ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring
-    # (build-time-only today)" for the operator-facing framing.
+    # The production Anthropic LlmClient (build_anthropic_ingest_llm_client)
+    # now ships and is wired at FastAPI lifespan startup (#1386); the
+    # previously-cited ``Task #467`` was G8.1-T3 (audit CLI verbs,
+    # CLOSED), never the adapter. This live-LLM variant stays a manual,
+    # key-gated sanity hook — keep the skip so operators running the
+    # canary manually see a clear pointer rather than a silent skip. See
+    # ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring" for the
+    # operator-facing framing.
     pytest.skip(
-        "Live-LLM canary requires a production Anthropic LlmClient "
-        "adapter wired at FastAPI lifespan startup; the chassis does "
-        "not yet ship one. Stubs cover the canary's correctness; this "
-        "variant lands when an operator installs the adapter (see "
-        "docs/codebase/spec-ingestion.md and G0.18-T7 #1360).",
+        "Live-LLM canary is a manual, key-gated sanity hook; not run "
+        "automatically. The production Anthropic LlmClient ships and is "
+        "wired at lifespan startup (#1386) — stubs cover the canary's "
+        "correctness; run this manually with ANTHROPIC_API_KEY set (see "
+        "docs/codebase/spec-ingestion.md).",
     )
 
 

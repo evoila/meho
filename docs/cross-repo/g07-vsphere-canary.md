@@ -108,7 +108,7 @@ parameter-ref parser branch and #503 extended this canary):
   backplane. The canary acceptance test uses a deterministic stub
   (see *Test variant* below) so it can run without an adapter
   wired. Full framing in
-  [``docs/codebase/spec-ingestion.md``](../codebase/spec-ingestion.md#llm-client-wiring-build-time-only-today).
+  [``docs/codebase/spec-ingestion.md``](../codebase/spec-ingestion.md#llm-client-wiring).
 
 ## Operator procedure
 
@@ -245,13 +245,15 @@ runs the same procedure non-interactively against a
 testcontainers Postgres + a deterministic LLM stub that classifies
 ops by URL path prefix. The stub keeps the test reproducible and
 fast (~5 s ingest + ~1-2 s per benchmark query); a live-LLM variant
-gated on ``MEHO_G07_CANARY_LIVE_LLM=1`` is reserved for the day a
-production Anthropic ``LlmClient`` adapter is wired at FastAPI
-lifespan startup. No such adapter ships today (the previously-cited
-``Task #467`` was the audit CLI verb tracker, not an LLM adapter
-— see G0.18-T7 #1360 for the cleanup and
-``docs/codebase/spec-ingestion.md`` §"LLM-client wiring
-(build-time-only today)" for the operator-facing framing).
+gated on ``MEHO_G07_CANARY_LIVE_LLM=1`` exercises the real grouping
+pass. As of #1386 a production Anthropic ``LlmClient``
+(``build_anthropic_ingest_llm_client``) is wired at FastAPI lifespan
+startup, reusing ``settings.anthropic_api_key``, so the live-LLM
+variant runs whenever ``ANTHROPIC_API_KEY`` is set (it skips when the
+key is absent — the previously-cited ``Task #467`` was the audit CLI
+verb tracker, not an LLM adapter; see
+``docs/codebase/spec-ingestion.md`` §"LLM-client wiring" for the
+operator-facing framing).
 
 The acceptance test asserts:
 

@@ -258,8 +258,9 @@ release:
   # SHA256SUMS look right before operators see the GitHub Release.
   # G2.6-T5 lands cosign signing into this same flow; flipping to
   # `draft: false` is a one-liner once the full pipeline is proven
-  # end to end.
-  draft: true
+  # end to end. Flipped 2026-05-31 (#1127): pipeline proven across
+  # v0.2.0–v0.8.1; cosign signing landed (#47). Release now auto-publishes.
+  draft: false
   # `prerelease: auto` flips the GitHub "pre-release" flag based on
   # whether the tag contains a hyphen (semver pre-release identifier
   # per https://semver.org). `v0.1.0-rc.1` → pre-release; `v0.1.0`

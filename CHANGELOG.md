@@ -135,6 +135,14 @@ connector-related release-notes line.
 
 ### Fixed
 
+- Agent runtime no longer 404s on the shipped default model id: the
+  `provider:` prefix of a pydantic-ai spec-form id
+  (`anthropic:claude-sonnet-4-6`) is now stripped before constructing
+  `AnthropicModel`, at both the G11.5 backend resolver and the
+  pre-resolver default path. A prefixed override (the documented spec
+  form) and a deploy-supplied bare id both still work. (#1375 — RDC #789
+  N11)
+
 - **Manually-seeded topology nodes are now visible to
   `query_topology kind=history` / `kind=timeline` (G0.18-T6 #1359,
   RDC #789 F-A).** `meho.topology.create_node` wrote `audit_log` +

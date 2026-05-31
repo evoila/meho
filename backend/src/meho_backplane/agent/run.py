@@ -428,6 +428,8 @@ def default_model_factory() -> Model:
 
     from meho_backplane.settings import get_settings
 
+    from .invocation import _split_model_id
+
     settings = get_settings()
     api_key = settings.anthropic_api_key
     if not api_key:
@@ -436,7 +438,12 @@ def default_model_factory() -> Model:
             "set it to run against Anthropic. Multi-provider routing is G11.5.",
         )
     provider = AnthropicProvider(anthropic_client=AsyncAnthropic(api_key=api_key))
-    return AnthropicModel(settings.agent_default_model, provider=provider)
+    # ``agent_default_model`` is the pydantic-ai spec form
+    # (``anthropic:claude-...``); AnthropicModel's ``model_name`` reaches the
+    # Messages API verbatim and 404s on the ``anthropic:`` prefix, so pass
+    # only the bare model id. A deploy-supplied bare id falls through unchanged.
+    _, model_name = _split_model_id(settings.agent_default_model)
+    return AnthropicModel(model_name, provider=provider)
 
 
 def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:

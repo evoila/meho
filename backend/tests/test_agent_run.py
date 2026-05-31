@@ -387,6 +387,52 @@ async def test_default_model_factory_fail_closed_without_key(
         get_settings.cache_clear()
 
 
+async def test_default_model_factory_strips_provider_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shipped default spec-form id reaches AnthropicModel as the bare id.
+
+    ``agent_default_model`` defaults to the pydantic-ai spec form
+    ``anthropic:claude-sonnet-4-6``; passed raw, the ``anthropic:`` prefix
+    reaches the Messages API verbatim and 404s. The factory must strip it
+    (RDC #789 N11).
+    """
+    from pydantic_ai.models.anthropic import AnthropicModel
+
+    from meho_backplane.agent.run import default_model_factory
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-prefix-test")
+    monkeypatch.delenv("AGENT_DEFAULT_MODEL", raising=False)
+    get_settings.cache_clear()
+    try:
+        model = default_model_factory()
+        assert isinstance(model, AnthropicModel)
+        assert model.model_name == "claude-sonnet-4-6"
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_default_model_factory_accepts_bare_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deploy-supplied bare model id passes through unchanged."""
+    from pydantic_ai.models.anthropic import AnthropicModel
+
+    from meho_backplane.agent.run import default_model_factory
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-prefix-test")
+    monkeypatch.setenv("AGENT_DEFAULT_MODEL", "claude-sonnet-4-6")
+    get_settings.cache_clear()
+    try:
+        model = default_model_factory()
+        assert isinstance(model, AnthropicModel)
+        assert model.model_name == "claude-sonnet-4-6"
+    finally:
+        get_settings.cache_clear()
+
+
 async def test_toolset_definition_drives_resolved_call_operation(
     stub_embedding_service: AsyncMock,
 ) -> None:

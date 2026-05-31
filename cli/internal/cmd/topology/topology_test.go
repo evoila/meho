@@ -195,7 +195,7 @@ func TestBuildPathQuerySetsFromTo(t *testing.T) {
 
 // TestPrintNodeClosureEmpty — the defensive zero-row branch renders
 // a no-result line without the header. Since G0.18-T4 (#1357) an
-// untracked anchor surfaces as a 404 ``node_untracked`` that
+// untracked anchor surfaces as a 404 `node_untracked` that
 // `renderHTTPStatus` -> `formatNotFound` handles before this point;
 // the function still tolerates a zero-row payload as a future
 // contract-drift guard.
@@ -214,7 +214,7 @@ func TestPrintNodeClosureEmpty(t *testing.T) {
 	}
 }
 
-// TestFormatNotFoundNodeUntracked — a 404 ``node_untracked`` envelope
+// TestFormatNotFoundNodeUntracked — a 404 `node_untracked` envelope
 // from a dependents / dependencies route renders a clear "register /
 // refresh or annotate" prompt instead of being swept into the
 // resolver near-miss formatter. G0.18-T4 (#1357, RDC #789 N2).
@@ -234,7 +234,7 @@ func TestFormatNotFoundNodeUntracked(t *testing.T) {
 }
 
 // TestFormatNotFoundNodeUntrackedWithKind — when the closure route's
-// 404 envelope carries the ``kind`` echo (caller supplied --node-kind),
+// 404 envelope carries the `kind` echo (caller supplied --node-kind),
 // the rendered line includes the kind pin so the operator has a
 // self-contained diagnostic.
 func TestFormatNotFoundNodeUntrackedWithKind(t *testing.T) {

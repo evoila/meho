@@ -16,9 +16,9 @@ import (
 // empty VIA.
 //
 // G0.18-T4 (#1357) changed the not-found contract: a closure on an
-// untracked anchor returns HTTP 404 ``node_untracked`` and is
-// rendered by ``formatNotFound`` upstream — it never reaches this
-// function. The minimum payload here is the one-element ``[root]``
+// untracked anchor returns HTTP 404 `node_untracked` and is
+// rendered by `formatNotFound` upstream — it never reaches this
+// function. The minimum payload here is the one-element `[root]`
 // for a tracked-but-no-dependents node. The defensive zero-row
 // branch stays as a structural guard against a future contract
 // drift (or an unforeseen empty response from a service patched at

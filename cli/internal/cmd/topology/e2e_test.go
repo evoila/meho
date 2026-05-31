@@ -219,10 +219,10 @@ func TestDependentsAmbiguousNode409(t *testing.T) {
 
 // TestDependentsCrossTenantNodeUntracked — G0.18-T4 (#1357, RDC #789
 // N2). A node name that exists only in another tenant surfaces as
-// HTTP 404 ``node_untracked`` (not the empty 200 list the
+// HTTP 404 `node_untracked` (not the empty 200 list the
 // pre-G0.18-T4 contract returned). The CLI renders the
 // "not tracked in the topology graph" operator-actionable line via
-// ``formatNotFound``; tenant-boundary acceptance still holds (the
+// `formatNotFound`; tenant-boundary acceptance still holds (the
 // other tenant's node is never visible).
 func TestDependentsCrossTenantNodeUntracked(t *testing.T) {
 	mux := http.NewServeMux()

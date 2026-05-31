@@ -37,14 +37,20 @@ seed rows into directly.
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import Connector
@@ -1153,3 +1159,275 @@ async def test_post_completion_check_in_progress_returns_false() -> None:
 
     allowed = await run_service.can_show_template_post_completion(tenant_id, OPERATOR, "d", 1)
     assert allowed is False
+
+
+# ---------------------------------------------------------------------------
+# next_step session lifetime (#1352) -- the verify dispatch must not hold an
+# AsyncSession across the external ``call_operation`` await, and the outcome
+# write must re-validate run state in case a TENANT_ADMIN raced the gap with
+# ``abort_run`` / ``reassign_run``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_next_step_aborted_during_dispatch_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``abort_run`` landing between the read phase and the write phase wins.
+
+    Simulates a TENANT_ADMIN aborting the run while ``next_step`` is in
+    its (now sessionless) verify-dispatch phase. The post-dispatch
+    re-validation must observe the terminal flip and raise
+    :class:`RunAlreadyTerminalError` rather than overwriting the
+    abandoned state with a ``verified`` / ``in_progress`` outcome.
+    """
+    from meho_backplane.runbooks import run_service as run_service_mod
+
+    tenant_id = uuid.uuid4()
+    await _seed_published_template(tenant_id, "d", body=_two_step_template())
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    original_resolve = run_service._resolve_verify_response
+
+    async def _abort_mid_dispatch(**kwargs: Any) -> Any:
+        # Fire the race inside the dispatch window: session A has closed,
+        # session B has not opened. An admin aborts the run here.
+        await run_service.abort_run(
+            tenant_id, ADMIN, start.run_id, AbortRunRequest(reason="raced"), caller_is_admin=True
+        )
+        return await original_resolve(**kwargs)
+
+    monkeypatch.setattr(run_service, "_resolve_verify_response", _abort_mid_dispatch)
+
+    with pytest.raises(RunAlreadyTerminalError):
+        await run_service.next_step(
+            tenant_id,
+            OPERATOR,
+            start.run_id,
+            NextStepRequest(
+                last_verified=True,
+                verify_response=ConfirmVerifyResponse(type="confirm", answer="yes"),
+            ),
+        )
+
+    # The aborted state survived; no step was flipped to verified.
+    sessionmaker = run_service_mod.get_sessionmaker()
+    async with sessionmaker() as session:
+        run = (
+            await session.scalars(select(RunbookRun).where(RunbookRun.run_id == start.run_id))
+        ).one()
+        assert run.state == "abandoned"
+        states = (
+            await session.scalars(
+                select(RunbookRunStepState).where(RunbookRunStepState.run_id == start.run_id)
+            )
+        ).all()
+        by_id = {s.step_id: s for s in states}
+        assert by_id["step-1"].state == "in_progress"
+        assert by_id["step-2"].state == "pending"
+
+
+@pytest.mark.asyncio
+async def test_next_step_reassigned_during_dispatch_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``reassign_run`` landing in the dispatch gap revokes the caller's right.
+
+    A TENANT_ADMIN reassigns the run to another operator while the
+    original assignee's ``next_step`` is dispatching. The post-dispatch
+    re-validation must raise :class:`NotRunAssigneeError` rather than
+    advancing on behalf of the now-former assignee.
+    """
+    from meho_backplane.runbooks import run_service as run_service_mod
+
+    tenant_id = uuid.uuid4()
+    await _seed_published_template(tenant_id, "d", body=_two_step_template())
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    original_resolve = run_service._resolve_verify_response
+
+    async def _reassign_mid_dispatch(**kwargs: Any) -> Any:
+        await run_service.reassign_run(
+            tenant_id, ADMIN, start.run_id, ReassignRunRequest(new_assignee=OPERATOR_BETA)
+        )
+        return await original_resolve(**kwargs)
+
+    monkeypatch.setattr(run_service, "_resolve_verify_response", _reassign_mid_dispatch)
+
+    with pytest.raises(NotRunAssigneeError):
+        await run_service.next_step(
+            tenant_id,
+            OPERATOR,
+            start.run_id,
+            NextStepRequest(
+                last_verified=True,
+                verify_response=ConfirmVerifyResponse(type="confirm", answer="yes"),
+            ),
+        )
+
+    # The run still belongs to OPERATOR_BETA and step-1 was not advanced.
+    sessionmaker = run_service_mod.get_sessionmaker()
+    async with sessionmaker() as session:
+        run = (
+            await session.scalars(select(RunbookRun).where(RunbookRun.run_id == start.run_id))
+        ).one()
+        assert run.assigned_to == OPERATOR_BETA
+        states = (
+            await session.scalars(
+                select(RunbookRunStepState).where(RunbookRunStepState.run_id == start.run_id)
+            )
+        ).all()
+        assert {s.step_id: s.state for s in states}["step-1"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_next_step_does_not_pin_connection_across_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow verify dispatch must not pin a pooled connection.
+
+    With a ``pool_size=1, max_overflow=0`` pool, the old single-session
+    shape held the lone connection for the full ``call_operation`` await,
+    so a concurrent query queued behind it for the entire (here 500ms)
+    dispatch. With the read/dispatch/write split, the connection is back
+    in the pool during the dispatch, so the concurrent probe returns
+    promptly. The assertion is a generous margin below the dispatch
+    duration -- a regression to the pinned shape would blow past it.
+    """
+    from meho_backplane.runbooks import run_service as run_service_mod
+
+    tenant_id = uuid.uuid4()
+    await _seed_published_template(tenant_id, "d", body=_two_step_template())
+    run_service = RunbookRunService()
+    start = await run_service.start_run(
+        tenant_id, OPERATOR, StartRunRequest(template_slug="d", target="n", params={})
+    )
+    assert isinstance(start, CurrentStepResponse)
+
+    # A single-connection pool over the same per-test SQLite file. The
+    # production engine factory prunes pool_size for SQLite URLs, so we
+    # build the constrained engine directly to make the pinning failure
+    # mode observable. aiosqlite uses AsyncAdaptedQueuePool for a
+    # file-backed URL, which honours pool_size / max_overflow.
+    db_url = get_settings().database_url
+    pinned_engine = create_async_engine(db_url, pool_size=1, max_overflow=0, pool_timeout=30)
+    pinned_sessionmaker = async_sessionmaker(pinned_engine, expire_on_commit=False)
+    monkeypatch.setattr(run_service_mod, "get_sessionmaker", lambda: pinned_sessionmaker)
+
+    dispatch_secs = 0.5
+
+    async def _slow_resolve(**kwargs: Any) -> Any:
+        # Stand in for a slow external connector dispatch. The real
+        # _resolve_verify_response would await call_operation here; the
+        # point is purely that no session is checked out during this await.
+        await asyncio.sleep(dispatch_secs)
+        return kwargs["request_verify"]
+
+    monkeypatch.setattr(run_service, "_resolve_verify_response", _slow_resolve)
+
+    dispatch_started = asyncio.Event()
+
+    async def _drive_next_step() -> None:
+        dispatch_started.set()
+        await run_service.next_step(
+            tenant_id,
+            OPERATOR,
+            start.run_id,
+            NextStepRequest(
+                last_verified=True,
+                verify_response=ConfirmVerifyResponse(type="confirm", answer="yes"),
+            ),
+        )
+
+    async def _probe() -> float:
+        await dispatch_started.wait()
+        # Let next_step reach its (sessionless) dispatch phase before we probe.
+        await asyncio.sleep(0.05)
+        t0 = time.perf_counter()
+        async with pinned_sessionmaker() as probe_session:
+            await probe_session.execute(text("SELECT 1"))
+        return time.perf_counter() - t0
+
+    try:
+        driver = asyncio.create_task(_drive_next_step())
+        probe_elapsed = await _probe()
+        await driver
+    finally:
+        await pinned_engine.dispose()
+
+    # The probe must not have queued behind the full dispatch. Half the
+    # dispatch window is a wide margin: the pinned shape would force the
+    # probe to wait the entire dispatch_secs.
+    assert probe_elapsed < dispatch_secs / 2, (
+        f"probe waited {probe_elapsed * 1000:.0f}ms -- connection was pinned "
+        f"across the {dispatch_secs * 1000:.0f}ms dispatch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_next_step_falsy_operation_result_preserved_in_forensics(
+    db_session: AsyncSession,
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A falsy ``result`` payload (``[]`` / ``0``) must survive into ``actual``.
+
+    The verify-dispatch path used ``call_result.get("result") or {}``,
+    which collapsed any falsy payload to ``{}`` and erased the forensics
+    record. The fix uses ``.get("result", {})`` so only an absent key
+    defaults; falsy-but-present values flow into the non-dict wrap and
+    round-trip into the persisted ``verify_response.actual``.
+    """
+    await _seed_stub_op(stub_embedding_service)
+
+    for slug, falsy_result, expected_actual in (
+        ("empty-list", [], {"result": []}),
+        ("zero", 0, {"result": 0}),
+    ):
+        tenant_id = uuid.uuid4()
+        await _seed_target(tenant_id, "n")
+        await _seed_published_template(tenant_id, slug, body=_op_call_template())
+        run_service = RunbookRunService()
+        start = await run_service.start_run(
+            tenant_id, OPERATOR, StartRunRequest(template_slug=slug, target="n", params={})
+        )
+        assert isinstance(start, CurrentStepResponse)
+
+        # Stub only the dispatch so _resolve_verify_response builds
+        # ``actual`` from a falsy ``result``; the connector-id resolution
+        # (a DB lookup before the dispatch) still runs against the seeded
+        # stub op.
+        async def _falsy_call(operator: Any, arguments: Any, _r: Any = falsy_result) -> Any:
+            return {"status": "success", "result": _r}
+
+        monkeypatch.setattr("meho_backplane.runbooks.run_service.call_operation", _falsy_call)
+
+        # expect={"ok": True} won't match a list/scalar actual, so the
+        # step fails -- but the verify_response is persisted before the
+        # PreviousStepFailedError is raised.
+        with pytest.raises(PreviousStepFailedError):
+            await run_service.next_step(
+                tenant_id,
+                OPERATOR,
+                start.run_id,
+                NextStepRequest(last_verified=True, verify_response=None),
+            )
+
+        row = (
+            await db_session.scalars(
+                select(RunbookRunStepState)
+                .where(RunbookRunStepState.run_id == start.run_id)
+                .where(RunbookRunStepState.step_id == "call-it")
+            )
+        ).one()
+        assert row.state == "failed"
+        assert isinstance(row.verify_response, dict)
+        assert row.verify_response["actual"] == expected_actual

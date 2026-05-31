@@ -348,13 +348,20 @@ async def test_tenant_boundary_holds_across_all_routes(topo_app: FastAPI) -> Non
             }
 
             # Tenant B has NOT refreshed — its "shared" node does not
-            # exist, so its query is empty (not tenant A's graph).
+            # exist in its tenant-scoped graph, so the closure read
+            # returns 404 ``node_untracked`` (G0.18-T4 #1357 contract;
+            # pre-T4 this was 200 + ``[]`` which conflated
+            # tracked-no-deps with untracked and let the tenant
+            # boundary leak the wrong-shaped response, not just the
+            # wrong-tenant data).
             db = await client.get(
                 "/api/v1/topology/dependencies/shared",
                 headers=_authed(token_b),
             )
-            assert db.status_code == 200
-            assert db.json() == []
+            assert db.status_code == 404, db.text
+            body = db.json()
+            assert body["detail"]["error"] == "node_untracked"
+            assert body["detail"]["name"] == "shared"
 
             # Tenant B refreshes its own "shared" target — only
             # tenant-B rows are written; tenant A's row count is

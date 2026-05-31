@@ -111,3 +111,50 @@ Create the name of the service account to use.
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Resolved Kubernetes Secret name holding the agent-runtime Anthropic API key
+(G11.1 #803). Two paths converge here so operators who flip
+`eso.agent.enabled: true` without also setting `agent.secretName` get a
+working wiring instead of an unresolvable reference:
+
+  1. `agent.secretName` when the operator set it explicitly (BYO Secret,
+     or already pointed at the ESO target).
+  2. `<release>-agent` when `eso.agent.enabled: true` — the chart's
+     ExternalSecret materialises that exact name (templates/
+     externalsecrets.yaml).
+  3. `fail` (with a remediation message) when called under
+     `agent.enabled: true` and neither path resolved. The schema can't
+     express the cross-property dependency on `eso.agent.enabled`
+     cleanly, so this runtime check is the authoritative gate. Caller is
+     `templates/deployment.yaml` which guards the call with
+     `if .Values.agent.enabled`.
+*/}}
+{{- define "meho.agentSecretName" -}}
+{{- if .Values.agent.secretName -}}
+{{- .Values.agent.secretName -}}
+{{- else if and .Values.eso.agent .Values.eso.agent.enabled -}}
+{{- printf "%s-agent" (include "meho.fullname" .) -}}
+{{- else -}}
+{{- fail "agent.enabled=true requires either agent.secretName=<your-secret> (BYO) or eso.agent.enabled=true (chart-rendered ExternalSecret)." -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Resolved Kubernetes Secret name holding the Keycloak Admin client secret
+(G11.2 #803). Same resolution pattern as `meho.agentSecretName`:
+
+  1. `keycloakAdmin.clientSecret.secretName` when operator-set.
+  2. `<release>-keycloak-admin` when `eso.keycloakAdmin.enabled: true`.
+  3. `fail` (with a remediation message) when called under
+     `keycloakAdmin.enabled: true` and neither path resolved.
+*/}}
+{{- define "meho.keycloakAdminSecretName" -}}
+{{- if .Values.keycloakAdmin.clientSecret.secretName -}}
+{{- .Values.keycloakAdmin.clientSecret.secretName -}}
+{{- else if and .Values.eso.keycloakAdmin .Values.eso.keycloakAdmin.enabled -}}
+{{- printf "%s-keycloak-admin" (include "meho.fullname" .) -}}
+{{- else -}}
+{{- fail "keycloakAdmin.enabled=true requires either keycloakAdmin.clientSecret.secretName=<your-secret> (BYO) or eso.keycloakAdmin.enabled=true (chart-rendered ExternalSecret)." -}}
+{{- end -}}
+{{- end }}

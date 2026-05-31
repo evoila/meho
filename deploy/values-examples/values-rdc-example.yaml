@@ -168,6 +168,45 @@ keycloak:
   audience: meho-backplane
   clientSecretSyncFromVault: secret/meho/keycloak/client_secret
 
+# Agent-runtime LLM credentials (G11.1 #803). Off by default — flip
+# `enabled: true` only on deploys that intentionally run the bounded
+# tool-use loop in `meho_backplane.agent.run`. The `secretName` below
+# is the Vault-synced Secret the consumer GitOps repo provisions
+# (matches the chart's `eso.agent` ExternalSecret target name if you
+# flip both on; pre-existing Secret names also work). Keep `enabled:
+# false` on deploys that don't use agents — the backplane's seam
+# stays fail-closed and `/api/v1/agent-runs` returns the same "no
+# credentials" surface it always has.
+agent:
+  enabled: false
+  # Operator-managed Secret name. When set, the chart skips ESO and
+  # references this Secret directly. When empty AND
+  # `eso.agent.enabled: true` (below), the chart resolves the
+  # ESO-rendered `<release>-agent` Secret automatically.
+  secretName: ""
+  # Default `api_key`; override only when reusing an existing Secret
+  # with a different key.
+  secretKey: api_key
+
+# Keycloak Admin API credentials (G11.2 #803) gating agent-principal
+# registration (`POST /api/v1/agent-principals`). Off by default —
+# flip `enabled: true` only after provisioning the `meho-admin`
+# service-account client in Keycloak (see
+# `docs/cross-repo/keycloak-agent-client.md` §Step 1) and surfacing
+# the client secret to Vault at `secret/meho/keycloak/admin_client_secret`.
+keycloakAdmin:
+  enabled: false
+  # MUST be substituted: realm-scoped Admin REST API base.
+  url: "https://keycloak.evba.lab/admin/realms/<REPLACE: realm-name>"
+  # MUST match the Keycloak client id provisioned in Step 1.
+  clientId: meho-admin
+  clientSecret:
+    # Operator-managed Secret name OR empty when `eso.keycloakAdmin.enabled:
+    # true` (chart resolves the `<release>-keycloak-admin` ESO target).
+    secretName: ""
+    # Default `client_secret`; override only when reusing an existing Secret.
+    secretKey: client_secret
+
 audit:
   # v0.1: audit rows written to PostgreSQL only. The S3 / object-store
   # mirror is v0.2 per Goal #11 scope.
@@ -209,8 +248,33 @@ networkPolicy:
 # only if you want the chart to render ExternalSecret resources for
 # `postgres.credentialsSecret` and `keycloak.clientSecretSyncFromVault`
 # itself; see deploy/values-examples/README.md for the contract.
+#
+# The two G11 sub-toggles (`eso.agent`, `eso.keycloakAdmin`) are
+# independent of `eso.enabled` — flip them on individually to have
+# the chart render an ExternalSecret for the Anthropic API key /
+# Keycloak admin client secret without enabling the rest of the
+# chart's ESO surface. The `secretStore.name` below is required when
+# any of the three toggles is on.
 eso:
   enabled: false
+  secretStore:
+    # Operator-supplied ClusterSecretStore / SecretStore name (the chart
+    # does NOT render this — install ESO and create the store first).
+    name: ""
+    kind: ClusterSecretStore
+  agent:
+    # G11.1 #803 — when `true`, the chart renders
+    # `<release>-agent` (keyed `api_key`) from `secret/meho/agent`.
+    # Pairs with `agent.enabled: true` above; leave `agent.secretName`
+    # empty so the chart resolves the ESO target automatically.
+    enabled: false
+  keycloakAdmin:
+    # G11.2 #803 — when `true`, the chart renders
+    # `<release>-keycloak-admin` (keyed `client_secret`) from
+    # `secret/meho/keycloak/admin_client_secret`. Pairs with
+    # `keycloakAdmin.enabled: true` above; leave
+    # `keycloakAdmin.clientSecret.secretName` empty.
+    enabled: false
 
 # Trust bundle for internal-CA-signed Vault + Keycloak + Postgres.
 # The RDC lab uses trust-manager (jetstack/trust-manager) to distribute

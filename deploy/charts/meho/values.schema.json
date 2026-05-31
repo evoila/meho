@@ -297,6 +297,77 @@
         "clientSecretSyncFromVault": { "type": "string", "minLength": 1 }
       }
     },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Agent-runtime LLM credentials (G11.1 #803). When `enabled: true`, the chart wires `ANTHROPIC_API_KEY` into the backplane Deployment via `secretKeyRef` (never plaintext). The referenced Kubernetes Secret resolves through `meho.agentSecretName`: explicit `secretName` when set, otherwise the `<release>-agent` Secret rendered by `eso.agent.enabled: true`. When neither path resolves a name and `agent.enabled: true`, the `externalsecrets.yaml` / `deployment.yaml` template fails at `helm template` time with an actionable message — the schema cannot express the cross-property dependency on `eso.agent.enabled` cleanly, so the runtime check is the authoritative gate. When `agent.enabled: false`, the chart renders no env var and the backplane's fail-closed surface keeps agent-runtime endpoints inoperative — same as a chart that doesn't ship this block.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": {
+          "type": "string",
+          "description": "Name of the Kubernetes Secret holding the Anthropic API key. Either operator-managed (set this directly) or ESO-rendered (set `eso.agent.enabled: true` and leave this empty — the helper resolves the ESO target). Empty when `agent.enabled: true` AND `eso.agent.enabled: false` fails the chart-template gate."
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key within `secretName` whose value is the API key. Defaults to `api_key`, matching the ESO target."
+        }
+      }
+    },
+    "keycloakAdmin": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Keycloak Admin API credentials (G11.2 #803) that gate agent-principal registration. When `enabled: true`, the chart wires `KEYCLOAK_ADMIN_URL` + `KEYCLOAK_ADMIN_CLIENT_ID` as plain env and `KEYCLOAK_ADMIN_CLIENT_SECRET` via `secretKeyRef` into the backplane Deployment. The schema enforces non-empty `url` and `clientId` under `enabled: true` (operator config that the chart can validate locally). The Secret-name resolution for the admin client secret mirrors `agent` — explicit `clientSecret.secretName` when set, otherwise the `<release>-keycloak-admin` Secret rendered by `eso.keycloakAdmin.enabled: true`. When neither path resolves a name, the chart-template gate fails at `helm template` time. `meho_backplane.features._agent_runtime_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false`, `POST /api/v1/agent-principals` returns `503 keycloak_admin_not_configured` (same posture as a chart that doesn't ship this block).",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "url": {
+          "type": "string",
+          "description": "Admin REST API base URL for the realm managing MEHO principals, e.g. `https://keycloak.example.com/admin/realms/meho`. Plain env (`KEYCLOAK_ADMIN_URL`). Required (non-empty, `http(s)://` URL) when `keycloakAdmin.enabled: true`."
+        },
+        "clientId": {
+          "type": "string",
+          "description": "`client_id` of the confidential Keycloak client backing the Admin REST API. Plain env (`KEYCLOAK_ADMIN_CLIENT_ID`). Required (non-empty) when `keycloakAdmin.enabled: true`."
+        },
+        "clientSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Confidential admin client secret, wired via `secretKeyRef` — never as a plaintext chart value or env value.",
+          "properties": {
+            "secretName": {
+              "type": "string",
+              "description": "Name of the Kubernetes Secret holding the admin client secret. Either operator-managed (set this directly) or ESO-rendered (set `eso.keycloakAdmin.enabled: true` and leave this empty — the helper resolves the ESO target). Empty when `keycloakAdmin.enabled: true` AND `eso.keycloakAdmin.enabled: false` fails the chart-template gate."
+            },
+            "secretKey": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Key within `secretName` whose value is the admin client secret. Defaults to `client_secret`, matching the ESO target."
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["url", "clientId"],
+            "properties": {
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "format": "uri",
+                "pattern": "^https?://"
+              },
+              "clientId": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
     "audit": {
       "type": "object",
       "additionalProperties": false,
@@ -532,6 +603,40 @@
             "remoteProperty": {
               "type": "string",
               "minLength": 1
+            }
+          }
+        },
+        "agent": {
+          "type": "object",
+          "description": "Optional ExternalSecret for the agent-runtime Anthropic API key (G11.1 #803). Target Secret is `<release>-agent`, keyed `api_key` (matches the chart default `agent.secretKey`). Independent of `eso.enabled: true`: when ESO isn't installed cluster-wide this stays `false` and operators manage the Secret directly.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "remoteKey": {
+              "type": "string",
+              "description": "Vault KV path holding the Anthropic API key value. Empty → the template derives it as `<vault.paths.kv>/agent` at render time."
+            },
+            "remoteProperty": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Property within the remote KV entry that holds the API key. Must match `agent.secretKey` (default `api_key`)."
+            }
+          }
+        },
+        "keycloakAdmin": {
+          "type": "object",
+          "description": "Optional ExternalSecret for the Keycloak admin client secret (G11.2 #803). Target Secret is `<release>-keycloak-admin`, keyed `client_secret` (matches the chart default `keycloakAdmin.clientSecret.secretKey`). Independent of `eso.enabled: true`.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "remoteKey": {
+              "type": "string",
+              "description": "Vault KV path holding the admin client secret value. Empty → the template derives it as `<vault.paths.kv>/keycloak/admin_client_secret` at render time."
+            },
+            "remoteProperty": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Property within the remote KV entry that holds the admin client secret. Must match `keycloakAdmin.clientSecret.secretKey` (default `client_secret`)."
             }
           }
         }

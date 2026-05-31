@@ -205,6 +205,10 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     )
     from meho_backplane.connectors.kubernetes.ops_network import NETWORK_OPS
     from meho_backplane.connectors.kubernetes.ops_workload import WORKLOAD_OPS
+    from meho_backplane.connectors.kubernetes.ops_write_meta import (
+        WRITE_CAUTION_OPS,
+        WRITE_DANGEROUS_OPS,
+    )
 
     logs_op = KubernetesOp(
         op_id="k8s.logs",
@@ -245,6 +249,8 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         *CONFIG_OPS,
         *EVENT_OPS,
         logs_op,
+        *WRITE_CAUTION_OPS,
+        *WRITE_DANGEROUS_OPS,
     )
 
 

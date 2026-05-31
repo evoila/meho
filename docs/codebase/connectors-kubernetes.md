@@ -17,9 +17,13 @@ and documented in
 [`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md).
 
 The connector replaces the operator's daily `kubectl-vcf.sh` wrapper for
-read workflows -- inventory listing, workload inspection, log fetching.
-Write operations stay in the wrapper until v0.2.next ships policy +
-approval flow.
+read workflows -- inventory listing, workload inspection, log fetching --
+and, as of G3.14-T1 (#1403), for the single-call **write** surface
+(scale / rollout-restart / namespace-create / annotate / label / cordon /
+apply / delete / secret-create / job-create). Every write op is
+`requires_approval=True`, so once #1401's human-queue routing is live an
+operator's write dispatch is parked for approval rather than auto-run or
+hard-denied. `k8s.exec` (G3.14-T2) and `k8s.drain` stay in the wrapper.
 
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
@@ -157,6 +161,51 @@ proves dispatcher -> handler -> k3s round-trips through the
 op; the onboarding recipe in
 [`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md)
 is the operator cookbook for migrating off `kubectl-vcf.sh`.
+
+### Write op surface (G3.14-T1, #1403)
+
+The single-call write ops live in `ops_write.py` (caution-class
+handlers + the annotate/label kind dispatch table),
+`ops_write_dangerous.py` (dangerous-class handlers + the delete dispatch
+table), and `ops_write_meta.py` (the JSON-Schema parameter shapes +
+`KubernetesOp` registration rows for **all** write ops, split out so each
+handler file stays under the 600-line code-quality cap and the
+operator-facing surface reads in one place). Handlers are bound-method
+shims on `KubernetesConnector` forwarding to module-level functions --
+the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
+`safety_level` caution|dangerous and `requires_approval=True`.
+
+| op_id                  | safety    | k8s call                                                          |
+| ---------------------- | --------- | ---------------------------------------------------------------- |
+| `k8s.scale`            | caution   | `AppsV1Api.patch_namespaced_deployment_scale` -- before/after replicas in result. |
+| `k8s.rollout.restart`  | caution   | Stamp `kubectl.kubernetes.io/restartedAt` on the pod template (kubectl parity). |
+| `k8s.namespace.create` | caution   | `CoreV1Api.create_namespace` -- create-or-ignore-409 (idempotent). |
+| `k8s.annotate`         | caution   | Strategic-merge patch of `metadata.annotations` over a kind table (deployment/pod/service/namespace/node); null value removes a key. |
+| `k8s.label`            | caution   | Same as annotate over `metadata.labels`; relabeling a Service-selected workload can re-route traffic. |
+| `k8s.cordon`           | caution   | `CoreV1Api.patch_node(spec.unschedulable)`; `uncordon=true` reverses. Eviction-free. |
+| `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). |
+| `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
+| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). |
+| `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
+
+**Secret redaction reuses the shipped `credential_write` op-class
+(#1401), not a new mechanism.** `k8s.secret.create` was already in
+`_CREDENTIAL_WRITE_OPS` (`broadcast/events.py`); G3.14-T1 adds
+`k8s.job.create` (a Job pod-template's inline `env` can carry secret
+material in `params`). `classify_op` returns `credential_write`, so
+`redact_payload` collapses the broadcast event to aggregate-only
+`{op_class, result_status}` -- the secret never reaches the SSE stream or
+a Slack mirror. The handlers also return value-free summaries, so the
+`OperationResult` itself carries no secret.
+
+**`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
+to the API's `?dryRun=All`) so the would-be object is returned without
+mutating -- the diff-preview an agent or reviewer runs before the real
+apply. Note: the dispatcher / approval-queue substrate has **no per-op
+`proposed_effect` builder hook**, so the dry-run result is not
+auto-populated into the approval row at queue time today; the dry-run is
+expressible + returned by the op, and queue-time auto-population is a
+follow-up that needs a dispatcher hook.
 
 ### Shared list-op request shape (`ops_listparams.py`)
 

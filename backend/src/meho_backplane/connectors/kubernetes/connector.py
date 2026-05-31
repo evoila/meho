@@ -1052,6 +1052,120 @@ class KubernetesConnector(Connector):
 
         return await _k8s_deployment_info(self, target, operator, params)
 
+    async def k8s_scale(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.scale`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write import k8s_scale
+
+        return await k8s_scale(self, target, operator, params)
+
+    async def k8s_rollout_restart(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.rollout.restart`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write import k8s_rollout_restart
+
+        return await k8s_rollout_restart(self, target, operator, params)
+
+    async def k8s_namespace_create(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.namespace.create`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write import k8s_namespace_create
+
+        return await k8s_namespace_create(self, target, operator, params)
+
+    async def k8s_annotate(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.annotate`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write import k8s_annotate
+
+        return await k8s_annotate(self, target, operator, params)
+
+    async def k8s_label(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.label`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write import k8s_label
+
+        return await k8s_label(self, target, operator, params)
+
+    async def k8s_cordon(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.cordon`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write import k8s_cordon
+
+        return await k8s_cordon(self, target, operator, params)
+
+    async def k8s_apply(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.apply`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write_dangerous import k8s_apply
+
+        return await k8s_apply(self, target, operator, params)
+
+    async def k8s_delete(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.delete`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write_dangerous import k8s_delete
+
+        return await k8s_delete(self, target, operator, params)
+
+    async def k8s_secret_create(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.create`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
+            k8s_secret_create,
+        )
+
+        return await k8s_secret_create(self, target, operator, params)
+
+    async def k8s_job_create(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.job.create`` (G3.14-T1 #1403)."""
+        from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
+            k8s_job_create,
+        )
+
+        return await k8s_job_create(self, target, operator, params)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`KUBERNETES_OPS` into ``endpoint_descriptor``.

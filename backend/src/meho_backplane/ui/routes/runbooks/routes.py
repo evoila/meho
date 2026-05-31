@@ -307,7 +307,18 @@ async def _render_list_fragment(
     status: _StatusFilter | None,
     target_kind: str | None,
 ) -> HTMLResponse:
-    """Render the ``_list.html`` fragment for the HTMX filter controls."""
+    """Render the ``_list.html`` fragment for the HTMX filter controls.
+
+    The fragment re-mints the CSRF token into the admin row-action
+    Publish/Deprecate buttons (``hx-headers``), so the response **must** also
+    refresh the ``meho_csrf`` cookie to match -- otherwise the next row-action
+    POST presents a header token that no longer equals the stale cookie and the
+    :class:`~meho_backplane.ui.csrf.CSRFMiddleware` ``value_mismatch`` check
+    403s the action. Filter swaps and the post-action ``runbooks-refresh``
+    reload both re-render via this path, so a missing cookie refresh breaks the
+    catalog row action on the second interaction. Mirrors the cookie posture of
+    :func:`_render_index` / :func:`_render_detail` (mint -> ``_set_csrf_cookie``).
+    """
     summaries = await _list_summaries(session.tenant_id, status, target_kind)
     csrf_token = mint_csrf_token(str(session.session_id))
     is_admin = await _is_admin(session)
@@ -319,7 +330,9 @@ async def _render_list_fragment(
         "csrf_token": csrf_token,
         "active_surface": "runbooks",
     }
-    return get_templates().TemplateResponse(request, "runbooks/_list.html", context)
+    response = get_templates().TemplateResponse(request, "runbooks/_list.html", context)
+    _set_csrf_cookie(response, csrf_token)
+    return response
 
 
 async def _render_detail(

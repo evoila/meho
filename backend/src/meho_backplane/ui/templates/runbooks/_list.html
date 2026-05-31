@@ -93,6 +93,11 @@
                   {% if is_admin and tpl.status in ("draft", "published") %}
                     {%- set row_action = "publish" if tpl.status == "draft" else "deprecate" -%}
                     {%- set row_key = tpl.slug ~ "@" ~ tpl.version -%}
+                    {#- CSS-safe element id for the per-row alert slot. A slug may
+                        carry ``.`` (SLUG_PATTERN allows it), which is invalid in a
+                        ``#id`` CSS selector, so the HTMX target id keys off the
+                        loop index (always a safe integer) rather than slug@ver. -#}
+                    {%- set row_id = loop.index -%}
                     <button
                       type="button"
                       class="btn btn-xs {{ 'btn-success' if row_action == 'publish' else 'btn-warning' }}"
@@ -127,15 +132,28 @@
                                   x-on:click="confirmKey = ''">
                             Cancel
                           </button>
+                          {# Row action POST. Targets the per-row alert slot
+                             (``hx-swap="innerHTML"``) so a typed-400 (publishing
+                             a non-draft / deprecating a non-published version on
+                             a stale row) renders inline as an alert rather than
+                             being swallowed. ``runbooks-refresh`` fires only on a
+                             SUCCESSFUL response whose body carries no alert-error
+                             — so the list reloads (new badge) on success but the
+                             error stays visible on a typed-400. The 200-with-
+                             alert shape (the handler maps the typed-400 to an
+                             inline alert in a 200 body, mirroring the detail
+                             surface) means $event.detail.successful alone isn't
+                             enough; we also check the response has no alert. #}
                           <button
                             type="button"
                             class="btn btn-sm {{ 'btn-success' if row_action == 'publish' else 'btn-warning' }}"
                             hx-post="/ui/runbooks/{{ tpl.slug }}/{{ row_action }}"
                             hx-vals='{"version": "{{ tpl.version }}"}'
                             hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'
-                            hx-swap="none"
+                            hx-target="#runbook-row-alert-{{ row_id }}"
+                            hx-swap="innerHTML"
                             x-on:click="confirmKey = ''"
-                            x-on:htmx:after-request="$dispatch('runbooks-refresh')"
+                            x-on:htmx:after-request="if ($event.detail.successful && !($event.detail.xhr.response || '').includes('alert-error')) $dispatch('runbooks-refresh')"
                           >
                             {{ row_action | capitalize }}
                           </button>
@@ -143,6 +161,9 @@
                       </div>
                       <div class="modal-backdrop" x-on:click="confirmKey = ''"></div>
                     </div>
+                    {# Per-row inline alert slot — the row-action POST swaps a
+                       typed-400 alert in here; empty on success. #}
+                    <div id="runbook-row-alert-{{ row_id }}"></div>
                   {% endif %}
                 </div>
               </td>

@@ -38,6 +38,7 @@ uses).
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -335,6 +336,41 @@ def _status(tenant_id: uuid.UUID, slug: str, version: int) -> str:
         return tpl.status
 
     return asyncio.run(_do())
+
+
+#: Pull the ``meho_csrf`` value out of a raw ``Set-Cookie`` header. The cookie
+#: is ``Secure``, so the plain-``http`` TestClient does not auto-store it -- the
+#: real browser cookie/header round-trip is reconstructed by reading the
+#: Set-Cookie the server emitted and presenting it back verbatim (this is the
+#: exact path B1 broke: the list fragment minted a fresh header token but never
+#: refreshed this cookie).
+_CSRF_SETCOOKIE_RE = re.compile(rf"{CSRF_COOKIE_NAME}=([^;]+)")
+
+#: Pull the ``X-CSRF-Token`` the row-action button echoes via ``hx-headers`` out
+#: of the rendered ``_list.html`` fragment. This is the *header* half of the
+#: double-submit pair the catalog row POST will present.
+_ROW_HX_HEADERS_RE = re.compile(r'hx-headers=\'\{"X-CSRF-Token": "([^"]+)"\}\'')
+
+
+def _extract_csrf_cookie(response: Any) -> str:
+    """Return the ``meho_csrf`` value the response set, or fail the test.
+
+    Reads the raw ``Set-Cookie`` header rather than the TestClient cookie jar so
+    the ``Secure`` attribute (which the http TestClient honours by NOT storing
+    the cookie) does not hide it -- the value is exactly what a browser would
+    send back on the next request.
+    """
+    set_cookie = response.headers.get("set-cookie", "")
+    match = _CSRF_SETCOOKIE_RE.search(set_cookie)
+    assert match, f"no {CSRF_COOKIE_NAME} cookie set; got Set-Cookie={set_cookie!r}"
+    return match.group(1)
+
+
+def _extract_row_hx_token(body: str) -> str:
+    """Return the ``X-CSRF-Token`` the row-action button echoes via hx-headers."""
+    match = _ROW_HX_HEADERS_RE.search(body)
+    assert match, "no row-action hx-headers X-CSRF-Token found in the list fragment"
+    return match.group(1)
 
 
 # ---------------------------------------------------------------------------
@@ -703,3 +739,180 @@ def test_catalog_row_action_hidden_for_operator() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert 'hx-post="/ui/runbooks/rotate-cert/publish"' not in body
+
+
+# ---------------------------------------------------------------------------
+# B1 regression — catalog row action survives the REAL cookie/header CSRF path
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_row_action_real_csrf_cookie_header_pair_200() -> None:
+    """Row action POST through the REAL list-fragment cookie/header CSRF path -> 200.
+
+    Regression for B1: ``_render_list_fragment`` re-mints the CSRF token into the
+    row-action button's ``hx-headers`` but (before the fix) never refreshed the
+    ``meho_csrf`` cookie, so the next row POST presented a header token that no
+    longer matched the stale cookie and the CSRFMiddleware ``value_mismatch``
+    check 403'd. This test does NOT hand-mint a matching token into both header
+    and cookie (the way the other tests do, which is exactly why they missed B1).
+    Instead it drives the genuine flow: GET the HTMX list fragment, capture the
+    ``Set-Cookie`` ``meho_csrf`` value AND the token the row button echoes via
+    ``hx-headers``, assert they are the same minted value, then POST the row
+    action presenting THAT cookie + THAT header. A 200 proves the cookie/header
+    pair is internally consistent; a 403 would be the B1 desync.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    version = _seed_template(tenant_id=_TENANT_A, slug="rotate-cert")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+
+        # GET the HTMX list fragment (the path filter swaps + post-action
+        # runbooks-refresh both render through here).
+        list_resp = client.get("/ui/runbooks/list", headers={"HX-Request": "true"})
+        assert list_resp.status_code == 200, list_resp.text
+
+        cookie_token = _extract_csrf_cookie(list_resp)
+        header_token = _extract_row_hx_token(list_resp.text)
+        # The fix guarantees the cookie and the echoed header are the SAME minted
+        # token; without it the cookie would be a stale (or absent) value.
+        assert cookie_token == header_token, (
+            "list-fragment CSRF cookie does not match the row button's "
+            "hx-headers token -- the B1 desync"
+        )
+
+        # POST the row action presenting the captured pair verbatim (the real
+        # browser round-trip), with no hand-minted override.
+        response = client.post(
+            "/ui/runbooks/rotate-cert/publish",
+            data={"version": str(version)},
+            headers={
+                CSRF_HEADER_NAME: header_token,
+                "HX-Request": "true",
+                "HX-Target": "runbook-row-alert-1",
+            },
+            cookies={CSRF_COOKIE_NAME: cookie_token},
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    # The action actually fired through the gate -- the draft is now published.
+    assert _status(_TENANT_A, "rotate-cert", version) == "published"
+
+
+# ---------------------------------------------------------------------------
+# M1 regression — catalog typed-400 renders inline, not swallowed by a refresh
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_row_action_typed_400_renders_inline_alert() -> None:
+    """A typed-400 on the catalog row path returns an inline alert (M1).
+
+    Regression for M1: the catalog row button used to dispatch ``runbooks-refresh``
+    on every ``htmx:after-request`` regardless of outcome, so a typed-400
+    (publishing a non-draft on a stale row) was swallowed under the list reload.
+    The fix targets a per-row alert slot and returns the minimal
+    ``_row_alert.html`` fragment carrying the alert when the POST originated from
+    the catalog (``HX-Target`` points at ``runbook-row-alert-…``). This asserts
+    the catalog-shaped response surfaces the alert inline (and does NOT leak the
+    detail-surface action row / OOB badge into a list row).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    # Deprecated version -> publishing it is a typed-400 (not draft).
+    version = _seed_template(tenant_id=_TENANT_A, slug="rotate-cert", deprecate=True)
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        csrf = _csrf_token(session_id)
+        response = client.post(
+            "/ui/runbooks/rotate-cert/publish",
+            data={"version": str(version)},
+            headers={**_csrf_kwargs(csrf)["headers"], "HX-Target": "runbook-row-alert-1"},
+            cookies=_csrf_kwargs(csrf)["cookies"],
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The typed-400 surfaces inline as a catalog alert.
+    assert "alert-error" in body
+    assert "not draft" in body
+    # The catalog response is the minimal slot -- NOT the detail action row /
+    # OOB header-badge (those would be nonsense swapped into a list row).
+    assert 'id="runbook-status-badge"' not in body
+    assert "Edit (forks draft)" not in body
+    # Status is unchanged.
+    assert _status(_TENANT_A, "rotate-cert", version) == "deprecated"
+
+
+def test_catalog_row_action_success_returns_empty_slot() -> None:
+    """A successful catalog row action returns an empty alert slot (no error)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    version = _seed_template(tenant_id=_TENANT_A, slug="rotate-cert")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        csrf = _csrf_token(session_id)
+        response = client.post(
+            "/ui/runbooks/rotate-cert/publish",
+            data={"version": str(version)},
+            headers={**_csrf_kwargs(csrf)["headers"], "HX-Target": "runbook-row-alert-1"},
+            cookies=_csrf_kwargs(csrf)["cookies"],
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # No error alert on success; the button's success-only handler then fires
+    # runbooks-refresh to reload the list with the new badge.
+    assert "alert-error" not in body
+    assert _status(_TENANT_A, "rotate-cert", version) == "published"
+
+
+def test_catalog_row_button_gates_refresh_on_success() -> None:
+    """The catalog row button dispatches runbooks-refresh only on success (M1).
+
+    Asserts the rendered ``_list.html`` markup: the button targets the per-row
+    alert slot and its ``htmx:after-request`` handler is gated on
+    ``$event.detail.successful`` AND the response carrying no ``alert-error``
+    (the typed-400 returns a 200 body with the alert, so ``successful`` alone is
+    insufficient). This is the static counterpart to the behavioural typed-400
+    test -- it pins the client-side wiring the reviewer required.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks", headers={"HX-Request": "false"})
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The row action targets the per-row alert slot (so a typed-400 lands inline).
+    assert 'hx-target="#runbook-row-alert-' in body
+    assert 'id="runbook-row-alert-' in body
+    # The dispatch is gated: success AND no alert-error in the response body.
+    assert "$event.detail.successful" in body
+    assert "alert-error" in body  # appears in the gate expression
+    assert "$dispatch('runbooks-refresh')" in body

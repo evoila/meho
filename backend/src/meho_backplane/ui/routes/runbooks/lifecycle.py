@@ -115,6 +115,17 @@ _require_admin = Depends(require_ui_admin)
 #: form value reaching :func:`int` rather than expressing a real ceiling.
 _MAX_VERSION_FIELD_LENGTH: Final[int] = 16
 
+#: Prefix of the HTMX ``hx-target`` element id the **catalog** row action points
+#: at (``#runbook-row-alert-<slug>@<version>``). When the ``HX-Target`` request
+#: header starts with this prefix the action originated from the catalog list,
+#: so the handler returns the minimal ``runbooks/_row_alert.html`` slot fragment
+#: (an inline alert on a typed-400, empty on success) instead of the detail
+#: surface's full ``_detail_actions.html`` row. The detail surface targets
+#: ``#runbook-lifecycle`` and gets the full fragment. This is how the catalog
+#: path surfaces a typed-400 inline rather than swallowing it under the
+#: success-only ``runbooks-refresh`` reload.
+_CATALOG_ROW_ALERT_TARGET_PREFIX: Final[str] = "runbook-row-alert-"
+
 
 @dataclass(frozen=True)
 class _ActionOutcome:
@@ -192,6 +203,42 @@ async def _deprecate(session: UISessionContext, slug: str, version: int) -> _Act
     return _ActionOutcome(template=template, error_message=None)
 
 
+def _is_catalog_row_action(request: Request) -> bool:
+    """Return ``True`` when this POST was dispatched from the catalog row.
+
+    The catalog row action targets the per-row ``#runbook-row-alert-…`` slot, so
+    HTMX sends that element id in the ``HX-Target`` request header. The detail
+    surface targets ``#runbook-lifecycle`` instead. Branching on the target lets
+    one handler serve both surfaces with the right fragment: the catalog gets the
+    minimal alert slot (inline typed-400 / empty on success) and the detail page
+    gets the full action row + OOB badge refresh.
+    """
+    target = request.headers.get("HX-Target", "")
+    return target.startswith(_CATALOG_ROW_ALERT_TARGET_PREFIX)
+
+
+async def _render_row_alert_fragment(
+    request: Request,
+    session: UISessionContext,
+    outcome: _ActionOutcome,
+) -> HTMLResponse:
+    """Render the catalog ``_row_alert.html`` slot for an HTMX swap.
+
+    The catalog row action surfaces a typed-400 inline (``alert-error`` in the
+    per-row slot) and renders empty on success -- the button's success-only
+    ``runbooks-refresh`` then reloads the list so the new badge shows. The CSRF
+    cookie is re-minted + refreshed here too: the freshly-rendered list fragment
+    (after ``runbooks-refresh``) re-mints its own token, but on the typed-400
+    path the list is NOT reloaded, so the row's button must keep a token whose
+    cookie still matches for a retry against a corrected row.
+    """
+    csrf_token = mint_csrf_token(str(session.session_id))
+    context = {"lifecycle_error": outcome.error_message}
+    response = get_templates().TemplateResponse(request, "runbooks/_row_alert.html", context)
+    set_csrf_cookie(response, csrf_token)
+    return response
+
+
 async def _render_actions_fragment(
     request: Request,
     session: UISessionContext,
@@ -204,7 +251,15 @@ async def _render_actions_fragment(
     state, and -- on the typed-400 path -- the inline alert. CSRF is re-minted
     (the prior token was consumed by this POST) so the next action carries a
     live token; the cookie is refreshed to match.
+
+    When the action was dispatched from the **catalog** row (``HX-Target``
+    points at a ``#runbook-row-alert-…`` slot) the minimal catalog slot fragment
+    is returned instead -- the detail-shaped action row + OOB badge would be
+    nonsense swapped into a list row, and the catalog surfaces its typed-400
+    inline via :func:`_render_row_alert_fragment`.
     """
+    if _is_catalog_row_action(request):
+        return await _render_row_alert_fragment(request, session, outcome)
     template = outcome.template
     in_flight = 0
     if template.status == "published":

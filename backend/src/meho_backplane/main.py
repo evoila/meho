@@ -74,6 +74,9 @@ from meho_backplane.api.v1.broadcast_overrides import (
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
+from meho_backplane.api.v1.connectors_ingest import (
+    set_llm_client_factory,
+)
 from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
@@ -119,7 +122,11 @@ from meho_backplane.memory import (
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
-from meho_backplane.operations.ingest import load_catalog, validate_catalog_registry_coverage
+from meho_backplane.operations.ingest import (
+    build_anthropic_ingest_llm_client,
+    load_catalog,
+    validate_catalog_registry_coverage,
+)
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
@@ -160,6 +167,24 @@ async def _preload_embedding_model() -> None:
             error_class=type(exc).__name__,
             error_message=str(exc),
         )
+
+
+def _wire_ingest_llm_client() -> None:
+    """Install the production spec-ingestion grouping LLM client (#1386).
+
+    Replaces the fail-closed ``default_llm_client_factory`` holder with
+    :func:`~meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`,
+    which reuses ``settings.anthropic_api_key`` (the key the agent
+    runtime already reads) so non-dry-run ``--catalog`` ingest grouping
+    works on deployed backplanes instead of failing closed with 503.
+
+    Installs the factory *callable* — it is not invoked here, so startup
+    never crashes on a missing key. The fail-closed
+    :class:`~meho_backplane.operations.ingest.LlmClientUnavailable`
+    (-> HTTP 503) surfaces only when an ingest actually runs the
+    grouping pass on a deploy that configured no key.
+    """
+    set_llm_client_factory(build_anthropic_ingest_llm_client)
 
 
 def _assert_mcp_resource_uri_configured() -> None:
@@ -280,6 +305,12 @@ async def _run_lifespan_startup() -> None:
     # ``version: "3"``) would have crashed the lifespan instead of
     # shipping silently.
     validate_catalog_registry_coverage()
+    # Production spec-ingestion grouping LLM client (#1386). Installs the
+    # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
+    # works on deployed backplanes (reusing settings.anthropic_api_key)
+    # instead of the build-time-only 503. Fail-closed when no key is set
+    # — the factory raises LlmClientUnavailable only when invoked.
+    _wire_ingest_llm_client()
     # Typed-op registration (G0.6-T-Refactor-Vault #390). See the
     # docstring for the contract; runs registrars connectors appended
     # to during the import pass above so descriptor rows are populated

@@ -43,6 +43,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from meho_backplane.api.v1.connectors_ingest import get_llm_client_factory
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.operations.ingest import (
     ConnectorListItem,
@@ -518,12 +519,14 @@ def test_call_meho_connector_ingest_threads_specs_through(
     assert len(call_kwargs["specs"]) == 2
     assert call_kwargs["specs"][0].uri == "docs:vcenter-9.0/vcenter.yaml"
     assert call_kwargs["specs"][1].uri == "docs:vcenter-9.0/vi-json.yaml"
-    # Pipeline gets a factory; the chassis-shipped fail-closed
-    # default is what we install today (no production adapter is
-    # wired at FastAPI lifespan startup -- G0.18-T7 #1360). A
-    # future operator-installed adapter would replace it via
-    # ``set_llm_client_factory(...)``.
-    assert pipeline.init_kwargs.get("llm_client_factory") is not None
+    # The MCP tool reads the *active* lifespan-wired factory holder via
+    # get_llm_client_factory() rather than pinning the fail-closed
+    # default (#1386) — so it shares whatever REST/CLI use. The
+    # TestClient lifespan wired build_anthropic_ingest_llm_client, so the
+    # factory the pipeline received is identically the active holder. (If
+    # the tool still hardcoded default_llm_client_factory, this would now
+    # fail, since lifespan changed the holder away from the default.)
+    assert pipeline.init_kwargs.get("llm_client_factory") is get_llm_client_factory()
 
 
 @pytest.mark.parametrize(

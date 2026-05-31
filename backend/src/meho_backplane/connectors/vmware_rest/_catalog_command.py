@@ -57,17 +57,17 @@ def catalog_command_for_vmware_rest(version: str) -> str:
     /api/v1/connectors/ingest`` directly should land T9 (#1150)
     ``{"catalog_entry": "vmware/<version>"}`` instead.
 
-    Build-time-only caveat (G0.18-T7 #1360): non-dry-run ingest of an
-    un-grouped catalog entry needs an injected ``LlmClient`` for the
-    grouping pass, and the chassis ships no production adapter
-    today -- on deployed backplanes the returned command fails closed
-    with HTTP 503 / ``LlmClientUnavailable`` until an operator wires
-    :func:`meho_backplane.api.v1.connectors_ingest.set_llm_client_factory`
-    at FastAPI lifespan startup. The
+    LLM-key caveat (#1386): non-dry-run ingest of an un-grouped catalog
+    entry needs an injected ``LlmClient`` for the grouping pass. The
+    chassis wires the production adapter
+    (``build_anthropic_ingest_llm_client``) at FastAPI lifespan startup,
+    reusing ``settings.anthropic_api_key`` -- so the returned command
+    completes the ingest on a deploy with ``ANTHROPIC_API_KEY`` set, and
+    fails closed with HTTP 503 / ``LlmClientUnavailable`` on one without.
+    The
     :func:`~meho_backplane.operations._errors.result_composite_l2_missing`
-    envelope's human message names this limitation so operators don't
-    follow the suggested command into the 503; see
-    ``docs/codebase/spec-ingestion.md`` section "LLM-client wiring
-    (build-time-only today)".
+    envelope's human message names the key requirement so operators know
+    the prerequisite; see ``docs/codebase/spec-ingestion.md`` section
+    "LLM-client wiring".
     """
     return f"meho connector ingest --catalog vmware/{version}"

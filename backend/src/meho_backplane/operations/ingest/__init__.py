@@ -16,6 +16,10 @@ routes at T6, admin MCP tools at T7) import from
 private module layout.
 """
 
+from meho_backplane.operations.ingest.anthropic_client import (
+    AnthropicMessagesLlmClient,
+    build_anthropic_ingest_llm_client,
+)
 from meho_backplane.operations.ingest.api_schemas import (
     ConnectorListItem,
     ConnectorListResponse,
@@ -114,6 +118,7 @@ from meho_backplane.operations.ingest.service import ReviewService
 
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
+    "AnthropicMessagesLlmClient",
     "CatalogError",
     "CatalogListResponse",
     "ConnectorListItem",
@@ -159,6 +164,7 @@ __all__ = [
     "UnsupportedSpecError",
     "UpstreamNotSpecError",
     "VersionMismatchError",
+    "build_anthropic_ingest_llm_client",
     "build_catalog_entry_malformed_detail",
     "build_catalog_entry_not_found_detail",
     "build_catalog_entry_typed_connector_detail",

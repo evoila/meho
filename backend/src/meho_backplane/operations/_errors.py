@@ -253,8 +253,9 @@ def result_composite_l2_missing(
     and the dispatcher converts it to this structured result.
 
     Wording is the v0.9 reframe from G0.16-T1 (#1303), refined by
-    G0.18-T7 (#1360) to honestly state that the escape-hatch ingest
-    is build-time-only on current deploys. The v0.8.0 envelope cast
+    G0.18-T7 (#1360) and #1386 to state that the escape-hatch ingest
+    needs ``ANTHROPIC_API_KEY`` set for its grouping pass. The v0.8.0
+    envelope cast
     the catalog command as "the remediation path" and operators read
     it as the recommended next step; reality is the opposite (per
     ``docs/codebase/api-shape-conventions.md`` §1) -- the curated
@@ -263,24 +264,23 @@ def result_composite_l2_missing(
     handle vendor-shape responses without operator-shape envelopes
     or ``requires_approval`` annotations.
 
-    G0.18-T7 (#1360) adds the build-time-only caveat: the chassis
-    does not wire a production ``LlmClient`` adapter at FastAPI
-    lifespan startup, so non-dry-run ``meho connector ingest
-    --catalog ...`` fails closed with HTTP 503 /
-    ``LlmClientUnavailable`` on deployed backplanes (RDC #789 N9
-    surfaced operators following the escape-hatch hint into a
-    silent 503). The structured ``catalog_command`` field stays
-    populated -- the operator-side fix is to install a real
-    ``LlmClient`` via
-    ``meho_backplane.api.v1.connectors_ingest.set_llm_client_factory(...)``
-    at lifespan startup; until then the human message names the
-    limitation so operators don't walk into the 503.
+    The escape-hatch ingest needs an ``ANTHROPIC_API_KEY`` to run its
+    grouping pass: #1386 wires a production ``LlmClient`` at FastAPI
+    lifespan startup
+    (``build_anthropic_ingest_llm_client``, reusing
+    ``settings.anthropic_api_key``), so non-dry-run ``meho connector
+    ingest --catalog ...`` groups successfully on a deploy with the key
+    set. A deploy that configured no key still fails closed with HTTP
+    503 / ``LlmClientUnavailable`` (RDC #789 N9 surfaced operators
+    following the escape-hatch hint into a silent 503), so the human
+    message names the key requirement rather than claiming the path is
+    build-time-only.
 
     The error shape still complies with the
     ``docs/codebase/error-message-shape.md`` convention (G0.14-T11
     #1141): a stable ``composite_l2_missing`` code, a
     diagnostic-bearing human message (curation gap + the missing
-    op-ids + the escape-hatch recipe + the build-time-only caveat +
+    op-ids + the escape-hatch recipe + the key requirement +
     two doc references), and a structured ``data`` payload
     (``missing_op_ids`` + ``catalog_command``) so an agent can branch
     on the diagnostic without re-parsing the human text.
@@ -296,14 +296,14 @@ def result_composite_l2_missing(
             f"L1 wrapper that exposes these ops in operator shape. As an "
             f"escape hatch, run {catalog_command!r} to ingest the raw "
             f"vendor ops (vendor-shape responses, no approval annotations) "
-            f"and retry -- note that ingest grouping needs an injected "
-            f"LlmClient and is build-time-only on deployed backplanes "
-            f"today (returns 503 / LlmClientUnavailable until an "
-            f"operator wires set_llm_client_factory at lifespan startup; "
-            f"see G0.18-T7 #1360). See docs/codebase/api-shape-conventions.md "
+            f"and retry -- note that ingest grouping needs ANTHROPIC_API_KEY "
+            f"set (the chassis wires the grouping LlmClient at lifespan "
+            f"startup, reusing that key); a deploy with no key configured "
+            f"fails closed with 503 / LlmClientUnavailable (#1386). See "
+            f"docs/codebase/api-shape-conventions.md "
             f"section 1 for the strategic framing, "
-            f"docs/codebase/spec-ingestion.md section 'LLM-client wiring "
-            f"(build-time-only today)' for the 503 caveat, and "
+            f"docs/codebase/spec-ingestion.md section 'LLM-client wiring' "
+            f"for the key requirement, and "
             f"docs/codebase/connectors-vmware-rest.md for the L1+L2 "
             f"dispatch contract."
         ),

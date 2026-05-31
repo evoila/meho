@@ -103,8 +103,7 @@ against the **two-spec NSX corpus**:
   provider-routed via G11.5) and pass it via
   `IngestionPipelineService(..., llm_client_factory=...)` to
   unblock the canary on a live backplane; see
-  [`docs/codebase/spec-ingestion.md` §"LLM-client wiring
-  (build-time-only today)"](../codebase/spec-ingestion.md#llm-client-wiring-build-time-only-today)
+  [`docs/codebase/spec-ingestion.md` §"LLM-client wiring"](../codebase/spec-ingestion.md#llm-client-wiring)
   for the operator-facing framing.
 - **A Vault path holding the NSX service-account credentials.**
   The `NsxConnector.session_loader` resolves

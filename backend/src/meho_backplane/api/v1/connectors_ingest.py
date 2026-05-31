@@ -98,20 +98,21 @@ writes an HTTP row but no service-level row.
 LLM-client injection
 --------------------
 
-The ingest route uses a module-level
-:data:`_llm_client_factory_dep` FastAPI dependency that resolves the
-:class:`LlmClientFactory` for the :class:`IngestionPipelineService`.
-Production wiring would set this via :func:`set_llm_client_factory`
-at app-startup time, but **no production adapter is wired today** —
-``settings.anthropic_api_key`` flows only to the agent runtime
-(``agent/run.py``), not here. Tests inject a deterministic stub via
-the same hook (or via :class:`IngestionPipelineService`'s
-``llm_client_factory`` constructor argument). The default factory
-raises :class:`LlmClientUnavailable`, which the route maps to 503;
-on deployed backplanes that means non-dry-run ingest of an
-un-grouped connector fails closed and ``--catalog`` ingest grouping
-is build-time-only. See G0.18-T7 (#1360) for the doc cleanup and
-the operator-facing build-time-only framing.
+The ingest route resolves the :class:`LlmClientFactory` for the
+:class:`IngestionPipelineService` via the :func:`get_llm_client_factory`
+dependency, which returns the active module-level factory. FastAPI
+lifespan startup installs the production factory
+(:func:`meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`)
+via :func:`set_llm_client_factory`, so a deploy with
+``ANTHROPIC_API_KEY`` set runs ``--catalog`` ingest grouping for real
+(the grouping pass reuses the agent runtime's Anthropic key). Tests
+inject a deterministic stub via the same hook (or via
+:class:`IngestionPipelineService`'s ``llm_client_factory`` constructor
+argument). When no key is configured the production factory still
+raises :class:`LlmClientUnavailable`, which the route maps to 503 — so
+a misconfigured deploy fails closed rather than 401-ing mid-grouping.
+See #1386 for the lifespan wire-up and G0.18-T7 (#1360) for the prior
+build-time-only framing this replaces.
 """
 
 from __future__ import annotations
@@ -182,6 +183,7 @@ from meho_backplane.operations.ingest.api_schemas import (
 )
 
 __all__ = [
+    "get_llm_client_factory",
     "router",
     "set_llm_client_factory",
 ]
@@ -212,16 +214,17 @@ def set_llm_client_factory(factory: LlmClientFactory) -> LlmClientFactory:
     """Install a new LLM-client factory; return the previous one.
 
     The previous factory is returned so callers can restore it after
-    a test or a feature-flagged deploy. **No production caller exists
-    today** — the chassis exposes this as the wire-up seam for a
-    production adapter (Anthropic Messages API or provider-routed via
-    G11.5), but FastAPI lifespan startup never invokes it and
-    ``settings.anthropic_api_key`` flows only to the agent runtime
-    (``agent/run.py``). Tests call this from their fixture setup with
-    a deterministic stub; without that, the chassis default
-    (:func:`default_llm_client_factory`) raises
-    :class:`LlmClientUnavailable` → HTTP 503. See G0.18-T7 (#1360)
-    for the doc cleanup and the build-time-only framing.
+    a test or a feature-flagged deploy. FastAPI lifespan startup is the
+    production caller (#1386): it installs
+    :func:`meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`,
+    which reuses ``settings.anthropic_api_key`` (the same key the agent
+    runtime reads) so ``--catalog`` ingest grouping works on deployed
+    backplanes. Tests call this from their fixture setup with a
+    deterministic stub; a deploy that never set a key keeps the
+    fail-closed posture — the production factory raises
+    :class:`LlmClientUnavailable` → HTTP 503 when invoked without a key,
+    same observable behaviour as the chassis default
+    (:func:`default_llm_client_factory`).
 
     The mutation is intentional rather than a FastAPI ``dependency_
     overrides`` entry: this factory needs to be reachable both from
@@ -235,11 +238,16 @@ def set_llm_client_factory(factory: LlmClientFactory) -> LlmClientFactory:
     return previous
 
 
-def _get_llm_client_factory() -> LlmClientFactory:
-    """FastAPI dependency that returns the active LLM-client factory.
+def get_llm_client_factory() -> LlmClientFactory:
+    """Return the active LLM-client factory.
 
-    Built as a dependency so tests can also override via
-    :attr:`FastAPI.dependency_overrides` when convenient.
+    Public read-side counterpart to :func:`set_llm_client_factory`.
+    The HTTP route consumes it as a FastAPI dependency
+    (``Depends(get_llm_client_factory)``) so tests can also override via
+    :attr:`FastAPI.dependency_overrides` when convenient; the non-HTTP
+    ingest siblings (the ``meho.connector.ingest`` admin MCP tool) call
+    it directly so they share the same lifespan-wired factory the route
+    sees, rather than pinning the fail-closed default.
     """
     return _llm_client_factory
 
@@ -285,7 +293,7 @@ async def ingest_endpoint(
     operator: Operator = _require_admin,
     llm_client_factory: Annotated[
         LlmClientFactory,
-        Depends(_get_llm_client_factory),
+        Depends(get_llm_client_factory),
     ] = default_llm_client_factory,
 ) -> JSONResponse:
     """Run the full ingestion pipeline (T1 → T2 → T3) for one connector.

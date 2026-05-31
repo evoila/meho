@@ -992,19 +992,20 @@ async def test_run_llm_grouping_with_real_claude_haiku(
     group choices, which would be model-version dependent.
 
     Note: this test exercises only the public surface; it does not
-    pull the Anthropic SDK at import time. A concrete LlmClient
-    backed by ``anthropic.AsyncAnthropic`` does **not** yet ship in
-    the chassis -- ``set_llm_client_factory`` is the wire-up seam
-    but FastAPI lifespan startup has no caller for it (see
-    ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring (build-
-    time-only today)" + G0.18-T7 #1360). For v0.2 this test stays as
-    a manual sanity hook.
+    pull the Anthropic SDK at import time. The production
+    ``anthropic.AsyncAnthropic``-backed LlmClient now ships
+    (``build_anthropic_ingest_llm_client``, wired at FastAPI lifespan
+    startup via ``set_llm_client_factory`` — #1386); the unit-level
+    contract for it lives in ``test_operations_ingest_anthropic_client.py``.
+    This remains a manual, opt-in live-API sanity hook: build the
+    production client and pass it to ``run_llm_grouping`` to verify
+    prompt quality against the real model. See
+    ``docs/codebase/spec-ingestion.md`` §"LLM-client wiring".
     """
     pytest.skip(
-        "real-LLM integration adapter not yet wired; "
-        "no production LlmClient ships in the chassis "
-        "(set_llm_client_factory has no lifespan caller). "
-        "Tracked under G0.18-T7 #1360.",
+        "manual live-API sanity hook; not run automatically even with a "
+        "key. Build build_anthropic_ingest_llm_client() and pass it to "
+        "run_llm_grouping to exercise the real model (#1386).",
     )
 
 

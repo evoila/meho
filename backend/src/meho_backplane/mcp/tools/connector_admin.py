@@ -92,6 +92,7 @@ from uuid import UUID
 
 import structlog
 
+from meho_backplane.api.v1.connectors_ingest import get_llm_client_factory
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -105,7 +106,6 @@ from meho_backplane.operations.ingest import (
     VersionMismatchError,
     build_uncovered_version_label_detail,
     build_version_mismatch_detail,
-    default_llm_client_factory,
     list_ingested_connectors,
 )
 
@@ -181,17 +181,16 @@ async def _ingest_handler(
 
     Translates the MCP arguments into the canonical
     :class:`IngestRequest` (from :mod:`api_schemas`) and delegates to
-    :meth:`IngestionPipelineService.ingest`. The handler installs
-    :func:`default_llm_client_factory` so a misconfigured chassis
-    surfaces :class:`LlmClientUnavailable` rather than crashing
-    mid-grouping. **No production adapter wires itself at the FastAPI
-    lifespan layer today** — a future operator-installed adapter
-    (Anthropic Messages API or provider-routed via G11.5) would call
-    :func:`meho_backplane.api.v1.connectors_ingest.set_llm_client_factory`
-    once at startup; until then, non-dry-run ingest of an un-grouped
-    connector via this MCP tool fails closed with
-    :class:`LlmClientUnavailable`. See G0.18-T7 (#1360) for the doc
-    cleanup and the operator-facing build-time-only framing.
+    :meth:`IngestionPipelineService.ingest`. The handler reads the
+    **active** LLM-client factory via
+    :func:`meho_backplane.api.v1.connectors_ingest.get_llm_client_factory`,
+    so it shares the production factory FastAPI lifespan startup installs
+    (:func:`~meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`,
+    reusing ``settings.anthropic_api_key``) rather than pinning the
+    fail-closed default — without this, the MCP surface would 503 even on
+    a deploy where the REST / CLI surfaces group successfully (#1386). On
+    a deploy that configured no key the factory still raises
+    :class:`LlmClientUnavailable`, surfaced here as the JSON-RPC error.
 
     The response is the canonical :class:`IngestResponse` shape the
     REST route at ``POST /api/v1/connectors/ingest`` also returns.
@@ -217,7 +216,7 @@ async def _ingest_handler(
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
     service = IngestionPipelineService(
         operator,
-        llm_client_factory=default_llm_client_factory,
+        llm_client_factory=get_llm_client_factory(),
     )
     # G0.9.1-T5 (#777): VersionMismatchError + UncoveredVersionLabel are
     # caller-input validation errors (the operator's ``version`` label

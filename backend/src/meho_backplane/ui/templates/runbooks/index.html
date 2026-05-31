@@ -1,0 +1,98 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbooks catalog page: status + target_kind filters + the template
+  list. Read-only surface (authoring is T2, lifecycle controls T3).
+
+  Initiative #1381 (G10.6 Runbooks UI), Task #1382 (T1).
+
+  HTMX wiring:
+    * Status select: ``hx-trigger="change"`` fires ``GET /ui/runbooks/list``
+      with the current filter values.
+    * Target-kind input: ``hx-trigger="keyup changed delay:300ms"`` so a
+      keystroke that doesn't change the value doesn't fire a request.
+    * Both controls swap the ``#runbooks-list`` element
+      (``hx-target`` + ``hx-swap="outerHTML"``) and ``hx-include`` the
+      sibling filter so the server sees both values on every request.
+    * ``hx-push-url`` keeps the browser URL in sync so a filtered view is
+      copy/paste reproducible (and a direct nav renders the full page).
+    * The list is rendered server-side into ``_list.html``; that partial
+      is also included here for the initial render so both paths share
+      identical markup.
+
+  Template blocks:
+    * ``page_title`` — overrides the ``<title>`` suffix.
+    * ``content`` — overrides the base.html main pane.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Runbooks &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Runbooks</h1>
+      <p class="text-sm opacity-70">
+        Browse the tenant's runbook templates and their lifecycle state.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Filter bar ---------- #}
+  <div class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body flex-row flex-wrap items-end gap-4 py-3">
+      <label class="form-control">
+        <div class="label">
+          <span class="label-text">Status</span>
+        </div>
+        <select
+          name="status"
+          class="select select-bordered select-sm"
+          aria-label="Filter by status"
+          hx-get="/ui/runbooks/list"
+          hx-target="#runbooks-list"
+          hx-swap="outerHTML"
+          hx-trigger="change"
+          hx-include="[name='target_kind']"
+          hx-push-url="true"
+        >
+          <option value="" {% if not status_filter %}selected{% endif %}>All</option>
+          <option value="draft" {% if status_filter == 'draft' %}selected{% endif %}>Draft</option>
+          <option value="published" {% if status_filter == 'published' %}selected{% endif %}>
+            Published
+          </option>
+          <option value="deprecated" {% if status_filter == 'deprecated' %}selected{% endif %}>
+            Deprecated
+          </option>
+        </select>
+      </label>
+
+      <label class="form-control w-full max-w-xs">
+        <div class="label">
+          <span class="label-text">Target kind</span>
+        </div>
+        <input
+          type="search"
+          name="target_kind"
+          value="{{ target_kind_filter }}"
+          placeholder="e.g. vmware.vcenter&hellip;"
+          class="input input-bordered input-sm w-full"
+          aria-label="Filter by target kind"
+          autocomplete="off"
+          hx-get="/ui/runbooks/list"
+          hx-target="#runbooks-list"
+          hx-swap="outerHTML"
+          hx-trigger="keyup changed delay:300ms"
+          hx-include="[name='status']"
+          hx-push-url="true"
+        />
+      </label>
+    </div>
+  </div>
+
+  {# ---------- List / catalog area ---------- #}
+  {% include "runbooks/_list.html" %}
+</section>
+{% endblock %}

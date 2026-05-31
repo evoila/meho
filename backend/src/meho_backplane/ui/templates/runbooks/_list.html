@@ -1,0 +1,106 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbooks catalog results partial.
+
+  Initiative #1381 (G10.6 Runbooks UI), Task #1382 (T1). This fragment is
+  swapped into ``#runbooks-list`` by the HTMX filter controls (status
+  select + target_kind keyup); it is also included directly into
+  ``index.html`` for the initial full-page render so both paths share
+  identical markup.
+
+  Context variables:
+    summaries          -- list[TemplateSummary]: latest version per slug
+    status_filter      -- str: active status filter ("" = all)
+    target_kind_filter -- str: active target_kind filter ("" = all)
+
+  Layout:
+    * Non-empty: DaisyUI table of slug / version / title / status badge /
+      target_kind / edited_at, each row linking to the detail page.
+    * Empty: friendly empty-state card (filter-aware copy when a filter is
+      active).
+-#}
+<div id="runbooks-list" class="space-y-3">
+  {% if summaries %}
+    <div class="card bg-base-100 border-base-300 overflow-x-auto border shadow-sm">
+      <table class="table table-sm" aria-label="Runbook templates">
+        <thead>
+          <tr>
+            <th scope="col">Slug</th>
+            <th scope="col" class="hidden sm:table-cell">Title</th>
+            <th scope="col">Status</th>
+            <th scope="col">Ver</th>
+            <th scope="col" class="hidden md:table-cell">Target</th>
+            <th scope="col" class="hidden lg:table-cell">Edited</th>
+            <th scope="col" class="sr-only">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for tpl in summaries %}
+            <tr>
+              <td class="font-mono">
+                <a href="/ui/runbooks/{{ tpl.slug }}" class="link link-primary">{{ tpl.slug }}</a>
+              </td>
+              <td class="hidden sm:table-cell">{{ tpl.title }}</td>
+              <td>
+                {#- Status badge. DaisyUI semantic colour per lifecycle
+                    state; ``aria-label`` carries the same signal so the
+                    colour is never the only cue (WCAG 1.4.1). -#}
+                {% if tpl.status == "published" %}
+                  <span class="badge badge-success badge-outline" aria-label="Status: published">
+                    published
+                  </span>
+                {% elif tpl.status == "draft" %}
+                  <span class="badge badge-warning badge-outline" aria-label="Status: draft">
+                    draft
+                  </span>
+                {% else %}
+                  <span class="badge badge-ghost badge-outline" aria-label="Status: deprecated">
+                    deprecated
+                  </span>
+                {% endif %}
+              </td>
+              <td class="font-mono opacity-70">v{{ tpl.version }}</td>
+              <td class="hidden md:table-cell opacity-70">
+                {{ tpl.target_kind or "—" }}
+              </td>
+              <td class="hidden lg:table-cell text-xs opacity-70">
+                {{ tpl.edited_at.strftime("%Y-%m-%d %H:%M") }}
+              </td>
+              <td>
+                <a
+                  href="/ui/runbooks/{{ tpl.slug }}"
+                  class="btn btn-ghost btn-xs"
+                  aria-label="View template {{ tpl.slug }}"
+                >
+                  View
+                </a>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {# Empty state — no templates match (or none exist for this tenant). #}
+    <div class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body py-10 text-center">
+        {% if status_filter or target_kind_filter %}
+          <p class="text-lg opacity-60">No runbook templates match the current filters</p>
+          <p class="text-sm opacity-40">
+            Adjust the status or target filters, or
+            <a href="/ui/runbooks" class="link">clear them</a>.
+          </p>
+        {% else %}
+          <p class="text-lg opacity-60">No runbook templates yet</p>
+          <p class="text-sm opacity-40">
+            Author a template with
+            <code>meho runbook draft-template</code> via CLI; published
+            templates and drafts appear here.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+</div>

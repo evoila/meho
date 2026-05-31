@@ -21,10 +21,14 @@ ships the umbrella :func:`build_router` that aggregates:
 * :mod:`~meho_backplane.ui.routes.kb` -- ``GET /ui/kb``,
   ``POST /ui/kb/search``, ``GET /ui/kb/<slug>``,
   ``GET /ui/kb/<slug>/preview`` -- KB read surface (G10.2-T1 #870).
-* :mod:`~meho_backplane.ui.routes.stubs` -- now empty. All five
+* :mod:`~meho_backplane.ui.routes.runbooks` -- ``GET /ui/runbooks``,
+  ``GET /ui/runbooks/list`` (HTMX filter partial),
+  ``GET /ui/runbooks/<slug>`` -- runbooks read surface, catalog +
+  opacity-floor-aware template detail (G10.6-T1 #1382).
+* :mod:`~meho_backplane.ui.routes.stubs` -- now empty. All six
   surfaces (broadcast #867, topology #880, memory #877, connectors
-  #873, kb #870) ship real routers; no ``/ui/{slug}`` placeholder
-  remains.
+  #873, kb #870, runbooks #1382) ship real routers; no ``/ui/{slug}``
+  placeholder remains.
 
 Auth surfaces (``/ui/auth/login``, ``/ui/auth/callback``,
 ``/ui/auth/logout``) live under
@@ -49,6 +53,7 @@ from meho_backplane.ui.routes.connectors import build_router as build_connectors
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.memory import build_memory_router
+from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 
@@ -59,13 +64,14 @@ __all__ = [
     "build_kb_router",
     "build_memory_router",
     "build_router",
+    "build_runbooks_router",
     "build_stubs_router",
     "build_topology_router",
 ]
 
 
 def build_router() -> APIRouter:
-    """Aggregate the dashboard + broadcast + topology + memory + connectors + kb routers.
+    """Aggregate the dashboard + surface routers (broadcast … runbooks).
 
     Order matters: FastAPI matches by registration order, so a
     surface Initiative's real router is included **before** the
@@ -75,11 +81,14 @@ def build_router() -> APIRouter:
     topology lands ``/ui/topology`` + ``/ui/topology/node/{id}``,
     memory lands ``/ui/memory`` + ``/ui/memory/{scope}/{slug}``,
     connectors lands ``/ui/connectors`` + ``/ui/connectors/{name}`` +
-    ``POST /ui/connectors/{name}/probe``, and kb lands ``/ui/kb`` +
-    ``/ui/kb/{slug}`` (+ search / preview) -- each owning its path.
-    All five surfaces now ship real routers, so the stubs aggregate
-    is empty; it is still included for symmetry and to keep the
-    retirement pattern's seam in place.
+    ``POST /ui/connectors/{name}/probe``, kb lands ``/ui/kb`` +
+    ``/ui/kb/{slug}`` (+ search / preview), and runbooks lands
+    ``/ui/runbooks`` + ``/ui/runbooks/list`` + ``/ui/runbooks/{slug}``
+    -- each owning its path. ``/ui/runbooks/list`` is registered before
+    ``/ui/runbooks/{slug}`` inside that router so the literal segment is
+    not bound as a slug. All six surfaces now ship real routers, so the
+    stubs aggregate is empty; it is still included for symmetry and to
+    keep the retirement pattern's seam in place.
     """
     router = APIRouter()
     router.include_router(build_dashboard_router())
@@ -90,5 +99,6 @@ def build_router() -> APIRouter:
     router.include_router(build_memory_router())
     router.include_router(build_connectors_router())
     router.include_router(build_kb_router())
+    router.include_router(build_runbooks_router())
     router.include_router(build_stubs_router())
     return router

@@ -259,6 +259,16 @@
                 <span>Memory</span>
               </a>
             </li>
+            <li>
+              <a
+                href="/ui/runbooks"
+                class="flex items-center gap-2{% if active_surface == 'runbooks' %} menu-active{% endif %}"
+                {% if active_surface == 'runbooks' %}aria-current="page"{% endif %}
+              >
+                <span aria-hidden="true">&#x1F4D8;</span>
+                <span>Runbooks</span>
+              </a>
+            </li>
           </ul>
         </nav>
       </aside>

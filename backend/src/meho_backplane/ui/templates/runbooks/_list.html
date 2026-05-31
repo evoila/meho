@@ -14,14 +14,23 @@
     summaries          -- list[TemplateSummary]: latest version per slug
     status_filter      -- str: active status filter ("" = all)
     target_kind_filter -- str: active target_kind filter ("" = all)
+    is_admin           -- bool: caller is tenant_admin (gates the row
+                          lifecycle actions; the POST handlers re-check
+                          server-side via require_ui_admin)
+    csrf_token         -- str: double-submit token echoed via hx-headers on
+                          the row publish / deprecate POSTs
 
   Layout:
     * Non-empty: DaisyUI table of slug / version / title / status badge /
-      target_kind / edited_at, each row linking to the detail page.
+      target_kind / edited_at, each row linking to the detail page. A
+      tenant_admin additionally sees a Publish (draft) / Deprecate (published)
+      row action, each behind an Alpine confirm dialog naming slug + version;
+      a successful action reloads the catalog so the new badge shows.
     * Empty: friendly empty-state card (filter-aware copy when a filter is
       active).
 -#}
-<div id="runbooks-list" class="space-y-3">
+<div id="runbooks-list" class="space-y-3"
+     {% if is_admin %}x-data="{ confirmKey: '' }"{% endif %}>
   {% if summaries %}
     <div class="card bg-base-100 border-base-300 overflow-x-auto border shadow-sm">
       <table class="table table-sm" aria-label="Runbook templates">
@@ -69,13 +78,73 @@
                 {{ tpl.edited_at.strftime("%Y-%m-%d %H:%M") }}
               </td>
               <td>
-                <a
-                  href="/ui/runbooks/{{ tpl.slug }}"
-                  class="btn btn-ghost btn-xs"
-                  aria-label="View template {{ tpl.slug }}"
-                >
-                  View
-                </a>
+                <div class="flex items-center justify-end gap-1">
+                  <a
+                    href="/ui/runbooks/{{ tpl.slug }}"
+                    class="btn btn-ghost btn-xs"
+                    aria-label="View template {{ tpl.slug }}"
+                  >
+                    View
+                  </a>
+                  {# Lifecycle row action — tenant_admin only. A Publish on a
+                     draft, a Deprecate on a published version; each names the
+                     specific (slug, version) the row shows. The POST handlers
+                     re-check require_ui_admin server-side. #}
+                  {% if is_admin and tpl.status in ("draft", "published") %}
+                    {%- set row_action = "publish" if tpl.status == "draft" else "deprecate" -%}
+                    {%- set row_key = tpl.slug ~ "@" ~ tpl.version -%}
+                    <button
+                      type="button"
+                      class="btn btn-xs {{ 'btn-success' if row_action == 'publish' else 'btn-warning' }}"
+                      x-on:click="confirmKey = '{{ row_key }}'"
+                      aria-label="{{ row_action | capitalize }} {{ tpl.slug }} v{{ tpl.version }}"
+                    >
+                      {{ row_action | capitalize }}
+                    </button>
+                    <div
+                      x-show="confirmKey === '{{ row_key }}'"
+                      x-cloak
+                      class="modal modal-open"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-label="Confirm {{ row_action }} {{ tpl.slug }}"
+                    >
+                      <div class="modal-box">
+                        <h3 class="text-lg font-semibold">
+                          {{ row_action | capitalize }}
+                          <code class="font-mono">{{ tpl.slug }}</code>
+                          <span class="font-mono">v{{ tpl.version }}</span>?
+                        </h3>
+                        <p class="py-3 text-sm">
+                          {% if row_action == "publish" %}
+                            Promote this draft to <strong>published</strong>.
+                          {% else %}
+                            Retire this published version to <strong>deprecated</strong>.
+                          {% endif %}
+                        </p>
+                        <div class="modal-action">
+                          <button type="button" class="btn btn-ghost btn-sm"
+                                  x-on:click="confirmKey = ''">
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-sm {{ 'btn-success' if row_action == 'publish' else 'btn-warning' }}"
+                            hx-post="/ui/runbooks/{{ tpl.slug }}/{{ row_action }}"
+                            hx-vals='{"version": "{{ tpl.version }}"}'
+                            hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'
+                            hx-swap="none"
+                            x-on:click="confirmKey = ''"
+                            x-on:htmx:after-request="$dispatch('runbooks-refresh')"
+                          >
+                            {{ row_action | capitalize }}
+                          </button>
+                        </div>
+                      </div>
+                      <div class="modal-backdrop" x-on:click="confirmKey = ''"></div>
+                    </div>
+                  {% endif %}
+                </div>
               </td>
             </tr>
           {% endfor %}

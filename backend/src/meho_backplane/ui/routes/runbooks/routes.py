@@ -112,6 +112,7 @@ from meho_backplane.ui.auth.session_store import load_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
 from meho_backplane.ui.routes.runbooks.editor_routes import register_editor_routes
+from meho_backplane.ui.routes.runbooks.lifecycle import register_lifecycle_routes
 from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_runbooks_router"]
@@ -203,6 +204,20 @@ async def _resolve_role(session_ctx: UISessionContext) -> Operator | None:
     return operator
 
 
+async def _is_admin(session_ctx: UISessionContext) -> bool:
+    """Resolve whether the session's operator is a ``tenant_admin``.
+
+    Thin wrapper over :func:`_resolve_role` returning just the admin verdict --
+    the catalog + list-fragment renders need the boolean (to show / hide the
+    lifecycle row actions) but not the full :class:`Operator`. Fails soft to
+    ``False`` (operator privileges) via :func:`_resolve_role`, so the row
+    actions are hidden whenever the role lift can't complete. The POST handlers
+    re-check server-side, so a hidden-but-forged action is still a 403.
+    """
+    operator = await _resolve_role(session_ctx)
+    return operator is not None and operator.tenant_role == TenantRole.TENANT_ADMIN
+
+
 def _render_steps(template: ShowTemplateResponse) -> list[dict[str, object]]:
     """Project the template's ordered steps into render-ready dicts.
 
@@ -267,10 +282,12 @@ async def _render_index(
     """
     summaries = await _list_summaries(session.tenant_id, status, target_kind)
     csrf_token = mint_csrf_token(str(session.session_id))
+    is_admin = await _is_admin(session)
     context = {
         "summaries": summaries,
         "status_filter": status or "",
         "target_kind_filter": target_kind or "",
+        "is_admin": is_admin,
         "operator_sub": session.operator_sub,
         "csrf_token": csrf_token,
         "active_surface": "runbooks",
@@ -292,10 +309,14 @@ async def _render_list_fragment(
 ) -> HTMLResponse:
     """Render the ``_list.html`` fragment for the HTMX filter controls."""
     summaries = await _list_summaries(session.tenant_id, status, target_kind)
+    csrf_token = mint_csrf_token(str(session.session_id))
+    is_admin = await _is_admin(session)
     context = {
         "summaries": summaries,
         "status_filter": status or "",
         "target_kind_filter": target_kind or "",
+        "is_admin": is_admin,
+        "csrf_token": csrf_token,
         "active_surface": "runbooks",
     }
     return get_templates().TemplateResponse(request, "runbooks/_list.html", context)
@@ -320,12 +341,24 @@ async def _render_detail(
     is_admin = operator is not None and operator.tenant_role == TenantRole.TENANT_ADMIN
     detail = await _resolve_detail(session, slug, version, is_admin=is_admin)
     csrf_token = mint_csrf_token(str(session.session_id))
+    # The fork-on-edit affordance surfaces how many runs are still pinned to a
+    # published version (forking leaves them bound to the source). Only a real,
+    # admin-visible published row needs the count; the restricted placeholder
+    # and non-published states show none.
+    in_flight_run_count = 0
+    if not detail.restricted and detail.template.status == "published":
+        in_flight_run_count = await RunbookTemplateService().count_in_flight_runs(
+            session.tenant_id, detail.template.slug, detail.template.version
+        )
     context = {
         "template": detail.template,
         "restricted": detail.restricted,
         "steps_rendered": detail.steps_rendered,
         "code_css": pygments_css(),
         "is_admin": is_admin,
+        "in_flight_run_count": in_flight_run_count,
+        "lifecycle_error": None,
+        "swap_badge": False,
         "operator_sub": session.operator_sub,
         "csrf_token": csrf_token,
         "active_surface": "runbooks",
@@ -377,6 +410,12 @@ def build_runbooks_router() -> APIRouter:
     # ``preview`` segments as slug parameters. Their handlers + the form
     # (de)serialisation live in ``runbooks.editor``.
     register_editor_routes(router)
+
+    # The T3 (#1384) lifecycle routes (``/ui/runbooks/{slug}/publish`` +
+    # ``/ui/runbooks/{slug}/deprecate`` POST) -- registered here, also BEFORE
+    # ``/ui/runbooks/{slug}`` so the literal ``publish`` / ``deprecate`` tail
+    # segments are not swallowed by the slug catch-all.
+    register_lifecycle_routes(router)
 
     @router.get("/ui/runbooks/{slug}", response_class=HTMLResponse)
     async def runbooks_detail(

@@ -100,5 +100,19 @@
 
   {# ---------- List / catalog area ---------- #}
   {% include "runbooks/_list.html" %}
+
+  {# Catalog refresh hook. A row lifecycle action (publish / deprecate) fires a
+     ``runbooks-refresh`` event after its POST settles; this hidden element
+     re-fetches the list with the active filters so the row's status badge
+     reflects the new state. ``from:body`` lets the event bubble up from the
+     row's button regardless of where the modal rendered. #}
+  <div
+    hidden
+    hx-get="/ui/runbooks/list"
+    hx-target="#runbooks-list"
+    hx-swap="outerHTML"
+    hx-trigger="runbooks-refresh from:body"
+    hx-include="[name='status'], [name='target_kind']"
+  ></div>
 </section>
 {% endblock %}

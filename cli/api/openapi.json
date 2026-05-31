@@ -9456,6 +9456,110 @@
         }
       }
     },
+    "/ui/runbooks/{slug}/publish": {
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Publish",
+        "description": "Publish ``(slug, version)`` (draft -> published); admin only.",
+        "operationId": "runbooks_publish_ui_runbooks__slug__publish_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_publish_ui_runbooks__slug__publish_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runbooks/{slug}/deprecate": {
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Deprecate",
+        "description": "Deprecate ``(slug, version)`` (published -> deprecated); admin only.",
+        "operationId": "runbooks_deprecate_ui_runbooks__slug__deprecate_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/runbooks/{slug}": {
       "get": {
         "tags": [
@@ -10754,6 +10858,18 @@
         ],
         "title": "Body_kb_upload_single_ui_kb_upload_post"
       },
+      "Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Version",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post"
+      },
       "Body_runbooks_editor_create_ui_runbooks_new_post": {
         "properties": {
           "slug": {
@@ -10824,6 +10940,18 @@
         },
         "type": "object",
         "title": "Body_runbooks_editor_update_ui_runbooks__slug__edit_post"
+      },
+      "Body_runbooks_publish_ui_runbooks__slug__publish_post": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Version",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_publish_ui_runbooks__slug__publish_post"
       },
       "Body_ui_connectors_create_submit_ui_connectors_create_post": {
         "properties": {

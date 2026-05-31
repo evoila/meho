@@ -104,6 +104,27 @@ connector-related release-notes line.
 
 ### Fixed
 
+- **Manually-seeded topology nodes are now visible to
+  `query_topology kind=history` / `kind=timeline` (G0.18-T6 #1359,
+  RDC #789 F-A).** `meho.topology.create_node` wrote `audit_log` +
+  one broadcast event but no `graph_node_history` row, so a manual
+  seed was invisible to the per-resource history walk and the
+  tenant-wide timeline even though it surfaced in `query_audit` —
+  an audit-vs-graph-history asymmetry surfaced by the RDC consumer
+  finding when operators bootstrapping non-k8s targets via
+  `create_node` could not answer "when was this node added?"
+  through the history/timeline verbs. The hook now emits one
+  `graph_node_history` row per meaningful call sharing the call's
+  pre-allocated `audit_id` (chassis pre-allocation pattern shared
+  with refresh / annotate so history rows join back against
+  audit_log to recover the causing principal). Idempotent re-seeds
+  whose only change is the heartbeat `seeded_at` / `last_seen`
+  fields deliberately skip the emit — mirrors
+  `refresh._update_existing_node`'s `is_meaningful_update`
+  discipline and `annotate._annotate_curated_is_meaningful`'s
+  heartbeat strip — so a polling MCP agent does not balloon the
+  history table with empty UPDATED rows.
+
 - **`POST /api/v1/targets` accepts the `meho connector list` SDDC
   product token (G0.18-T2 #1355).** Closes #1312 acceptance B, which
   had been marked "already aligned" but the split persisted:

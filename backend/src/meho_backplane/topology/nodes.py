@@ -61,7 +61,13 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.broadcast import BroadcastEvent, publish_event
-from meho_backplane.db.models import _GRAPH_NODE_KINDS, AuditLog, GraphNode
+from meho_backplane.db.models import (
+    _GRAPH_NODE_KINDS,
+    AuditLog,
+    GraphHistoryChangeKind,
+    GraphNode,
+)
+from meho_backplane.topology.history import node_snapshot, record_node_change
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,6 +101,17 @@ _OP_CLASS = "write"
 #: op_id, mirroring :data:`refresh._AUDIT_METHOD` and
 #: :data:`annotate._AUDIT_METHOD_ANNOTATE`).
 _AUDIT_METHOD = "CREATE_NODE"
+
+#: Property keys that change on every :func:`create_or_get_node` call
+#: regardless of operator intent — heartbeats stripped from the
+#: meaningful-change comparison so an idempotent re-seed does not emit
+#: a phantom ``updated`` history row. ``seeded_at`` is the
+#: ``datetime.now(UTC).isoformat()`` stamped into ``properties`` on
+#: every call (the create-node side of the same heartbeat pattern
+#: :data:`annotate._ANNOTATE_HEARTBEAT_PROPERTY_KEYS` carries for
+#: ``annotated_at``). Top-level ``last_seen`` is also a heartbeat and
+#: is handled inside :func:`_create_node_is_meaningful` itself.
+_CREATE_NODE_HEARTBEAT_PROPERTY_KEYS: tuple[str, ...] = ("seeded_at",)
 
 
 class InvalidNodeKindError(ValueError):
@@ -204,6 +221,37 @@ def _build_audit_row(
     )
 
 
+def _create_node_is_meaningful(*, before: dict[str, Any] | None, after: dict[str, Any]) -> bool:
+    """Return ``True`` when the re-seed's snapshot reflects a real change.
+
+    Compares ``before`` to ``after`` after stripping the heartbeat
+    fields (top-level ``last_seen`` and
+    ``properties.seeded_at``) that change on every call regardless of
+    operator intent. Mirrors :func:`annotate._annotate_curated_is_meaningful`
+    and :func:`refresh._properties_differ` so all three history-emission
+    paths agree on what counts as a mutation — an idempotent re-seed
+    with the same ``(note, evidence_url)`` and no auto→curated
+    promotion is a no-op for history purposes.
+
+    ``before`` is ``None`` on a fresh insert; that path is always
+    meaningful (the row did not exist), so the caller treats ``None``
+    as the "always emit" case before calling this helper.
+    """
+    if before is None:
+        return True
+
+    def _strip(snapshot: dict[str, Any]) -> dict[str, Any]:
+        stripped = {k: v for k, v in snapshot.items() if k != "last_seen"}
+        props = stripped.get("properties")
+        if isinstance(props, dict):
+            stripped["properties"] = {
+                k: v for k, v in props.items() if k not in _CREATE_NODE_HEARTBEAT_PROPERTY_KEYS
+            }
+        return stripped
+
+    return _strip(before) != _strip(after)
+
+
 async def _publish(
     *,
     audit_id: uuid.UUID,
@@ -285,6 +333,21 @@ async def create_or_get_node(
     transaction. Publishes one :class:`BroadcastEvent` after commit
     (fail-open per the refresh / annotate pattern).
 
+    **Diff-on-write hook (G9.3-T2 #857).** A meaningful call adds one
+    :class:`GraphNodeHistory` row in the same transaction so
+    :func:`query_history` ``kind=history``  / ``kind=timeline`` reflect
+    manual seeds the same way they reflect auto-refresh changes (RDC
+    #789 finding F-A — manual seeds were previously invisible to the
+    history/timeline verbs because only :mod:`refresh` populated the
+    history tables). Fresh inserts emit a ``created`` row;
+    auto→curated promotions and property changes emit ``updated``; an
+    idempotent re-seed with the same ``(note, evidence_url)`` and no
+    promotion is a heartbeat-only mutation and emits no history row
+    (mirrors :func:`refresh._update_existing_node`'s
+    ``is_meaningful_update`` skip and
+    :func:`annotate._annotate_curated_is_meaningful`'s heartbeat
+    strip).
+
     Args:
         session: Caller-owned :class:`AsyncSession` with **no active
             transaction**. The function opens its own
@@ -315,6 +378,14 @@ async def create_or_get_node(
             :data:`_GRAPH_NODE_KINDS`.
     """
     canonical_kind = _validate_kind(kind)
+    # Pre-allocate ``audit_id`` so the history row's ``audit_id``
+    # references the same ``audit_log`` row this call writes (the
+    # chassis "audit-id pre-allocation" pattern shared with refresh /
+    # annotate). Generating it inside the ``session.begin()`` block
+    # would force the history hook to either re-read the audit row
+    # or carry a second id — both worse than threading the same
+    # uuid through.
+    audit_id = uuid.uuid4()
 
     async with session.begin():
         existing_stmt = select(GraphNode).where(
@@ -347,7 +418,16 @@ async def create_or_get_node(
             session.add(node)
             await session.flush()
             was_created = True
+            node_before: dict[str, Any] | None = None
         else:
+            # Capture the pre-mutation snapshot **before** rewriting
+            # ``properties`` / ``discovered_by`` / ``last_seen`` so
+            # the history row's ``before`` reflects the state the
+            # operator would have seen on a ``list-nodes``
+            # immediately prior to the re-seed (same discipline
+            # :func:`refresh._update_existing_node` and
+            # :func:`annotate._reannotate_existing_edge` use).
+            node_before = node_snapshot(existing)
             # Merge the manual-seed keys onto the existing properties
             # dict. Reassign rather than mutate so SQLAlchemy's JSONB
             # change-detection picks up the write (same reassign
@@ -370,7 +450,30 @@ async def create_or_get_node(
             node = existing
             was_created = False
 
-        audit_id = uuid.uuid4()
+        # Diff-on-write hook (G9.3-T2 #857). Emit exactly one
+        # ``graph_node_history`` row per meaningful call so
+        # ``query_topology kind=history|timeline`` reflect manual
+        # seeds the same way they reflect auto-refresh changes (RDC
+        # #789 F-A). Idempotent re-seeds whose only change is the
+        # heartbeat ``seeded_at`` / ``last_seen`` skip emission — the
+        # "no double-write" criterion on the get path.
+        node_after = node_snapshot(node)
+        if _create_node_is_meaningful(before=node_before, after=node_after):
+            record_node_change(
+                session,
+                node_id=node.id,
+                tenant_id=operator.tenant_id,
+                change_kind=(
+                    GraphHistoryChangeKind.CREATED
+                    if was_created
+                    else GraphHistoryChangeKind.UPDATED
+                ),
+                before=node_before,
+                after=node_after,
+                audit_id=audit_id,
+                valid_from=now,
+            )
+
         payload = _build_payload(
             node=node,
             note=note,

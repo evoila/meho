@@ -1,0 +1,189 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Runbooks editor — one repeatable step's fields.
+
+  Initiative #1381 (G10.6 Runbooks UI), Task #1383 (T2). Rendered inside the
+  Alpine ``<template x-for="(step, idx) in steps">`` loop in ``editor.html``;
+  every binding here addresses the loop-local ``step`` object, so the whole
+  step tree lives in one Alpine model and is JSON-serialised into the hidden
+  ``steps`` form field on submit.
+
+  Discriminated-union toggles:
+    * ``step.type`` (manual / operation_call) — the ``operation_call`` block
+      (op_id + params) shows only when ``step.type === 'operation_call'``.
+    * ``step.verify.type`` (confirm / operation_call) — the confirm prompt vs
+      the operation_call op_id/params/expect block toggles on the verify type.
+
+  Body editor:
+    * Each step's ``body`` binds a textarea that CodeMirror 6 enhances on
+      mount (see the init script in ``editor.html``). The textarea carries a
+      debounced ``hx-post="/ui/runbooks/preview"`` that swaps the sibling
+      ``.runbook-step-preview`` pane with the server-rendered Markdown.
+
+  Client-side validation is convenience (the server re-validates everything):
+    * step id pattern ``^[a-z][a-z0-9\-]{0,63}$`` via the ``pattern`` attr +
+      an Alpine-computed duplicate/empty hint.
+-#}
+<div class="card bg-base-100 border-base-300 border shadow-sm" role="group"
+     x-bind:aria-label="'Step ' + (idx + 1)">
+  <div class="card-body space-y-3 py-4">
+    {# ----- Step header: index + remove/reorder ----- #}
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="badge badge-neutral" x-text="idx + 1"></span>
+      <span class="text-sm font-medium opacity-60">Step</span>
+      <div class="ml-auto flex gap-1">
+        <button type="button" class="btn btn-ghost btn-xs"
+                x-bind:disabled="idx === 0"
+                x-on:click="moveStep(idx, -1)"
+                aria-label="Move step up">&uarr;</button>
+        <button type="button" class="btn btn-ghost btn-xs"
+                x-bind:disabled="idx === steps.length - 1"
+                x-on:click="moveStep(idx, 1)"
+                aria-label="Move step down">&darr;</button>
+        <button type="button" class="btn btn-ghost btn-xs text-error"
+                x-bind:disabled="steps.length === 1"
+                x-on:click="removeStep(idx)"
+                aria-label="Remove step">&times;</button>
+      </div>
+    </div>
+
+    {# ----- Step id + type ----- #}
+    <div class="flex flex-wrap gap-4">
+      <label class="form-control flex-1 min-w-48">
+        <div class="label py-0">
+          <span class="label-text font-medium">Step id</span>
+          <span class="label-text-alt opacity-60">lowercase, hyphens, unique</span>
+        </div>
+        <input type="text" class="input input-bordered input-sm font-mono"
+               x-model="step.id"
+               pattern="[a-z][a-z0-9\-]{0,63}"
+               placeholder="drain-node"
+               autocomplete="off"
+               x-bind:aria-label="'Step ' + (idx + 1) + ' id'" />
+        <div class="label py-0" x-show="stepIdError(idx)">
+          <span class="label-text-alt text-error" x-text="stepIdError(idx)"></span>
+        </div>
+      </label>
+      <label class="form-control min-w-48">
+        <div class="label py-0">
+          <span class="label-text font-medium">Type</span>
+        </div>
+        <select class="select select-bordered select-sm" x-model="step.type"
+                x-bind:aria-label="'Step ' + (idx + 1) + ' type'">
+          <option value="manual">manual</option>
+          <option value="operation_call">operation_call</option>
+        </select>
+      </label>
+    </div>
+
+    {# ----- Step title ----- #}
+    <label class="form-control">
+      <div class="label py-0"><span class="label-text font-medium">Title</span></div>
+      <input type="text" class="input input-bordered input-sm"
+             x-model="step.title" placeholder="Drain the node" autocomplete="off"
+             x-bind:aria-label="'Step ' + (idx + 1) + ' title'" />
+    </label>
+
+    {# ----- operation_call: op_id + params ----- #}
+    <div x-show="step.type === 'operation_call'" x-cloak class="space-y-3">
+      <label class="form-control">
+        <div class="label py-0">
+          <span class="label-text font-medium">Operation id</span>
+          <span class="label-text-alt opacity-60">registry op_id (free text)</span>
+        </div>
+        <input type="text" class="input input-bordered input-sm font-mono"
+               x-model="step.op_id" placeholder="vmware.composite.vm.create"
+               autocomplete="off"
+               x-bind:aria-label="'Step ' + (idx + 1) + ' operation id'" />
+      </label>
+      <label class="form-control">
+        <div class="label py-0">
+          <span class="label-text font-medium">Params (JSON)</span>
+          <span class="label-text-alt opacity-60">${run.target} / ${run.params.X} only</span>
+        </div>
+        <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="3"
+                  x-model="step.params" placeholder="{}"
+                  x-bind:aria-label="'Step ' + (idx + 1) + ' params'"></textarea>
+      </label>
+    </div>
+
+    {# ----- Body editor + live preview (CodeMirror + HTMX) ----- #}
+    <div class="flex flex-wrap gap-4">
+      <div class="flex-1 min-w-64 space-y-1">
+        <div class="text-xs font-medium uppercase tracking-wide opacity-60">Body (Markdown)</div>
+        {# CodeMirror mounts onto this textarea; the textarea stays the
+           form-model source (x-model) and the HTMX preview trigger. #}
+        <textarea class="textarea textarea-bordered textarea-sm font-mono w-full runbook-step-body"
+                  rows="6"
+                  x-model="step.body"
+                  x-bind:data-step-index="idx"
+                  hx-post="/ui/runbooks/preview"
+                  hx-trigger="input changed delay:500ms"
+                  hx-target="closest .flex-wrap >> .runbook-step-preview"
+                  hx-swap="innerHTML"
+                  hx-vals='js:{body: event.target.value}'
+                  hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'
+                  x-bind:aria-label="'Step ' + (idx + 1) + ' body'"></textarea>
+      </div>
+      <div class="flex-1 min-w-64 space-y-1">
+        <div class="text-xs font-medium uppercase tracking-wide opacity-60">Preview</div>
+        <div class="runbook-step-preview prose prose-sm max-w-none border-base-300 rounded-box border p-3 min-h-24"
+             aria-live="polite" x-bind:aria-label="'Step ' + (idx + 1) + ' preview'">
+          <p class="opacity-40 text-sm">Start typing to see a preview&hellip;</p>
+        </div>
+      </div>
+    </div>
+
+    {# ----- Verify gate ----- #}
+    <div class="border-base-300 border-t pt-3 space-y-3">
+      <div class="flex flex-wrap items-end gap-4">
+        <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
+        <label class="form-control min-w-48">
+          <select class="select select-bordered select-sm" x-model="step.verify.type"
+                  x-bind:aria-label="'Step ' + (idx + 1) + ' verify type'">
+            <option value="confirm">confirm</option>
+            <option value="operation_call">operation_call</option>
+          </select>
+        </label>
+      </div>
+
+      {# confirm: a single prompt #}
+      <label class="form-control" x-show="step.verify.type === 'confirm'">
+        <div class="label py-0"><span class="label-text font-medium">Prompt</span></div>
+        <input type="text" class="input input-bordered input-sm"
+               x-model="step.verify.prompt" placeholder="Node drained?" autocomplete="off"
+               x-bind:aria-label="'Step ' + (idx + 1) + ' verify prompt'" />
+      </label>
+
+      {# operation_call: op_id + params + expect #}
+      <div x-show="step.verify.type === 'operation_call'" x-cloak class="space-y-3">
+        <label class="form-control">
+          <div class="label py-0"><span class="label-text font-medium">Operation id</span></div>
+          <input type="text" class="input input-bordered input-sm font-mono"
+                 x-model="step.verify.op_id" placeholder="vmware.cert.status"
+                 autocomplete="off"
+                 x-bind:aria-label="'Step ' + (idx + 1) + ' verify operation id'" />
+        </label>
+        <label class="form-control">
+          <div class="label py-0">
+            <span class="label-text font-medium">Params (JSON)</span>
+          </div>
+          <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="2"
+                    x-model="step.verify.params" placeholder="{}"
+                    x-bind:aria-label="'Step ' + (idx + 1) + ' verify params'"></textarea>
+        </label>
+        <label class="form-control">
+          <div class="label py-0">
+            <span class="label-text font-medium">Expect (JSON)</span>
+            <span class="label-text-alt opacity-60">structural-equality match</span>
+          </div>
+          <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="2"
+                    x-model="step.verify.expect" placeholder="{}"
+                    x-bind:aria-label="'Step ' + (idx + 1) + ' verify expect'"></textarea>
+        </label>
+      </div>
+    </div>
+  </div>
+</div>

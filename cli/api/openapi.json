@@ -9261,6 +9261,201 @@
         }
       }
     },
+    "/ui/runbooks/new": {
+      "get": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Editor New",
+        "description": "Render the authoring editor for a brand-new draft template.",
+        "operationId": "runbooks_editor_new_ui_runbooks_new_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Editor Create",
+        "description": "Create a new draft from the editor form (mirrors REST POST).",
+        "operationId": "runbooks_editor_create_ui_runbooks_new_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_editor_create_ui_runbooks_new_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runbooks/preview": {
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Editor Preview",
+        "description": "HTMX live-preview partial for a step's Markdown ``body`` (admin only).",
+        "operationId": "runbooks_editor_preview_ui_runbooks_preview_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_editor_preview_ui_runbooks_preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runbooks/{slug}/edit": {
+      "get": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Editor Edit",
+        "description": "Render the authoring editor pre-loaded with an existing template.",
+        "operationId": "runbooks_editor_edit_ui_runbooks__slug__edit_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Editor Update",
+        "description": "Edit a draft in place / fork from published (mirrors REST PATCH).",
+        "operationId": "runbooks_editor_update_ui_runbooks__slug__edit_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_editor_update_ui_runbooks__slug__edit_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/runbooks/{slug}": {
       "get": {
         "tags": [
@@ -10558,6 +10753,77 @@
           "file"
         ],
         "title": "Body_kb_upload_single_ui_kb_upload_post"
+      },
+      "Body_runbooks_editor_create_ui_runbooks_new_post": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug",
+            "default": ""
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "default": ""
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "target_kind": {
+            "type": "string",
+            "title": "Target Kind",
+            "default": ""
+          },
+          "steps": {
+            "type": "string",
+            "maxLength": 262144,
+            "title": "Steps",
+            "default": "[]"
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_editor_create_ui_runbooks_new_post"
+      },
+      "Body_runbooks_editor_preview_ui_runbooks_preview_post": {
+        "properties": {
+          "body": {
+            "type": "string",
+            "maxLength": 65536,
+            "title": "Body",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_editor_preview_ui_runbooks_preview_post"
+      },
+      "Body_runbooks_editor_update_ui_runbooks__slug__edit_post": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "default": ""
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "target_kind": {
+            "type": "string",
+            "title": "Target Kind",
+            "default": ""
+          },
+          "steps": {
+            "type": "string",
+            "maxLength": 262144,
+            "title": "Steps",
+            "default": "[]"
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_editor_update_ui_runbooks__slug__edit_post"
       },
       "Body_ui_connectors_create_submit_ui_connectors_create_post": {
         "properties": {

@@ -267,20 +267,21 @@ async def test_find_dependents_untracked_vs_tracked_no_deps(
     """Mirror the RDC #789 N2 repro: ``[]`` must not conflate untracked
     with tracked-but-no-dependents (G0.18-T4 #1357).
 
-    The ``known_graph`` fixture seeds ``ds1`` as a leaf — nothing
-    depends on it, so the reverse closure is the one-element ``[ds1]``
-    (the substrate's depth-0 anchor row). A non-existent
-    ``vault-prod`` target — the exact shape a registered non-k8s
-    target takes today because auto-discovery is k8s-only — raises
-    :class:`NodeNotFoundError` rather than returning the bare ``[]``
-    the pre-fix behaviour produced.
+    The ``known_graph`` fixture seeds ``app`` with only outgoing edges
+    (``app --belongs-to--> {vm1, vm2}``) — nothing depends on ``app``
+    in the reverse-closure direction, so ``find_dependents("app")``
+    returns the one-element ``[app]`` (the substrate's depth-0 anchor
+    row). A non-existent ``vault-prod`` target — the exact shape a
+    registered non-k8s target takes today because auto-discovery is
+    k8s-only — raises :class:`NodeNotFoundError` rather than returning
+    the bare ``[]`` the pre-fix behaviour produced.
 
     The pre-G0.18-T4 implementation returned the same empty list for
     both, and the consumer's pre-destructive blast-radius check read
     the empty list as "safe to delete," a false-negative SEV-3.
     """
-    tracked = await find_dependents(_operator(TENANT_A_ID), "ds1")
-    assert [n.name for n in tracked] == ["ds1"]
+    tracked = await find_dependents(_operator(TENANT_A_ID), "app")
+    assert [n.name for n in tracked] == ["app"]
     assert tracked[0].depth == 0
 
     with pytest.raises(NodeNotFoundError) as excinfo:

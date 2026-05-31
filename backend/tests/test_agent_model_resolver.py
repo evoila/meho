@@ -294,6 +294,54 @@ def test_default_anthropic_policy_routes_to_anthropic(
         assert isinstance(model, AnthropicModel), tier
 
 
+def test_anthropic_builder_strips_provider_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The G11.5 Anthropic builder strips the spec-form provider prefix.
+
+    With the shipped default ``agent_default_model`` spec form
+    (``anthropic:claude-sonnet-4-6``), the resolved AnthropicModel must
+    carry the bare id — the ``anthropic:`` prefix would otherwise 404 at
+    the Messages API (RDC #789 N11).
+    """
+    from pydantic_ai.models.anthropic import AnthropicModel
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-prefix-test")
+    monkeypatch.delenv("AGENT_DEFAULT_MODEL", raising=False)
+    get_settings.cache_clear()
+
+    resolver = build_resolver(
+        policies={DEFAULT_TENANT_KEY: default_anthropic_policy()},
+        backends=default_anthropic_backends(),
+    )
+    operator = _make_operator(tenant_id=_TENANT_B)
+
+    model = resolver.resolve(operator, AgentTier.TRIAGE)
+    assert isinstance(model, AnthropicModel)
+    assert model.model_name == "claude-sonnet-4-6"
+
+
+def test_anthropic_builder_accepts_bare_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deploy-supplied bare model id passes through the builder unchanged."""
+    from pydantic_ai.models.anthropic import AnthropicModel
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-prefix-test")
+    monkeypatch.setenv("AGENT_DEFAULT_MODEL", "claude-sonnet-4-6")
+    get_settings.cache_clear()
+
+    resolver = build_resolver(
+        policies={DEFAULT_TENANT_KEY: default_anthropic_policy()},
+        backends=default_anthropic_backends(),
+    )
+    operator = _make_operator(tenant_id=_TENANT_B)
+
+    model = resolver.resolve(operator, AgentTier.TRIAGE)
+    assert isinstance(model, AnthropicModel)
+    assert model.model_name == "claude-sonnet-4-6"
+
+
 def test_default_anthropic_builder_fails_closed_without_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

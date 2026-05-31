@@ -6212,7 +6212,7 @@
           "approvals"
         ],
         "summary": "Approve Approval Request",
-        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully.\n* 403 \u2014 operator lacks ``operator`` role.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch.",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully.\n* 403 \u2014 operator lacks ``operator`` role, **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch.",
         "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {

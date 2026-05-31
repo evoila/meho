@@ -31,7 +31,9 @@ What this harness proves (issue #551 DoD)
   :func:`~meho_backplane.operations.dispatch`; each asserts the live
   response shape, that a synchronous ``audit_log`` row committed
   (CLAUDE.md postulate 7), and that the broadcast event's
-  ``op_class`` is correct — ``write`` for ``vault.kv.put`` /
+  ``op_class`` is correct — ``credential_write`` for ``vault.kv.put``
+  (its KV-v2 secret rides in the request params, so the broadcast
+  collapses to aggregate-only per G11.7-T1 #1401), ``write`` for
   ``vault.kv.delete``, ``credential_read`` for ``vault.kv.read`` /
   ``vault.kv.list``, ``read`` for the KV-v2 / sys metadata reads and
   the ``.list`` auth ops, and ``other`` for the two ``.read``
@@ -518,30 +520,66 @@ async def test_kv_put_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``vault.kv.put`` writes a new version; audited; op_class=write."""
+    """``vault.kv.put`` writes a new version; audited; op_class=credential_write.
+
+    G11.7-T1 (#1401) reclassified ``vault.kv.put`` from plain ``write`` to
+    ``credential_write``: the KV-v2 secret rides in the *request params*, so
+    a plain-``write`` classification broadcast the written secret in full to
+    every operator on the feed. ``credential_write`` collapses the broadcast
+    to aggregate-only (``{op_class, result_status}``) — the team-coordination
+    signal "someone wrote a credential" without the secret material.
+
+    This integration assertion strengthens the contract end-to-end: the
+    written secret value is seeded as a distinctive sentinel and the test
+    positively asserts it is **absent** from the *entire serialised
+    BroadcastEvent* (not just ``payload`` — a regression placing the secret
+    in a new top-level field would slip a payload-only check), mirroring
+    :func:`tests.test_broadcast_credential_write_dispatch
+    .test_credential_write_broadcast_is_aggregate_only`. The
+    :class:`~meho_backplane.connectors.schemas.OperationResult` and the
+    Vault read-back still carry the secret — only the broadcast is redacted.
+    """
     target, addr = vault_e2e
+    # Distinctive value so any appearance in the serialised broadcast event
+    # is an unambiguous leak (a short/common value like "v" could collide
+    # with field names or framework strings and make absence unprovable).
+    sentinel = "kvput-secret-sentinel-1401"
     operator = _make_operator(sub="op-kv-put")
     result = await dispatch(
         operator=operator,
         connector_id="vault-1.x",
         op_id="vault.kv.put",
         target=target,
-        params={"path": "app/written", "data": {"k": "v"}},
+        params={"path": "app/written", "data": {"k": sentinel}},
     )
     assert result.status == "ok", result.error
     assert result.result == {"version": 1}
-    # Read back through a fresh root client to prove the write landed.
+    # Read back through a fresh root client to prove the write landed — the
+    # secret is intact in Vault and in the caller's OperationResult; only the
+    # broadcast view is redacted.
     readback = _root_client(addr).secrets.kv.v2.read_secret_version(
         path="app/written",
         mount_point=_KV_MOUNT,
         raise_on_deleted_version=False,
     )
-    assert readback["data"]["data"] == {"k": "v"}
+    assert readback["data"]["data"] == {"k": sentinel}
     await _assert_audited(
         "vault.kv.put",
         operator_sub="op-kv-put",
-        expected_op_class="write",
+        expected_op_class="credential_write",
         events=captured_events,
+    )
+    # Positive secret-absence assertion (AC4): the redacted broadcast carries
+    # only the aggregate view and the sentinel never reaches the feed.
+    put_event = next(e for e in captured_events if e.op_id == "vault.kv.put")
+    assert put_event.payload == {
+        "op_class": "credential_write",
+        "result_status": "ok",
+    }
+    serialised = put_event.model_dump_json()
+    assert sentinel not in serialised, (
+        f"credential_write leak: {sentinel!r} reached the broadcast event for "
+        f"vault.kv.put — serialised event: {serialised}"
     )
 
 

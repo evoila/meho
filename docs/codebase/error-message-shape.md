@@ -249,10 +249,50 @@ specifically referenced).
 | `PATCH /api/v1/targets/{name}` 422 (unknown_product) | structured `detail` with `kind='unknown_product'`, `product`, `valid_products[]`, `message` (`api/v1/targets.py` `update_target`) | compliant (structured) — landed in T4 #1145 | — |
 | `DELETE /api/v1/targets/{name}` 409 (target_has_references) | structured `detail` with `kind='target_has_references'`, `graph_node_refs`, `message` naming the `?force=true` remediation (`api/v1/targets.py` `delete_target`) | compliant (structured) — landed in T4 #1145 | — |
 | `vmware.composite.*` dispatch when L2 not ingested (signal 20) | structured `extras` with `error_code='composite_l2_missing'`, `missing_op_ids[]`, `catalog_command`; `error` message names the composite, the missing op-ids, the catalog command (`meho connector ingest --catalog vmware/9.0`), and a reference to `docs/codebase/connectors-vmware-rest.md`. Built by `result_composite_l2_missing` in `operations/_errors.py`; raised by `preflight_l2_dependencies` in `connectors/vmware_rest/composites/_preflight.py`. | compliant (structured) — landed in T10 #1151 (Option B / lazy pre-resolve on first call) | — |
+| `POST /api/v1/runbooks/runs` 422 (`missing_params`) and `POST /api/v1/runbooks/runs/{run_id}/next` 422 (`verify_response_required` / `verify_response_mismatch`) | Pydantic validation-error LIST `detail` (`[{"loc", "msg", "type"}]`) with a per-case `type` discriminator, via the shared `http_for` emitter in `api/v1/_errors.py` (registered in `runbook_runs.py`) | compliant (schema-conformant) — landed in #1364. Conforms to the `HTTPValidationError` schema FastAPI auto-declares for the route's 422, so the Go CLI's oapi-codegen client (and any OpenAPI-generated SDK) deserializes it; replaces the prior `detail=str(exc)` string body that forced the CLI's `rawNextResponse` shim | — |
+| `POST/PATCH /api/v1/runbooks/templates*` 422 (`invalid_kb_slug` on draft / edit / publish / deprecate) | Pydantic validation-error LIST `detail` with `type="invalid_kb_slug"`, `loc=["path","slug"]`, via the same `http_for` emitter (registered in `runbook_templates.py`) | compliant (schema-conformant) — landed in #1364 alongside the runs surface | — |
 
 The table is the audit artefact's deliverable, not a separate
 spreadsheet. Adding new error surfaces against the convention
 extends this table at the same time the surface lands.
+
+## OpenAPI-schema conformance for 422 bodies (#1364)
+
+Distinct from the *code + message + data* convention above (which
+governs the **content** of `HTTPException.detail`), this rule governs
+the **shape** of 422 bodies specifically, so typed clients generated
+from the OpenAPI spec can deserialize them.
+
+FastAPI auto-declares every route's 422 response as the
+`HTTPValidationError` model — a list under `detail`:
+
+```json
+{"detail": [{"loc": ["body", "<field>"], "msg": "...", "type": "..."}]}
+```
+
+The framework's own `RequestValidationError` handler emits that list
+shape, but a hand-raised `HTTPException(status_code=422,
+detail=str(exc))` emits `{"detail": "<string>"}` instead. The two
+don't match the declared schema, so a strict codegen client (the Go
+CLI's oapi-codegen client; an `openapi-python-client` /
+`openapi-typescript` SDK) errors on the list-vs-string mismatch
+rather than deserializing. Before #1364 the only mitigation was the
+CLI's `rawNextResponse` shim that bypassed the typed parser and read
+the raw bytes.
+
+**The rule:** a route that raises a 422 from a typed exception emits
+the body through the shared `http_for` emitter
+(`backend/src/meho_backplane/api/v1/_errors.py`), which wraps the
+detail into the validation-error list shape with a per-case `type`
+discriminator a client keys on. Register each exception once at module
+import via `register_error(exc_cls, status=..., type_tag=..., loc=...)`.
+Non-422 statuses (400 / 403 / 404 / 409) keep the plain string-detail
+body — their OpenAPI schemas don't declare a structured shape, so the
+string form is conformant there.
+
+The runbook routes are the first adopters (#1364). Other `api/v1/*`
+surfaces that raise a 422 with `detail=str(exc)` have the same latent
+mismatch; sweeping them is a follow-up, not part of #1364's scope.
 
 ## How to apply the convention
 

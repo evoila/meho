@@ -417,7 +417,18 @@ def test_start_missing_params_422(client: TestClient) -> None:
             headers=_authed(token),
         )
     assert response.status_code == 422
-    assert "run.params" in response.json()["detail"]
+    # 422 body conforms to the OpenAPI HTTPValidationError LIST shape
+    # (#1364): {"detail": [{"loc": [...], "msg": ..., "type": ...}]} so
+    # a typed client (the Go CLI's oapi-codegen client) deserializes it
+    # cleanly and keys on detail[0].type.
+    detail = response.json()["detail"]
+    assert detail == [
+        {
+            "loc": ["body", "params"],
+            "msg": "template references run.params not supplied at start: cluster",
+            "type": "missing_params",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -608,7 +619,13 @@ def test_next_previous_failed_400(client: TestClient) -> None:
 
 
 def test_next_verify_response_required_422(client: TestClient) -> None:
-    """Confirm step without a verify response -> 422."""
+    """Confirm step without a verify response -> 422 in the Pydantic-list shape.
+
+    #1364: the body conforms to the OpenAPI ``HTTPValidationError`` LIST
+    shape with ``type="verify_response_required"`` so the Go CLI's typed
+    client deserializes it and keys on ``detail[0].type`` to decide
+    whether to enter the interactive confirm prompt.
+    """
     run_id = uuid.uuid4()
     key, token = _operator_token()
     fake_next = AsyncMock(
@@ -625,6 +642,13 @@ def test_next_verify_response_required_422(client: TestClient) -> None:
             headers=_authed(token),
         )
     assert response.status_code == 422
+    assert response.json()["detail"] == [
+        {
+            "loc": ["body", "verify_response"],
+            "msg": "confirm step requires a verify_response",
+            "type": "verify_response_required",
+        }
+    ]
 
 
 def test_next_verify_response_mismatch_422(client: TestClient) -> None:
@@ -633,7 +657,9 @@ def test_next_verify_response_mismatch_422(client: TestClient) -> None:
     Regression on the engine's typed-mismatch path (e.g. caller sends a
     ``confirm`` response on an ``operation_call`` step). The route maps
     :class:`VerifyResponseMismatchError` to the same 422 surface as the
-    missing-response variant.
+    missing-response variant, emitting the Pydantic-list shape with
+    ``type="verify_response_mismatch"`` so the typed client tells it
+    apart from the required-response variant (#1364).
     """
     run_id = uuid.uuid4()
     key, token = _operator_token()
@@ -656,6 +682,13 @@ def test_next_verify_response_mismatch_422(client: TestClient) -> None:
             headers=_authed(token),
         )
     assert response.status_code == 422
+    assert response.json()["detail"] == [
+        {
+            "loc": ["body", "verify_response"],
+            "msg": "operation_call step expects operation_call verify response",
+            "type": "verify_response_mismatch",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

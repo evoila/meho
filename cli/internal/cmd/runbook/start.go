@@ -189,12 +189,28 @@ func runStartRun(cmd *cobra.Command, opts startRunOptions) error {
 	return nil
 }
 
-// postStartRun bypasses the generated typed-response parser for the
-// same reasons postNext does (see next.go's docstring): the 201
-// body is a discriminated union with an unexported union field,
-// and 422 FastAPI HTTPException bodies don't fit the
-// HTTPValidationError shape. Reading the raw bytes once keeps both
-// paths working through a single render layer.
+// rawNextResponse adapts an unparsed raw HTTP response to the
+// retryOn401 helper's "has a StatusCode() int" expectation. The retry
+// helper only reads the status code; it never decodes the body.
+//
+// postStartRun reads the raw bytes (rather than the generated typed
+// parser) because the 201 body is a discriminated union (kind=
+// current_step | completed) the codegen lifts into a struct with an
+// unexported `union json.RawMessage` field -- decodeNextStepResponse
+// re-reads the discriminator off the raw bytes anyway, so parsing
+// twice buys nothing. (`next`'s 200 path shares decodeNextStepResponse
+// but reads the raw bytes off the typed envelope's `.Body` field; see
+// next.go.)
+type rawNextResponse struct {
+	status int
+	body   []byte
+}
+
+// postStartRun reads the raw response bytes for the reason rawNextResponse
+// documents: the 201 body is a discriminated union with an unexported
+// union field, so decodeNextStepResponse re-reads the kind discriminator
+// off the raw bytes. Reading once keeps the 201 and the error paths
+// working through a single render layer.
 func postStartRun(
 	ctx context.Context,
 	backplaneURL string,

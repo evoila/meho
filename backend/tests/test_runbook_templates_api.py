@@ -365,7 +365,13 @@ def test_draft_invalid_slug_422(client: TestClient) -> None:
 
 
 def test_draft_service_invalid_slug_422(client: TestClient) -> None:
-    """Service-side InvalidKbSlugError (defense in depth) → 422 from the route."""
+    """Service-side InvalidKbSlugError (defense in depth) → 422 from the route.
+
+    #1364: the body conforms to the OpenAPI ``HTTPValidationError`` LIST
+    shape — ``{"detail": [{"loc": ["path", "slug"], "msg": ...,
+    "type": "invalid_kb_slug"}]}`` — so a typed client deserializes it
+    cleanly instead of erroring on the legacy ``{"detail": "<string>"}``.
+    """
     key, token = _admin_token()
     fake_create = AsyncMock(side_effect=InvalidKbSlugError("slug does not match pattern"))
     with (
@@ -379,7 +385,13 @@ def test_draft_service_invalid_slug_422(client: TestClient) -> None:
             headers=_authed(token),
         )
     assert response.status_code == 422
-    assert "does not match" in response.json()["detail"]
+    assert response.json()["detail"] == [
+        {
+            "loc": ["path", "slug"],
+            "msg": "slug does not match pattern",
+            "type": "invalid_kb_slug",
+        }
+    ]
 
 
 def test_draft_operator_role_403(client: TestClient) -> None:
@@ -940,6 +952,25 @@ def test_deprecate_draft_400(client: TestClient) -> None:
 _MALFORMED_SLUG = "Bad-Caps"  # uppercase -> fails SLUG_PATTERN
 
 
+def _assert_invalid_kb_slug_shape(detail: Any) -> None:
+    """Assert *detail* is the conformant invalid-slug 422 list entry (#1364).
+
+    The four template write routes map ``InvalidKbSlugError`` through the
+    shared ``http_for`` emitter, which produces the Pydantic-list shape
+    ``{"detail": [{"loc": ["path", "slug"], "msg": ...,
+    "type": "invalid_kb_slug"}]}`` so a typed client deserializes the body
+    and keys on ``detail[0].type``. The ``msg`` carries the full
+    SLUG_PATTERN explanation verbatim, so we structurally pin ``loc`` /
+    ``type`` and substring-check the message.
+    """
+    assert isinstance(detail, list)
+    assert len(detail) == 1
+    entry = detail[0]
+    assert entry["loc"] == ["path", "slug"]
+    assert entry["type"] == "invalid_kb_slug"
+    assert "does not match" in entry["msg"]
+
+
 def test_edit_malformed_slug_422_no_service_call(client: TestClient) -> None:
     """PATCH on a malformed path slug → 422, service never invoked."""
     key, token = _admin_token()
@@ -955,6 +986,7 @@ def test_edit_malformed_slug_422_no_service_call(client: TestClient) -> None:
             headers=_authed(token),
         )
     assert response.status_code == 422
+    _assert_invalid_kb_slug_shape(response.json()["detail"])
     fake_edit.assert_not_awaited()
 
 
@@ -973,6 +1005,7 @@ def test_publish_malformed_slug_422_no_service_call(client: TestClient) -> None:
             headers=_authed(token),
         )
     assert response.status_code == 422
+    _assert_invalid_kb_slug_shape(response.json()["detail"])
     fake_publish.assert_not_awaited()
 
 
@@ -991,6 +1024,7 @@ def test_deprecate_malformed_slug_422_no_service_call(client: TestClient) -> Non
             headers=_authed(token),
         )
     assert response.status_code == 422
+    _assert_invalid_kb_slug_shape(response.json()["detail"])
     fake_deprecate.assert_not_awaited()
 
 

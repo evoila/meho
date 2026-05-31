@@ -110,6 +110,21 @@ Why some 400 vs 422 distinctions:
   doesn't satisfy what the engine needs -- Pydantic-style validation
   failure surface).
 
+The mapping is registered with the shared
+:func:`~meho_backplane.api.v1._errors.http_for` emitter at module
+import (see the ``register_error`` block below). The 422 entries emit
+the Pydantic validation-error LIST shape
+(``{"detail": [{"loc": [...], "msg": ..., "type": ...}]}``) so the body
+matches the ``HTTPValidationError`` schema FastAPI declares for the
+route's 422 response -- a typed client generated from the OpenAPI spec
+deserializes it cleanly and keys on ``detail[0].type``
+(``missing_params`` / ``verify_response_required`` /
+``verify_response_mismatch``). The non-422 entries keep the plain
+``{"detail": "<string>"}`` body (conformant -- the OpenAPI schemas for
+400 / 403 / 404 don't declare a structured shape). See
+:mod:`meho_backplane.api.v1._errors` and
+``docs/codebase/error-message-shape.md`` for the convention.
+
 Audit + broadcast contract
 --------------------------
 
@@ -158,10 +173,11 @@ import uuid
 from typing import Final, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.api.v1._errors import http_for, register_error
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.runbooks.engine import (
@@ -214,42 +230,44 @@ _RUNBOOK_RUN_OP_IDS: Final[dict[str, str]] = {
     "list": "runbook.list_runs",
 }
 
-#: Typed-exception -> HTTP-status mapping. Centralised so each handler
-#: declares its mapping as a one-line tuple rather than open-coding the
-#: same ``raise HTTPException(...) from exc`` body N times. Order in
-#: the per-handler tuples matters only when one exception type is a
-#: subclass of another (none of these are -- the engine and service
-#: vocabularies inherit only from stdlib ``ValueError`` /
-#: ``LookupError`` / ``PermissionError``, never each other), so the
-#: tuples can be ordered for readability (404 / 403 / 400 / 422 by
-#: severity).
-_EXC_STATUS: Final[dict[type[Exception], int]] = {
-    RunNotFoundError: http_status.HTTP_404_NOT_FOUND,
-    TemplateNotFoundError: http_status.HTTP_404_NOT_FOUND,
-    NotRunAssigneeError: http_status.HTTP_403_FORBIDDEN,
-    DeprecatedTemplateError: http_status.HTTP_400_BAD_REQUEST,
-    RunAlreadyTerminalError: http_status.HTTP_400_BAD_REQUEST,
-    PreviousStepFailedError: http_status.HTTP_400_BAD_REQUEST,
-    PreviousStepNotVerifiedError: http_status.HTTP_400_BAD_REQUEST,
-    MissingParamsError: http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-    VerifyResponseRequiredError: http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-    VerifyResponseMismatchError: http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-}
-
-
-def _http_for(exc: Exception) -> HTTPException:
-    """Map a typed service / engine exception to its canonical HTTPException.
-
-    Looks the *concrete* type up in :data:`_EXC_STATUS`. Returns an
-    :class:`HTTPException` chainable with ``from exc`` by the caller.
-    A type that isn't registered raises :class:`KeyError` -- treat that
-    as a contract bug (the handler caught something the module's
-    typed-error vocabulary doesn't promise to map). The strict lookup
-    is the point: silent fall-through to 500 would hide a missing
-    mapping; the strict lookup forces the contributor to either add
-    the type to :data:`_EXC_STATUS` or stop catching it at all.
-    """
-    return HTTPException(status_code=_EXC_STATUS[type(exc)], detail=str(exc))
+#: Typed-exception -> HTTP mapping, registered with the shared
+#: :func:`~meho_backplane.api.v1._errors.http_for` emitter at module
+#: import. Centralised so each handler maps a caught exception with one
+#: ``raise http_for(exc) from exc`` line rather than open-coding the
+#: ``HTTPException`` body N times. The 422 entries carry a ``type_tag``
+#: discriminator and a ``loc`` path so :func:`http_for` emits the
+#: Pydantic validation-error LIST shape the OpenAPI 422 schema declares
+#: (a typed client keys on ``detail[0].type``); the non-422 entries
+#: need neither (their ``{"detail": "<string>"}`` body is already
+#: schema-conformant). None of these exception types subclass each
+#: other (the engine and service vocabularies inherit only from stdlib
+#: ``ValueError`` / ``LookupError`` / ``PermissionError``), so the
+#: registry's concrete-type lookup is unambiguous.
+register_error(RunNotFoundError, status=http_status.HTTP_404_NOT_FOUND)
+register_error(TemplateNotFoundError, status=http_status.HTTP_404_NOT_FOUND)
+register_error(NotRunAssigneeError, status=http_status.HTTP_403_FORBIDDEN)
+register_error(DeprecatedTemplateError, status=http_status.HTTP_400_BAD_REQUEST)
+register_error(RunAlreadyTerminalError, status=http_status.HTTP_400_BAD_REQUEST)
+register_error(PreviousStepFailedError, status=http_status.HTTP_400_BAD_REQUEST)
+register_error(PreviousStepNotVerifiedError, status=http_status.HTTP_400_BAD_REQUEST)
+register_error(
+    MissingParamsError,
+    status=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+    type_tag="missing_params",
+    loc=("body", "params"),
+)
+register_error(
+    VerifyResponseRequiredError,
+    status=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+    type_tag="verify_response_required",
+    loc=("body", "verify_response"),
+)
+register_error(
+    VerifyResponseMismatchError,
+    status=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+    type_tag="verify_response_mismatch",
+    loc=("body", "verify_response"),
+)
 
 
 class RunbookListRunsResponse(BaseModel):
@@ -334,7 +352,7 @@ async def start_run(
     try:
         return await service.start_run(operator.tenant_id, operator.sub, request)
     except (DeprecatedTemplateError, TemplateNotFoundError, MissingParamsError) as exc:
-        raise _http_for(exc) from exc
+        raise http_for(exc) from exc
 
 
 @router.post("/{run_id}/next")
@@ -399,7 +417,7 @@ async def advance_run(
         VerifyResponseRequiredError,
         VerifyResponseMismatchError,
     ) as exc:
-        raise _http_for(exc) from exc
+        raise http_for(exc) from exc
 
 
 @router.post("/{run_id}/abort", response_model=AbortRunResponse)
@@ -448,7 +466,7 @@ async def abort_run(
             caller_is_admin=caller_is_admin,
         )
     except (RunNotFoundError, NotRunAssigneeError, RunAlreadyTerminalError) as exc:
-        raise _http_for(exc) from exc
+        raise http_for(exc) from exc
 
 
 @router.post("/{run_id}/reassign", response_model=ReassignRunResponse)
@@ -485,7 +503,7 @@ async def reassign_run(
     try:
         return await service.reassign_run(operator.tenant_id, operator.sub, run_id, request)
     except (RunNotFoundError, RunAlreadyTerminalError) as exc:
-        raise _http_for(exc) from exc
+        raise http_for(exc) from exc
 
 
 @router.get("", response_model=RunbookListRunsResponse)

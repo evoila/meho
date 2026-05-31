@@ -79,7 +79,11 @@ to the caller-facing status:
 * :class:`~meho_backplane.runbooks.service.TemplateNotDraftError` -> 400
 * :class:`~meho_backplane.runbooks.service.TemplateNotPublishedError` -> 400
 * :class:`~meho_backplane.runbooks.service.DuplicateDraftError` -> 409
-* :class:`~meho_backplane.kb.schemas.InvalidKbSlugError` -> 422
+* :class:`~meho_backplane.kb.schemas.InvalidKbSlugError` -> 422 (emitted
+  in the OpenAPI ``HTTPValidationError`` LIST shape via the shared
+  :func:`~meho_backplane.api.v1._errors.http_for` emitter so typed
+  clients deserialize it -- #1364; the non-422 mappings raise
+  ``HTTPException`` inline with the conformant plain string detail).
 
 Audit + broadcast contract
 --------------------------
@@ -128,6 +132,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.api.v1._errors import http_for, register_error
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.kb.schemas import InvalidKbSlugError, validate_slug
@@ -176,6 +181,17 @@ _RUNBOOK_OP_IDS: Final[dict[str, str]] = {
     "publish": "runbook.publish_template",
     "deprecate": "runbook.deprecate_template",
 }
+
+#: Register the one typed exception this surface maps through the shared
+#: ``http_for`` emitter -- a slug failing SLUG_PATTERN on the four write
+#: routes (draft / edit / publish / deprecate); ``type_tag`` / ``loc``
+#: feed the OpenAPI 422 validation-error LIST shape (see ``_errors``).
+register_error(
+    InvalidKbSlugError,
+    status=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+    type_tag="invalid_kb_slug",
+    loc=("path", "slug"),
+)
 
 
 class RunbookTemplateListResponse(BaseModel):
@@ -252,10 +268,7 @@ async def draft_template(
             detail=str(exc),
         ) from exc
     except InvalidKbSlugError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(exc),
-        ) from exc
+        raise http_for(exc) from exc
 
 
 @router.get("", response_model=RunbookTemplateListResponse)
@@ -465,10 +478,7 @@ async def edit_template(
     try:
         validate_slug(slug)
     except InvalidKbSlugError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(exc),
-        ) from exc
+        raise http_for(exc) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUNBOOK_OP_IDS["edit"],
         audit_op_class="write",
@@ -517,10 +527,7 @@ async def publish_template(
     try:
         validate_slug(slug)
     except InvalidKbSlugError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(exc),
-        ) from exc
+        raise http_for(exc) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUNBOOK_OP_IDS["publish"],
         audit_op_class="write",
@@ -572,10 +579,7 @@ async def deprecate_template(
     try:
         validate_slug(slug)
     except InvalidKbSlugError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(exc),
-        ) from exc
+        raise http_for(exc) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUNBOOK_OP_IDS["deprecate"],
         audit_op_class="write",

@@ -6,7 +6,6 @@ package runbook
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,11 +37,15 @@ import (
 // thin HTTP wrapper:
 //
 //  1. Interactive verify prompt. When --verify-response is omitted
-//     AND the substrate's first answer is 422 VerifyResponseRequiredError
-//     (indicating a confirm-typed verify), the CLI prompts the
-//     operator on stdin (yes/no/escalate) and re-issues the call
-//     with the answer. The substrate is the verify oracle; the
-//     prompt is operator UX, not a security boundary.
+//     AND the substrate's first answer is a 422 whose typed body
+//     carries `type=verify_response_required` (indicating a
+//     confirm-typed verify), the CLI prompts the operator on stdin
+//     (yes/no/escalate) and re-issues the call with the answer. The
+//     422 body is the OpenAPI HTTPValidationError list shape (#1364),
+//     so the generated typed client deserializes it and the probe
+//     reads the `detail[0].type` discriminator directly. The
+//     substrate is the verify oracle; the prompt is operator UX, not
+//     a security boundary.
 //  2. Opacity rendering. Whether the response is the next step's
 //     body or the RunCompletedResponse marker, the CLI renders ONLY
 //     the current step (or the completion banner) -- never a list,
@@ -168,7 +171,7 @@ func runNextRun(cmd *cobra.Command, opts nextRunOptions) error {
 	// to let the substrate either dispatch the operation_call verify
 	// or surface VerifyResponseRequiredError on a confirm step we
 	// then prompt for.
-	body, fcode, ferr := postNext(cmd.Context(), backplaneURL, runID, answer)
+	resp, ferr := postNext(cmd.Context(), backplaneURL, runID, answer)
 	if ferr != nil {
 		return renderRequestError(cmd, backplaneURL, ferr, opts.JSONOut)
 	}
@@ -178,20 +181,22 @@ func runNextRun(cmd *cobra.Command, opts nextRunOptions) error {
 	// section, "pick (C) -- error-as-control-flow"). We only enter
 	// the prompt path when:
 	//   - the substrate said 422,
-	//   - the error detail indicates a verify response was required
-	//     (not, e.g., a mismatch -- those mean the operator's
-	//     supplied answer was wrong-shape, which is a re-prompt
-	//     loop a CLI shouldn't drive without operator intent),
+	//   - the typed 422 body's discriminator is
+	//     `verify_response_required` (not, e.g., a mismatch -- those
+	//     mean the operator's supplied answer was wrong-shape, which
+	//     is a re-prompt loop a CLI shouldn't drive without operator
+	//     intent),
 	//   - the operator did not pass --verify-response (we don't
 	//     prompt over a supplied answer; that's the scripted path
 	//     and we'd be drowning out the operator's explicit flag).
-	if fcode == http.StatusUnprocessableEntity && answer == "" && verifyResponseRequired(body) {
-		return promptAndRetryConfirm(cmd, backplaneURL, runID, body, opts)
+	if resp.StatusCode() == http.StatusUnprocessableEntity && answer == "" &&
+		verifyResponseRequired(resp.JSON422) {
+		return promptAndRetryConfirm(cmd, backplaneURL, runID, opts)
 	}
-	if fcode != http.StatusOK {
-		return renderHTTPStatus(cmd, backplaneURL, fcode, body, opts.JSONOut)
+	if resp.StatusCode() != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	return renderNextResponse(cmd, backplaneURL, body, opts)
+	return renderNextResponse(cmd, backplaneURL, resp.Body, opts)
 }
 
 // postNext issues one POST to /next with the given verify-response
@@ -199,78 +204,41 @@ func runNextRun(cmd *cobra.Command, opts nextRunOptions) error {
 // dispatch an operation_call verify or surface
 // VerifyResponseRequiredError).
 //
-// Returns the body bytes verbatim, the status code, and any
-// transport error. We bypass the generated typed parser
-// (ParseAdvanceRunApiV1RunbooksRunsRunIdNextPostResponse) because:
+// Uses the generated typed client directly. The 422 body now conforms
+// to the OpenAPI HTTPValidationError list shape
+// (`{"detail": [{"loc", "msg", "type"}, ...]}`, #1364), so the
+// generated parser deserializes it into `resp.JSON422` instead of
+// erroring with a json.UnmarshalTypeError on the legacy
+// `{"detail": "<string>"}` body. verifyResponseRequired reads the
+// typed `resp.JSON422.Detail[0].Type` discriminator off that.
 //
-//  1. The 200 body is a discriminated union (kind=current_step |
-//     completed); the generated client lifts it into an anonymous
-//     struct with an unexported `union json.RawMessage` field, so
-//     we'd need to re-marshal the raw bytes to read the
-//     discriminator anyway. decodeNextStepResponse already does
-//     that on the raw bytes.
-//  2. The 422 body is FastAPI HTTPException(detail=str(exc)) --
-//     `{"detail": "<string>"}` -- which the generated parser
-//     rejects with a json.UnmarshalTypeError because the OpenAPI
-//     schema declares 422 as the validation-error list shape.
-//     Bypassing the typed parser lets the 422 body reach
-//     verifyResponseRequired's probe verbatim.
-//
-// The function reads the response body exactly once (defer Close)
-// and surfaces the bytes to the caller for both probing and
-// rendering.
+// The 200 body is still a discriminated union (kind=current_step |
+// completed) the codegen lifts into a struct with an unexported
+// raw-message union field; the caller routes it through
+// decodeNextStepResponse, which reads the kind discriminator off the
+// raw `resp.Body` bytes the typed envelope also carries. So the
+// typed envelope serves both surfaces: typed 422 for the probe, raw
+// `.Body` for the union render.
 func postNext(
 	ctx context.Context,
 	backplaneURL string,
 	runID uuid.UUID,
 	answer string,
-) ([]byte, int, error) {
+) (*api.AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	body := buildNextRequestBody(answer)
 	params := &api.AdvanceRunApiV1RunbooksRunsRunIdNextPostParams{}
-	// retryOn401 is generic over the typed response envelope;
-	// reuse it for the 401-refresh dance by routing through the
-	// raw *http.Response variant the generated client exposes, then
-	// pack it into a tiny shim that exposes StatusCode() the
-	// retry helper inspects.
-	resp, err := retryOn401(ctx, authed,
-		func(ctx context.Context) (*rawNextResponse, error) {
-			httpResp, herr := authed.AdvanceRunApiV1RunbooksRunsRunIdNextPost(
+	return retryOn401(ctx, authed,
+		func(ctx context.Context) (*api.AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse, error) {
+			return authed.AdvanceRunApiV1RunbooksRunsRunIdNextPostWithResponse(
 				ctx, runID, params, body,
 			)
-			if herr != nil {
-				return nil, herr
-			}
-			defer func() { _ = httpResp.Body.Close() }()
-			bodyBytes, rerr := io.ReadAll(io.LimitReader(httpResp.Body, responseBodyCap))
-			if rerr != nil {
-				return nil, fmt.Errorf("read /next response body: %w", rerr)
-			}
-			return &rawNextResponse{
-				status: httpResp.StatusCode,
-				body:   bodyBytes,
-			}, nil
 		},
-		func(r *rawNextResponse) int { return r.status },
+		func(r *api.AdvanceRunApiV1RunbooksRunsRunIdNextPostResponse) int { return r.StatusCode() },
 	)
-	if err != nil {
-		return nil, 0, err
-	}
-	return resp.body, resp.status, nil
-}
-
-// rawNextResponse adapts an unparsed raw HTTP response to the
-// retryOn401 helper's "has a StatusCode() int" expectation. The
-// retry helper only reads the status code; it never decodes the
-// body. This keeps the 422-with-string-detail body (which the
-// generated typed parser would reject) reachable in the calling
-// function.
-type rawNextResponse struct {
-	status int
-	body   []byte
 }
 
 // buildNextRequestBody constructs the NextStepRequest payload. The
@@ -319,38 +287,27 @@ func makeConfirmVerifyResponse(answer string) api.NextStepRequest_VerifyResponse
 	return vr
 }
 
-// verifyResponseRequired probes the 422 body for the substrate's
-// VerifyResponseRequiredError signature. We match on the detail
-// string ("VerifyResponseRequiredError" emitted by str(exc) in the
-// runbook_runs.py route handler -- see _http_for and the engine's
-// exception classname). The probe is intentionally string-shaped
-// rather than parsing a structured envelope so a backend that
-// renames the field but keeps the exception classname continues to
-// work.
+// verifyResponseRequired reports whether the typed 422 body is the
+// substrate's "missing verify response" signal -- i.e. its first
+// validation-error entry's `type` discriminator is
+// `verify_response_required`.
 //
-// The fall-back tolerates the FastAPI validation-error shape that
-// 422 sometimes carries (a list of {loc, msg, type} dicts) -- a
-// real "missing verify response" should mention the message text;
-// anything else is a different 422 (verify_response_mismatch,
-// missing_params) and should NOT enter the prompt loop.
-func verifyResponseRequired(body []byte) bool {
-	trim := strings.TrimSpace(string(body))
-	if trim == "" {
+// The backend (#1364) emits 422s in the OpenAPI HTTPValidationError
+// list shape with a structured `type` tag per case
+// (`verify_response_required` / `verify_response_mismatch` /
+// `missing_params`), so the probe keys on that discriminator rather
+// than substring-matching the message. Only the required-response
+// case enters the interactive prompt loop; a mismatch or a
+// missing-params 422 is a different failure the operator must fix,
+// not re-prompt past.
+//
+// A nil body (no 422 payload parsed) or an empty detail list reports
+// false -- there is no discriminator to enter the prompt on.
+func verifyResponseRequired(body *api.HTTPValidationError) bool {
+	if body == nil || body.Detail == nil || len(*body.Detail) == 0 {
 		return false
 	}
-	if strings.Contains(trim, "VerifyResponseRequired") {
-		return true
-	}
-	// FastAPI HTTPException(detail=str(exc)) shape: {"detail": "<...>"}
-	var env struct {
-		Detail any `json:"detail"`
-	}
-	if err := json.Unmarshal(body, &env); err == nil {
-		if s, ok := env.Detail.(string); ok && strings.Contains(s, "VerifyResponseRequired") {
-			return true
-		}
-	}
-	return false
+	return (*body.Detail)[0].Type == "verify_response_required"
 }
 
 // promptAndRetryConfirm runs the interactive confirm prompt. Called
@@ -368,7 +325,6 @@ func promptAndRetryConfirm(
 	cmd *cobra.Command,
 	backplaneURL string,
 	runID uuid.UUID,
-	body []byte,
 	opts nextRunOptions,
 ) error {
 	// The substrate surfaces VerifyResponseRequiredError without
@@ -386,21 +342,20 @@ func promptAndRetryConfirm(
 	if perr != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(perr.Error()), opts.JSONOut)
 	}
-	retryBody, code, rerr := postNext(cmd.Context(), backplaneURL, runID, answer)
+	resp, rerr := postNext(cmd.Context(), backplaneURL, runID, answer)
 	if rerr != nil {
 		return renderRequestError(cmd, backplaneURL, rerr, opts.JSONOut)
 	}
-	if code != http.StatusOK {
+	if resp.StatusCode() != http.StatusOK {
 		// Don't recurse into the prompt loop on a second 422 -- a
 		// second VerifyResponseRequiredError after a valid answer
 		// means the run's state machine is in an unexpected place
 		// (the assignee got reassigned mid-prompt, the step
 		// concurrently transitioned to failed). Surface the body
 		// verbatim and exit.
-		return renderHTTPStatus(cmd, backplaneURL, code, retryBody, opts.JSONOut)
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
-	_ = body
-	return renderNextResponse(cmd, backplaneURL, retryBody, opts)
+	return renderNextResponse(cmd, backplaneURL, resp.Body, opts)
 }
 
 // readVerifyAnswer reads one line from cmd.InOrStdin(), trims

@@ -17,6 +17,33 @@ import (
 	"github.com/evoila/meho/cli/internal/api"
 )
 
+// The runbook routes emit 422 bodies in the OpenAPI HTTPValidationError
+// list shape (#1364): {"detail": [{"loc", "msg", "type"}, ...]}. The
+// `type` discriminator is what the CLI's verifyResponseRequired probe
+// and renderHTTPStatus 422 branch key on. These fixtures mirror the
+// backend's conformant emission (see
+// backend/src/meho_backplane/api/v1/_errors.py).
+const (
+	// verifyResponseRequired422Body is the body the substrate returns
+	// when a confirm step is advanced without a verify_response. Its
+	// type=verify_response_required is the discriminator that enters
+	// the interactive prompt loop.
+	verifyResponseRequired422Body = `{"detail":[{"loc":["body","verify_response"],` +
+		`"msg":"confirm step requires a verify_response","type":"verify_response_required"}]}`
+
+	// verifyResponseMismatch422Body is the operation_call verify-fail
+	// body (substrate's dispatched verify mismatched). type=
+	// verify_response_mismatch must NOT enter the prompt loop.
+	verifyResponseMismatch422Body = `{"detail":[{"loc":["body","verify_response"],` +
+		`"msg":"verify mismatch: expected powered_on=true, got powered_on=false",` +
+		`"type":"verify_response_mismatch"}]}`
+
+	// verifyResponseMismatchShape422Body is a confirm-on-operation_call
+	// shape mismatch. Same type=verify_response_mismatch discriminator.
+	verifyResponseMismatchShape422Body = `{"detail":[{"loc":["body","verify_response"],` +
+		`"msg":"verify response shape mismatch","type":"verify_response_mismatch"}]}`
+)
+
 // TestRunNextWithExplicitVerifyResponseYes — issue test #6. With
 // `--verify-response yes`, the verb POSTs once with the answer
 // embedded; no prompt.
@@ -109,7 +136,7 @@ func TestRunNextInteractiveConfirmPrompt(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnprocessableEntity)
-				fmt.Fprint(w, `{"detail":"VerifyResponseRequiredError: step-2 needs a confirm response"}`)
+				fmt.Fprint(w, verifyResponseRequired422Body)
 				return
 			}
 			// Second call: the prompt path supplied "yes".
@@ -165,8 +192,9 @@ func TestRunNextInteractiveInvalidAnswer(t *testing.T) {
 			n := atomic.AddInt32(&calls, 1)
 			_ = r
 			if n == 1 {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnprocessableEntity)
-				fmt.Fprint(w, `{"detail":"VerifyResponseRequiredError"}`)
+				fmt.Fprint(w, verifyResponseRequired422Body)
 				return
 			}
 			step := confirmStepBody("s4", "Step 4", "B.", "p?")
@@ -211,8 +239,9 @@ func TestRunNextInteractiveEscalate(t *testing.T) {
 			var req api.NextStepRequest
 			readJSONBodyOf(t, raw, &req)
 			if n == 1 {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnprocessableEntity)
-				fmt.Fprint(w, `{"detail":"VerifyResponseRequiredError"}`)
+				fmt.Fprint(w, verifyResponseRequired422Body)
 				return
 			}
 			confirm, _ := req.VerifyResponse.AsConfirmVerifyResponse()
@@ -341,14 +370,17 @@ func TestRunNextOperationCallVerifyPass(t *testing.T) {
 }
 
 // TestRunNextOperationCallVerifyFail — issue test #11. The
-// substrate's verify dispatch mismatched; backend returns 422
-// VerifyResponseMismatchError. The CLI surfaces the detail.
+// substrate's verify dispatch mismatched; backend returns a 422 with
+// type=verify_response_mismatch (the conformant list shape, #1364).
+// The CLI surfaces the detail (the 422 branch of renderHTTPStatus
+// renders the body verbatim, which carries the loc/msg/type entry).
 func TestRunNextOperationCallVerifyFail(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/runbooks/runs/77777777-7777-4777-8777-777777777777/next",
 		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			fmt.Fprint(w, `{"detail":"VerifyResponseMismatchError: expected powered_on=true, got powered_on=false"}`)
+			fmt.Fprint(w, verifyResponseMismatch422Body)
 		})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -364,8 +396,8 @@ func TestRunNextOperationCallVerifyFail(t *testing.T) {
 		t.Fatal("expected error on verify mismatch")
 	}
 	out := stderr.String()
-	if !strings.Contains(out, "VerifyResponseMismatchError") {
-		t.Errorf("expected mismatch detail in stderr; got:\n%s", out)
+	if !strings.Contains(out, "verify_response_mismatch") {
+		t.Errorf("expected mismatch type discriminator in stderr; got:\n%s", out)
 	}
 	if !strings.Contains(out, "powered_on=false") {
 		t.Errorf("expected actual-vs-expected detail in stderr; got:\n%s", out)
@@ -481,8 +513,9 @@ func TestRunNext422NonRequiredErrorDoesNotPrompt(t *testing.T) {
 	mux.HandleFunc("/api/v1/runbooks/runs/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/next",
 		func(w http.ResponseWriter, _ *http.Request) {
 			atomic.AddInt32(&calls, 1)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			fmt.Fprint(w, `{"detail":"VerifyResponseMismatchError: shape mismatch"}`)
+			fmt.Fprint(w, verifyResponseMismatchShape422Body)
 		})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -501,8 +534,8 @@ func TestRunNext422NonRequiredErrorDoesNotPrompt(t *testing.T) {
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("expected exactly 1 POST (no retry); got %d", got)
 	}
-	if !strings.Contains(stderr.String(), "VerifyResponseMismatchError") {
-		t.Errorf("expected mismatch detail; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "verify_response_mismatch") {
+		t.Errorf("expected mismatch type discriminator; got %q", stderr.String())
 	}
 }
 

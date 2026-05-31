@@ -119,15 +119,19 @@ names.
   - Both halves share the chassis (`runbook.go`, `yaml.go`): the
     `newAuthedClient` / `retryOn401` / `renderRequestError` /
     `renderHTTPStatus` helpers, the 1 MiB response-body cap, and the
-    FastAPI HTTPException detail decoder. The run-side verbs
-    (`start.go`, `next.go`) bypass the generated typed-response
-    parser for the discriminated-union response shapes (the codegen
-    lifts them into structs with an unexported `union json.RawMessage`
-    field) and decode the raw bytes directly via
-    `decodeNextStepResponse`; the bypass also keeps FastAPI's
-    `HTTPException(detail=str(exc))` 422 bodies reachable (the typed
-    parser rejects them because the schema declares 422 as the
-    Pydantic validation-error list shape).
+    FastAPI HTTPException detail decoder. The run-side verbs read the
+    raw response bytes for the **200/201 discriminated-union body**
+    (kind=current_step | completed) — the codegen lifts that into a
+    struct with an unexported `union json.RawMessage` field, so
+    `decodeNextStepResponse` re-reads the kind discriminator off the
+    raw bytes regardless. `start.go`'s `postStartRun` keeps the
+    `rawNextResponse` shim for that; `next.go`'s `postNext` now uses
+    the generated typed client (`...WithResponse`) directly, reading
+    `resp.Body` for the union render and the typed `resp.JSON422` for
+    the verify-prompt probe. The 422 bodies are now the OpenAPI
+    `HTTPValidationError` list shape (#1364), so the typed parser
+    deserializes them cleanly instead of rejecting the legacy
+    `{"detail": "<string>"}` body.
   - T3 (#1320) ships [`docs/cli/runbook.md`](../cli/runbook.md) — the
     operator-facing CLI reference for the eleven-verb tree (synopsis +
     role gate + exit codes per verb, three worked transcripts —
@@ -260,8 +264,8 @@ cli/
     │   │   ├── edit_template.go         # `meho runbook edit-template <slug> --from <file.yaml>` (PATCH /api/v1/runbooks/templates/{slug}); renders `forked_from` on the fork-on-edit path.
     │   │   ├── publish_template.go      # `meho runbook publish-template <slug> --version N` (POST /api/v1/runbooks/templates/{slug}/publish).
     │   │   ├── deprecate_template.go    # `meho runbook deprecate-template <slug> --version N` (POST /api/v1/runbooks/templates/{slug}/deprecate).
-    │   │   ├── start.go                 # T2 — `meho runbook start <slug> --target T [--param k=v ...]` (POST /api/v1/runbooks/runs). Hosts the opacity rendering helpers (stepBodyDTO + decodeNextStepResponse + renderCurrentStep) that next.go also consumes. Bypasses the generated typed parser for the discriminated-union 201 body; uses the rawNextResponse shim (defined in next.go) so retryOn401's generic still flows.
-    │   │   ├── next.go                  # T2 — `meho runbook next <run_id> [--verify-response yes|no|escalate]` (POST /api/v1/runbooks/runs/{run_id}/next). Load-bearing: hosts the interactive verify-prompt loop (probes 422 VerifyResponseRequiredError via verifyResponseRequired, then prompts on stdin), the buildNextRequestBody / makeConfirmVerifyResponse union builders, and renderNextResponse which routes between current_step and completed kinds. Also defines rawNextResponse — a tiny shim adapting raw `*http.Response` reads to retryOn401's generic API so the 422 HTTPException body reaches verifyResponseRequired verbatim.
+    │   │   ├── start.go                 # T2 — `meho runbook start <slug> --target T [--param k=v ...]` (POST /api/v1/runbooks/runs). Hosts the opacity rendering helpers (stepBodyDTO + decodeNextStepResponse + renderCurrentStep) that next.go also consumes. Reads the raw 201 discriminated-union body via the rawNextResponse shim (defined here) so decodeNextStepResponse can route on `kind` and retryOn401's generic still flows.
+    │   │   ├── next.go                  # T2 — `meho runbook next <run_id> [--verify-response yes|no|escalate]` (POST /api/v1/runbooks/runs/{run_id}/next). Load-bearing: hosts the interactive verify-prompt loop, the buildNextRequestBody / makeConfirmVerifyResponse union builders, and renderNextResponse which routes between current_step and completed kinds. Uses the generated typed client directly (#1364): postNext returns the typed *...Response, renderNextResponse reads `resp.Body` for the 200 union render, and verifyResponseRequired reads the typed `resp.JSON422.Detail[0].Type == "verify_response_required"` discriminator to decide whether to prompt.
     │   │   ├── abort.go                 # T2 — `meho runbook abort <run_id> [--reason "<text>"]` (POST /api/v1/runbooks/runs/{run_id}/abort). When `--reason` is missing: prompts on TTY (stdinIsTTY); exits 1 with abortExitCode1 wrapper on non-TTY. Mirrors the `meho kb delete` confirm-prompt pattern.
     │   │   ├── reassign.go              # T2 — `meho runbook reassign <run_id> --to <sub>` (POST /api/v1/runbooks/runs/{run_id}/reassign). Tenant_admin-only at the route gate; thin HTTP wrapper.
     │   │   ├── runs.go                  # T2 — `meho runbook runs [--assignee] [--status] [--template-slug] [--limit]` (GET /api/v1/runbooks/runs). 7-column table (RUN_ID truncated to 8 chars; full UUIDs in --json). Pass-through filters — the backend enforces role-based scoping (OPERATOR sees own; TENANT_ADMIN sees all unless narrowed).

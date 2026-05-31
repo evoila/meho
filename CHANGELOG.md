@@ -102,6 +102,37 @@ connector-related release-notes line.
   "A-remainder"). (#1356 — RDC #789 Finding 3,
   `list-endpoint-envelope-asymmetry`)
 
+- **Helm chart first-class wiring for agent-runtime credentials
+  (G0.18-T10 #1363).** Two new top-level chart blocks land so an
+  operator enables the G11.1 agent LLM loop and G11.2 agent-principal
+  registration without hand-rolling Kubernetes Secrets + `extraEnv`
+  `valueFrom` plumbing: `agent.enabled` wires `ANTHROPIC_API_KEY` and
+  `keycloakAdmin.enabled` wires the three `KEYCLOAK_ADMIN_*` envs into
+  the backplane Deployment. The two confidential credentials
+  (`ANTHROPIC_API_KEY`, `KEYCLOAK_ADMIN_CLIENT_SECRET`) are always
+  rendered as `secretKeyRef` — never plaintext chart values or env
+  values — mirroring the existing `postgres.credentialsSecret` and
+  `eso.keycloak` precedents; `KEYCLOAK_ADMIN_URL` and
+  `KEYCLOAK_ADMIN_CLIENT_ID` are plain operator config and render as
+  `value:`. Both blocks default `enabled: false`, so a deploy that
+  doesn't want either feature stays fail-closed (`/api/v1/agent-runs`
+  → "no credentials"; `POST /api/v1/agent-principals` →
+  `503 keycloak_admin_not_configured`) — no behaviour change for
+  existing operators. Two new opt-in ExternalSecret rendering paths
+  (`eso.agent.enabled`, `eso.keycloakAdmin.enabled`) materialise
+  `<release>-agent` / `<release>-keycloak-admin` Secrets from Vault
+  in parallel to the existing `eso.keycloak` story; the Secret-name
+  resolution helpers (`meho.agentSecretName`,
+  `meho.keycloakAdminSecretName`) let operators pick BYO Secret or
+  ESO-rendered Secret without reconciling names. A new
+  `helm test`-triggered Pod
+  (`templates/tests/test-agent-runtime-config.yaml`) and a chart-CI
+  grep gate (in `.github/workflows/chart.yml`) assert the wired-up
+  shape so a regression that flips either secret to plaintext is
+  rejected at PR-build time. Closes the chart-side gap that prevented
+  operators from enabling agents on a Helm deploy without a manual
+  `extraEnv` workaround.
+
 ### Fixed
 
 - **Manually-seeded topology nodes are now visible to

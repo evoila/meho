@@ -134,6 +134,44 @@ backplane derives the token URL automatically from `KEYCLOAK_ISSUER_URL`
 (`{issuer}/protocol/openid-connect/token`), so the issuer URL must
 already be set.
 
+### Helm chart wiring (G0.18-T10 #1363)
+
+On a Helm deploy, the chart wires these three env vars from the
+`keycloakAdmin` block in `values.yaml` — first-class chart values, not
+`extraEnv` `valueFrom`. The confidential client secret is always
+wired via `secretKeyRef`; the URL + clientId are plain env (`value:`).
+
+```yaml
+keycloakAdmin:
+  enabled: true
+  url: https://<keycloak-host>/admin/realms/<realm>
+  clientId: meho-admin
+  clientSecret:
+    # Operator-managed Secret name OR empty when eso.keycloakAdmin.enabled: true
+    secretName: keycloak-admin-creds
+    secretKey: client_secret
+
+# Optional: chart-rendered ExternalSecret for the client secret.
+eso:
+  secretStore:
+    name: <your-ClusterSecretStore>
+  keycloakAdmin:
+    enabled: true
+    # Vault KV path — default secret/meho/keycloak/admin_client_secret
+    # at property client_secret
+```
+
+`keycloakAdmin.enabled: false` (the default) → none of the three env
+vars are rendered and `POST /api/v1/agent-principals` returns
+`503 keycloak_admin_not_configured` (same posture as a chart that
+doesn't ship the block). The chart schema enforces non-empty `url`
+and `clientId` under `enabled: true`; the Secret-name resolution
+(operator-managed vs. ESO-rendered) is enforced by a helper-template
+`fail` at `helm template` time.
+
+See `deploy/values-examples/README.md` § Agent-runtime credential
+wiring for the full operator recipe.
+
 ## Step 4 — Register an agent principal
 
 ```shell

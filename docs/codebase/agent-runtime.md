@@ -628,13 +628,14 @@ of two sources, in order of authority:
    reaches into `Settings`.
 2. **Settings-driven default.** `default_openai_backend_builder()`
    reads `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_DEFAULT_MODEL`
-   from process environment (the same Helm-secret / external-secrets
-   / sealed-secret pipeline that wires `ANTHROPIC_API_KEY` today).
-   Empty `OPENAI_API_KEY` is fail-closed: the builder raises
-   `AgentRunError` rather than starting a loop with no credentials.
-   Use this only when the whole deploy talks to one OpenAI-compat
-   endpoint — the moment you need per-tenant routing, switch to
-   builder #1.
+   from process environment — wired the same way `ANTHROPIC_API_KEY`
+   is on Helm deploys (G0.18-T10 #1363): a first-class chart `agent.*`
+   block, `secretKeyRef` only, optional ExternalSecret rendering via
+   `eso.agent.enabled`. Empty `OPENAI_API_KEY` is fail-closed: the
+   builder raises `AgentRunError` rather than starting a loop with no
+   credentials. Use this only when the whole deploy talks to one
+   OpenAI-compat endpoint — the moment you need per-tenant routing,
+   switch to builder #1.
 
 ### Egress + the `is_saas_egress` flag
 

@@ -74,6 +74,39 @@ spec:
             # Other operator-supplied secrets (Keycloak client secret, Vault
             # role bindings) come via ESO-synced Kubernetes Secrets; G2.6
             # wires the references when each surface lands.
+            {{- if .Values.agent.enabled }}
+            # G11.1 (#803) — agent-runtime LLM credentials. Wired only when
+            # `agent.enabled: true`; unset → the seam's model factory in
+            # `meho_backplane.agent.run` fails closed at first invocation
+            # rather than starting a loop with no credentials. Always
+            # `secretKeyRef`, never plaintext — the schema rejects an empty
+            # `secretName` under `enabled: true` at install time.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "meho.agentSecretName" . | quote }}
+                  key: {{ .Values.agent.secretKey | quote }}
+            {{- end }}
+            {{- if .Values.keycloakAdmin.enabled }}
+            # G11.2 (#803) — Keycloak Admin REST API credentials gating
+            # agent-principal registration. All three render together
+            # (schema requires `url` + `clientId` + `clientSecret` refs
+            # under `enabled: true`). `KEYCLOAK_ADMIN_CLIENT_SECRET` is the
+            # only confidential value and uses `secretKeyRef`; the other
+            # two are plain operator config and render as `value:`.
+            # Unset → `POST /api/v1/agent-principals` returns
+            # `503 keycloak_admin_not_configured` (see
+            # `meho_backplane.features._agent_runtime_block`).
+            - name: KEYCLOAK_ADMIN_URL
+              value: {{ .Values.keycloakAdmin.url | quote }}
+            - name: KEYCLOAK_ADMIN_CLIENT_ID
+              value: {{ .Values.keycloakAdmin.clientId | quote }}
+            - name: KEYCLOAK_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "meho.keycloakAdminSecretName" . | quote }}
+                  key: {{ .Values.keycloakAdmin.clientSecret.secretKey | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             # Operator-supplied extra env vars (full EnvVar shape — accepts
             # `value` or `valueFrom`). Most common use: pointing

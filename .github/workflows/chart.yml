@@ -207,6 +207,80 @@ jobs:
           grep -Eq '^[[:space:]]*BACKPLANE_URL:[[:space:]]*"https://meho\.test"[[:space:]]*$' /tmp/rendered.yaml \
             || { echo "::error::chart did not derive BACKPLANE_URL from ingress.host (G0.8-T4 #633 regression)"; exit 1; }
 
+      - name: Assert agent-runtime credentials wire via secretKeyRef (#1363)
+        # G0.18-T10 (#1363): when an operator opts into the G11.1 agent
+        # LLM loop (`agent.enabled: true`) and the G11.2 agent-principal
+        # surface (`keycloakAdmin.enabled: true`), the chart MUST wire
+        # the two confidential credentials (`ANTHROPIC_API_KEY` +
+        # `KEYCLOAK_ADMIN_CLIENT_SECRET`) via `secretKeyRef` and never
+        # as plaintext env. The two non-secret admin values
+        # (`KEYCLOAK_ADMIN_URL` + `KEYCLOAK_ADMIN_CLIENT_ID`) render as
+        # plain `value:`. A regression that flips either secret to
+        # plaintext would slip past the `helm lint` schema gate (the
+        # schema can't see the runtime env shape) but would leak a
+        # real Anthropic key / Keycloak admin client secret in the
+        # rendered manifest — exactly the gap T10 closes. A render
+        # with both opt-ins on is what proves the wiring; the unset
+        # path is verified by the absence of those env names in the
+        # default-overrides render the steps above already produce.
+        run: |
+          set -euo pipefail
+          helm template test deploy/charts/meho/ \
+            --set image.tag=test \
+            --set ingress.host=meho.test \
+            --set ingress.tls.secretName=meho-tls \
+            --set postgres.credentialsSecret=meho-postgres \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+            --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
+            --set agent.enabled=true \
+            --set agent.secretName=anthropic-creds \
+            --set keycloakAdmin.enabled=true \
+            --set keycloakAdmin.url=https://keycloak.test/admin/realms/meho \
+            --set keycloakAdmin.clientId=meho-admin \
+            --set keycloakAdmin.clientSecret.secretName=keycloak-admin-creds \
+            > /tmp/rendered-agent.yaml
+
+          # `secretKeyRef`-shaped wiring: name + key on adjacent lines
+          # under `valueFrom:`. grep -A is the simplest portable form
+          # of "ANTHROPIC_API_KEY pairs with a secretKeyRef". `-e` is
+          # load-bearing here — without it, ugrep / GNU grep both read
+          # the leading `-` in `- name: ...` as the start of an option
+          # flag and abort with `invalid option`.
+          grep -A2 -F -e '- name: ANTHROPIC_API_KEY' /tmp/rendered-agent.yaml \
+            | grep -F 'secretKeyRef' \
+            || { echo "::error::ANTHROPIC_API_KEY is not wired via secretKeyRef (G0.18-T10 #1363 regression)"; exit 1; }
+          grep -A2 -F -e '- name: KEYCLOAK_ADMIN_CLIENT_SECRET' /tmp/rendered-agent.yaml \
+            | grep -F 'secretKeyRef' \
+            || { echo "::error::KEYCLOAK_ADMIN_CLIENT_SECRET is not wired via secretKeyRef (G0.18-T10 #1363 regression)"; exit 1; }
+
+          # Plain-env wiring: the two non-secret admin values render as
+          # `value:`. Grep on `name:` followed by the exact `value:`
+          # the override above set.
+          grep -A1 -F -e '- name: KEYCLOAK_ADMIN_URL' /tmp/rendered-agent.yaml \
+            | grep -F 'value: "https://keycloak.test/admin/realms/meho"' \
+            || { echo "::error::KEYCLOAK_ADMIN_URL is not wired as plain env (G0.18-T10 #1363 regression)"; exit 1; }
+          grep -A1 -F -e '- name: KEYCLOAK_ADMIN_CLIENT_ID' /tmp/rendered-agent.yaml \
+            | grep -F 'value: "meho-admin"' \
+            || { echo "::error::KEYCLOAK_ADMIN_CLIENT_ID is not wired as plain env (G0.18-T10 #1363 regression)"; exit 1; }
+
+          # The default-overrides render from the step above proves the
+          # unset path: with no `agent.enabled` / `keycloakAdmin.enabled`,
+          # none of these env names should appear in the Deployment env
+          # block (they may still appear in the kubeconform docs above
+          # — guard the grep against the Deployment by chunking on
+          # `kind: Deployment`).
+          if grep -qE '^\s+- name: (ANTHROPIC_API_KEY|KEYCLOAK_ADMIN_)' /tmp/rendered.yaml; then
+            echo "::error::default render leaked agent-runtime env vars without opt-in (G0.18-T10 #1363 regression)"
+            exit 1
+          fi
+          echo ">> agent-runtime env wiring verified: secretKeyRef on confidential values, plain env on operator config, no leakage when unset"
+
       - name: Assert Deployment carries CHART_VERSION env (#631)
         # GET /version reports a real chart_version only if the chart's
         # Deployment injects CHART_VERSION from .Chart.Version. Render the

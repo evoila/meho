@@ -170,9 +170,55 @@ Two resources combine to materialise a Secret the chart can consume:
 | --- | --- | --- |
 | `secret/meho/postgres` (property `url`) | The full `DATABASE_URL`: `postgresql+asyncpg://<user>:<pass>@<host>:<port>/<db>` | The Deployment env `DATABASE_URL` via `postgres.credentialsSecret` |
 | `secret/meho/keycloak/client_secret` (property `client_secret`) | The Keycloak OAuth client secret backing `keycloak.audience` | v0.2 federation wiring (rendered optionally today for end-to-end sync verification) |
+| `secret/meho/agent` (property `api_key`) | The Anthropic API key the G11.1 agent LLM loop authenticates with | The Deployment env `ANTHROPIC_API_KEY` via `agent.secretName` (resolved through `meho.agentSecretName`) when `agent.enabled: true` |
+| `secret/meho/keycloak/admin_client_secret` (property `client_secret`) | The G11.2 Keycloak Admin client secret gating agent-principal registration | The Deployment env `KEYCLOAK_ADMIN_CLIENT_SECRET` via `keycloakAdmin.clientSecret.secretName` (resolved through `meho.keycloakAdminSecretName`) when `keycloakAdmin.enabled: true` |
 
 The `secret/meho` base is configurable via `vault.paths.kv` — adjust the
 KV paths above accordingly if you remount Vault elsewhere.
+
+## Agent-runtime credential wiring (G11.1 + G11.2)
+
+The chart wires two G11 credential groups as first-class chart values
+so an operator enables agent-runtime without hand-rolling Secrets +
+`extraEnv` `valueFrom` (G0.18-T10 #1363):
+
+| Group | Chart toggle | Env vars wired | Secret handling |
+| --- | --- | --- | --- |
+| **G11.1 agent LLM loop** | `agent.enabled: true` | `ANTHROPIC_API_KEY` | `secretKeyRef` only — never plaintext. |
+| **G11.2 agent-principal registration** | `keycloakAdmin.enabled: true` | `KEYCLOAK_ADMIN_URL` + `KEYCLOAK_ADMIN_CLIENT_ID` (plain env) + `KEYCLOAK_ADMIN_CLIENT_SECRET` (`secretKeyRef`) | URL + clientId are plain config; only the client secret is `secretKeyRef`. |
+
+Both default to `enabled: false` — the chart renders no env wiring and
+the backplane's fail-closed surface keeps both features inoperative
+(`/api/v1/agent-runs` 503 / "no credentials"; `POST /api/v1/agent-principals`
+`503 keycloak_admin_not_configured`) — same posture as a chart that
+doesn't ship these blocks at all.
+
+The Secret-name resolution allows two equally first-class paths:
+
+- **Bring-your-own Secret.** Set `agent.secretName` /
+  `keycloakAdmin.clientSecret.secretName` to a Kubernetes Secret your
+  consumer GitOps repo provisions. Leave `eso.agent.enabled` /
+  `eso.keycloakAdmin.enabled` at `false`.
+
+- **ESO-rendered.** Flip `eso.agent.enabled` / `eso.keycloakAdmin.enabled`
+  to `true` and provide `eso.secretStore.name`. The chart renders an
+  ExternalSecret targeted at `<release>-agent` / `<release>-keycloak-admin`
+  (keys `api_key` / `client_secret`). Leave the `secretName` fields
+  empty — the `meho.agentSecretName` / `meho.keycloakAdminSecretName`
+  helpers automatically resolve the ESO target name.
+
+A configuration that flips `enabled: true` but leaves both Secret-name
+paths empty fails at `helm template` / `helm install` time with an
+actionable message (the chart's `fail` gates in
+`templates/_helpers.tpl`).
+
+The CI `helm test <release>` Pod
+(`templates/tests/test-agent-runtime-config.yaml`) asserts the four
+env vars resolve when both opt-ins are enabled. The
+`.github/workflows/chart.yml` PR build gate additionally renders the
+chart with both opt-ins on and greps for the `secretKeyRef` shape so
+a regression flipping `ANTHROPIC_API_KEY` to plaintext is rejected
+before merge.
 
 ## Internal-CA trust bundle (`extraVolumes` / `extraEnv`)
 

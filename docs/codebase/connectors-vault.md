@@ -263,7 +263,8 @@ and a real Postgres audit store (reusing the integration conftest's
   unwrap → dispatcher → audit → broadcast path runs unchanged.
 - **Assertions.** Each op asserts the live response shape, a single
   synchronously-committed `audit_log` row (postulate 7), and the
-  broadcast `op_class` — `write` for `kv.put` / `kv.delete`,
+  broadcast `op_class` — `credential_write` for `kv.put` (G11.7-T1
+  #1401) and `write` for `kv.delete`,
   `credential_read` for `kv.read` / `kv.list`, `read` for the
   KV-v2 / sys metadata reads and the `.list` auth ops
   (`auth.userpass.list` / `auth.approle.list`), and `other` for the

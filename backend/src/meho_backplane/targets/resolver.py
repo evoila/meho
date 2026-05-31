@@ -238,8 +238,8 @@ async def resolve_target_by_id(
     filter mirrors the resolver's soft-delete discipline (G0.14-T4
     #1145): a target soft-deleted between request and approval resolves
     to ``None`` so the caller fails closed (the re-dispatch returns a
-    structured ``no_connector`` / handler error) rather than reviving a
-    tombstoned target.
+    structured ``denied`` result and never executes) rather than
+    reviving a tombstoned target or dispatching against ``target=None``.
 
     Returns ``None`` when no live row matches the id in *tenant_id* (the
     caller decides how to surface the miss); cross-tenant ids are

@@ -64,6 +64,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.operations._errors import result_denied
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
@@ -203,10 +204,21 @@ async def _resume_dispatch_after_approval(
     ``target.name`` / ``target.fqdn`` would mis-resolve (or crash) if
     re-dispatched with ``target=None``. This loads the live ``Target`` by
     id (tenant-scoped, ``deleted_at IS NULL``) to restore the original
-    dispatch target. A target soft-deleted between request and approval
-    resolves to ``None``, so the re-dispatch fails closed (structured
-    connector error) rather than reviving a tombstone. Tenant-wide ops
-    (no original target) keep ``target_id IS NULL`` → ``None``.
+    dispatch target.
+
+    A target soft-deleted (or otherwise revoked) between request and
+    approval resolves to ``None``. In that case the re-dispatch **fails
+    closed**: it returns a structured ``denied`` :class:`OperationResult`
+    and never calls :func:`dispatch`. Dispatching with ``target=None``
+    would let a typed handler that derives its connection from
+    ``connector_id`` / ``params`` execute an approved privileged write
+    *outside* the original target scope — the approval authorized a call
+    against a specific target, not "whatever the connector defaults to".
+
+    Tenant-wide ops (no original target) keep ``target_id IS NULL`` →
+    ``None`` and dispatch normally; the fail-closed branch fires only when
+    a concrete ``target_id`` was pinned at request time but no longer
+    resolves.
 
     The re-dispatch bypasses the policy gate (``_approved=True``): the
     committed approval decision is the authorization. Without the bypass
@@ -221,6 +233,33 @@ async def _resume_dispatch_after_approval(
         async with sessionmaker() as session:
             resolved_target = await resolve_target_by_id(
                 session, operator.tenant_id, request.target_id
+            )
+        if resolved_target is None:
+            # Fail closed: the approval row pinned a concrete target_id, but
+            # no live target resolves it now (soft-deleted between request
+            # and approval, or cross-tenant). Dispatching with target=None
+            # would let a typed handler that derives its connection from
+            # connector_id/params execute an approved privileged write
+            # *outside* the original target scope. Refuse instead — the
+            # approval authorized a call against a target that no longer
+            # exists.
+            _log.warning(
+                "approval_resume_target_unresolvable",
+                approval_request_id=str(request.id),
+                op_id=request.op_id,
+                connector_id=request.connector_id,
+                target_id=str(request.target_id),
+                operator_sub=operator.sub,
+            )
+            return result_denied(
+                request.op_id,
+                (
+                    f"approved target {request.target_id} no longer resolves "
+                    "(soft-deleted or revoked between request and approval); "
+                    "re-dispatch refused to avoid executing outside the "
+                    "original target scope"
+                ),
+                0.0,
             )
 
     from meho_backplane.operations.dispatcher import dispatch

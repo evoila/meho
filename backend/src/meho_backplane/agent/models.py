@@ -535,6 +535,7 @@ def anthropic_backend_builder() -> Model:
 
     # Imported lazily so this module doesn't form an import cycle with
     # the run module (``run.py`` imports this module's symbols).
+    from meho_backplane.agent.invocation import _split_model_id
     from meho_backplane.agent.run import AgentRunError
     from meho_backplane.settings import get_settings
 
@@ -547,7 +548,12 @@ def anthropic_backend_builder() -> Model:
             "an on-prem backend (Bedrock/vLLM/PAIF) — see G11.5.",
         )
     provider = AnthropicProvider(anthropic_client=AsyncAnthropic(api_key=api_key))
-    return AnthropicModel(settings.agent_default_model, provider=provider)
+    # ``agent_default_model`` is the pydantic-ai spec form
+    # (``anthropic:claude-...``); AnthropicModel's ``model_name`` reaches the
+    # Messages API verbatim and 404s on the ``anthropic:`` prefix, so pass
+    # only the bare model id. A deploy-supplied bare id falls through unchanged.
+    _, model_name = _split_model_id(settings.agent_default_model)
+    return AnthropicModel(model_name, provider=provider)
 
 
 def default_anthropic_backends() -> dict[str, tuple[BackendBuilder, BackendCapabilities, bool]]:

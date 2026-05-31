@@ -110,10 +110,14 @@ register_mcp_tool(
             "hundreds of operations to a handful of relevant ones. "
             "Argument: `connector_id` in `<impl_id>-<version>` form "
             '(e.g. "vmware-rest-9.0", "vault-1.x") -- NOT the bare '
-            "product name. Returns groups in name order. An UNKNOWN "
-            "connector_id is an error (no such connector); a KNOWN "
-            "connector with no enabled groups returns an empty list "
-            "(operationally meaningful: it exists, nothing enabled yet)."
+            "product name. Returns groups in `group_key` order. An "
+            "UNKNOWN connector_id is an error (no such connector); a "
+            "KNOWN connector with no enabled groups returns an empty "
+            "list (operationally meaningful: it exists, nothing enabled "
+            "yet). Pagination (G0.18-T5 #1358): keyset on `group_key`; "
+            "default `limit=100`, max 500; pass the response's "
+            "`next_cursor` back as the next call's `cursor` to fetch "
+            "the next page. A `null` `next_cursor` is the end."
         ),
         inputSchema={
             "type": "object",
@@ -127,6 +131,29 @@ register_mcp_tool(
                         "value naming no registered connector is an error."
                     ),
                     "minLength": 1,
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 100,
+                    "description": (
+                        "Page size. Default 100; max 500. Matches "
+                        "`list_targets` paging — sibling list tools share "
+                        "one upper bound (G0.18-T5 #1358)."
+                    ),
+                },
+                "cursor": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Keyset-pagination cursor: pass the last "
+                        "`group_key` from the previous page to fetch the "
+                        "next. Results are ordered by `group_key` "
+                        "ascending. Matches `cursor` on `query_audit` / "
+                        "`query_topology` / `list_targets` / "
+                        "`meho.broadcast.recent` (G0.18-T5 #1358)."
+                    ),
+                    "maxLength": 256,
                 },
             },
             "required": ["connector_id"],
@@ -154,8 +181,16 @@ register_mcp_tool(
                         ],
                     },
                 },
+                "next_cursor": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Keyset cursor for the next page (last "
+                        "`group_key` on this page) or `null` when this "
+                        "page is the end of the listing."
+                    ),
+                },
             },
-            "required": ["connector_id", "groups"],
+            "required": ["connector_id", "groups", "next_cursor"],
         },
         required_role=TenantRole.OPERATOR,
         op_class="read",

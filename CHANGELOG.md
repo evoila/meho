@@ -332,6 +332,50 @@ connector-related release-notes line.
 
 ### Changed
 
+- **MCP `tools/list` shape-consistency sweep (G0.18-T5 #1358,
+  RDC #789 N4).** Schema-pairwise reconciliation of seven
+  sibling-tool drifts on the 51-tool MCP surface; the MCP-side
+  analogue of the REST/MCP sweep #1312 did for `/api/v1`. None
+  breaking — every prior wire name is retained as a deprecated
+  alias. The reconciliations:
+  - `query_audit.op_class` carries the full broadcast `OP_CLASS_ENUM`
+    (incl. `credential_mint`) as a JSON-Schema `enum`, ending the
+    "5 vs 6 values" prose-vs-enum drift that made filtering audit
+    for freshly-minted credentials undiscoverable.
+  - Forward-pagination is named `cursor` everywhere — `query_audit`,
+    `query_topology`, `list_targets`, `list_operation_groups`,
+    `meho.broadcast.recent`, `meho.broadcast.watch` (canonical).
+    `since` (broadcast.recent) and `since_cursor` (broadcast.watch)
+    survive as deprecated aliases marked `deprecated: true`;
+    passing both forms rejects with `-32602`.
+  - `meho.approvals.{get,approve,reject}` accept
+    `approval_request_id` (canonical, matching the `<noun>_id`
+    convention used by `trigger_id` / `agent_session_id`); the bare
+    `id` survives as a deprecated alias.
+  - `list_targets.tenant_id` is the canonical cross-tenant scope
+    name (matching `meho.connector.*` / `meho.scheduler.create`);
+    `tenant` survives as a deprecated alias. `list_targets.tenant_id`
+    continues to accept slug-or-uuid (a documented `list_targets`-
+    only extension over the admin tools' UUID-only shape).
+  - `meho.approvals.list.status` surfaces as a JSON `enum` with
+    `default: "pending"` instead of prose-only; pairs with
+    `meho.scheduler.list.status`.
+  - `meho.scheduler.list.{limit,offset}` and
+    `meho.approvals.list.{limit,offset}` declare their defaults
+    in-schema (100/0 and 50/0 respectively) so schema-driven MCP
+    clients render the documented values.
+  - `meho.agent_principals.register.name` carries the documented
+    safe-alphabet `pattern` plus `minLength`/`maxLength` at the
+    schema layer, matching `meho.agents.create.name`.
+  - `list_operation_groups` is keyset-paginated on `group_key`
+    (`limit` + `cursor` + `next_cursor`), matching `list_targets`'
+    paging shape. REST `GET /api/v1/operations/groups` gains the
+    same query params.
+  Conventions documented in
+  [`docs/codebase/api-shape-conventions.md`](docs/codebase/api-shape-conventions.md)
+  §14. Structural regression test at
+  `backend/tests/test_mcp_tools_list_shape_conventions.py` pins the
+  reconciled vocabulary so a future drift fails CI (#1358).
 - **K8s connector list-op request-shape parity — `event` / `service` /
   `ingress` / `configmap` `.list` adopt the `pod.list` input shape
   (G0.17-T1 #1330, RDC #771 Finding 24).** Every namespaced list op

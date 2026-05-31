@@ -306,7 +306,13 @@ async def test_get_groups_known_connector_zero_enabled_returns_empty_200(
             headers={"Authorization": f"Bearer {_operator_token(key)}"},
         )
     assert response.status_code == 200
-    assert response.json() == {"connector_id": "vault-1.x", "groups": []}
+    # G0.18-T5 #1358 — `next_cursor: null` is the documented "end of
+    # listing" sentinel under keyset pagination on `group_key`.
+    assert response.json() == {
+        "connector_id": "vault-1.x",
+        "groups": [],
+        "next_cursor": None,
+    }
 
 
 # ---------------------------------------------------------------------------

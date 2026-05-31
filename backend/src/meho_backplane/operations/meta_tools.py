@@ -71,7 +71,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Final
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
@@ -275,13 +275,118 @@ class CallOperationBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+#: Default page size for :func:`list_operation_groups` keyset
+#: pagination. Operation-group surfaces are usually small (O(10) per
+#: connector); 100 is a comfortable ceiling that keeps every real
+#: connector on one page while still bounding the response size for a
+#: pathological connector with thousands of groups (G0.18-T5 #1358 —
+#: parity with `list_targets` paging).
+_LIST_OPERATION_GROUPS_LIMIT_DEFAULT: Final[int] = 100
+
+#: Hard ceiling on :func:`list_operation_groups` ``limit``. Matches
+#: :data:`meho_backplane.mcp.tools.topology._LIST_TARGETS_LIMIT_MAX`'s
+#: 500 ceiling so sibling list tools share one upper bound.
+_LIST_OPERATION_GROUPS_LIMIT_MAX: Final[int] = 500
+
+
+def _coerce_list_operation_groups_pagination(
+    arguments: dict[str, Any],
+) -> tuple[int, str | None]:
+    """Extract + bounds-check the ``(limit, cursor)`` pagination pair.
+
+    Defaults `limit` to :data:`_LIST_OPERATION_GROUPS_LIMIT_DEFAULT`;
+    clamps to ``[1, _LIST_OPERATION_GROUPS_LIMIT_MAX]``; coerces an
+    empty / non-string `cursor` to ``None`` so the substrate query's
+    `where(group_key > cursor)` branch is skipped on the first page.
+    """
+    limit = int(arguments.get("limit") or _LIST_OPERATION_GROUPS_LIMIT_DEFAULT)
+    if limit < 1 or limit > _LIST_OPERATION_GROUPS_LIMIT_MAX:
+        raise ValueError(
+            f"limit out of range: {limit} (must be in [1, {_LIST_OPERATION_GROUPS_LIMIT_MAX}])",
+        )
+    cursor_arg = arguments.get("cursor")
+    cursor = cursor_arg if isinstance(cursor_arg, str) and cursor_arg else None
+    return limit, cursor
+
+
+async def _count_ops_per_group(
+    session: Any,
+    group_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, int]:
+    """Count enabled :class:`EndpointDescriptor` rows per group in one query.
+
+    One SQL round-trip + Python aggregation keeps the
+    application-side group-by portable across PG + SQLite. Excludes
+    NULL ``group_id`` — ungrouped ops don't contribute.
+    """
+    if not group_ids:
+        return {}
+    count_stmt = select(EndpointDescriptor.group_id).where(
+        EndpointDescriptor.group_id.in_(group_ids),
+        EndpointDescriptor.is_enabled.is_(True),
+    )
+    count_rows = (await session.execute(count_stmt)).all()
+    counts: dict[uuid.UUID, int] = {}
+    for row in count_rows:
+        gid = row[0]
+        if gid is not None:
+            counts[gid] = counts.get(gid, 0) + 1
+    return counts
+
+
+def _build_operation_groups_query(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+    tenant_id: uuid.UUID,
+    limit: int,
+    cursor: str | None,
+) -> Any:
+    """Build the keyset-paginated :class:`OperationGroup` SELECT.
+
+    Filters: matching connector triple + ``review_status='enabled'`` +
+    tenant scope (NULL global OR this tenant); orders by ``group_key``
+    ASC; capped at ``limit``. ``cursor`` (when given) advances past
+    the prior page's last ``group_key`` via strict ``>`` — keyset
+    pagination with no offset and no overlap.
+    """
+    stmt = (
+        select(OperationGroup)
+        .where(
+            OperationGroup.product == product,
+            OperationGroup.version == version,
+            OperationGroup.impl_id == impl_id,
+            OperationGroup.review_status == "enabled",
+            (OperationGroup.tenant_id.is_(None)) | (OperationGroup.tenant_id == tenant_id),
+        )
+        .order_by(OperationGroup.group_key)
+        .limit(limit)
+    )
+    if cursor is not None:
+        stmt = stmt.where(OperationGroup.group_key > cursor)
+    return stmt
+
+
+def _raise_unknown_connector(connector_id: str) -> None:
+    """Raise :class:`UnknownConnectorError` with the long-form recovery hint."""
+    raise UnknownConnectorError(
+        f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
+        f"(e.g. 'vmware-rest-9.0', 'vault-1.x'). If this id appeared in "
+        f"GET /api/v1/connectors, the listing is inconsistent with the "
+        f"dispatcher's resolve path — please file a bug report; otherwise "
+        f"the id is mistyped or the connector is not registered on this deploy"
+    )
+
+
 async def list_operation_groups(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """Return enabled operation groups for *connector_id*.
 
-    ``arguments`` shape: ``{"connector_id": str}``.
+    ``arguments`` shape: ``{"connector_id": str, "limit"?: int,
+    "cursor"?: str}``.
 
     Only ``review_status='enabled'`` groups are returned — staged /
     disabled groups remain hidden from the agent. Tenant scoping: the
@@ -296,8 +401,22 @@ async def list_operation_groups(
     meaningful (the connector exists; nothing is enabled yet). The
     distinction ends the "empty catalog" trap where a mis-shaped
     ``connector_id`` looked indistinguishable from an empty connector.
+
+    Pagination (G0.18-T5 #1358)
+    ---------------------------
+
+    Keyset pagination on the lexicographically-sorted ``group_key``.
+    The substrate query orders by ``group_key`` ASC; ``cursor`` is the
+    last ``group_key`` from the prior page (results are strictly past
+    the cursor). A full page implies more rows may exist and the
+    response carries ``next_cursor`` set to the last returned
+    ``group_key``; a short page is the end of the listing and
+    ``next_cursor`` is ``null``. Mirrors ``list_targets``'s
+    keyset-pagination shape so a sibling agent that paginates targets
+    re-uses the same idiom for operation groups.
     """
     connector_id = arguments["connector_id"]
+    limit, cursor = _coerce_list_operation_groups_pagination(arguments)
     product, version, impl_id = parse_connector_id(connector_id)
     if not await connector_exists(
         tenant_id=operator.tenant_id,
@@ -305,52 +424,19 @@ async def list_operation_groups(
         version=version,
         impl_id=impl_id,
     ):
-        raise UnknownConnectorError(
-            f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
-            f"(e.g. 'vmware-rest-9.0', 'vault-1.x'). If this id appeared in "
-            f"GET /api/v1/connectors, the listing is inconsistent with the "
-            f"dispatcher's resolve path — please file a bug report; otherwise "
-            f"the id is mistyped or the connector is not registered on this deploy"
-        )
+        _raise_unknown_connector(connector_id)
     sessionmaker = get_sessionmaker()
+    group_stmt = _build_operation_groups_query(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        tenant_id=operator.tenant_id,
+        limit=limit,
+        cursor=cursor,
+    )
     async with sessionmaker() as session:
-        # Count operations per group in a single pass so the response can
-        # carry ``operation_count`` without an N+1 round-trip. Joined on
-        # the natural key plus ``group_id`` (NULL excluded — ungrouped ops
-        # don't contribute to any group's count).
-        group_stmt = (
-            select(OperationGroup)
-            .where(
-                OperationGroup.product == product,
-                OperationGroup.version == version,
-                OperationGroup.impl_id == impl_id,
-                OperationGroup.review_status == "enabled",
-                # Tenant scoping: NULL (global) OR this tenant's rows.
-                # `is_(None)` and `==` chain via or_; see the resolver for
-                # the same shape on Target rows.
-                (OperationGroup.tenant_id.is_(None))
-                | (OperationGroup.tenant_id == operator.tenant_id),
-            )
-            .order_by(OperationGroup.group_key)
-        )
         groups = (await session.execute(group_stmt)).scalars().all()
-        # Per-group operation count: filter by group_id IN (...) and
-        # is_enabled, then aggregate in Python (one query, group-by in
-        # the application layer keeps SQL portable across PG + SQLite).
-        if groups:
-            group_ids = [g.id for g in groups]
-            count_stmt = select(EndpointDescriptor.group_id).where(
-                EndpointDescriptor.group_id.in_(group_ids),
-                EndpointDescriptor.is_enabled.is_(True),
-            )
-            count_rows = (await session.execute(count_stmt)).all()
-            counts: dict[uuid.UUID, int] = {}
-            for row in count_rows:
-                gid = row[0]
-                if gid is not None:
-                    counts[gid] = counts.get(gid, 0) + 1
-        else:
-            counts = {}
+        counts = await _count_ops_per_group(session, [g.id for g in groups])
     summaries = [
         OperationGroupSummary(
             group_key=g.group_key,
@@ -360,15 +446,24 @@ async def list_operation_groups(
         )
         for g in groups
     ]
+    # Keyset cursor: when the page is full there *may* be more groups
+    # past the last returned ``group_key``; surface it as the next
+    # call's ``cursor``. A short page is definitively the end of the
+    # listing and ``next_cursor`` is ``null`` so the caller stops.
+    next_cursor = groups[-1].group_key if len(groups) == limit else None
     _log.info(
         "list_operation_groups",
         connector_id=connector_id,
         group_count=len(summaries),
         tenant_id=str(operator.tenant_id),
+        limit=limit,
+        cursor=cursor,
+        next_cursor=next_cursor,
     )
     return {
         "connector_id": connector_id,
         "groups": [s.model_dump(mode="json") for s in summaries],
+        "next_cursor": next_cursor,
     }
 
 

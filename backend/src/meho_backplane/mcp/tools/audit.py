@@ -72,6 +72,7 @@ from meho_backplane.audit_query import (
     replay_session,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
@@ -143,9 +144,13 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
         },
         "op_class": {
             "type": ["string", "null"],
+            "enum": [*OP_CLASS_ENUM, None],
             "description": (
-                'One of "read" / "write" / "credential_read" / '
-                '"audit_query" / "other". Exact match.'
+                "Sensitivity classification (exact match). Same vocabulary "
+                "as `meho.broadcast.recent` / `meho.broadcast.watch` so a "
+                "consumer that filters audit on `credential_mint` and the "
+                "broadcast stream on `credential_mint` uses one enum. "
+                "Values: " + ", ".join(f"`{value}`" for value in OP_CLASS_ENUM) + "."
             ),
             "maxLength": 64,
         },

@@ -5137,7 +5137,13 @@ type PostCallApiV1OperationsCallPostParams struct {
 // GetGroupsApiV1OperationsGroupsGetParams defines parameters for GetGroupsApiV1OperationsGroupsGet.
 type GetGroupsApiV1OperationsGroupsGetParams struct {
 	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
-	ConnectorId   string  `form:"connector_id" json:"connector_id"`
+	ConnectorId string `form:"connector_id" json:"connector_id"`
+
+	// Limit Page size. Default 100; max 500. Matches `list_targets` paging — sibling list surfaces share one ceiling (G0.18-T5 #1358).
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Keyset-pagination cursor: pass the last `group_key` from the previous page to fetch the next. Results are ordered by `group_key` ascending. A `null` `next_cursor` in the response means this page is the end of the listing (G0.18-T5 #1358).
+	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -13238,6 +13244,38 @@ func NewGetGroupsApiV1OperationsGroupsGetRequest(server string, params *GetGroup
 					queryValues.Add(k, v2)
 				}
 			}
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
 		}
 
 		queryURL.RawQuery = queryValues.Encode()

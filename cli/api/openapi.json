@@ -2024,7 +2024,7 @@
           "operations"
         ],
         "summary": "Get Groups",
-        "description": "List enabled operation groups for *connector_id*.\n\nDelegates to :func:`list_operation_groups`. An *unknown*\n``connector_id`` (no operations registered for the parsed triple)\nis a ``404`` \u2014 not an empty ``200``: the empty-catalog trap was\nthat a mis-shaped id looked identical to an empty connector. A\n*known* connector with zero enabled groups still returns\n``{\"groups\": []}`` (that empty is operationally meaningful).",
+        "description": "List enabled operation groups for *connector_id*.\n\nDelegates to :func:`list_operation_groups`. An *unknown*\n``connector_id`` (no operations registered for the parsed triple)\nis a ``404`` \u2014 not an empty ``200``: the empty-catalog trap was\nthat a mis-shaped id looked identical to an empty connector. A\n*known* connector with zero enabled groups still returns\n``{\"groups\": [], \"next_cursor\": null}`` (that empty is\noperationally meaningful).\n\nPagination is keyset on ``group_key`` (G0.18-T5 #1358); the\nresponse carries ``next_cursor`` set to the last returned\n``group_key`` when a page is full, ``null`` otherwise.",
         "operationId": "get_groups_api_v1_operations_groups_get",
         "parameters": [
           {
@@ -2052,6 +2052,33 @@
                 "value": "k8s-1.x"
               }
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "Page size. Default 100; max 500. Matches `list_targets` paging \u2014 sibling list surfaces share one ceiling (G0.18-T5 #1358).",
+              "default": 100,
+              "title": "Limit"
+            },
+            "description": "Page size. Default 100; max 500. Matches `list_targets` paging \u2014 sibling list surfaces share one ceiling (G0.18-T5 #1358)."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "description": "Keyset-pagination cursor: pass the last `group_key` from the previous page to fetch the next. Results are ordered by `group_key` ascending. A `null` `next_cursor` in the response means this page is the end of the listing (G0.18-T5 #1358).",
+              "title": "Cursor"
+            },
+            "description": "Keyset-pagination cursor: pass the last `group_key` from the previous page to fetch the next. Results are ordered by `group_key` ascending. A `null` `next_cursor` in the response means this page is the end of the listing (G0.18-T5 #1358)."
           },
           {
             "name": "authorization",

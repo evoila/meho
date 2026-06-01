@@ -50,11 +50,14 @@ async def register_keycloak_typed_operations(
     runner passes the process-wide :class:`EmbeddingService` (or a
     chassis-test stub) to every registrar via
     ``registrar(embedding_service=...)``, so each registrar **must**
-    accept the kwarg or the lifespan crashes with :class:`TypeError`. T1
-    ships zero ops so the value is unused; the kwarg-accept-and-discard
-    shape matches the bind9 sibling.
+    accept the kwarg or the lifespan crashes with :class:`TypeError`.
+    :meth:`KeycloakConnector.register_operations` resolves the
+    process-wide :class:`EmbeddingService` singleton itself through
+    :func:`~meho_backplane.operations.typed_register.register_typed_operation`,
+    so the kwarg is accepted-and-discarded here (the same shape the bind9
+    sibling uses).
     """
-    del embedding_service  # T1 ships zero ops -- kwarg accepted for runner-compatibility
+    del embedding_service  # register_typed_operation resolves the singleton itself
     await KeycloakConnector.register_operations()
 
 

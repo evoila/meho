@@ -3,9 +3,10 @@
 
 """KeycloakConnector -- HttpConnector subclass for the Keycloak 26.x Admin REST API.
 
-G3.13-T1 (#1393) skeleton -- admin credential loader + fingerprint +
-dual registration. Read ops (T2) and onboarding docs (T3) layer on top;
-this module ships **zero** typed operations.
+G3.13-T1 (#1393) shipped the substrate -- admin credential loader +
+fingerprint + dual registration. G3.13-T2 (#1394) layers the six curated
+read ops onto that surface (realm/client/client-scope/user/role-mapping);
+onboarding docs (T3) and the approval-gated write surface (T4) follow.
 
 The load-bearing design point -- admin-vs-operator credential split
 =====================================================================
@@ -54,11 +55,13 @@ NSX / vRLI precedents established).
 Operations
 ==========
 
-This module ships zero operations -- the G0.6 dispatch shim
-:meth:`execute` exists for ABC compatibility and the
-:meth:`register_operations` classmethod is the seam T2 fills in. Until
-then the connector is registered + discoverable but ``execute`` against
-any ``op_id`` resolves to ``unknown_op`` at the dispatcher.
+The six T2 read ops live in
+:mod:`~meho_backplane.connectors.keycloak.ops_read` (metadata +
+handler logic); the connector exposes a thin bound-method shim per op
+and walks ``READ_OPS`` in :meth:`register_operations`. Each op dispatches
+via :meth:`auth_headers` (the admin-token Bearer) and scrubs secret
+material from its result. The G0.6 dispatch shim :meth:`execute` routes
+``op_id`` through the operator-aware dispatcher.
 
 References
 ----------
@@ -82,11 +85,12 @@ from typing import Any
 
 import httpx
 import structlog
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
-from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.http import HttpConnector, _retryable
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakAdminCredentialsLoader,
@@ -457,29 +461,195 @@ class KeycloakConnector(HttpConnector):
             probed_at=fp.probed_at,
         )
 
-    # -- typed-op registrar seam (T2 fills this in) ---------------------
+    # -- admin-auth JSON GET helpers ------------------------------------
+
+    async def _get_admin_json(
+        self,
+        target: KeycloakTargetLike,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Retried admin-auth GET for an **object** response.
+
+        Thin alias over the inherited
+        :meth:`~meho_backplane.connectors.adapters.http.HttpConnector._get_json`
+        so the read-op handlers read uniformly against object endpoints
+        (``GET /admin/realms/{realm}``, one client, role-mappings). The
+        admin Bearer is applied by this connector's
+        :meth:`auth_headers`; the operator authorises only the Vault read
+        behind the token mint.
+        """
+        return await self._get_json(target, path, operator=operator, params=params)
+
+    @retry(
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=2.0),
+        retry=retry_if_exception(_retryable),
+        reraise=True,
+    )
+    async def _get_admin_list(
+        self,
+        target: KeycloakTargetLike,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        """Retried admin-auth GET for an **array** response.
+
+        Several Keycloak Admin REST list endpoints (``/clients``,
+        ``/client-scopes``, ``/users``) return a JSON **array**, not an
+        object, so the inherited :meth:`_get_json` (typed ``dict``) is the
+        wrong shape. This helper mirrors its retry / timeout / auth
+        contract — same idempotent-GET backoff as
+        :meth:`~meho_backplane.connectors.adapters.http.HttpConnector._request_json`
+        — but returns the parsed list. A non-list body (an error envelope
+        Keycloak occasionally returns as an object) yields an empty list
+        so a handler never iterates a dict.
+        """
+        client = await self._http_client(target)
+        headers = await self.auth_headers(target, operator)
+        resp = await client.request("GET", path, params=params, headers=headers)
+        resp.raise_for_status()
+        payload = resp.json()
+        return payload if isinstance(payload, list) else []
+
+    # -- typed-op handler shims (G3.13-T2 #1394) ------------------------
+
+    async def realm_get(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.realm.get`` op (G3.13-T2 #1394)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_realm_get
+
+        return await keycloak_realm_get(self, operator, target, params)
+
+    async def client_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.client.list`` op (G3.13-T2 #1394)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_client_list
+
+        return await keycloak_client_list(self, operator, target, params)
+
+    async def client_get(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.client.get`` op (G3.13-T2 #1394)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_client_get
+
+        return await keycloak_client_get(self, operator, target, params)
+
+    async def client_scope_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.client_scope.list`` op (G3.13-T2 #1394)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_client_scope_list
+
+        return await keycloak_client_scope_list(self, operator, target, params)
+
+    async def user_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.user.list`` op (G3.13-T2 #1394)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_user_list
+
+        return await keycloak_user_list(self, operator, target, params)
+
+    async def role_mapping_get(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.role_mapping.get`` op (G3.13-T2 #1394)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_role_mapping_get
+
+        return await keycloak_role_mapping_get(self, operator, target, params)
+
+    # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 
     @classmethod
     async def register_operations(cls) -> None:
-        """Typed-op registrar seam -- ships **no** ops in T1 (G3.13-T1 #1393).
+        """Upsert every op in :data:`READ_OPS` into ``endpoint_descriptor``.
 
-        T1 is the substrate: the connector class, the admin credential
-        loader, fingerprint, and dual registration. Read ops land in T2,
-        which walks a ``KEYCLOAK_OPS`` table here exactly as
-        :meth:`~meho_backplane.connectors.pfsense.connector.PfSenseConnector.register_operations`
-        walks ``PFSENSE_OPS``. Wiring the no-op registrar now means the
-        lifespan's ``run_typed_op_registrars`` call already drives
-        Keycloak, so T2 only fills the op walk -- the seam doesn't move.
+        Called from the application lifespan after the registry has
+        eager-imported every connector module. Walks
+        :data:`~meho_backplane.connectors.keycloak.ops_read.READ_OPS` and
+        routes each row through
+        :func:`~meho_backplane.operations.typed_register.register_typed_operation`,
+        which derives ``handler_ref`` from the bound method's
+        ``__module__`` + ``__qualname__``, inserts on first call, and
+        skips the embedding compute on re-call with unchanged
+        summary / description / tags. Idempotent across pod restarts --
+        mirrors the bind9 / pfSense
+        :meth:`register_operations` shape.
 
-        Idempotent (a no-op is trivially idempotent across pod restarts).
+        G3.13-T2 (#1394) lands the six read ops
+        (``keycloak.realm.get`` / ``client.list`` / ``client.get`` /
+        ``client_scope.list`` / ``user.list`` / ``role_mapping.get``); the
+        write surface is the deferred approval-gated T4 follow-up.
         """
+        # Lazy imports: the operations package pulls in the embedding
+        # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
+        # pure-fingerprint / pure-probe unit test should not pay. Lifespan
+        # callers already have the embedding service warmed by the time
+        # this runs.
+        from meho_backplane.connectors.keycloak.ops_read import (
+            READ_OPS,
+            WHEN_TO_USE_BY_GROUP,
+        )
+        from meho_backplane.operations.typed_register import register_typed_operation
+
+        bindings: list[tuple[Any, Any]] = []
+        for op in READ_OPS:
+            handler = getattr(cls, op.handler_attr, None)
+            if handler is None:
+                raise AttributeError(
+                    f"KeycloakConnector op {op.op_id!r} declares "
+                    f"handler_attr={op.handler_attr!r} but the class has no such attribute"
+                )
+            bindings.append((op, handler))
+
+        for op, handler in bindings:
+            when_to_use: str | None
+            if op.group_key is None:
+                when_to_use = None
+            else:
+                when_to_use = WHEN_TO_USE_BY_GROUP.get(op.group_key)
+                if when_to_use is None:
+                    raise ValueError(
+                        f"KeycloakConnector op {op.op_id!r} declares "
+                        f"group_key={op.group_key!r} but no curated "
+                        f"when_to_use exists for that key. Add an entry to "
+                        f"WHEN_TO_USE_BY_GROUP in "
+                        f"meho_backplane.connectors.keycloak.ops_read so "
+                        f"list_operation_groups surfaces a real selection "
+                        f"signal instead of the auto-derive template."
+                    )
+            await register_typed_operation(
+                product=cls.product,
+                version=cls.version,
+                impl_id=cls.impl_id,
+                op_id=op.op_id,
+                handler=handler,
+                summary=op.summary,
+                description=op.description,
+                parameter_schema=op.parameter_schema,
+                response_schema=op.response_schema,
+                group_key=op.group_key,
+                when_to_use=when_to_use,
+                tags=list(op.tags),
+                safety_level=op.safety_level,
+                requires_approval=op.requires_approval,
+                llm_instructions=op.llm_instructions,
+            )
+
         _log.info(
             "keycloak_operations_registered",
-            count=0,
+            count=len(bindings),
             product=cls.product,
             version=cls.version,
             impl_id=cls.impl_id,
-            note="T1 substrate ships zero ops; read ops land in G3.13-T2",
         )
 
     # -- dispatcher shim ------------------------------------------------

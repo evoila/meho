@@ -471,13 +471,27 @@ async def test_mint_admin_token_raises_on_missing_access_token() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Registrar seam -- T1 ships zero ops
+# Registrar seam -- T2 (#1394) fills the read-op walk
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_register_operations_ships_zero_ops() -> None:
-    """The registrar seam is wired but ships no ops in T1 (read ops land in T2)."""
-    # No exception, no DB writes -- the no-op registrar is callable so the
-    # lifespan's run_typed_op_registrars already drives Keycloak.
-    await KeycloakConnector.register_operations()
+def test_read_ops_handler_attrs_resolve_to_bound_methods() -> None:
+    """Every READ_OPS ``handler_attr`` resolves to a method on the connector.
+
+    Pins the registration walk's precondition (the ``getattr`` lookup in
+    :meth:`KeycloakConnector.register_operations`) without a DB round-trip
+    — the DB-backed upsert + dispatch is covered by the E2E suite.
+    """
+    from meho_backplane.connectors.keycloak.ops_read import READ_OPS, WHEN_TO_USE_BY_GROUP
+
+    assert len(READ_OPS) == 6
+    for op in READ_OPS:
+        handler = getattr(KeycloakConnector, op.handler_attr, None)
+        assert callable(handler), (
+            f"{op.op_id} handler_attr={op.handler_attr!r} is not a method on the connector"
+        )
+        assert op.safety_level == "safe"
+        assert op.requires_approval is False
+        assert "read-only" in op.tags
+        # Every grouped op has a curated when_to_use (registration asserts this).
+        assert op.group_key is not None and op.group_key in WHEN_TO_USE_BY_GROUP

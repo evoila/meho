@@ -8,7 +8,8 @@ Copyright (c) 2026 evoila Group
 > Operator-facing recipe for the G3.12 `argocd-api-3.x` op surface — how
 > to register an `argocd` target (host, port, the Vault bearer-token
 > `secret_ref`), the six curated read ops, the `GET /api/version` probe,
-> and the **deferred write surface**. The op handlers live in
+> and the **seven approval-gated write ops** (G3.12-T4 #1405). The op
+> handlers live in
 > [`backend/src/meho_backplane/connectors/argocd/`](../../backend/src/meho_backplane/connectors/argocd/);
 > the engineering-facing companion is
 > [`docs/codebase/connectors-argocd.md`](../codebase/connectors-argocd.md).
@@ -291,34 +292,37 @@ broadcast event. Each op's `llm_instructions` payload (registered at
 [`backend/src/meho_backplane/connectors/argocd/ops.py`](../../backend/src/meho_backplane/connectors/argocd/ops.py))
 is what `search_operations` surfaces to rank and guide the agent.
 
-## Writes are deferred (read-only by design)
+## Approval-gated write surface (G3.12-T4 #1405)
 
-This connector ships **no write or mutating op**. The ArgoCD verbs that
-change cluster state —
+The connector also ships the **mutating** GitOps surface — every op
+`requires_approval=True`, so a dispatch parks in the human approve-queue
+(`status=awaiting_approval`) and only runs after an operator approves
+through the queue (G11.7-T1 [#1401](https://github.com/evoila/meho/issues/1401)
+routes a `USER`-principal `requires_approval` dispatch to the queue rather
+than hard-denying it):
 
-- **`app.sync`** — trigger a sync (reconcile an app to its Git-desired
-  state),
-- **`app.rollback`** — roll an app back to a previous synced revision,
-- **`app.set`** / spec edits — change an Application's source, target
-  revision, or sync policy —
+| op_id | safety | CLI verb | what it does |
+| --- | --- | --- | --- |
+| `argocd.app.sync` | dangerous | `meho argocd app sync --name N [--prune] [--revision R]` | reconcile to Git-desired; polls operationState to a terminal phase |
+| `argocd.app.rollback` | dangerous | `meho argocd app rollback --name N --id I` | roll back to a prior deployed history id; polls to terminal |
+| `argocd.app.set` | dangerous | `meho argocd app set --name N --spec-file F` | replace the ApplicationSpec; captures before/after into `proposed_effect` |
+| `argocd.app.refresh` | caution | `meho argocd app refresh --name N` | the governed replacement for `kubectl annotate … refresh=hard`; under selfHeal can trigger an auto-sync |
+| `argocd.app.delete` | dangerous | `meho argocd app delete --name N` | cascade-delete; captures the cascade resource list into `proposed_effect` |
+| `argocd.appproject.create` | dangerous | `meho argocd appproject create --project-file F [--upsert]` | create the tenancy/authorization boundary |
+| `argocd.appproject.update` | dangerous | `meho argocd appproject update --project-file F` | amend a project's allow-lists; captures before/after |
 
-are an **approval-gated follow-up** under Initiative
-[#1387](https://github.com/evoila/meho/issues/1387), not part of this
-op surface. They are deliberately out of scope here (Hard rule: no
-speculative optionality — read parity first, writes land as a separate
-Task behind the approval queue, following the
-[github-write-ops-approval](./github-write-ops-approval.md) /
-[g316-vmware-write-activation](./g316-vmware-write-activation.md)
-precedent). Until they land, drive syncs/rollbacks through the `argocd`
-CLI or the ArgoCD UI; use this connector for **visibility** —
-"is this app in sync?", "what changed?", "which child resource is
-unhealthy?", "can ArgoCD reach this repo?".
+`app.sync` / `app.rollback` are long-running: after the POST they poll
+`status.operationState.phase` until it reaches a terminal value
+(Succeeded / Failed / Error) or `--poll-timeout` (default 300s) elapses,
+then return the final phase + message. `app.set` / `delete` /
+`appproject.update` snapshot the before/after (or cascade list) into the
+result's `proposed_effect` block so the reviewer sees exactly what the
+change does.
 
-`argocd.app.diff` is the read-only counterpart of `argocd app diff
-<app>`: it returns the managed-resources delta (each item's `liveState`
-vs `targetState`) without touching the cluster — the right op to confirm
-*what* a future `app.sync` would reconcile, before the write surface
-exists.
+`argocd.app.diff` (read) is the right op to confirm *what* a sync would
+reconcile **before** approving the `app.sync`: it returns the
+managed-resources delta (each item's `liveState` vs `targetState`)
+without touching the cluster.
 
 ## Troubleshooting
 
@@ -326,7 +330,8 @@ exists.
 | --- | --- | --- |
 | `no backplane URL configured` (exit 2) | Never logged in / no `--backplane`. | `meho login <url>` or pass `--backplane <url>`. |
 | `auth_expired` / stored token rejected | Keycloak operator token expired. | `meho login <url>` again. |
-| `status=error … operation not found` | The typed-op registrar didn't run (lifespan crash) or op_id drift. | Verify the backplane started cleanly; `meho connector list` should show `argocd-api-3.x` with six enabled ops. Check logs for `argocd_operations_registered`. |
+| `status=error … operation not found` | The typed-op registrar didn't run (lifespan crash) or op_id drift. | Verify the backplane started cleanly; `meho connector list` should show `argocd-api-3.x` with thirteen enabled ops (six read + seven write). Check logs for `argocd_operations_registered`. |
+| write op returns `status=awaiting_approval` | Expected — every write `requires_approval=True`; it's parked in the queue. | Approve via the approval queue (REST/MCP/CLI), then the run resumes; this is the designed governance gate, not an error. |
 | `status=error … unknown_connector` | Connector id drift — typed `argocd-3.x` instead of `argocd-api-3.x`. | Use `argocd-api-3.x`; the `-api` impl_id discriminator is part of the connector_id grammar. |
 | `RuntimeError … missing required key 'token'` | The Vault secret at `secret_ref` lacks the `token` field. | `meho vault kv get …` the path; the secret must carry a `token` key (no `username`). |
 | op returns ArgoCD `401` / `403` | The stored token is invalid or its RBAC lacks `get`/`list`. | Re-mint with `argocd account generate-token`; grant read-only RBAC on `applications` / `projects` / `repositories`. |
@@ -336,11 +341,11 @@ exists.
 ## References
 
 - Initiative: [#1387 G3.12 ArgoCD connector](https://github.com/evoila/meho/issues/1387); Goal [#214](https://github.com/evoila/meho/issues/214) (connector parity / wrapper retirement).
-- Tasks that shipped this surface: [#1390](https://github.com/evoila/meho/issues/1390) (skeleton — bearer auth + fingerprint + dual registration), [#1391](https://github.com/evoila/meho/issues/1391) (curated read core), [#1392](https://github.com/evoila/meho/issues/1392) (CLI/MCP review + recorded-fixture E2E + this doc).
+- Tasks that shipped this surface: [#1390](https://github.com/evoila/meho/issues/1390) (skeleton — bearer auth + fingerprint + dual registration), [#1391](https://github.com/evoila/meho/issues/1391) (curated read core), [#1392](https://github.com/evoila/meho/issues/1392) (CLI/MCP review + recorded-fixture E2E + this doc), [#1405](https://github.com/evoila/meho/issues/1405) (approval-gated write ops + CLI write verbs).
 - Engineering companion: [`docs/codebase/connectors-argocd.md`](../codebase/connectors-argocd.md).
 - Op handlers: [`backend/src/meho_backplane/connectors/argocd/`](../../backend/src/meho_backplane/connectors/argocd/) (`connector.py`, `ops.py`, `session.py`).
 - Recorded-fixture E2E: [`backend/tests/test_connectors_argocd_e2e.py`](../../backend/tests/test_connectors_argocd_e2e.py) (full `call_operation` + `search_operations` surface); read-core dispatch suite: [`backend/tests/test_connectors_argocd_reads.py`](../../backend/tests/test_connectors_argocd_reads.py).
 - Generic dispatch CLI: [`cli/internal/cmd/operation/`](../../cli/internal/cmd/operation/) (`call.go`, `search.go`, `groups.go`).
 - ArgoCD API docs: <https://argo-cd.readthedocs.io/en/stable/developer-guide/api-docs/>; `VersionMessage` proto: `argoproj/argo-cd` `server/version/version.proto`.
 - Vault federation setup: [`vault-onboarding.md`](./vault-onboarding.md). Onboarding-doc precedents: [`bind9-onboarding.md`](./bind9-onboarding.md), [`kubernetes-onboarding.md`](./kubernetes-onboarding.md), [`harbor-onboarding.md`](./harbor-onboarding.md).
-- Deferred write surface: tracked under Initiative [#1387](https://github.com/evoila/meho/issues/1387); approval-gated write precedents [`github-write-ops-approval.md`](./github-write-ops-approval.md), [`g316-vmware-write-activation.md`](./g316-vmware-write-activation.md).
+- Approval-gated write ops ([#1405](https://github.com/evoila/meho/issues/1405)) route through the human approve-queue (G11.7-T1 [#1401](https://github.com/evoila/meho/issues/1401)); related approval-write precedents [`github-write-ops-approval.md`](./github-write-ops-approval.md), [`g316-vmware-write-activation.md`](./g316-vmware-write-activation.md).

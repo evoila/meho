@@ -17,10 +17,13 @@ import (
 func newAppProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "appproject",
-		Short:        "ArgoCD AppProject sub-verbs (list)",
+		Short:        "ArgoCD AppProject sub-verbs (list; create, update)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newAppProjectListCmd())
+	// Approval-gated write verbs (G3.12-T4 #1405).
+	cmd.AddCommand(newAppProjectCreateCmd())
+	cmd.AddCommand(newAppProjectUpdateCmd())
 	return cmd
 }
 

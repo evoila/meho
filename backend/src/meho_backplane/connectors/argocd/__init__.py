@@ -27,8 +27,11 @@ G3.12-T2 (#1391). :func:`register_argocd_typed_operations` delegates to
 curated read-core descriptors (``argocd.app.list`` / ``argocd.app.get`` /
 ``argocd.app.diff`` / ``argocd.app.resource_tree`` /
 ``argocd.appproject.list`` / ``argocd.repo.list``) — all ``safety_level="safe"``,
-``requires_approval=False``, read-only. The write ops (``app.sync`` /
-``rollback`` / ``set``) remain a deferred, approval-gated follow-up.
+``requires_approval=False``, read-only. The approval-gated write ops
+(``app.sync`` / ``rollback`` / ``set`` / ``refresh`` / ``delete`` +
+``appproject.create`` / ``update``, every one ``requires_approval=True``)
+land on the same registrar walk in G3.12-T4 (#1405) — see
+:mod:`meho_backplane.connectors.argocd.ops_write`.
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry
 point is intentionally **not** called: ArgoCD has no v1 chassis history,
@@ -42,6 +45,10 @@ from meho_backplane.connectors.argocd.ops import (
     ARGOCD_OPS,
     ARGOCD_WHEN_TO_USE_BY_GROUP,
     ArgoCdOp,
+)
+from meho_backplane.connectors.argocd.ops_write import (
+    ARGOCD_WHEN_TO_USE_WRITE_BY_GROUP,
+    ARGOCD_WRITE_OPS,
 )
 from meho_backplane.connectors.argocd.session import (
     ARGOCD_TOKEN_FIELD,
@@ -110,6 +117,8 @@ __all__ = [
     "ARGOCD_OPS",
     "ARGOCD_TOKEN_FIELD",
     "ARGOCD_WHEN_TO_USE_BY_GROUP",
+    "ARGOCD_WHEN_TO_USE_WRITE_BY_GROUP",
+    "ARGOCD_WRITE_OPS",
     "ArgoCdConnector",
     "ArgoCdCredentialsLoader",
     "ArgoCdOp",

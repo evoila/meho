@@ -18,6 +18,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/agent"
 	agentprincipal "github.com/evoila/meho/cli/internal/cmd/agent-principal"
 	"github.com/evoila/meho/cli/internal/cmd/approvals"
+	"github.com/evoila/meho/cli/internal/cmd/argocd"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
@@ -414,6 +415,20 @@ func newRootCmd() *cobra.Command {
 	// before registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `keycloak` parent.
 	root.AddCommand(keycloak.NewRootCmd())
+
+	// G3.12-T3 (#1392) -- argocd-api-3.x operator alias verbs for
+	// Initiative #1387. The verb tree pre-bakes connector_id=
+	// "argocd-api-3.x" on top of the existing /api/v1/operations/call
+	// dispatcher route so operators don't type the connector ID on every
+	// invocation. The connector authenticates to the ArgoCD server REST
+	// API with a Vault-sourced bearer token (the operator's OIDC token is
+	// never forwarded to ArgoCD — see docs/cross-repo/argocd-onboarding.md).
+	// Ships the 6 read-only ops (app list/get/diff/resource-tree,
+	// appproject list, repo list) registered by G3.12-T2 (#1442); the
+	// write surface (sync / refresh) is a deferred approval-gated
+	// follow-up. Registered before registerDynamicSubcommands so the
+	// backplane manifest cannot shadow the built-in `argocd` parent.
+	root.AddCommand(argocd.NewRootCmd())
 
 	// G3.7-T9 (#852) -- hetzner-rest-2026.04 operator alias verbs for
 	// Initiative #370. The verb tree pre-bakes connector_id=

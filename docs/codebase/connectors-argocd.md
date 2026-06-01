@@ -10,8 +10,17 @@ skeleton — bearer-token auth, fingerprint, probe, the G0.6 dispatch shim, and
 dual registration. G3.12-T2 (#1391) layers the curated read core on top:
 `argocd.app.list` / `argocd.app.get` / `argocd.app.diff` /
 `argocd.app.resource_tree` / `argocd.appproject.list` / `argocd.repo.list` —
-all `safety_level="safe"`, `requires_approval=False`, read-only. CLI verbs +
-MCP review + `docs/cross-repo/argocd-onboarding.md` arrive in G3.12-T3.
+all `safety_level="safe"`, `requires_approval=False`, read-only. G3.12-T3
+(#1392) closes the connector out: the ops are operator-usable via the
+per-connector `meho argocd …` Cobra verb tree (`cli/internal/cmd/argocd/`,
+pre-baking `connector_id="argocd-api-3.x"`, mirroring the keycloak/harbor/nsx
+siblings) or the equivalent generic `meho operation call argocd-api-3.x
+<op_id> …` verb, and agent-usable via the `search_operations` /
+`call_operation` meta-tools (the verb tree is operator-only — no per-op MCP
+tools, CLAUDE.md postulate 5), with a recorded-fixture E2E
+([`tests/test_connectors_argocd_e2e.py`](../../backend/tests/test_connectors_argocd_e2e.py))
+and the operator runbook
+[`docs/cross-repo/argocd-onboarding.md`](../cross-repo/argocd-onboarding.md).
 
 Source: `backend/src/meho_backplane/connectors/argocd/`.
 
@@ -188,6 +197,14 @@ shim.
   managed-resources drift, query-param plumbing (`projects`/`selector`/`project`
   + name URL-encoding), `search_operations` visibility, and the `ARGOCD_OPS`
   registration-shape invariants (all `safe`/no-approval/`read-only`, no write op).
+- `tests/test_connectors_argocd_e2e.py` — the G3.12-T3 recorded-fixture E2E:
+  each of the six ops dispatched through the `call_operation` meta-tool (the
+  same narrow-waist surface the MCP server and the `meho operation call` CLI
+  verb reach) against a respx-mocked `argocd-server`, resolving a real
+  DB-seeded `targets` row through `resolve_target` and a stub bearer-token
+  loader preseeded into the dispatcher instance cache; asserts the Vault-sourced
+  bearer rides every request, the token never leaks into the envelope, and all
+  six ops are visible to `search_operations`.
 
 ## Known issues
 
@@ -202,7 +219,8 @@ shim.
 
 ## References
 
-- Issues: #1390 (G3.12-T1 skeleton), #1391 (G3.12-T2 curated read core).
+- Issues: #1390 (G3.12-T1 skeleton), #1391 (G3.12-T2 curated read core),
+  #1392 (G3.12-T3 CLI/MCP review + recorded-fixture E2E + onboarding doc).
   Initiative: #1387 (G3.12 argocd connector). Goal: #214 (connector parity /
   wrapper retirement).
 - HttpConnector base: `backend/src/meho_backplane/connectors/adapters/http.py`

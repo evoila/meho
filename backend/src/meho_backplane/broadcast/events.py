@@ -321,12 +321,18 @@ def classify_op(op_id: str) -> str:
        map to ``write``. Checked before the dot-suffix branches since
        ingested ops carry no meho verb suffix.
     6. ``write`` — mutation suffixes (``.create`` / ``.update`` /
-       ``.delete`` / ``.patch`` / ``.put`` / ``.write``). The
-       secret-bearing ``.write`` ops (``vault.auth.userpass.write`` /
-       ``.update_password``) are pinned in step 3's allowlist, so they
-       never reach this branch.
+       ``.delete`` / ``.patch`` / ``.put`` / ``.write`` / ``.add`` /
+       ``.remove``). The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3)
+       runs first, so a ``.write``-shaped secret-bearing op like
+       ``vault.auth.userpass.write`` keeps its ``credential_write``
+       class.
     7. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
-       ``.get`` / ``.about`` / ``.ls``).
+       ``.get`` / ``.about`` / ``.ls`` / ``.health`` / ``.seal_status``
+       / ``.versions``). ``.read`` is deliberately **not** a read
+       suffix: it would over-match the ``credential_read``-allowlisted
+       ``vault.kv.read`` (the allowlist wins, but the exclusion keeps
+       the policy single-sourced) and would reclassify the auth-config
+       ``.read`` ops that intentionally broadcast as ``other``.
     8. ``other`` — everything else. Falls through to full-detail
        broadcast per decision #3.
 

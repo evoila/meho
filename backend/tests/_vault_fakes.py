@@ -400,6 +400,21 @@ class _FakeSysBackend:
     auth_methods_payload: Any = None
     raise_on_auth_methods: Exception | None = None
     auth_methods_calls: int = 0
+    # G3.15-T2 (#1410) ACL-policy ops. Same payload / raise pair shape as
+    # the sibling sys-read knobs above so the policy-op tests inject a
+    # success body or a failure independently. ``write`` / ``delete``
+    # record the call args (Vault returns 204 with no body, so there is
+    # no payload to inject — only a failure knob).
+    policy_read_payload: Any = None
+    raise_on_policy_read: Exception | None = None
+    policy_read_calls: list[dict[str, Any]] = field(default_factory=list)
+    policy_list_payload: Any = None
+    raise_on_policy_list: Exception | None = None
+    policy_list_calls: int = 0
+    raise_on_policy_write: Exception | None = None
+    policy_write_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_policy_delete: Exception | None = None
+    policy_delete_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
         self.read_calls.append({"method": method})
@@ -424,6 +439,35 @@ class _FakeSysBackend:
         if self.raise_on_auth_methods is not None:
             raise self.raise_on_auth_methods
         return self.auth_methods_payload
+
+    def read_policy(self, name: str) -> Any:
+        self.policy_read_calls.append({"name": name})
+        if self.raise_on_policy_read is not None:
+            raise self.raise_on_policy_read
+        return self.policy_read_payload
+
+    def list_policies(self) -> Any:
+        self.policy_list_calls += 1
+        if self.raise_on_policy_list is not None:
+            raise self.raise_on_policy_list
+        return self.policy_list_payload
+
+    def create_or_update_policy(
+        self, name: str, policy: str, pretty_print: bool = True
+    ) -> _DeleteResponse:
+        self.policy_write_calls.append(
+            {"name": name, "policy": policy, "pretty_print": pretty_print}
+        )
+        if self.raise_on_policy_write is not None:
+            raise self.raise_on_policy_write
+        # Vault returns 204 with no body; hvac yields the requests.Response.
+        return _DeleteResponse()
+
+    def delete_policy(self, name: str) -> _DeleteResponse:
+        self.policy_delete_calls.append({"name": name})
+        if self.raise_on_policy_delete is not None:
+            raise self.raise_on_policy_delete
+        return _DeleteResponse()
 
 
 @dataclass
@@ -494,6 +538,12 @@ def install_fake_client(
     mounts_exc: Exception | None = None,
     auth_methods_payload: Any = None,
     auth_methods_exc: Exception | None = None,
+    policy_read_payload: Any = None,
+    policy_read_exc: Exception | None = None,
+    policy_list_payload: Any = None,
+    policy_list_exc: Exception | None = None,
+    policy_write_exc: Exception | None = None,
+    policy_delete_exc: Exception | None = None,
     keys: list[str] | None = None,
     versions_meta: dict[str, Any] | None = None,
     list_exc: Exception | None = None,
@@ -511,9 +561,11 @@ def install_fake_client(
     login / revoke / health-read / kv-read exception injection plus
     secret and KV-version overrides, the G3.3-T2 (#546) sys read
     group's seal-status / mounts / auth-methods payload + exception
-    injection, and the G3.3-T1 KV-v2 verbs (list / put / versions /
-    patch / delete) with per-verb exception injection and
-    key/version-metadata overrides.
+    injection, the G3.3-T1 KV-v2 verbs (list / put / versions / patch /
+    delete) with per-verb exception injection and key/version-metadata
+    overrides, and the G3.15-T2 (#1410) ACL-policy verbs (read / list
+    payload + exception injection; write / delete exception injection,
+    write/delete returning 204 with no body).
     """
     fake = install_fake_vault(monkeypatch, kv_version=kv_version if kv_version is not None else 11)
     fake.auth.jwt.raise_on_login = login_exc
@@ -526,6 +578,12 @@ def install_fake_client(
     fake.sys.raise_on_mounts = mounts_exc
     fake.sys.auth_methods_payload = auth_methods_payload
     fake.sys.raise_on_auth_methods = auth_methods_exc
+    fake.sys.policy_read_payload = policy_read_payload
+    fake.sys.raise_on_policy_read = policy_read_exc
+    fake.sys.policy_list_payload = policy_list_payload
+    fake.sys.raise_on_policy_list = policy_list_exc
+    fake.sys.raise_on_policy_write = policy_write_exc
+    fake.sys.raise_on_policy_delete = policy_delete_exc
     kv = fake.secrets.kv.v2
     if secret is not None:
         kv.secret = secret

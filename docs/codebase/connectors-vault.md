@@ -44,9 +44,10 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   `vault.kv.read`; G3.3-T1 #545 adds list/put/versions/delete). Group
   key `kv`. `vault.kv.read` / `vault.kv.list` are classified
   `credential_read` (decision #3 — aggregate-only broadcast).
-- **`sys` read op group** (`ops_sys.py`, G3.3-T2 #546) —
-  `register_vault_sys_typed_operations()` registers four read-only
-  diagnostics ops under group key `sys`, all `safety_level='safe'`,
+- **`sys` op group** (`ops_sys.py`, G3.3-T2 #546; policy ops
+  G3.15-T2 #1410) — `register_vault_sys_typed_operations()` registers
+  four read-only diagnostics ops plus the four ACL-policy ops under
+  group key `sys`. The diagnostics ops are all `safety_level='safe'`,
   `requires_approval=False`:
   - `vault.sys.health` — `GET /v1/sys/health`. **Shares** the
     probe-path implementation: calls `auth.vault._build_client`
@@ -65,6 +66,38 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   The three authenticated ops forward the operator JWT via
   `vault_client_for_operator` and offload the blocking `hvac` call with
   `asyncio.to_thread`.
+
+  The ACL-policy ops (`ops_sys_policy.py` — handlers/schemas split out
+  to keep `ops_sys.py` under the 600-line file budget; registered from
+  the same `register_vault_sys_typed_operations()` so the whole `sys`
+  group lands from one place):
+
+  | op_id | hvac call | safety_level | requires_approval | op_class |
+  |---|---|---|---|---|
+  | `vault.sys.policy.read` | `sys.read_policy` | safe | False | `other` |
+  | `vault.sys.policy.list` | `sys.list_policies` | safe | False | `read` |
+  | `vault.sys.policy.write` | `sys.create_or_update_policy` | dangerous | True | `write` |
+  | `vault.sys.policy.delete` | `sys.delete_policy` | dangerous | True | `write` |
+
+  All four forward the operator JWT via `vault_client_for_operator` and
+  offload the sync `hvac` call with `asyncio.to_thread`. `policy.read`
+  unwraps the `data.rules` (or `data.policy`) envelope, falling back to
+  the legacy top-level keys → `{name, rules}` (rules `None` when
+  absent). `policy.list` returns `{policies: [...]}` from the
+  envelope's `data.policies`. `policy.write` / `policy.delete` return
+  Vault's HTTP 204 with no body, so the handlers synthesize
+  `{name, written: true}` / `{name, deleted: true}` (reaching-here =
+  success; hvac raises on non-2xx). The shared `name` param uses
+  `pattern="^(?=.*\S)[^/]+$"` (the KV-v2 `mount` fragment's shape): a
+  blank name fails validation rather than degrading to a runtime error,
+  and a slash-bearing name is rejected. `policy.write`'s `policy` param
+  is a non-empty HCL/JSON body that **replaces** the policy in full (not
+  a merge); the verb layer / agent owns any body linting — this op is a
+  thin pass-through and lets Vault reject malformed HCL. `policy.read`
+  classifies `other` (its only param is the policy name; `.read` is not
+  a read-suffix — see "Broadcast PII discipline"), `policy.list` `read`
+  via the `.list` suffix, and `policy.write` / `policy.delete` `write`
+  (the `.write` / `.delete` suffixes redact the HCL body).
 - **`auth` read op group** (`ops_auth.py`, G3.3-T3 #547) —
   `register_vault_auth_operations()` registers `vault.auth.userpass.list`
   / `vault.auth.userpass.read` / `vault.auth.approle.list` /
@@ -190,6 +223,20 @@ the broadcast collapses to aggregate-only and the audit row keeps only a
 secret. See `docs/codebase/broadcast.md` for the full sensitivity
 taxonomy.
 
+`vault.sys.policy.write` (G3.15-T2 #1410) classifies `write` via the
+`.write` write-suffix (added to `_WRITE_SUFFIXES` for this op): the HCL
+policy body is in the request params, so without the suffix it would
+fall through to `other` and broadcast the policy text in full. The
+`_CREDENTIAL_WRITE_OPS` allowlist is consulted first, so the
+`.write`-shaped `vault.auth.userpass.write` keeps its `credential_write`
+class. `vault.sys.policy.delete` is `write` via `.delete`;
+`vault.sys.policy.list` is `read` via `.list`. `vault.sys.policy.read`
+classifies `other` — `.read` is deliberately **not** a read-suffix (it
+would over-match the `credential_read`-allowlisted `vault.kv.read`), and
+the policy-read param is only the policy name, so the `other` full-param
+broadcast is the consistent, safe direction (same rationale as the
+`vault.auth.*.read` auth-config ops).
+
 ## Approval gating
 
 The mutating KV ops — `vault.kv.put` (`caution`), `vault.kv.patch`
@@ -215,6 +262,15 @@ audit rows) rather than hard-denied; the call executes on the
 approvals-API resume path once approved. `requires_approval` is a static
 boolean on the descriptor and `safety_level` is the load-bearing signal
 the gate keys on.
+
+`vault.sys.policy.write` / `vault.sys.policy.delete` (G3.15-T2 #1410)
+also register `requires_approval=True` (`safety_level='dangerous'`): a
+bad HCL body can lock everyone out or silently widen access, so both
+are approval-gated. A dispatch by a human/service principal therefore
+parks as `awaiting_approval` before reaching Vault (proven in
+`test_connectors_vault_sys.py`); the handler's hvac-forwarding logic is
+exercised by calling it directly in the unit suite. The policy reads
+(`policy.read` / `policy.list`) stay `requires_approval=False`.
 
 ## JSONFlux result-handle path (`vault.kv.list`)
 
@@ -357,8 +413,9 @@ and a real Postgres audit store (reusing the integration conftest's
   call. Acceptable under v0.2 dogfood load (per-request login is
   already the v0.1/v0.2 model); revisit if a per-operator token cache
   lands.
-- `sys` writes (unseal, mount/unmount, policy write) are deliberately
-  out of scope for v0.2.
+- `sys` policy writes (`policy.write` / `policy.delete`) landed in
+  G3.15-T2 (#1410), approval-gated. Other `sys` writes (unseal,
+  mount/unmount bootstrap) remain out of scope here (G3.15-T5).
 - AppRole secret-id generation is out of scope for v0.2 (high-risk
   write with policy implications; v0.2.next behind a policy gate).
 

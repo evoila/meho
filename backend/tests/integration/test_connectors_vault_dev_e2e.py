@@ -5,7 +5,8 @@
 
 Boots a real ``hashicorp/vault:1.18`` server in dev mode via
 testcontainers, seeds the surfaces every op in Initiative #366 touches
-(KV-v2 ``secret/``, ``userpass``, ``approle``), then dispatches every
+(KV-v2 ``secret/``, ``userpass``, ``approle``, and a ``ci-readonly`` ACL
+policy for the G3.15-T2 #1410 policy reads), then dispatches every
 registered ``vault.kv.*`` / ``vault.sys.*`` / ``vault.auth.*`` op
 through the **real G0.6 dispatcher** against the live Vault and a real
 Postgres audit store. The unit suites (``test_connectors_vault*.py``)
@@ -44,7 +45,10 @@ What this harness proves (issue #551 DoD)
   ``credential_read``-allowlisted ``vault.kv.read``; the auth-config
   ``.read`` ops therefore classify ``other``, the safe
   over-broadcast direction for non-secret auth-method metadata
-  (decision #3). The test assertions below encode this split.
+  (decision #3). ``vault.sys.policy.read`` (G3.15-T2 #1410) shares
+  this ``other`` classification for the same reason — its only param
+  is the policy name — while ``vault.sys.policy.list`` is ``read`` via
+  the ``.list`` suffix. The test assertions below encode this split.
 * The dev-root token is generated into the container via
   ``VAULT_DEV_ROOT_TOKEN_ID`` and only ever held in the fixture's
   return value — it is never written to a workflow log, a committed
@@ -287,6 +291,16 @@ def _seed_vault(addr: str) -> None:
         token_policies=["default"],
         token_ttl="1h",
         mount_point="approle",
+    )
+
+    # --- ACL policy (G3.15-T2 #1410) -------------------------------
+    # A named policy so vault.sys.policy.read / .list have a non-builtin
+    # target to assert on. Reads only — the dangerous write/delete ops
+    # are approval-gated, so a dispatch parks before reaching Vault and
+    # is covered by the unit suite.
+    client.sys.create_or_update_policy(
+        name="ci-readonly",
+        policy='path "secret/data/app/*" {\n  capabilities = ["read", "list"]\n}\n',
     )
 
 
@@ -831,6 +845,64 @@ async def test_sys_auth_list_against_dev_vault(
     await _assert_audited(
         "vault.sys.auth.list",
         operator_sub="op-sys-auth",
+        expected_op_class="read",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_policy_read_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.policy.read`` returns the seeded ci-readonly body; op_class=read."""
+    target, _ = vault_e2e
+    operator = _make_operator(sub="op-policy-read")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.policy.read",
+        target=target,
+        params={"name": "ci-readonly"},
+    )
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["name"] == "ci-readonly"
+    assert "secret/data/app/*" in (result.result["rules"] or "")
+    await _assert_audited(
+        "vault.sys.policy.read",
+        operator_sub="op-policy-read",
+        # ``.read`` is not a read-suffix; policy.read's only param is the
+        # policy name, so it broadcasts ``other`` (full params) like the
+        # vault.auth.*.read ops.
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_policy_list_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.policy.list`` includes the seeded policy + builtins; op_class=read."""
+    target, _ = vault_e2e
+    operator = _make_operator(sub="op-policy-list")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.policy.list",
+        target=target,
+        params={},
+    )
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    policies = result.result["policies"]
+    assert "ci-readonly" in policies
+    assert "default" in policies
+    await _assert_audited(
+        "vault.sys.policy.list",
+        operator_sub="op-policy-list",
         expected_op_class="read",
         events=captured_events,
     )

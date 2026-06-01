@@ -172,6 +172,28 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 - [ ] Chart published to `oci://ghcr.io/evoila/meho-chart` (`chart.yml` green).
 - [ ] CLI tarballs attached to the Release; `meho version` prints `vX.Y.Z`.
 
+#### Maintainer one-time setup — GHCR package visibility
+
+The first time `image.yml` pushes to `ghcr.io/evoila/meho`, GHCR creates
+the package as **private**. A maintainer must flip visibility to
+**public** once so anonymous `docker pull` works (this is a one-time
+action, not per-release):
+
+```bash
+gh api --method PATCH /orgs/evoila/packages/container/meho \
+  -f visibility=public
+```
+
+Or via the UI: GitHub org `evoila` → Packages → `meho` → Package settings →
+Change visibility → **Public**.
+
+Verify:
+
+```bash
+gh api /orgs/evoila/packages/container/meho --jq '.visibility'   # -> "public"
+docker logout ghcr.io && docker pull ghcr.io/evoila/meho:main    # -> succeeds
+```
+
 ### 6. Deploy + smoke
 
 - [ ] Deploy to `rke2-infra`.

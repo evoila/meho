@@ -6,11 +6,11 @@
 API. MEHO runs Keycloak as its own identity provider on the RDC fleet;
 this connector manages that Keycloak through its Admin REST surface.
 
-G3.13-T1 (#1393) ships the **substrate**: the connector class, the admin
-credential loader, `fingerprint()`, and dual registry registration. Read
-operations land in T2 and onboarding docs in T3. The module ships **zero**
-typed operations — the typed-op registrar seam is wired (so the lifespan
-already drives Keycloak) but the op walk is empty until T2.
+G3.13-T1 (#1393) shipped the **substrate**: the connector class, the
+admin credential loader, `fingerprint()`, and dual registry registration.
+G3.13-T2 (#1394) layers the **six curated read ops** onto that surface
+(realm/client/client-scope/user/role-mapping). Onboarding docs land in T3
+and the approval-gated write surface in T4.
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -20,7 +20,17 @@ fresh target with no asserted version still resolves.
 
 - `KeycloakConnector` (`connectors/keycloak/connector.py`) — the
   `HttpConnector` subclass. Holds a per-target admin-token cache with
-  TTL-driven refresh and an injectable admin-credential loader.
+  TTL-driven refresh and an injectable admin-credential loader. Exposes a
+  thin bound-method shim per read op (`realm_get`, `client_list`,
+  `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`) and
+  the `_get_admin_json` / `_get_admin_list` GET helpers (object vs array
+  responses).
+- `KeycloakOp` + `READ_OPS` (`connectors/keycloak/ops_read.py`) — the
+  op-metadata dataclass and the six-op registration table (the bind9 /
+  pfSense `ops`-table precedent). `WHEN_TO_USE_BY_GROUP` maps each op
+  group to its curated selection blurb.
+- `redact_secret_fields` (`connectors/keycloak/redaction.py`) — the
+  recursive scrubber every read handler runs its response through.
 - `KeycloakClientCredentials` / `KeycloakPasswordCredentials`
   (`connectors/keycloak/session.py`) — the two admin-credential shapes
   (tagged union `KeycloakAdminCredentials`).
@@ -95,6 +105,42 @@ The password shape accepts an optional `client_id` field (default
   `reachable=False`).
 - `probe(target)` — delegates to `fingerprint`; one admin round-trip
   covers reachability + admin-auth validity.
+- `register_operations()` — walks `READ_OPS`, resolves each
+  `handler_attr` to a bound method, looks the group's `when_to_use` up in
+  `WHEN_TO_USE_BY_GROUP` (a missing entry is a hard error), and upserts
+  via `register_typed_operation`. Idempotent across restarts.
+
+## Read ops (G3.13-T2)
+
+Six `safety_level="safe"` / `requires_approval=False` read ops, all
+tagged `read-only`, all dispatching via the admin-auth path. The realm is
+the target's `managed_realm` (no per-op realm param):
+
+| op_id | Admin REST API | returns |
+|---|---|---|
+| `keycloak.realm.get` | `GET /admin/realms/{realm}` | realm config |
+| `keycloak.client.list` | `GET .../clients` (`?clientId=`/`?max=`) | `{rows, total}` |
+| `keycloak.client.get` | `GET .../clients/{id}` | one client (flows, redirect URIs, mappers) |
+| `keycloak.client_scope.list` | `GET .../client-scopes` | `{rows, total}` |
+| `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | `{rows, total}`, no credentials |
+| `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | realm + client role mappings |
+
+`client.get` / `role_mapping.get` take the **internal UUID** (`id`), not
+the human `clientId` / `username` — discover it via the matching `.list`
+op first.
+
+### Secret redaction
+
+Every handler runs its response through `redact_secret_fields` before
+returning, so the value of `secret` (confidential-client secret),
+`credentials` / `value` / `secretData` / `credentialData` (user
+credential material) is replaced with `***REDACTED***` — recursively,
+including secrets nested inside protocol mappers or identity-provider
+configs. The scrub happens at the connector boundary (not the broadcast
+layer) because these are config reads where the secret is incidental: it
+must never enter the synchronous `OperationResult` the caller receives.
+The write surface (T4) will continue to redact secret *inputs* at the
+classification layer per the general posture.
 
 ## Target configuration
 
@@ -125,8 +171,9 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 
 ## Known issues / future work
 
-- T2 (#1394 et al.) fills the read-op walk in
-  `KeycloakConnector.register_operations`.
+- The write surface (client/user/scope/role-mapping CRUD,
+  `requires_approval=True`) is the deferred T4 follow-up; T2 ships
+  read-only.
 - No logout-revoke on `aclose` — admin access tokens are short-lived;
   revoke-on-close is deferred (same posture as NSX / vRLI).
 - `/admin/serverinfo` is undocumented (though stable across 26.x); the

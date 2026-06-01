@@ -25,6 +25,7 @@ Initiative's CI wiring lands under T6) sets
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -730,6 +731,143 @@ async def test_discover_topology_against_k3s_is_idempotent_when_recalled(
 
 
 # ---------------------------------------------------------------------------
+# G3.14-T2 (#1404) k8s.exec -- live k3s exercise over the WsApiClient
+# websocket transport. Creates a short-lived busybox pod (which ships a
+# real shell, unlike the distroless k3s system pods), execs against it,
+# and deletes it on teardown.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def busybox_pod(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> AsyncIterator[tuple[KubernetesConnector, _K3sTarget, str]]:
+    """Create a running busybox pod in ``default``; yield its name; delete it.
+
+    busybox is used because the k3s system pods (coredns, traefik,
+    metrics-server) run distroless / scratch images with no shell, so
+    exec'ing ``sh -c`` against them fails. The pod runs ``sleep`` so it
+    stays Running for the duration of the exec calls.
+    """
+    import asyncio as _asyncio
+
+    from kubernetes_asyncio import client as _client
+
+    connector, target = k3s_connector
+    operator = _make_k3d_operator()
+    api_client = await connector._get_api_client(target, operator)
+    v1 = _client.CoreV1Api(api_client)
+
+    namespace = "default"
+    # Server-generated name (generateName) + captured created.metadata.name:
+    # delete_namespaced_pod is async, so a fixed name races AlreadyExists
+    # across the three function-scoped exec tests on re-run / in parallel.
+    pod_manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"generateName": "meho-exec-it-busybox-", "namespace": namespace},
+        "spec": {
+            "restartPolicy": "Never",
+            "containers": [
+                {
+                    "name": "busybox",
+                    "image": os.environ.get("MEHO_TEST_BUSYBOX_IMAGE", "busybox:1.36"),
+                    "command": ["sleep", "600"],
+                }
+            ],
+        },
+    }
+    created = await v1.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+    pod_name = created.metadata.name
+
+    # Wait for the pod to reach Running (image pull + start). The
+    # container fixture already gated on the API server's readiness, so
+    # this loop only waits on the busybox image pull.
+    for _ in range(60):
+        pod = await v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+        if pod.status is not None and pod.status.phase == "Running":
+            break
+        await _asyncio.sleep(1.0)
+    else:
+        await v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
+        pytest.skip("busybox pod did not reach Running within 60s")
+
+    try:
+        yield connector, target, pod_name
+    finally:
+        # Best-effort teardown -- a delete failure (API blip) should not
+        # mask the test result; the pod is restartPolicy=Never.
+        with contextlib.suppress(Exception):
+            await v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
+
+
+@pytest.mark.asyncio
+async def test_exec_against_k3s_captures_stdout_and_exit_zero(
+    busybox_pod: tuple[KubernetesConnector, _K3sTarget, str],
+) -> None:
+    """``k8s.exec echo`` over the live websocket returns stdout + exit 0."""
+    connector, target, pod_name = busybox_pod
+    result = await connector.exec_command(
+        _make_k3d_operator(),
+        target,
+        {
+            "pod_name": pod_name,
+            "namespace": "default",
+            "command": ["echo", "hello-from-exec"],
+        },
+    )
+    assert result["pod"] == pod_name
+    assert result["container"] == "busybox"
+    assert result["stdout"] == "hello-from-exec\n"
+    assert result["stderr"] == ""
+    assert result["exit_code"] == 0
+    assert result["timed_out"] is False
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_exec_against_k3s_non_zero_exit_parsed_from_status_frame(
+    busybox_pod: tuple[KubernetesConnector, _K3sTarget, str],
+) -> None:
+    """A command that exits non-zero surfaces the code from the status frame."""
+    connector, target, pod_name = busybox_pod
+    result = await connector.exec_command(
+        _make_k3d_operator(),
+        target,
+        {
+            "pod_name": pod_name,
+            "namespace": "default",
+            "command": ["sh", "-c", "echo to-stderr 1>&2; exit 7"],
+        },
+    )
+    assert result["exit_code"] == 7
+    assert "to-stderr" in result["stderr"]
+    assert result["timed_out"] is False
+
+
+@pytest.mark.asyncio
+async def test_exec_against_k3s_timeout_returns_partial_and_timed_out(
+    busybox_pod: tuple[KubernetesConnector, _K3sTarget, str],
+) -> None:
+    """A long-running command is cut off at the deadline with timed_out=true."""
+    connector, target, pod_name = busybox_pod
+    result = await connector.exec_command(
+        _make_k3d_operator(),
+        target,
+        {
+            "pod_name": pod_name,
+            "namespace": "default",
+            "command": ["sh", "-c", "echo started; sleep 30"],
+            "timeout_seconds": 2,
+        },
+    )
+    assert result["timed_out"] is True
+    assert result["exit_code"] is None
+    # The "started" line is emitted immediately, before the sleep.
+    assert "started" in result["stdout"]
+
+
+# ---------------------------------------------------------------------------
 # G3.14-T1 (#1403) single-call write ops -- live k3s exercise.
 #
 # These talk to the real API server: they create + mutate + delete real
@@ -739,29 +877,36 @@ async def test_discover_topology_against_k3s_is_idempotent_when_recalled(
 # ---------------------------------------------------------------------------
 
 
-_WRITE_NS = "meho-write-test"
-
-
 @pytest.fixture
 async def write_namespace(
     k3s_connector: tuple[KubernetesConnector, _K3sTarget],
 ) -> Any:
-    """Create the scratch namespace via ``k8s.namespace.create`` and tear it down."""
+    """Create a unique scratch namespace via ``k8s.namespace.create`` and tear it down.
+
+    The namespace name carries a per-run random suffix so a leftover from a
+    prior run (or a retry, or test-ordering inside the same session) can't
+    pre-exist and make the idempotent ``k8s.namespace.create`` report
+    ``created=False`` on this first creation. Each test gets the name via the
+    yielded tuple rather than a module-level constant.
+    """
+    import uuid as _uuid
+
     from kubernetes_asyncio import client as _client
 
     connector, target = k3s_connector
     op = _make_k3d_operator()
-    created = await connector.k8s_namespace_create(op, target, {"name": _WRITE_NS})
+    ns_name = f"meho-write-test-{_uuid.uuid4().hex[:8]}"
+    created = await connector.k8s_namespace_create(op, target, {"name": ns_name})
     assert created["created"] is True
     try:
-        yield connector, target, op
+        yield connector, target, op, ns_name
     finally:
         import contextlib
 
         api_client = await connector._get_api_client(target, op)
         core_v1 = _client.CoreV1Api(api_client)
         with contextlib.suppress(Exception):
-            await core_v1.delete_namespace(name=_WRITE_NS)
+            await core_v1.delete_namespace(name=ns_name)
 
 
 @pytest.mark.asyncio
@@ -769,8 +914,8 @@ async def test_namespace_create_is_idempotent_against_k3s(
     write_namespace: Any,
 ) -> None:
     """A second create against the existing namespace reports created=False."""
-    connector, target, op = write_namespace
-    again = await connector.k8s_namespace_create(op, target, {"name": _WRITE_NS})
+    connector, target, op, ns_name = write_namespace
+    again = await connector.k8s_namespace_create(op, target, {"name": ns_name})
     assert again["created"] is False
     assert again["already_existed"] is True
 
@@ -782,12 +927,12 @@ async def test_apply_server_dry_run_then_real_against_k3s(
     """Server-dry-run previews without persisting; the real apply creates it."""
     from kubernetes_asyncio import client as _client
 
-    connector, target, op = write_namespace
+    connector, target, op, ns_name = write_namespace
     manifest = (
         "apiVersion: apps/v1\n"
         "kind: Deployment\n"
         "metadata:\n"
-        f"  name: nginx\n  namespace: {_WRITE_NS}\n"
+        f"  name: nginx\n  namespace: {ns_name}\n"
         "spec:\n"
         "  replicas: 1\n"
         "  selector:\n    matchLabels:\n      app: nginx\n"
@@ -805,18 +950,18 @@ async def test_apply_server_dry_run_then_real_against_k3s(
     from kubernetes_asyncio.client.exceptions import ApiException
 
     with pytest.raises(ApiException) as exc:
-        await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+        await apps_v1.read_namespaced_deployment(name="nginx", namespace=ns_name)
     assert exc.value.status == 404, "dry-run must not have persisted the Deployment"
 
     # Real apply now creates it.
     applied = await connector.k8s_apply(op, target, {"manifest": manifest})
     assert applied["dry_run"] is False
-    live = await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    live = await apps_v1.read_namespaced_deployment(name="nginx", namespace=ns_name)
     assert live.metadata.name == "nginx"
 
     # Scale it and confirm before/after.
     scaled = await connector.k8s_scale(
-        op, target, {"name": "nginx", "namespace": _WRITE_NS, "replicas": 3}
+        op, target, {"name": "nginx", "namespace": ns_name, "replicas": 3}
     )
     assert scaled["replicas_before"] == 1
     assert scaled["replicas_after"] == 3
@@ -828,24 +973,24 @@ async def test_apply_server_dry_run_then_real_against_k3s(
         {
             "kind": "deployment",
             "name": "nginx",
-            "namespace": _WRITE_NS,
+            "namespace": ns_name,
             "annotations": {"meho.test/owner": "platform"},
         },
     )
     await connector.k8s_label(
         op,
         target,
-        {"kind": "deployment", "name": "nginx", "namespace": _WRITE_NS, "labels": {"tier": "web"}},
+        {"kind": "deployment", "name": "nginx", "namespace": ns_name, "labels": {"tier": "web"}},
     )
-    refreshed = await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    refreshed = await apps_v1.read_namespaced_deployment(name="nginx", namespace=ns_name)
     assert refreshed.metadata.annotations.get("meho.test/owner") == "platform"
     assert refreshed.metadata.labels.get("tier") == "web"
 
     # Rollout restart stamps the pod-template annotation.
     restart = await connector.k8s_rollout_restart(
-        op, target, {"name": "nginx", "namespace": _WRITE_NS}
+        op, target, {"name": "nginx", "namespace": ns_name}
     )
-    rolled = await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    rolled = await apps_v1.read_namespaced_deployment(name="nginx", namespace=ns_name)
     stamped = rolled.spec.template.metadata.annotations.get("kubectl.kubernetes.io/restartedAt")
     assert stamped == restart["restarted_at"]
 
@@ -866,10 +1011,10 @@ async def test_secret_create_redacts_values_against_k3s(
 
     from meho_backplane.broadcast.events import classify_op, redact_payload
 
-    connector, target, op = write_namespace
+    connector, target, op, ns_name = write_namespace
     raw_params = {
         "name": "db-creds",
-        "namespace": _WRITE_NS,
+        "namespace": ns_name,
         "string_data": {"password": "live-hunter2"},
     }
     summary = await connector.k8s_secret_create(op, target, dict(raw_params))
@@ -880,7 +1025,7 @@ async def test_secret_create_redacts_values_against_k3s(
     # The value DID reach the cluster.
     api_client = await connector._get_api_client(target, op)
     core_v1 = _client.CoreV1Api(api_client)
-    live = await core_v1.read_namespaced_secret(name="db-creds", namespace=_WRITE_NS)
+    live = await core_v1.read_namespaced_secret(name="db-creds", namespace=ns_name)
     assert base64.b64decode(live.data["password"]).decode() == "live-hunter2"
 
     # The broadcast the publisher would emit is aggregate-only -- the
@@ -898,10 +1043,10 @@ async def test_job_create_then_delete_redacts_env_secret_against_k3s(
     """A live Job's inline env secret never reaches the broadcast; delete reaps it."""
     from meho_backplane.broadcast.events import classify_op, redact_payload
 
-    connector, target, op = write_namespace
+    connector, target, op, ns_name = write_namespace
     job_params = {
         "name": "echo-job",
-        "namespace": _WRITE_NS,
+        "namespace": ns_name,
         "spec": {
             "backoffLimit": 0,
             "template": {
@@ -920,7 +1065,7 @@ async def test_job_create_then_delete_redacts_env_secret_against_k3s(
         },
     }
     created = await connector.k8s_job_create(op, target, dict(job_params))
-    assert created == {"name": "echo-job", "namespace": _WRITE_NS, "created": True}
+    assert created == {"name": "echo-job", "namespace": ns_name, "created": True}
     assert "job-topsecret" not in str(created)
 
     # Broadcast redaction: aggregate-only, no env secret.
@@ -935,7 +1080,7 @@ async def test_job_create_then_delete_redacts_env_secret_against_k3s(
         {
             "kind": "job",
             "name": "echo-job",
-            "namespace": _WRITE_NS,
+            "namespace": ns_name,
             "propagation_policy": "Background",
         },
     )
@@ -951,12 +1096,12 @@ async def test_delete_rejects_namespace_kind_against_k3s(
         UndeletableKindError,
     )
 
-    connector, target, op = write_namespace
+    connector, target, op, ns_name = write_namespace
     with pytest.raises(UndeletableKindError):
         await connector.k8s_delete(
             op,
             target,
-            {"kind": "namespace", "name": _WRITE_NS, "namespace": _WRITE_NS},
+            {"kind": "namespace", "name": ns_name, "namespace": ns_name},
         )
 
 

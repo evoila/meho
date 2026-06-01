@@ -148,6 +148,51 @@ real operator through the same loader.
 | `k8s.configmap.info`   | safe   | `CoreV1Api.read_namespaced_config_map()` -- full data + binary_data. |
 | `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` / `list_event_for_all_namespaces()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. Forwards `label_selector` + `field_selector`. |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
+| `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
+
+### `k8s.exec` -- websocket command-and-capture (`ops_exec.py`)
+
+`k8s.exec` is the one op that cannot ride the cached read `ApiClient`.
+Pod exec is an HTTP `Upgrade` to a websocket carrying the multiplexed
+`v4.channel.k8s.io` sub-protocol, which `kubernetes_asyncio` only speaks
+through its `kubernetes_asyncio.stream.WsApiClient` subclass. The
+connector therefore keeps a **parallel** per-target cache
+(`KubernetesConnector._ws_api_clients`, keyed on `secret_ref` exactly
+like `_api_clients`), built lazily from the same operator-identity
+kubeconfig via `_get_ws_api_client` and closed alongside the read
+clients in `aclose` (no leaked sockets).
+
+The library's `WsApiClient.request` with `_preload_content=True` (the
+default) concatenates stdout + stderr into one blob *and discards the
+status frame* -- so the exit code is lost and the two streams can no
+longer be told apart. To meet the op's contract the handler passes
+`_preload_content=False`, which returns the raw aiohttp websocket
+context manager; it then `async with`-es the socket, demuxes the leading
+channel byte itself (1 = stdout, 2 = stderr, 3 = error/status), and
+parses the exit code from the channel-3 frame via
+`WsApiClient.parse_error_data` (`status == "Success"` -> 0; otherwise the
+code in `details.causes[0].message`).
+
+A bounded `timeout_seconds` (default 30, capped 300) wraps the drain in
+`asyncio.wait_for`. On expiry the socket is closed explicitly and partial
+output is returned with `timed_out=true` and `exit_code=null`. The
+partial-output guarantee is why the demux writes into a caller-owned
+`_ExecCapture` accumulator rather than returning a tuple: a `wait_for`
+cancellation discards a coroutine's return value but not the bytes
+already written to the shared accumulator.
+
+Each stream is capped at 1 MiB independently and front-truncated when
+oversize (`*_truncated_byte_count` recorded), reusing the never-log
+posture of `k8s.logs` -- the audit row hashes only the request params,
+never the captured bytes. Pod / container resolution reuses
+`resolve_pod_and_container` from `ops_logs`.
+
+Interactive exec (`kubectl exec -it` -- a live PTY/shell) is
+**deliberately out of scope**: the dispatcher returns a single
+`OperationResult` with no incremental stdin/stdout envelope, the same
+deferral `k8s.logs -f` took. `stdin` and `tty` are pinned `False` on the
+wire and no code path flips them; both land once the MCP `tools/call`
+envelope grows a streaming shape.
 
 G3.2-T6 (CLI alias verbs + k3d E2E acceptance + operator-facing
 onboarding doc) layers operator ergonomics on top of this surface
@@ -526,9 +571,14 @@ just `len(rows)` because nothing reduces.
   - [#323 G3.2-T3](https://github.com/evoila/meho/issues/323) -- workload
     ops (`k8s.pod.{list,info}` / `k8s.deployment.{list,info}`).
   - [#325 G3.2-T5](https://github.com/evoila/meho/issues/325) -- `k8s.logs`.
-- This Task: [#324 G3.2-T4](https://github.com/evoila/meho/issues/324)
-  -- network + config + event ops (`k8s.service.list` /
-  `k8s.ingress.list` / `k8s.configmap.list/info` / `k8s.event.list`).
+  - [#324 G3.2-T4](https://github.com/evoila/meho/issues/324) -- network +
+    config + event ops (`k8s.service.list` / `k8s.ingress.list` /
+    `k8s.configmap.list/info` / `k8s.event.list`).
+- This Task: [#1404 G3.14-T2](https://github.com/evoila/meho/issues/1404)
+  -- `k8s.exec` bounded command-and-capture over the `WsApiClient`
+  websocket transport (interactive `-it` deferred). Parent Initiative:
+  [#1398 G3.14](https://github.com/evoila/meho/issues/1398) -- kubernetes
+  write/exec op surface.
 - Substrate Initiative: [#388 G0.6](https://github.com/evoila/meho/issues/388)
   -- operation registry + dispatcher + JSONFlux substrate.
 - `kubernetes_asyncio`: https://github.com/tomplus/kubernetes_asyncio

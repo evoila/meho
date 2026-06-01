@@ -161,6 +161,8 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "k8s.delete",
     "k8s.secret.create",
     "k8s.job.create",
+    # G3.14-T2 exec op (websocket pod-exec, approval-gated).
+    "k8s.exec",
 )
 
 
@@ -895,5 +897,6 @@ async def test_dispatch_unknown_op_returns_dispatcher_unknown_op_envelope(
     extras = result.extras
     assert extras.get("error_code") == "unknown_op"
     # ``known_op_count`` carries the descriptor count for the triple;
-    # post-G3.14-T1 this is len(EXPECTED_OP_IDS) (24: 14 read + 10 write).
+    # post-G3.14-T2 this is len(EXPECTED_OP_IDS) (25: 14 read + 10 write
+    # + 1 exec).
     assert extras.get("known_op_count") == len(EXPECTED_OP_IDS)

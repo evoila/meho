@@ -877,29 +877,36 @@ async def test_exec_against_k3s_timeout_returns_partial_and_timed_out(
 # ---------------------------------------------------------------------------
 
 
-_WRITE_NS = "meho-write-test"
-
-
 @pytest.fixture
 async def write_namespace(
     k3s_connector: tuple[KubernetesConnector, _K3sTarget],
 ) -> Any:
-    """Create the scratch namespace via ``k8s.namespace.create`` and tear it down."""
+    """Create a unique scratch namespace via ``k8s.namespace.create`` and tear it down.
+
+    The namespace name carries a per-run random suffix so a leftover from a
+    prior run (or a retry, or test-ordering inside the same session) can't
+    pre-exist and make the idempotent ``k8s.namespace.create`` report
+    ``created=False`` on this first creation. Each test gets the name via the
+    yielded tuple rather than a module-level constant.
+    """
+    import uuid as _uuid
+
     from kubernetes_asyncio import client as _client
 
     connector, target = k3s_connector
     op = _make_k3d_operator()
-    created = await connector.k8s_namespace_create(op, target, {"name": _WRITE_NS})
+    ns_name = f"meho-write-test-{_uuid.uuid4().hex[:8]}"
+    created = await connector.k8s_namespace_create(op, target, {"name": ns_name})
     assert created["created"] is True
     try:
-        yield connector, target, op
+        yield connector, target, op, ns_name
     finally:
         import contextlib
 
         api_client = await connector._get_api_client(target, op)
         core_v1 = _client.CoreV1Api(api_client)
         with contextlib.suppress(Exception):
-            await core_v1.delete_namespace(name=_WRITE_NS)
+            await core_v1.delete_namespace(name=ns_name)
 
 
 @pytest.mark.asyncio
@@ -907,8 +914,8 @@ async def test_namespace_create_is_idempotent_against_k3s(
     write_namespace: Any,
 ) -> None:
     """A second create against the existing namespace reports created=False."""
-    connector, target, op = write_namespace
-    again = await connector.k8s_namespace_create(op, target, {"name": _WRITE_NS})
+    connector, target, op, ns_name = write_namespace
+    again = await connector.k8s_namespace_create(op, target, {"name": ns_name})
     assert again["created"] is False
     assert again["already_existed"] is True
 
@@ -920,12 +927,12 @@ async def test_apply_server_dry_run_then_real_against_k3s(
     """Server-dry-run previews without persisting; the real apply creates it."""
     from kubernetes_asyncio import client as _client
 
-    connector, target, op = write_namespace
+    connector, target, op, ns_name = write_namespace
     manifest = (
         "apiVersion: apps/v1\n"
         "kind: Deployment\n"
         "metadata:\n"
-        f"  name: nginx\n  namespace: {_WRITE_NS}\n"
+        f"  name: nginx\n  namespace: {ns_name}\n"
         "spec:\n"
         "  replicas: 1\n"
         "  selector:\n    matchLabels:\n      app: nginx\n"
@@ -943,18 +950,18 @@ async def test_apply_server_dry_run_then_real_against_k3s(
     from kubernetes_asyncio.client.exceptions import ApiException
 
     with pytest.raises(ApiException) as exc:
-        await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+        await apps_v1.read_namespaced_deployment(name="nginx", namespace=ns_name)
     assert exc.value.status == 404, "dry-run must not have persisted the Deployment"
 
     # Real apply now creates it.
     applied = await connector.k8s_apply(op, target, {"manifest": manifest})
     assert applied["dry_run"] is False
-    live = await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    live = await apps_v1.read_namespaced_deployment(name="nginx", namespace=ns_name)
     assert live.metadata.name == "nginx"
 
     # Scale it and confirm before/after.
     scaled = await connector.k8s_scale(
-        op, target, {"name": "nginx", "namespace": _WRITE_NS, "replicas": 3}
+        op, target, {"name": "nginx", "namespace": ns_name, "replicas": 3}
     )
     assert scaled["replicas_before"] == 1
     assert scaled["replicas_after"] == 3
@@ -966,24 +973,24 @@ async def test_apply_server_dry_run_then_real_against_k3s(
         {
             "kind": "deployment",
             "name": "nginx",
-            "namespace": _WRITE_NS,
+            "namespace": ns_name,
             "annotations": {"meho.test/owner": "platform"},
         },
     )
     await connector.k8s_label(
         op,
         target,
-        {"kind": "deployment", "name": "nginx", "namespace": _WRITE_NS, "labels": {"tier": "web"}},
+        {"kind": "deployment", "name": "nginx", "namespace": ns_name, "labels": {"tier": "web"}},
     )
-    refreshed = await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    refreshed = await apps_v1.read_namespaced_deployment(name="nginx", namespace=ns_name)
     assert refreshed.metadata.annotations.get("meho.test/owner") == "platform"
     assert refreshed.metadata.labels.get("tier") == "web"
 
     # Rollout restart stamps the pod-template annotation.
     restart = await connector.k8s_rollout_restart(
-        op, target, {"name": "nginx", "namespace": _WRITE_NS}
+        op, target, {"name": "nginx", "namespace": ns_name}
     )
-    rolled = await apps_v1.read_namespaced_deployment(name="nginx", namespace=_WRITE_NS)
+    rolled = await apps_v1.read_namespaced_deployment(name="nginx", namespace=ns_name)
     stamped = rolled.spec.template.metadata.annotations.get("kubectl.kubernetes.io/restartedAt")
     assert stamped == restart["restarted_at"]
 
@@ -1004,10 +1011,10 @@ async def test_secret_create_redacts_values_against_k3s(
 
     from meho_backplane.broadcast.events import classify_op, redact_payload
 
-    connector, target, op = write_namespace
+    connector, target, op, ns_name = write_namespace
     raw_params = {
         "name": "db-creds",
-        "namespace": _WRITE_NS,
+        "namespace": ns_name,
         "string_data": {"password": "live-hunter2"},
     }
     summary = await connector.k8s_secret_create(op, target, dict(raw_params))
@@ -1018,7 +1025,7 @@ async def test_secret_create_redacts_values_against_k3s(
     # The value DID reach the cluster.
     api_client = await connector._get_api_client(target, op)
     core_v1 = _client.CoreV1Api(api_client)
-    live = await core_v1.read_namespaced_secret(name="db-creds", namespace=_WRITE_NS)
+    live = await core_v1.read_namespaced_secret(name="db-creds", namespace=ns_name)
     assert base64.b64decode(live.data["password"]).decode() == "live-hunter2"
 
     # The broadcast the publisher would emit is aggregate-only -- the
@@ -1036,10 +1043,10 @@ async def test_job_create_then_delete_redacts_env_secret_against_k3s(
     """A live Job's inline env secret never reaches the broadcast; delete reaps it."""
     from meho_backplane.broadcast.events import classify_op, redact_payload
 
-    connector, target, op = write_namespace
+    connector, target, op, ns_name = write_namespace
     job_params = {
         "name": "echo-job",
-        "namespace": _WRITE_NS,
+        "namespace": ns_name,
         "spec": {
             "backoffLimit": 0,
             "template": {
@@ -1058,7 +1065,7 @@ async def test_job_create_then_delete_redacts_env_secret_against_k3s(
         },
     }
     created = await connector.k8s_job_create(op, target, dict(job_params))
-    assert created == {"name": "echo-job", "namespace": _WRITE_NS, "created": True}
+    assert created == {"name": "echo-job", "namespace": ns_name, "created": True}
     assert "job-topsecret" not in str(created)
 
     # Broadcast redaction: aggregate-only, no env secret.
@@ -1073,7 +1080,7 @@ async def test_job_create_then_delete_redacts_env_secret_against_k3s(
         {
             "kind": "job",
             "name": "echo-job",
-            "namespace": _WRITE_NS,
+            "namespace": ns_name,
             "propagation_policy": "Background",
         },
     )
@@ -1089,12 +1096,12 @@ async def test_delete_rejects_namespace_kind_against_k3s(
         UndeletableKindError,
     )
 
-    connector, target, op = write_namespace
+    connector, target, op, ns_name = write_namespace
     with pytest.raises(UndeletableKindError):
         await connector.k8s_delete(
             op,
             target,
-            {"kind": "namespace", "name": _WRITE_NS, "namespace": _WRITE_NS},
+            {"kind": "namespace", "name": ns_name, "namespace": ns_name},
         )
 
 

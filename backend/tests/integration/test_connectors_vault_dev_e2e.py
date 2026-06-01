@@ -909,6 +909,157 @@ async def test_sys_policy_list_against_dev_vault(
 
 
 # ---------------------------------------------------------------------------
+# sys bootstrap writes — auth/mount enable + tune (G3.15-T5 #1413). These
+# are approval-gated, so each dispatch passes ``_approved=True`` (the
+# approvals-API resume flag) to drive the authorized-execution path.
+# ``.enable`` / ``.tune`` are not write/read suffixes, so all four
+# broadcast ``other`` (full params; no secret material in the params).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sys_auth_enable_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.auth.enable`` mounts a new auth method; op_class=other."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-auth-enable")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.auth.enable",
+        target=target,
+        params={"method_type": "userpass", "path": "userpass-new", "description": "ci"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "path": "userpass-new",
+        "method_type": "userpass",
+        "created": True,
+    }
+    # Read back through a root client: the method is mounted at the path.
+    methods = _root_client(addr).sys.list_auth_methods()
+    assert "userpass-new/" in methods["data"]
+    await _assert_audited(
+        "vault.sys.auth.enable",
+        operator_sub="op-auth-enable",
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_auth_enable_idempotent_on_existing_path(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """Re-enabling the seeded ``userpass`` method → created=False (no error)."""
+    target, _ = vault_e2e
+    result = await dispatch(
+        operator=_make_operator(sub="op-auth-enable-dup"),
+        connector_id="vault-1.x",
+        op_id="vault.sys.auth.enable",
+        target=target,
+        # ``userpass`` is enabled by ``_seed_vault``; a duplicate enable
+        # is Vault's "path is already in use" 400 → idempotent success.
+        params={"method_type": "userpass", "path": "userpass"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "path": "userpass",
+        "method_type": "userpass",
+        "created": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_sys_mounts_enable_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.mounts.enable`` mounts a new secret engine; op_class=other."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-mount-enable")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.mounts.enable",
+        target=target,
+        params={"backend_type": "kv", "path": "kv-prod"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"path": "kv-prod", "backend_type": "kv", "created": True}
+    mounts = _root_client(addr).sys.list_mounted_secrets_engines()
+    assert "kv-prod/" in mounts["data"]
+    await _assert_audited(
+        "vault.sys.mounts.enable",
+        operator_sub="op-mount-enable",
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_auth_tune_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.auth.tune`` reconfigures the seeded userpass mount; op_class=other."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-auth-tune")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.auth.tune",
+        target=target,
+        params={"path": "userpass", "default_lease_ttl": "1234s", "description": "tuned-up"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"path": "userpass", "tuned": True}
+    # Read back the tuned config — the lease TTL landed.
+    cfg = _root_client(addr).sys.read_auth_method_tuning(path="userpass")
+    assert cfg["data"]["default_lease_ttl"] == 1234
+    await _assert_audited(
+        "vault.sys.auth.tune",
+        operator_sub="op-auth-tune",
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sys_mounts_tune_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.sys.mounts.tune`` reconfigures the dev ``secret/`` mount; op_class=other."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-mount-tune")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.sys.mounts.tune",
+        target=target,
+        params={"path": _KV_MOUNT, "max_lease_ttl": "4321s"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"path": _KV_MOUNT, "tuned": True}
+    cfg = _root_client(addr).sys.read_mount_configuration(path=_KV_MOUNT)
+    assert cfg["data"]["max_lease_ttl"] == 4321
+    await _assert_audited(
+        "vault.sys.mounts.tune",
+        operator_sub="op-mount-tune",
+        expected_op_class="other",
+        events=captured_events,
+    )
+
+
+# ---------------------------------------------------------------------------
 # auth group — userpass + approle read-only
 # ---------------------------------------------------------------------------
 

@@ -79,6 +79,12 @@ from meho_backplane.connectors.vault import (
     VaultConnector,
     register_vault_sys_typed_operations,
 )
+from meho_backplane.connectors.vault.ops_sys_bootstrap import (
+    vault_sys_auth_enable,
+    vault_sys_auth_tune,
+    vault_sys_mounts_enable,
+    vault_sys_mounts_tune,
+)
 from meho_backplane.connectors.vault.ops_sys_policy import (
     vault_sys_policy_delete,
     vault_sys_policy_write,
@@ -730,3 +736,319 @@ async def test_policy_write_handler_reraises_vault_error(
     )
     with pytest.raises(hvac.exceptions.InvalidRequest):
         await handler(_make_operator(), None, params)
+
+
+# ---------------------------------------------------------------------------
+# vault.sys.{auth,mounts}.{enable,tune} — sys bootstrap writes (G3.15-T5 #1413)
+# ---------------------------------------------------------------------------
+
+
+_BOOTSTRAP_DANGEROUS_OP_IDS = (
+    "vault.sys.auth.enable",
+    "vault.sys.mounts.enable",
+)
+_BOOTSTRAP_CAUTION_OP_IDS = (
+    "vault.sys.auth.tune",
+    "vault.sys.mounts.tune",
+)
+_BOOTSTRAP_OP_IDS = _BOOTSTRAP_DANGEROUS_OP_IDS + _BOOTSTRAP_CAUTION_OP_IDS
+
+
+@pytest.mark.parametrize(
+    ("op_id", "expected_level"),
+    [
+        ("vault.sys.auth.enable", "dangerous"),
+        ("vault.sys.mounts.enable", "dangerous"),
+        ("vault.sys.auth.tune", "caution"),
+        ("vault.sys.mounts.tune", "caution"),
+    ],
+)
+async def test_bootstrap_ops_register_with_safety_and_approval(
+    op_id: str,
+    expected_level: str,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """enable=dangerous, tune=caution; all four approval-gated, group 'sys'."""
+    row, group = await _policy_descriptor(op_id)
+    assert row.source_kind == "typed"
+    assert row.safety_level == expected_level
+    assert row.requires_approval is True
+    assert group.group_key == "sys"
+
+
+@pytest.mark.parametrize("op_id", _BOOTSTRAP_OP_IDS)
+def test_bootstrap_ops_classify_as_other(op_id: str) -> None:
+    """``.enable`` / ``.tune`` are not write/read suffixes → ``other``.
+
+    Deliberate: adding ``.enable`` to the broadcast classifier's
+    write-suffix tuple would reclassify the unrelated
+    ``meho.connector.enable`` MCP admin tool from ``other`` to ``write``.
+    None of these bootstrap ops carry secret material in their params, so
+    the full-detail ``other`` broadcast leaks nothing — classifying them
+    ``other`` is both the cleaner and the more scoped choice
+    (see ``docs/codebase/connectors-vault.md``).
+    """
+    assert classify_op(op_id) == "other"
+
+
+def test_adding_bootstrap_suffixes_would_not_reclassify_connector_admin() -> None:
+    """Guard: ``meho.connector.enable`` stays ``other`` (collision sentinel).
+
+    The broadcast op_class for the MCP connector-admin tools is derived
+    from ``classify_op(op_id)`` on the tool name. This pins the decision
+    NOT to add ``.enable`` to ``_WRITE_SUFFIXES`` — if a future change
+    does, this assertion fails and forces a re-audit of the collision.
+    """
+    assert classify_op("meho.connector.enable") == "other"
+
+
+async def test_auth_enable_handler_forwards_and_returns_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """auth.enable forwards type/path/description and reports created=True."""
+    fake = install_fake_client(monkeypatch)
+    result = await vault_sys_auth_enable(
+        _make_operator("op-jwt"),
+        None,
+        {"method_type": "userpass", "path": "userpass", "description": "ci login"},
+    )
+
+    assert result == {"path": "userpass", "method_type": "userpass", "created": True}
+    assert fake.sys.auth_enable_calls == [
+        {"method_type": "userpass", "path": "userpass", "description": "ci login"}
+    ]
+    assert fake.auth.jwt.login_calls == [{"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"}]
+    assert fake.auth.token.revoke_calls == 1
+
+
+async def test_mounts_enable_handler_forwards_and_returns_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mounts.enable forwards type/path and reports created=True (no description)."""
+    fake = install_fake_client(monkeypatch)
+    result = await vault_sys_mounts_enable(
+        _make_operator(), None, {"backend_type": "transit", "path": "transit"}
+    )
+
+    assert result == {"path": "transit", "backend_type": "transit", "created": True}
+    assert fake.sys.mount_enable_calls == [
+        {"backend_type": "transit", "path": "transit", "description": None}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("handler", "params", "exc_kwarg", "expected"),
+    [
+        (
+            vault_sys_auth_enable,
+            {"method_type": "userpass", "path": "userpass"},
+            "auth_enable_exc",
+            {"path": "userpass", "method_type": "userpass", "created": False},
+        ),
+        (
+            vault_sys_mounts_enable,
+            {"backend_type": "kv", "path": "secret"},
+            "mount_enable_exc",
+            {"path": "secret", "backend_type": "kv", "created": False},
+        ),
+    ],
+)
+async def test_enable_handler_is_idempotent_on_path_already_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+    params: dict[str, Any],
+    exc_kwarg: str,
+    expected: dict[str, Any],
+) -> None:
+    """A duplicate enable (400 'path is already in use') → created=False, not error."""
+    install_fake_client(
+        monkeypatch,
+        **{exc_kwarg: hvac.exceptions.InvalidRequest("path is already in use at userpass/")},
+    )
+    result = await handler(_make_operator(), None, params)
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("handler", "params", "exc_kwarg"),
+    [
+        (vault_sys_auth_enable, {"method_type": "bogus", "path": "x"}, "auth_enable_exc"),
+        (vault_sys_mounts_enable, {"backend_type": "bogus", "path": "x"}, "mount_enable_exc"),
+    ],
+)
+async def test_enable_handler_reraises_other_invalid_request(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+    params: dict[str, Any],
+    exc_kwarg: str,
+) -> None:
+    """A non-idempotency 400 (unknown type) propagates for connector_error."""
+    install_fake_client(
+        monkeypatch,
+        **{exc_kwarg: hvac.exceptions.InvalidRequest("unknown backend type: bogus")},
+    )
+    with pytest.raises(hvac.exceptions.InvalidRequest):
+        await handler(_make_operator(), None, params)
+
+
+async def test_auth_tune_handler_forwards_supplied_knobs_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """auth.tune forwards only the supplied knobs and reports tuned=True."""
+    fake = install_fake_client(monkeypatch)
+    result = await vault_sys_auth_tune(
+        _make_operator("op-jwt"),
+        None,
+        {"path": "userpass", "default_lease_ttl": "768h", "description": "tuned"},
+    )
+
+    assert result == {"path": "userpass", "tuned": True}
+    # Only the two supplied knobs are forwarded — an omitted knob leaves
+    # Vault's current value untouched (no max_lease_ttl in the call).
+    assert fake.sys.auth_tune_calls == [
+        {"path": "userpass", "default_lease_ttl": "768h", "description": "tuned"}
+    ]
+    assert fake.auth.token.revoke_calls == 1
+
+
+async def test_mounts_tune_handler_forwards_supplied_knobs_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """mounts.tune forwards only the supplied knobs and reports tuned=True."""
+    fake = install_fake_client(monkeypatch)
+    result = await vault_sys_mounts_tune(
+        _make_operator(), None, {"path": "secret", "max_lease_ttl": 3600}
+    )
+
+    assert result == {"path": "secret", "tuned": True}
+    assert fake.sys.mount_tune_calls == [{"path": "secret", "max_lease_ttl": 3600}]
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        ("vault.sys.auth.enable", {"method_type": "userpass", "path": "userpass"}),
+        ("vault.sys.auth.tune", {"path": "userpass", "default_lease_ttl": "1h"}),
+        ("vault.sys.mounts.enable", {"backend_type": "kv", "path": "kv-prod"}),
+        ("vault.sys.mounts.tune", {"path": "secret", "description": "x"}),
+    ],
+)
+async def test_bootstrap_ops_are_approval_gated_on_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    _registered_vault_sys_ops: None,
+) -> None:
+    """DoD: a bootstrap dispatch parks as ``awaiting_approval`` (handler never runs)."""
+    fake = install_fake_client(monkeypatch)
+    result = await _dispatch_vault(op_id, params)
+
+    assert result.status == "awaiting_approval", result.error
+    assert result.extras.get("error_code") == "awaiting_approval"
+    assert result.extras.get("approval_request_id")
+    # The gate parks before any hvac call reaches Vault.
+    assert fake.sys.auth_enable_calls == []
+    assert fake.sys.auth_tune_calls == []
+    assert fake.sys.mount_enable_calls == []
+    assert fake.sys.mount_tune_calls == []
+
+
+async def test_bootstrap_op_dispatches_with_approved_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """With the approvals-API resume flag, the dispatch reaches the handler."""
+    fake = install_fake_client(monkeypatch)
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.sys.auth.enable",
+        target=None,
+        params={"method_type": "userpass", "path": "userpass"},
+        _approved=True,
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result == {"path": "userpass", "method_type": "userpass", "created": True}
+    assert fake.sys.auth_enable_calls == [
+        {"method_type": "userpass", "path": "userpass", "description": None}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        # blank / slash-bearing paths
+        ("vault.sys.auth.enable", {"method_type": "userpass", "path": "  "}),
+        ("vault.sys.auth.enable", {"method_type": "userpass", "path": "a/b"}),
+        # missing required field
+        ("vault.sys.auth.enable", {"path": "userpass"}),
+        ("vault.sys.mounts.enable", {"path": "secret"}),
+        # blank type
+        ("vault.sys.mounts.enable", {"backend_type": "  ", "path": "secret"}),
+        # stray key
+        ("vault.sys.auth.tune", {"path": "userpass", "bogus": "x"}),
+        # tune with no path
+        ("vault.sys.mounts.tune", {"default_lease_ttl": "1h"}),
+        # bad enum on listing_visibility
+        ("vault.sys.auth.tune", {"path": "userpass", "listing_visibility": "public"}),
+    ],
+)
+async def test_bootstrap_op_rejects_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    _registered_vault_sys_ops: None,
+) -> None:
+    """Schema rejects blank/slash paths, missing fields, stray keys, bad enums.
+
+    Validation runs ahead of the approval gate, so a malformed call
+    surfaces ``invalid_params`` rather than ``awaiting_approval``.
+    """
+    install_fake_client(monkeypatch)
+    result = await _dispatch_vault(op_id, params)
+
+    assert result.status == "error"
+    assert result.extras.get("error_code") == "invalid_params"
+
+
+@pytest.mark.parametrize(
+    ("handler", "params", "exc_kwarg"),
+    [
+        (vault_sys_auth_tune, {"path": "userpass"}, "auth_tune_exc"),
+        (vault_sys_mounts_tune, {"path": "secret"}, "mount_tune_exc"),
+    ],
+)
+async def test_tune_handler_reraises_vault_error(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+    params: dict[str, Any],
+    exc_kwarg: str,
+) -> None:
+    """The tune handler propagates a Vault-side error for connector_error."""
+    install_fake_client(
+        monkeypatch,
+        **{exc_kwarg: hvac.exceptions.InvalidRequest("cannot fetch sysview for path")},
+    )
+    with pytest.raises(hvac.exceptions.InvalidRequest):
+        await handler(_make_operator(), None, params)
+
+
+async def test_bootstrap_op_login_failure_surfaces_vault_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """Login-phase failure on an approved bootstrap dispatch → VaultClientError class."""
+    install_fake_client(monkeypatch, login_exc=hvac.exceptions.Forbidden("role denied"))
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.sys.mounts.enable",
+        target=None,
+        params={"backend_type": "kv", "path": "kv-prod"},
+        _approved=True,
+    )
+
+    assert result.status == "error"
+    assert result.extras.get("error_code") == "connector_error"
+    assert result.extras.get("exception_class") == "VaultRoleDeniedError"

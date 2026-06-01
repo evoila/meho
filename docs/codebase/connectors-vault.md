@@ -45,9 +45,11 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   key `kv`. `vault.kv.read` / `vault.kv.list` are classified
   `credential_read` (decision #3 — aggregate-only broadcast).
 - **`sys` op group** (`ops_sys.py`, G3.3-T2 #546; policy ops
-  G3.15-T2 #1410) — `register_vault_sys_typed_operations()` registers
-  four read-only diagnostics ops plus the four ACL-policy ops under
-  group key `sys`. The diagnostics ops are all `safety_level='safe'`,
+  G3.15-T2 #1410; bootstrap ops G3.15-T5 #1413) —
+  `register_vault_sys_typed_operations()` registers four read-only
+  diagnostics ops, the four ACL-policy ops, and the four bootstrap
+  enable/tune ops under group key `sys`. The diagnostics ops are all
+  `safety_level='safe'`,
   `requires_approval=False`:
   - `vault.sys.health` — `GET /v1/sys/health`. **Shares** the
     probe-path implementation: calls `auth.vault._build_client`
@@ -98,6 +100,50 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   a read-suffix — see "Broadcast PII discipline"), `policy.list` `read`
   via the `.list` suffix, and `policy.write` / `policy.delete` `write`
   (the `.write` / `.delete` suffixes redact the HCL body).
+
+  The sys bootstrap ops (`ops_sys_bootstrap.py` — same module-split
+  rationale as the policy ops; registered from the same
+  `register_vault_sys_typed_operations()`) move the auth-method /
+  secret-mount enable + tune operations off the break-glass shell
+  wrapper. All four are `requires_approval=True`:
+
+  | op_id | hvac call | safety_level | op_class |
+  |---|---|---|---|
+  | `vault.sys.auth.enable` | `sys.enable_auth_method` | dangerous | `other` |
+  | `vault.sys.auth.tune` | `sys.tune_auth_method` | caution | `other` |
+  | `vault.sys.mounts.enable` | `sys.enable_secrets_engine` | dangerous | `other` |
+  | `vault.sys.mounts.tune` | `sys.tune_mount_configuration` | caution | `other` |
+
+  Enables are `dangerous` (a new auth method / secret engine widens the
+  cluster's credential surface); tunes are `caution` (they reconfigure
+  an already-enabled mount — lease TTLs, description, listing
+  visibility — without standing up a new path). The `path` param uses
+  the policy-name pattern shape (`^(?=.*\S)[^/]+$`): a blank or
+  slash-bearing path fails validation. Enables take a required type
+  (`method_type` / `backend_type`) plus an optional `description`;
+  tunes take only the supplied config knobs (an omitted knob leaves
+  Vault's current value untouched). All four forward the operator JWT
+  via `vault_client_for_operator` and offload the sync `hvac` call with
+  `asyncio.to_thread`.
+
+  **Enable idempotency.** A duplicate `enable` (same type at an
+  already-mounted path) is Vault's HTTP 400 "path is already in use".
+  The enable handlers unwrap *that one* `hvac.exceptions.InvalidRequest`
+  into a `{created: false}` success (matching the connector's
+  error-unwrapping posture); every other 400 (unknown type, malformed
+  config) re-raises for the dispatcher's `connector_error` branch. Tunes
+  are naturally idempotent on Vault's side (a no-op 204) and synthesize
+  `{path, tuned: true}`.
+
+  **Broadcast classification.** All four classify `other` — `.enable` /
+  `.tune` are deliberately **not** added to the classifier's
+  write-suffix tuple. Adding `.enable` there would reclassify the
+  unrelated `meho.connector.enable` MCP admin tool (whose broadcast
+  op_class is derived from `classify_op` on the tool name) from `other`
+  to `write`, an out-of-scope behaviour change. None of these ops carry
+  secret material in their params (type, path, lease TTLs,
+  descriptions — config only), so the full-detail `other` broadcast
+  leaks nothing; `other` is both the cleaner and the more scoped choice.
 - **`auth` read op group** (`ops_auth.py`, G3.3-T3 #547) —
   `register_vault_auth_operations()` registers `vault.auth.userpass.list`
   / `vault.auth.userpass.read` / `vault.auth.approle.list` /
@@ -414,8 +460,11 @@ and a real Postgres audit store (reusing the integration conftest's
   already the v0.1/v0.2 model); revisit if a per-operator token cache
   lands.
 - `sys` policy writes (`policy.write` / `policy.delete`) landed in
-  G3.15-T2 (#1410), approval-gated. Other `sys` writes (unseal,
-  mount/unmount bootstrap) remain out of scope here (G3.15-T5).
+  G3.15-T2 (#1410), approval-gated; the sys bootstrap writes
+  (`auth.enable` / `auth.tune` / `mounts.enable` / `mounts.tune`)
+  landed in G3.15-T5 (#1413), also approval-gated. Unseal / rekey
+  (destructive cluster-lifecycle ops) remain out of scope — not in the
+  govc-parity verb set, not filed.
 - AppRole secret-id generation is out of scope for v0.2 (high-risk
   write with policy implications; v0.2.next behind a policy gate).
 

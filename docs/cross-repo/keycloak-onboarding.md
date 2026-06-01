@@ -29,9 +29,11 @@ non-admin control surface (e.g. a `keycloak-account-26.x` over the
 Account REST API) without breaking the resolver's tie-break ladder; v0.1
 ships only the Admin REST surface.
 
-The v0.1 op surface (Initiative
-[#1388](https://github.com/evoila/meho/issues/1388)) is the read-only
-working set operators use to inspect and audit the managed realm:
+The op surface (Initiative
+[#1388](https://github.com/evoila/meho/issues/1388)) is a read working set
+to inspect and audit the managed realm, plus an approval-gated write set
+(G3.13-T4 #1406) that retires the consumer's five Keycloak bootstrap
+scripts. The read ops:
 
 | Group | Op ID | Admin REST API | Class |
 | --- | --- | --- | --- |
@@ -42,8 +44,9 @@ working set operators use to inspect and audit the managed realm:
 | `user` | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | read-only |
 | `user` | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | read-only |
 
-Six ops total. All are `safety_level="safe"` and
-`requires_approval=False`. Every op dispatches through the same
+Six read ops. All are `safety_level="safe"` and
+`requires_approval=False`; the write ops (below) are `caution` /
+`dangerous` and all `requires_approval=True`. Every op dispatches through the same
 `POST /api/v1/operations/call` route the agent surface uses — auth,
 policy, audit, broadcast, and JSONFlux all run as documented in
 [CLAUDE.md](../../CLAUDE.md) §6. The CLI verb tree is operator ergonomics
@@ -55,6 +58,74 @@ every Keycloak op via the narrow-waist meta-tools, see the
 `client.get` and `role_mapping.get` take the client / user **internal
 UUID** (`id`), not the human `clientId` / `username` — discover it via
 the matching `.list` op first.
+
+### The write surface (G3.13-T4 #1406)
+
+The approval-gated **write** ops retire the consumer's five Keycloak
+bootstrap scripts. All are `requires_approval=True` — a write never
+dispatches without going through the human approve-queue (G11.7-T1
+#1401); a dispatch returns `status=awaiting_approval` until a human
+approves it through the queue.
+
+| Group | Op ID | Admin REST API | Safety |
+| --- | --- | --- | --- |
+| `realm` | `keycloak.realm.create` | `POST /admin/realms` | dangerous |
+| `realm` | `keycloak.realm.update` | `PUT .../realms/{realm}` | caution |
+| `client` | `keycloak.client.create` | `POST .../realms/{realm}/clients` | caution |
+| `client` | `keycloak.client.update` | `PUT .../clients/{id}` | caution |
+| `client_scope` | `keycloak.client_scope.create` | `POST .../client-scopes` | caution |
+| `protocol_mapper` | `keycloak.protocol_mapper.create` | `POST .../clients/{id}/protocol-mappers/models` | caution |
+| `user` | `keycloak.user.create` | `POST .../realms/{realm}/users` | caution |
+| `user` | `keycloak.user.reset_password` | `PUT .../users/{id}/reset-password` | caution |
+| `role_mapping` | `keycloak.role_mapping.assign` | `POST .../users/{id}/role-mappings/realm` | dangerous |
+
+Three properties are load-bearing for correctness and safety:
+
+- **Name → UUID resolution.** Keycloak addresses every object by an
+  internal UUID, never its human name. `client.update` /
+  `protocol_mapper.create` accept either `id` (the UUID) or `client_id`
+  (the human clientId, resolved via `?clientId=`); `user.reset_password`
+  / `role_mapping.assign` accept either `id` or `username` (resolved via
+  `?username=&exact=true`). A create returns the new object's UUID parsed
+  from the `Location` header.
+- **Idempotency.** A create that hits an HTTP **409 already-exists** is
+  treated as a no-op-equivalent success (`conflict: true`), and the
+  existing object's UUID is resolved — so re-running a bootstrap step is
+  safe.
+- **Password handling.** `user.create` / `user.reset_password` **never**
+  carry the password inline. Pass `password_secret_ref` (a Vault KV-v2
+  path; optional `password_secret_mount` / `password_secret_key`) and the
+  connector reads the password from Vault under the operator's identity.
+  The password is set as a credential on Keycloak but never enters the op
+  params, the audit row (audit stores a `params_hash`, never raw params),
+  or the broadcast feed (`keycloak.user.create` /
+  `keycloak.user.reset_password` classify as `credential_write` →
+  aggregate-only broadcast). The CLI exposes only `--password-secret-ref`,
+  never an inline `--password`, so the secret never lands in shell
+  history or `ps` output.
+
+`keycloak.idp.create` (identity-provider federation) is **deferred** —
+it is not exercised by the current bootstrap scripts (#1406), so it is
+out of scope for this surface. A future task can add it under the same
+registrar walk.
+
+#### Bootstrap-script → MEHO-op mapping
+
+The five consumer bootstrap scripts now have callable MEHO equivalents.
+Each script's operations decompose into the write ops above (drive them
+through `meho keycloak …` or the agent meta-tools, feeding the same JSON
+representations the scripts POSTed to `kcadm.sh`):
+
+| Bootstrap script | What it does | MEHO equivalent op(s) |
+| --- | --- | --- |
+| `keycloak-bootstrap-meho-admin.sh` | Realm + admin service-account client + its protocol mappers + role grants | `keycloak.realm.create`, `keycloak.client.create`, `keycloak.protocol_mapper.create`, `keycloak.role_mapping.assign` |
+| `keycloak-bootstrap-meho-cli.sh` | The `meho-cli` public client (device/PKCE flow) + tenant claim mappers | `keycloak.client.create`, `keycloak.protocol_mapper.create` |
+| `keycloak-bootstrap-meho-mcp.sh` | The `meho-mcp` confidential client + client scopes + `tenant_id`/`tenant_role` mappers | `keycloak.client.create`, `keycloak.client_scope.create`, `keycloak.protocol_mapper.create` |
+| `keycloak-bootstrap-meho-web.sh` | The `meho-web` client (redirect URIs / web origins) + claim mappers | `keycloak.client.create`, `keycloak.protocol_mapper.create` |
+| `keycloak-provision-meho-user.sh` | Provision an operator user with a Vault-sourced password + realm-role grant | `keycloak.user.create` (`password_secret_ref`), `keycloak.role_mapping.assign` |
+
+The never-built `scripts/keycloak.sh` umbrella is discharged by the
+`meho keycloak …` verb tree as a whole.
 
 > **Not** the `meho admin keycloak …` deployer-onramp. That subtree
 > (#791) bootstraps Keycloak clients during initial deployment, before a
@@ -355,19 +426,47 @@ agent — e.g. the `client` blurb tells the agent to call `client.list`
 first to discover a client's internal `id`, then `client.get` for its
 full representation.
 
-## Deferred: the write surface (T4 / #1406)
+### Write verb reference
 
-This op surface is **read-only**. The Keycloak **write** ops —
-realm / client / client-scope / protocol-mapper / user / role-mapping
-creates, updates, and deletes — are the deferred approval-gated
-follow-up, tracked as G3.13-T4
-([#1406](https://github.com/evoila/meho/issues/1406)). Those ops will
-ship with `requires_approval=True` (the write-gating posture every
-mutating connector op follows) and will retire the consumer's five
-Keycloak bootstrap scripts. Until T4 lands, all Keycloak mutation goes
-through the existing `meho admin keycloak …` deployer-onramp (#791) or
-direct `kcadm.sh` / admin-console operations; the `meho keycloak …` tree
-is inspection-only.
+Every write verb takes `--target <slug>`, `--json`, and `--backplane
+<url>` like the read verbs. Create / update verbs take the
+representation body from a JSON file via `--representation-file` / `-f`.
+
+```console
+# Create a realm (idempotent: re-running on an existing realm succeeds)
+$ meho keycloak realm create --target rdc-keycloak -f realm-evba.json
+
+# Update the managed realm's top-level config
+$ meho keycloak realm update --target rdc-keycloak -f realm-patch.json
+
+# Create a client; update one by clientId (resolved to its UUID)
+$ meho keycloak client create --target rdc-keycloak -f client-meho-web.json
+$ meho keycloak client update --target rdc-keycloak --client-id meho-web -f client-patch.json
+
+# Create a client scope
+$ meho keycloak client-scope create --target rdc-keycloak -f scope-roles.json
+
+# Add the tenant_id claim mapper to a client (by clientId)
+$ meho keycloak protocol-mapper create --target rdc-keycloak \
+    --client-id meho-web -f mapper-tenant-id.json
+
+# Create a user; the password is read from Vault, never passed inline
+$ meho keycloak user create --target rdc-keycloak -f user-operator-a.json \
+    --password-secret-ref rdc-hetzner-dc/keycloak/operator-a
+
+# Reset a user's password from Vault (by username → UUID)
+$ meho keycloak user reset-password --target rdc-keycloak \
+    --username operator-a --password-secret-ref rdc-hetzner-dc/keycloak/operator-a
+
+# Grant a realm role to a user (privilege grant; --role is repeatable)
+$ meho keycloak role-mapping assign --target rdc-keycloak \
+    --username operator-a --role tenant_admin
+```
+
+Because every write is `requires_approval=True`, the first dispatch
+returns `status=awaiting_approval` and parks the call in the approval
+queue. A human approves it through the queue; the approved write then
+runs against Keycloak.
 
 ## Audit and broadcast
 
@@ -381,9 +480,14 @@ Every `meho keycloak …` dispatch writes an audit row to the
 - `status` = `ok` / `error` / `denied`
 - `duration_ms` = connector wall-clock time
 
-Broadcast events follow the standard envelope (CLAUDE.md §6 §7). All six
-ops are `safety_level="safe"` and broadcast with `risk_level=LOW` unless
-the agent's policy engine overrides.
+Broadcast events follow the standard envelope (CLAUDE.md §6 §7). The six
+read ops are `safety_level="safe"` and broadcast with `risk_level=LOW`
+unless the agent's policy engine overrides. The write ops broadcast under
+their mutation class — `keycloak.role_mapping.assign` and the create /
+update verbs as `write`, and the two password ops
+(`keycloak.user.create` / `keycloak.user.reset_password`) as
+`credential_write`, which collapses the broadcast to aggregate-only so no
+credential material reaches the feed.
 
 ## Troubleshooting
 
@@ -407,7 +511,7 @@ the agent's policy engine overrides.
 | MCP `search_operations` / `call_operation` dispatch reviewed | ✅ this PR (`test_connectors_keycloak_e2e.py`) |
 | respx recorded-fixture E2E for all 6 ops + admin-token refresh through dispatch | ✅ `test_connectors_keycloak_e2e.py` |
 | `docs/cross-repo/keycloak-onboarding.md` with admin-vs-operator split + deferred-write note | ✅ this document |
-| G3.13-T4 #1406 — approval-gated write ops (retire the 5 bootstrap scripts) | ⏳ deferred follow-up |
+| G3.13-T4 #1406 — approval-gated write ops (realm/client/scope/protocol-mapper/user/role-mapping) that retire the 5 bootstrap scripts | ✅ this PR (`idp.create` deferred — not exercised by the scripts) |
 
 ## References
 
@@ -415,8 +519,8 @@ the agent's policy engine overrides.
   Goal [#214](https://github.com/evoila/meho/issues/214) (connector parity).
 - Tasks that shipped this surface: [#1393](https://github.com/evoila/meho/issues/1393) (T1 skeleton + auth),
   [#1394](https://github.com/evoila/meho/issues/1394) (T2 read ops),
-  [#1395](https://github.com/evoila/meho/issues/1395) (T3 CLI + MCP review + E2E + this doc).
-  Deferred write surface: [#1406](https://github.com/evoila/meho/issues/1406) (T4).
+  [#1395](https://github.com/evoila/meho/issues/1395) (T3 CLI + MCP review + E2E + this doc),
+  [#1406](https://github.com/evoila/meho/issues/1406) (T4 approval-gated write surface).
 - Connector source: [`backend/src/meho_backplane/connectors/keycloak/`](../../backend/src/meho_backplane/connectors/keycloak/).
 - CLI verbs: [`cli/internal/cmd/keycloak/`](../../cli/internal/cmd/keycloak/).
 - E2E tests: [`backend/tests/test_connectors_keycloak_e2e.py`](../../backend/tests/test_connectors_keycloak_e2e.py).

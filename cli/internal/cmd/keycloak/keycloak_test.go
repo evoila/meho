@@ -345,11 +345,12 @@ func TestAllOpsUseCanonicalOpIDs(t *testing.T) {
 func TestNewRootCmdHasExpectedSubcommands(t *testing.T) {
 	root := NewRootCmd()
 	want := map[string]bool{
-		"realm":        false,
-		"client":       false,
-		"client-scope": false,
-		"user":         false,
-		"role-mapping": false,
+		"realm":           false,
+		"client":          false,
+		"client-scope":    false,
+		"protocol-mapper": false,
+		"user":            false,
+		"role-mapping":    false,
 	}
 	for _, sub := range root.Commands() {
 		want[sub.Name()] = true

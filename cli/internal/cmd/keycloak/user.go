@@ -12,15 +12,164 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// newUserCmd returns the `meho keycloak user` parent with one sub-verb:
-// `list` (keycloak.user.list).
+// newUserCmd returns the `meho keycloak user` parent with the read verb
+// `list` (keycloak.user.list) and the approval-gated write verbs `create`
+// (keycloak.user.create) and `reset-password`
+// (keycloak.user.reset_password).
 func newUserCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "user",
-		Short:        "Keycloak user sub-verbs (list)",
+		Short:        "Keycloak user sub-verbs (list, create, reset-password)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newUserListCmd())
+	cmd.AddCommand(newUserCreateCmd())
+	cmd.AddCommand(newUserResetPasswordCmd())
+	return cmd
+}
+
+// passwordSecretFlags is the shared flag bundle for the Vault-sourced
+// password: the path (--password-secret-ref) plus the optional mount /
+// key / temporary overrides. The password is NEVER a command-line flag —
+// only its Vault location is — so it never lands in shell history, ps
+// output, or the op params.
+type passwordSecretFlags struct {
+	ref       string
+	mount     string
+	key       string
+	temporary bool
+}
+
+func (p *passwordSecretFlags) bind(cmd *cobra.Command, required bool) {
+	cmd.Flags().StringVar(&p.ref, "password-secret-ref", "",
+		"Vault KV-v2 path the password is read from (the password is never passed inline)")
+	cmd.Flags().StringVar(&p.mount, "password-secret-mount", "",
+		"Vault KV-v2 mount point (default 'secret')")
+	cmd.Flags().StringVar(&p.key, "password-secret-key", "",
+		"field within the Vault secret payload (default 'password')")
+	cmd.Flags().BoolVar(&p.temporary, "temporary", false,
+		"force a password change on first login")
+	if required {
+		if err := cmd.MarkFlagRequired("password-secret-ref"); err != nil {
+			panic(err) // programmer error: the flag is defined directly above
+		}
+	}
+}
+
+// apply writes the password-secret params into the dispatch param map.
+// Only non-empty values are written so the connector's defaults apply.
+func (p *passwordSecretFlags) apply(params map[string]any) {
+	if p.ref != "" {
+		params["password_secret_ref"] = p.ref
+	}
+	if p.mount != "" {
+		params["password_secret_mount"] = p.mount
+	}
+	if p.key != "" {
+		params["password_secret_key"] = p.key
+	}
+	if p.temporary {
+		params["temporary"] = true
+	}
+}
+
+// newUserCreateCmd returns the `meho keycloak user create` command
+// (keycloak.user.create — approval-gated). POSTs
+// /admin/realms/{realm}/users with the UserRepresentation from
+// --representation-file. The password is read from Vault
+// (--password-secret-ref) and set as a credential — NEVER passed inline. A
+// 409 already-exists is idempotent.
+func newUserCreateCmd() *cobra.Command {
+	var (
+		f       writeFlags
+		pw      passwordSecretFlags
+		repFile string
+	)
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a Keycloak user with a Vault-sourced password (approval-gated)",
+		Long: "create dispatches keycloak.user.create with the UserRepresentation\n" +
+			"from --representation-file (JSON). The password is read from Vault\n" +
+			"(--password-secret-ref, optional --password-secret-mount /\n" +
+			"--password-secret-key) and set as a credential — it is NEVER passed\n" +
+			"on the command line or in op params. Requires approval; a 409\n" +
+			"already-exists is an idempotent success. The password is never\n" +
+			"returned.\n\n" +
+			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
+			"3=unreachable, 4=unexpected.",
+		Example:       "  meho keycloak user create --target rdc-keycloak -f user-operator-a.json --password-secret-ref rdc-hetzner-dc/keycloak/operator-a",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			rep, serr := loadRepresentation(repFile)
+			if serr != nil {
+				return output.RenderError(cmd.ErrOrStderr(), serr, f.jsonOut)
+			}
+			params := map[string]any{"representation": rep}
+			pw.apply(params)
+			return dispatchWrite(cmd, "keycloak.user.create", f.targetName,
+				params, f.jsonOut, f.backplaneOverride)
+		},
+	}
+	f.bind(cmd)
+	pw.bind(cmd, false) // password optional on create (a user may be SSO-only)
+	cmd.Flags().StringVarP(&repFile, "representation-file", "f", "",
+		"path to a JSON file with the UserRepresentation body (required)")
+	if err := cmd.MarkFlagRequired("representation-file"); err != nil {
+		panic(err) // programmer error: the flag is defined directly above
+	}
+	return cmd
+}
+
+// newUserResetPasswordCmd returns the `meho keycloak user reset-password`
+// command (keycloak.user.reset_password — approval-gated). PUTs
+// .../users/{id}/reset-password with a CredentialRepresentation whose
+// value is read from Vault — NEVER passed inline. Keys on the user UUID
+// (--id) or --username for resolution.
+func newUserResetPasswordCmd() *cobra.Command {
+	var (
+		f        writeFlags
+		pw       passwordSecretFlags
+		userUUID string
+		username string
+	)
+	cmd := &cobra.Command{
+		Use:   "reset-password",
+		Short: "Reset a Keycloak user's password from Vault (approval-gated)",
+		Long: "reset-password dispatches keycloak.user.reset_password. The new\n" +
+			"password is read from Vault (--password-secret-ref) — NEVER passed\n" +
+			"on the command line. Keys on the user UUID — pass --id directly, or\n" +
+			"pass --username for name→UUID resolution. Requires approval.\n\n" +
+			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
+			"3=unreachable, 4=unexpected.",
+		Example:       "  meho keycloak user reset-password --target rdc-keycloak --username operator-a --password-secret-ref rdc-hetzner-dc/keycloak/operator-a",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if userUUID == "" && username == "" {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected("one of --id or --username is required"), f.jsonOut)
+			}
+			params := map[string]any{}
+			pw.apply(params)
+			if userUUID != "" {
+				params["id"] = userUUID
+			}
+			if username != "" {
+				params["username"] = username
+			}
+			return dispatchWrite(cmd, "keycloak.user.reset_password", f.targetName,
+				params, f.jsonOut, f.backplaneOverride)
+		},
+	}
+	f.bind(cmd)
+	pw.bind(cmd, true) // password required on reset
+	cmd.Flags().StringVar(&userUUID, "id", "",
+		"the user's internal UUID (skips name→UUID resolution)")
+	cmd.Flags().StringVar(&username, "username", "",
+		"the username (resolved to UUID when --id is absent)")
 	return cmd
 }
 

@@ -135,6 +135,14 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         "vault.kv.patch",
         "k8s.secret.create",
         "k8s.job.create",
+        # G3.13-T4 #1406 — Keycloak user-credential write ops. Both source
+        # the password from Vault (it is never an inline param), so the
+        # request params carry only a Vault *path*. The pin is
+        # defence-in-depth: should a future param-shape change ever place
+        # credential material in params, the broadcast collapses to
+        # aggregate-only rather than shipping it on the feed.
+        "keycloak.user.create",
+        "keycloak.user.reset_password",
     }
 )
 
@@ -172,6 +180,13 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     # branch.
     ".add",
     ".remove",
+    # keycloak role-mapping privilege-grant verb (G3.13-T4 #1406).
+    # ``keycloak.role_mapping.assign`` is a mutating privilege grant; its
+    # params (user id/username + role names) carry no secret, so the plain
+    # ``write`` class (full detail) is correct — but without this suffix it
+    # falls through to ``other``. Classifying it ``write`` keeps the feed's
+    # mutation signal accurate.
+    ".assign",
 )
 
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``

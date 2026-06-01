@@ -13,14 +13,56 @@ import (
 )
 
 // newClientScopeCmd returns the `meho keycloak client-scope` parent with
-// one sub-verb: `list` (keycloak.client_scope.list).
+// the read verb `list` (keycloak.client_scope.list) and the approval-gated
+// write verb `create` (keycloak.client_scope.create).
 func newClientScopeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "client-scope",
-		Short:        "Keycloak client-scope sub-verbs (list)",
+		Short:        "Keycloak client-scope sub-verbs (list, create)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newClientScopeListCmd())
+	cmd.AddCommand(newClientScopeCreateCmd())
+	return cmd
+}
+
+// newClientScopeCreateCmd returns the `meho keycloak client-scope create`
+// command (keycloak.client_scope.create — approval-gated). POSTs
+// /admin/realms/{realm}/client-scopes with the ClientScopeRepresentation
+// from --representation-file. A 409 already-exists is idempotent.
+func newClientScopeCreateCmd() *cobra.Command {
+	var (
+		f       writeFlags
+		repFile string
+	)
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a Keycloak client scope (approval-gated)",
+		Long: "create dispatches keycloak.client_scope.create with the\n" +
+			"ClientScopeRepresentation (its protocolMappers ride in the body)\n" +
+			"read from --representation-file (JSON). Requires approval; a 409\n" +
+			"already-exists is an idempotent success.\n\n" +
+			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
+			"3=unreachable, 4=unexpected.",
+		Example:       "  meho keycloak client-scope create --target rdc-keycloak -f scope-roles.json",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			rep, serr := loadRepresentation(repFile)
+			if serr != nil {
+				return output.RenderError(cmd.ErrOrStderr(), serr, f.jsonOut)
+			}
+			return dispatchWrite(cmd, "keycloak.client_scope.create", f.targetName,
+				map[string]any{"representation": rep}, f.jsonOut, f.backplaneOverride)
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().StringVarP(&repFile, "representation-file", "f", "",
+		"path to a JSON file with the ClientScopeRepresentation body (required)")
+	if err := cmd.MarkFlagRequired("representation-file"); err != nil {
+		panic(err) // programmer error: the flag is defined directly above
+	}
 	return cmd
 }
 

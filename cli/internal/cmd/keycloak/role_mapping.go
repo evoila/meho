@@ -14,14 +14,77 @@ import (
 )
 
 // newRoleMappingCmd returns the `meho keycloak role-mapping` parent with
-// one sub-verb: `get` (keycloak.role_mapping.get).
+// the read verb `get` (keycloak.role_mapping.get) and the approval-gated
+// write verb `assign` (keycloak.role_mapping.assign — a privilege grant).
 func newRoleMappingCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "role-mapping",
-		Short:        "Keycloak role-mapping sub-verbs (get)",
+		Short:        "Keycloak role-mapping sub-verbs (get, assign)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newRoleMappingGetCmd())
+	cmd.AddCommand(newRoleMappingAssignCmd())
+	return cmd
+}
+
+// newRoleMappingAssignCmd returns the `meho keycloak role-mapping assign`
+// command (keycloak.role_mapping.assign — approval-gated, dangerous: a
+// privilege grant). POSTs .../users/{id}/role-mappings/realm with the
+// resolved RoleRepresentations for the named --role values. Keys on the
+// user UUID (--id) or --username for resolution.
+func newRoleMappingAssignCmd() *cobra.Command {
+	var (
+		f        writeFlags
+		userUUID string
+		username string
+		roles    []string
+	)
+	cmd := &cobra.Command{
+		Use:   "assign",
+		Short: "Grant realm roles to a Keycloak user (approval-gated, privilege grant)",
+		Long: "assign dispatches keycloak.role_mapping.assign — a privilege grant\n" +
+			"(dangerous, requires approval). Keys on the user UUID — pass --id\n" +
+			"directly, or pass --username for resolution. Pass --role once per\n" +
+			"realm role name to grant. Each role name is resolved to its\n" +
+			"representation; an unknown role errors. Re-assigning a held role is\n" +
+			"a server-side no-op.\n\n" +
+			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
+			"3=unreachable, 4=unexpected.",
+		Example:       "  meho keycloak role-mapping assign --target rdc-keycloak --username operator-a --role tenant_admin",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if userUUID == "" && username == "" {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected("one of --id or --username is required"), f.jsonOut)
+			}
+			if len(roles) == 0 {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected("at least one --role is required"), f.jsonOut)
+			}
+			rolesAny := make([]any, len(roles))
+			for i, r := range roles {
+				rolesAny[i] = r
+			}
+			params := map[string]any{"roles": rolesAny}
+			if userUUID != "" {
+				params["id"] = userUUID
+			}
+			if username != "" {
+				params["username"] = username
+			}
+			return dispatchWrite(cmd, "keycloak.role_mapping.assign", f.targetName,
+				params, f.jsonOut, f.backplaneOverride)
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().StringVar(&userUUID, "id", "",
+		"the user's internal UUID (skips name→UUID resolution)")
+	cmd.Flags().StringVar(&username, "username", "",
+		"the username (resolved to UUID when --id is absent)")
+	cmd.Flags().StringArrayVar(&roles, "role", nil,
+		"realm role name to grant (repeatable)")
 	return cmd
 }
 

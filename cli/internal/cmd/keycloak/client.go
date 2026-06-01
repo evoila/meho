@@ -13,17 +13,119 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// newClientCmd returns the `meho keycloak client` parent with two
-// sub-verbs: `list` (keycloak.client.list) and `get`
-// (keycloak.client.get).
+// newClientCmd returns the `meho keycloak client` parent with the read
+// verbs `list` / `get` and the approval-gated write verbs `create`
+// (keycloak.client.create) and `update` (keycloak.client.update).
 func newClientCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "client",
-		Short:        "Keycloak client sub-verbs (list, get)",
+		Short:        "Keycloak client sub-verbs (list, get, create, update)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newClientListCmd())
 	cmd.AddCommand(newClientGetCmd())
+	cmd.AddCommand(newClientCreateCmd())
+	cmd.AddCommand(newClientUpdateCmd())
+	return cmd
+}
+
+// newClientCreateCmd returns the `meho keycloak client create` command
+// (keycloak.client.create — approval-gated). POSTs
+// /admin/realms/{realm}/clients with the ClientRepresentation from
+// --representation-file. A 409 already-exists is idempotent and the
+// existing client's UUID is resolved.
+func newClientCreateCmd() *cobra.Command {
+	var (
+		f       writeFlags
+		repFile string
+	)
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a Keycloak client (approval-gated)",
+		Long: "create dispatches keycloak.client.create with the\n" +
+			"ClientRepresentation (flows / redirect URIs / mappers) read from\n" +
+			"--representation-file (JSON). Requires approval; a 409\n" +
+			"already-exists is an idempotent success. The client secret is\n" +
+			"never returned.\n\n" +
+			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
+			"3=unreachable, 4=unexpected.",
+		Example:       "  meho keycloak client create --target rdc-keycloak -f client-meho-web.json",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			rep, serr := loadRepresentation(repFile)
+			if serr != nil {
+				return output.RenderError(cmd.ErrOrStderr(), serr, f.jsonOut)
+			}
+			return dispatchWrite(cmd, "keycloak.client.create", f.targetName,
+				map[string]any{"representation": rep}, f.jsonOut, f.backplaneOverride)
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().StringVarP(&repFile, "representation-file", "f", "",
+		"path to a JSON file with the ClientRepresentation body (required)")
+	if err := cmd.MarkFlagRequired("representation-file"); err != nil {
+		panic(err) // programmer error: the flag is defined directly above
+	}
+	return cmd
+}
+
+// newClientUpdateCmd returns the `meho keycloak client update` command
+// (keycloak.client.update — approval-gated). PUTs
+// /admin/realms/{realm}/clients/{id}. Keys on the client UUID — pass --id
+// directly, or pass --client-id (the human clientId) for name→UUID
+// resolution.
+func newClientUpdateCmd() *cobra.Command {
+	var (
+		f          writeFlags
+		repFile    string
+		clientUUID string
+		clientID   string
+	)
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update a Keycloak client by UUID or clientId (approval-gated)",
+		Long: "update dispatches keycloak.client.update with the partial\n" +
+			"ClientRepresentation from --representation-file (JSON). Keys on the\n" +
+			"internal UUID — pass --id directly, or pass --client-id (the human\n" +
+			"clientId) and the connector resolves the UUID. Requires approval.\n\n" +
+			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
+			"3=unreachable, 4=unexpected.",
+		Example:       "  meho keycloak client update --target rdc-keycloak --client-id meho-web -f client-patch.json",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if clientUUID == "" && clientID == "" {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected("one of --id or --client-id is required"), f.jsonOut)
+			}
+			rep, serr := loadRepresentation(repFile)
+			if serr != nil {
+				return output.RenderError(cmd.ErrOrStderr(), serr, f.jsonOut)
+			}
+			params := map[string]any{"representation": rep}
+			if clientUUID != "" {
+				params["id"] = clientUUID
+			}
+			if clientID != "" {
+				params["client_id"] = clientID
+			}
+			return dispatchWrite(cmd, "keycloak.client.update", f.targetName,
+				params, f.jsonOut, f.backplaneOverride)
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().StringVarP(&repFile, "representation-file", "f", "",
+		"path to a JSON file with the partial ClientRepresentation body (required)")
+	cmd.Flags().StringVar(&clientUUID, "id", "",
+		"the client's internal UUID (skips name→UUID resolution)")
+	cmd.Flags().StringVar(&clientID, "client-id", "",
+		"the human clientId (resolved to UUID when --id is absent)")
+	if err := cmd.MarkFlagRequired("representation-file"); err != nil {
+		panic(err) // programmer error: the flag is defined directly above
+	}
 	return cmd
 }
 

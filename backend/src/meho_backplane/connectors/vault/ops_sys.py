@@ -1,24 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Vault ``sys`` read op group — typed handlers + ``endpoint_descriptor``
+"""Vault ``sys`` op group — typed handlers + ``endpoint_descriptor``
 registration helper.
 
-Op-id namespace (v0.2): ``vault.sys.<verb>``. The four ops here are the
-read-only diagnostics surface the consumer's wrappers exercise daily:
+Op-id namespace: ``vault.sys.<verb>``. The group spans the read-only
+diagnostics surface the consumer's wrappers exercise daily plus the
+ACL-policy CRUD surface (G3.15-T2 #1410, defined in
+:mod:`meho_backplane.connectors.vault.ops_sys_policy` and registered here):
 
 * ``vault.sys.health`` — cluster health (``GET /v1/sys/health``).
 * ``vault.sys.seal_status`` — seal state (``GET /v1/sys/seal-status``).
 * ``vault.sys.mounts.list`` — enabled secret backends (``GET /v1/sys/mounts``).
 * ``vault.sys.auth.list`` — enabled auth backends (``GET /v1/sys/auth``).
+* ``vault.sys.policy.read`` — one ACL policy body (``GET /v1/sys/policy/<name>``).
+* ``vault.sys.policy.list`` — configured policy names (``GET /v1/sys/policy``).
+* ``vault.sys.policy.write`` — create/replace an ACL policy
+  (``PUT /v1/sys/policy/<name>``).
+* ``vault.sys.policy.delete`` — remove an ACL policy
+  (``DELETE /v1/sys/policy/<name>``).
 
-All four are ``safety_level='safe'`` and classify as ``op_class='read'``
-via :func:`~meho_backplane.broadcast.events.classify_op` (the ``.health``
-and ``.seal_status`` suffixes were added to that classifier's read-suffix
-tuple so the diagnostics surface broadcasts at the same sensitivity as
-``.list`` / ``.get`` ops — there is no secret content in any of these
-payloads). ``sys`` writes (unseal, mount/unmount, policy write) are out
-of scope for v0.2.
+The four diagnostics ops are ``safety_level='safe'`` /
+``requires_approval=False`` and classify as ``op_class='read'`` via
+:func:`~meho_backplane.broadcast.events.classify_op` (the ``.health`` /
+``.seal_status`` suffixes are in that classifier's read-suffix tuple so
+they broadcast at the same sensitivity as ``.list`` / ``.get`` ops —
+there is no secret content in any of these payloads). The two policy
+reads (``policy.read`` / ``policy.list``) are likewise ``safe`` /
+``requires_approval=False``; ``policy.list`` ends in ``.list`` so it
+classifies ``read``, while ``policy.read`` classifies ``other`` (its
+only param is the policy name — ``.read`` is deliberately absent from
+the read-suffix tuple, mirroring the ``vault.auth.*.read`` precedent
+that broadcasts auth-config reads as ``other``). ``vault.sys.policy.write``
+/ ``vault.sys.policy.delete`` are mutating: ``safety_level='dangerous'``
+with ``requires_approval=True`` (a bad HCL body can lock everyone out or
+silently widen access — the highest-blast-radius Vault mutation, so the
+G11.7 approval gate parks a dispatch before the handler runs). They
+classify as ``op_class='write'`` (the ``.write`` suffix was added to the
+classifier's write-suffix tuple so ``policy.write`` redacts its HCL body
+rather than broadcasting it as an ``other``-class full-detail event).
+Other ``sys`` writes (unseal, mount/unmount bootstrap) remain out of
+scope here (T5).
 
 Handler shape mirrors :mod:`meho_backplane.connectors.vault.ops`: each
 handler is a module-level ``async def`` typed op. Handlers that forward
@@ -72,6 +94,24 @@ from typing import Any
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vault.ops_sys_policy import (
+    VAULT_SYS_POLICY_DELETE_LLM_INSTRUCTIONS,
+    VAULT_SYS_POLICY_DELETE_PARAMETER_SCHEMA,
+    VAULT_SYS_POLICY_DELETE_RESPONSE_SCHEMA,
+    VAULT_SYS_POLICY_LIST_LLM_INSTRUCTIONS,
+    VAULT_SYS_POLICY_LIST_PARAMETER_SCHEMA,
+    VAULT_SYS_POLICY_LIST_RESPONSE_SCHEMA,
+    VAULT_SYS_POLICY_READ_LLM_INSTRUCTIONS,
+    VAULT_SYS_POLICY_READ_PARAMETER_SCHEMA,
+    VAULT_SYS_POLICY_READ_RESPONSE_SCHEMA,
+    VAULT_SYS_POLICY_WRITE_LLM_INSTRUCTIONS,
+    VAULT_SYS_POLICY_WRITE_PARAMETER_SCHEMA,
+    VAULT_SYS_POLICY_WRITE_RESPONSE_SCHEMA,
+    vault_sys_policy_delete,
+    vault_sys_policy_list,
+    vault_sys_policy_read,
+    vault_sys_policy_write,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
@@ -81,6 +121,10 @@ __all__ = [
     "vault_sys_auth_list",
     "vault_sys_health",
     "vault_sys_mounts_list",
+    "vault_sys_policy_delete",
+    "vault_sys_policy_list",
+    "vault_sys_policy_read",
+    "vault_sys_policy_write",
     "vault_sys_seal_status",
 ]
 
@@ -447,7 +491,15 @@ async def register_vault_sys_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert the Vault ``sys`` read ops into ``endpoint_descriptor``.
+    """Upsert the Vault ``sys`` ops into ``endpoint_descriptor``.
+
+    Registers the four read-only diagnostics ops plus the four
+    ACL-policy ops (G3.15-T2 #1410: ``policy.read`` / ``policy.list``
+    safe, ``policy.write`` / ``policy.delete`` dangerous + approval-
+    gated). The policy handlers and schemas live in
+    :mod:`meho_backplane.connectors.vault.ops_sys_policy`; the
+    registration stays here so the whole ``sys`` group registers from
+    one place.
 
     Queued onto the lifespan-driven registrar list from the package
     ``__init__`` alongside
@@ -463,19 +515,25 @@ async def register_vault_sys_typed_operations(
     # ``list_operation_groups``. Differentiates this diagnostic group
     # from the sibling ``kv`` (secret CRUD) and ``auth`` (identity
     # inspection) groups so the agent routes 'is Vault up?' / 'where
-    # are things mounted?' questions here.
+    # are things mounted?' questions here. G3.15-T2 (#1410) extends it
+    # with the ACL-policy CRUD verbs.
     sys_when_to_use = (
-        "Use for Vault target diagnostics and mount-surface "
-        "introspection: 'is this Vault reachable / unsealed / "
-        "serving traffic?' (sys.health), 'is it sealed and how "
-        "many key shares are needed?' (sys.seal_status), 'which "
-        "secret engines are mounted at which paths?' "
-        "(sys.mounts.list), 'which auth methods are mounted?' "
-        "(sys.auth.list). Read-only; returns mount metadata, never "
-        "secret values. The right group when triaging connectivity "
-        "or mapping mountpoints before drilling into a path with "
-        "the 'kv' group, or before drilling into per-backend role "
-        "config (read-only) via the 'auth' group."
+        "Use for Vault target diagnostics, mount-surface "
+        "introspection, and ACL-policy management: 'is this Vault "
+        "reachable / unsealed / serving traffic?' (sys.health), 'is "
+        "it sealed and how many key shares are needed?' "
+        "(sys.seal_status), 'which secret engines are mounted at "
+        "which paths?' (sys.mounts.list), 'which auth methods are "
+        "mounted?' (sys.auth.list), 'what does this policy grant / "
+        "which policies exist?' (sys.policy.read / sys.policy.list), "
+        "and creating, replacing, or deleting an ACL policy "
+        "(sys.policy.write / sys.policy.delete — dangerous, approval-"
+        "gated). The diagnostics and policy-read ops are read-only and "
+        "return mount/policy metadata, never secret values. The right "
+        "group when triaging connectivity, mapping mountpoints before "
+        "drilling into a path with the 'kv' group, inspecting per-"
+        "backend role config (read-only) via the 'auth' group, or "
+        "governing who can read which secrets via ACL policies."
     )
     await register_typed_operation(
         product="vault",
@@ -571,5 +629,101 @@ async def register_vault_sys_typed_operations(
         safety_level="safe",
         requires_approval=False,
         llm_instructions=_VAULT_SYS_AUTH_LIST_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    # G3.15-T2 (#1410) ACL-policy ops. Reads are safe; writes/deletes are
+    # dangerous + approval-gated (a bad HCL body can lock everyone out).
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.policy.read",
+        handler=vault_sys_policy_read,
+        summary="Read one HashiCorp Vault ACL policy body by name.",
+        description=(
+            "Reads GET /v1/sys/policy/<name> via the operator's OIDC-"
+            "forwarded JWT and returns {'name', 'rules'} where 'rules' "
+            "is the stored HCL/JSON policy body. Read-only; returns ACL "
+            "policy text, not secret values."
+        ),
+        parameter_schema=VAULT_SYS_POLICY_READ_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_POLICY_READ_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["read-only", "policy", "acl"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=VAULT_SYS_POLICY_READ_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.policy.list",
+        handler=vault_sys_policy_list,
+        summary="List the configured ACL policy names on a HashiCorp Vault target.",
+        description=(
+            "Reads GET /v1/sys/policy via the operator's OIDC-forwarded "
+            "JWT and returns {'policies': [<name>, ...]} (always includes "
+            "the built-in 'default' / 'root'). Read-only; names only, no "
+            "policy bodies."
+        ),
+        parameter_schema=VAULT_SYS_POLICY_LIST_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_POLICY_LIST_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["read-only", "policy", "acl"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=VAULT_SYS_POLICY_LIST_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.policy.write",
+        handler=vault_sys_policy_write,
+        summary="Create or replace a HashiCorp Vault ACL policy (dangerous, approval-gated).",
+        description=(
+            "Writes PUT /v1/sys/policy/<name> via the operator's OIDC-"
+            "forwarded JWT, replacing any existing policy of the same "
+            "name in full with the supplied HCL/JSON body. DANGEROUS: a "
+            "bad body can lock operators out or silently widen access. "
+            "Approval-gated. Returns {'name', 'written': true} on success."
+        ),
+        parameter_schema=VAULT_SYS_POLICY_WRITE_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_POLICY_WRITE_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["write", "policy", "acl", "dangerous"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VAULT_SYS_POLICY_WRITE_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.policy.delete",
+        handler=vault_sys_policy_delete,
+        summary="Delete a HashiCorp Vault ACL policy by name (dangerous, approval-gated).",
+        description=(
+            "Deletes DELETE /v1/sys/policy/<name> via the operator's "
+            "OIDC-forwarded JWT. DANGEROUS: removing a policy immediately "
+            "revokes the access it granted to every token/entity bound "
+            "to it. Approval-gated. Returns {'name', 'deleted': true} on "
+            "success (deleting a non-existent policy is a no-op success)."
+        ),
+        parameter_schema=VAULT_SYS_POLICY_DELETE_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_POLICY_DELETE_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["write", "policy", "acl", "dangerous"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VAULT_SYS_POLICY_DELETE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

@@ -156,6 +156,14 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     # branch.
     ".add",
     ".remove",
+    # Vault policy-write verb (G3.15-T2 #1410). ``vault.sys.policy.write``
+    # carries the full HCL/JSON policy body in its params; without
+    # ``.write`` in the write-suffix tuple it would fall through to
+    # ``other`` and broadcast the policy text to every operator. The
+    # ``_CREDENTIAL_WRITE_OPS`` allowlist is consulted first, so the
+    # ``.write``-shaped ``vault.auth.userpass.write`` keeps its
+    # ``credential_write`` class.
+    ".write",
 )
 
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
@@ -305,9 +313,18 @@ def classify_op(op_id: str) -> str:
        map to ``write``. Checked before the dot-suffix branches since
        ingested ops carry no meho verb suffix.
     6. ``write`` — mutation suffixes (``.create`` / ``.update`` /
-       ``.delete`` / ``.patch``).
+       ``.delete`` / ``.patch`` / ``.put`` / ``.add`` / ``.remove`` /
+       ``.write``). The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3)
+       runs first, so a ``.write``-shaped secret-bearing op like
+       ``vault.auth.userpass.write`` keeps its ``credential_write``
+       class.
     7. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
-       ``.get`` / ``.about`` / ``.ls``).
+       ``.get`` / ``.about`` / ``.ls`` / ``.health`` / ``.seal_status``
+       / ``.versions``). ``.read`` is deliberately **not** a read
+       suffix: it would over-match the ``credential_read``-allowlisted
+       ``vault.kv.read`` (the allowlist wins, but the exclusion keeps
+       the policy single-sourced) and would reclassify the auth-config
+       ``.read`` ops that intentionally broadcast as ``other``.
     8. ``other`` — everything else. Falls through to full-detail
        broadcast per decision #3.
 

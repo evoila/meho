@@ -284,6 +284,11 @@ class TestClassifyOp:
             # metadata only (no secret values) → ``read``, not
             # ``credential_read``.
             ("vault.kv.versions", "read"),
+            # Vault ACL-policy list (G3.15-T2 #1410): ``.list`` suffix →
+            # ``read`` (policy names, no secret content). ``policy.read``
+            # is intentionally ``other`` (see test_unknown_falls_through_
+            # to_other) — ``.read`` is not a read-suffix.
+            ("vault.sys.policy.list", "read"),
         ],
     )
     def test_read_suffixes(self, op_id: str, expected: str) -> None:
@@ -303,6 +308,12 @@ class TestClassifyOp:
             # than redact under the ``write`` branch.
             ("bind9.record.add", "write"),
             ("bind9.record.remove", "write"),
+            # Vault ACL-policy write (G3.15-T2 #1410). ``policy.write``
+            # carries the full HCL body in its params; the ``.write``
+            # suffix redacts it under the ``write`` branch rather than
+            # broadcasting the policy text as an ``other``-class event.
+            ("vault.sys.policy.write", "write"),
+            ("vault.sys.policy.delete", "write"),
         ],
     )
     def test_write_suffixes(self, op_id: str, expected: str) -> None:
@@ -315,6 +326,12 @@ class TestClassifyOp:
             "weird",
             "vsphere.vm.poweron",  # not a write suffix
             "",
+            # G3.15-T2 #1410: ``.read`` is deliberately not a read-suffix
+            # (it would over-match the credential_read-allowlisted
+            # vault.kv.read and the auth-config .read ops). vault.sys.
+            # policy.read's only param is the policy name, so ``other``
+            # (full params) is the safe, consistent classification.
+            "vault.sys.policy.read",
         ],
     )
     def test_unknown_falls_through_to_other(self, op_id: str) -> None:

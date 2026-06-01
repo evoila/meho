@@ -30,6 +30,23 @@ repeats):
   :class:`VaultClientError` subclass name in
   ``extras["exception_class"]``.
 
+ACL-policy ops (G3.15-T2 #1410) add:
+
+* ``policy.read`` / ``policy.list`` register safe + ``requires_approval``
+  False; ``policy.write`` / ``policy.delete`` register dangerous +
+  ``requires_approval`` True, all in the ``sys`` group.
+* ``classify_op`` maps the reads to ``read`` and the writes to ``write``.
+* ``policy.read`` unwraps the ``data.rules`` envelope (modern + legacy
+  top-level shapes; null when absent); ``policy.list`` returns the
+  policy-name array; the write/delete handlers forward to hvac and
+  synthesize the 204-success payload.
+* A ``policy.write`` / ``policy.delete`` *dispatch* is parked as
+  ``awaiting_approval`` by the G11.7 policy gate before the handler runs;
+  the handler's own logic is exercised by calling it directly.
+* Schema rejects slash/blank names, empty/missing bodies, and stray keys
+  (validation runs ahead of the approval gate). Vault-side / login
+  failures surface structurally.
+
 Test isolation mirrors ``test_connectors_vault.py``: the production
 code builds Vault clients through the single ``_build_client`` seam;
 the shared ``tests/_vault_fakes.py`` ``install_fake_client`` helper
@@ -61,6 +78,10 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.vault import (
     VaultConnector,
     register_vault_sys_typed_operations,
+)
+from meho_backplane.connectors.vault.ops_sys_policy import (
+    vault_sys_policy_delete,
+    vault_sys_policy_write,
 )
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
@@ -383,3 +404,329 @@ async def test_authenticated_sys_op_login_failure_surfaces_vault_client_error(
     assert result.error.startswith("connector_error:")
     assert result.extras.get("error_code") == "connector_error"
     assert result.extras.get("exception_class") == expected_exc_class
+
+
+# ---------------------------------------------------------------------------
+# vault.sys.policy.* — ACL-policy ops (G3.15-T2 #1410)
+# ---------------------------------------------------------------------------
+
+
+_POLICY_SAFE_OP_IDS = (
+    "vault.sys.policy.read",
+    "vault.sys.policy.list",
+)
+_POLICY_DANGEROUS_OP_IDS = (
+    "vault.sys.policy.write",
+    "vault.sys.policy.delete",
+)
+
+
+async def _policy_descriptor(op_id: str) -> Any:
+    """Fetch the endpoint_descriptor + its group for a policy op."""
+    from sqlalchemy import select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.product == "vault",
+                    EndpointDescriptor.version == "1.x",
+                    EndpointDescriptor.impl_id == "vault",
+                    EndpointDescriptor.op_id == op_id,
+                )
+            )
+        ).scalar_one()
+        group = (
+            await session.execute(select(OperationGroup).where(OperationGroup.id == row.group_id))
+        ).scalar_one()
+        return row, group
+
+
+@pytest.mark.parametrize("op_id", _POLICY_SAFE_OP_IDS)
+async def test_policy_read_ops_register_safe_no_approval(
+    op_id: str,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """policy.read / policy.list register safe, group 'sys', no approval."""
+    row, group = await _policy_descriptor(op_id)
+    assert row.source_kind == "typed"
+    assert row.safety_level == "safe"
+    assert row.requires_approval is False
+    assert group.group_key == "sys"
+
+
+@pytest.mark.parametrize("op_id", _POLICY_DANGEROUS_OP_IDS)
+async def test_policy_write_ops_register_dangerous_with_approval(
+    op_id: str,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """policy.write / policy.delete register dangerous + requires_approval."""
+    row, group = await _policy_descriptor(op_id)
+    assert row.source_kind == "typed"
+    assert row.safety_level == "dangerous"
+    assert row.requires_approval is True
+    assert group.group_key == "sys"
+
+
+@pytest.mark.parametrize(
+    ("op_id", "expected"),
+    [
+        # ``policy.read``'s only param is the policy name; ``.read`` is
+        # deliberately not a read-suffix (would over-match vault.kv.read),
+        # so it classifies ``other`` like the vault.auth.*.read ops.
+        ("vault.sys.policy.read", "other"),
+        ("vault.sys.policy.list", "read"),
+        ("vault.sys.policy.write", "write"),
+        ("vault.sys.policy.delete", "write"),
+    ],
+)
+def test_policy_ops_classify(op_id: str, expected: str) -> None:
+    """policy.list → read; policy.read → other; writes/deletes redact under ``write``."""
+    assert classify_op(op_id) == expected
+
+
+async def test_policy_read_returns_name_and_rules(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """policy.read unwraps the envelope ``data.rules`` and forwards the JWT."""
+    rules = 'path "secret/data/*" {\n  capabilities = ["read"]\n}\n'
+    fake = install_fake_client(
+        monkeypatch,
+        policy_read_payload={"data": {"name": "meho-mcp", "rules": rules}},
+    )
+    result = await _dispatch_vault("vault.sys.policy.read", {"name": "meho-mcp"}, jwt="op-jwt")
+
+    assert result.status == "ok", result.error
+    assert result.result == {"name": "meho-mcp", "rules": rules}
+    assert fake.sys.policy_read_calls == [{"name": "meho-mcp"}]
+    assert fake.auth.jwt.login_calls == [{"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"}]
+    assert fake.auth.token.revoke_calls == 1
+
+
+async def test_policy_read_accepts_top_level_rules(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """Legacy Vault returns ``rules`` at the envelope top level (no ``data``)."""
+    install_fake_client(
+        monkeypatch,
+        policy_read_payload={"name": "default", "rules": "# default policy\n"},
+    )
+    result = await _dispatch_vault("vault.sys.policy.read", {"name": "default"})
+
+    assert result.status == "ok", result.error
+    assert result.result == {"name": "default", "rules": "# default policy\n"}
+
+
+async def test_policy_read_missing_body_yields_null_rules(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """A response carrying no rules surfaces ``rules=None`` (not a crash)."""
+    install_fake_client(monkeypatch, policy_read_payload={"data": {"name": "empty"}})
+    result = await _dispatch_vault("vault.sys.policy.read", {"name": "empty"})
+
+    assert result.status == "ok", result.error
+    assert result.result == {"name": "empty", "rules": None}
+
+
+async def test_policy_list_unwraps_envelope_data(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """policy.list returns the policy names from the envelope ``data``."""
+    names = ["default", "meho-mcp", "root"]
+    fake = install_fake_client(
+        monkeypatch,
+        policy_list_payload={"data": {"policies": names}, "policies": names},
+    )
+    result = await _dispatch_vault("vault.sys.policy.list", {})
+
+    assert result.status == "ok", result.error
+    assert result.result == {"policies": names}
+    assert fake.sys.policy_list_calls == 1
+
+
+# ``policy.write`` / ``policy.delete`` are ``requires_approval=True``, so a
+# full ``dispatch()`` for a human/service principal is intercepted by the
+# G11.7 policy gate and parked as ``awaiting_approval`` *before* the
+# handler runs (see ``test_policy_write_ops_are_approval_gated_on_dispatch``).
+# The handler's hvac-forwarding + payload-shape + error contract is
+# therefore exercised by calling the handler directly with the fake
+# client installed.
+
+
+async def test_policy_write_handler_forwards_body_and_returns_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """policy.write handler forwards name+body to hvac and reports written=True."""
+    body = 'path "secret/data/app/*" {\n  capabilities = ["read", "list"]\n}\n'
+    fake = install_fake_client(monkeypatch)
+    result = await vault_sys_policy_write(
+        _make_operator("op-jwt"), None, {"name": "app-ro", "policy": body}
+    )
+
+    assert result == {"name": "app-ro", "written": True}
+    assert fake.sys.policy_write_calls == [{"name": "app-ro", "policy": body, "pretty_print": True}]
+    assert fake.auth.jwt.login_calls == [{"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"}]
+    assert fake.auth.token.revoke_calls == 1
+
+
+async def test_policy_delete_handler_forwards_name_and_returns_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """policy.delete handler forwards the name and reports deleted=True."""
+    fake = install_fake_client(monkeypatch)
+    result = await vault_sys_policy_delete(_make_operator(), None, {"name": "app-ro"})
+
+    assert result == {"name": "app-ro", "deleted": True}
+    assert fake.sys.policy_delete_calls == [{"name": "app-ro"}]
+    assert fake.auth.token.revoke_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        ("vault.sys.policy.write", {"name": "app-ro", "policy": "# body\n"}),
+        ("vault.sys.policy.delete", {"name": "app-ro"}),
+    ],
+)
+async def test_policy_write_ops_are_approval_gated_on_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    _registered_vault_sys_ops: None,
+) -> None:
+    """DoD: a write/delete dispatch parks as ``awaiting_approval`` (handler never runs)."""
+    fake = install_fake_client(monkeypatch)
+    result = await _dispatch_vault(op_id, params)
+
+    assert result.status == "awaiting_approval", result.error
+    assert result.extras.get("error_code") == "awaiting_approval"
+    assert result.extras.get("approval_request_id")
+    # The handler must not have reached Vault — the gate parks first.
+    assert fake.sys.policy_write_calls == []
+    assert fake.sys.policy_delete_calls == []
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        ("vault.sys.policy.read", {"name": "secret/data"}),
+        ("vault.sys.policy.read", {"name": "  "}),
+        ("vault.sys.policy.read", {}),
+        ("vault.sys.policy.write", {"name": "ok", "policy": ""}),
+        ("vault.sys.policy.write", {"name": "ok"}),
+        ("vault.sys.policy.write", {"name": "secret/x", "policy": "y"}),
+        ("vault.sys.policy.delete", {"name": "secret/x"}),
+        ("vault.sys.policy.list", {"name": "x"}),
+    ],
+)
+async def test_policy_op_rejects_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    _registered_vault_sys_ops: None,
+) -> None:
+    """Schema rejects slash/blank names, empty/missing bodies, stray keys.
+
+    Validation runs ahead of the approval gate, so even the
+    ``requires_approval`` write/delete ops surface ``invalid_params``
+    rather than ``awaiting_approval`` for a malformed call.
+    """
+    install_fake_client(monkeypatch)
+    result = await _dispatch_vault(op_id, params)
+
+    assert result.status == "error"
+    assert result.extras.get("error_code") == "invalid_params"
+
+
+# --- read/list error + login-failure: these dispatch all the way to the
+# handler (they are not approval-gated), so the dispatcher's connector_error
+# branch is exercised end to end. ---
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params", "exc_kwarg"),
+    [
+        ("vault.sys.policy.read", {"name": "x"}, "policy_read_exc"),
+        ("vault.sys.policy.list", {}, "policy_list_exc"),
+    ],
+)
+async def test_policy_read_op_vault_error_surfaces_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    exc_kwarg: str,
+    _registered_vault_sys_ops: None,
+) -> None:
+    """A Vault-side error on a read op → connector_error, no traceback."""
+    install_fake_client(
+        monkeypatch,
+        **{exc_kwarg: hvac.exceptions.InvalidRequest("failed to parse policy")},
+    )
+    result = await _dispatch_vault(op_id, params)
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_error:")
+    assert result.extras.get("error_code") == "connector_error"
+    assert result.extras.get("exception_class") == "InvalidRequest"
+
+
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        ("vault.sys.policy.read", {"name": "x"}),
+        ("vault.sys.policy.list", {}),
+    ],
+)
+async def test_policy_read_op_login_failure_surfaces_vault_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    _registered_vault_sys_ops: None,
+) -> None:
+    """Login-phase failure on a read op → connector_error w/ VaultClientError class."""
+    install_fake_client(monkeypatch, login_exc=hvac.exceptions.Forbidden("role denied"))
+    result = await _dispatch_vault(op_id, params)
+
+    assert result.status == "error"
+    assert result.extras.get("exception_class") == "VaultRoleDeniedError"
+
+
+# --- write/delete handler-level error propagation (the handler runs only
+# after approval in production; here we drive it directly to prove it
+# re-raises Vault errors for the dispatcher's connector_error branch). ---
+
+
+@pytest.mark.parametrize(
+    ("handler", "params", "exc_kwarg"),
+    [
+        (vault_sys_policy_write, {"name": "x", "policy": "bad"}, "policy_write_exc"),
+        (vault_sys_policy_delete, {"name": "x"}, "policy_delete_exc"),
+    ],
+)
+async def test_policy_write_handler_reraises_vault_error(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+    params: dict[str, Any],
+    exc_kwarg: str,
+) -> None:
+    """The write/delete handler propagates a Vault-side error to the caller.
+
+    The dispatcher's ``connector_error`` branch (proven for the read ops
+    above) then turns this into a structured result; the handler's
+    contract is simply "raise on failure".
+    """
+    install_fake_client(
+        monkeypatch,
+        **{exc_kwarg: hvac.exceptions.InvalidRequest("failed to parse policy")},
+    )
+    with pytest.raises(hvac.exceptions.InvalidRequest):
+        await handler(_make_operator(), None, params)

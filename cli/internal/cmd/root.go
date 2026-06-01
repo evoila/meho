@@ -29,6 +29,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/holodeck"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
+	"github.com/evoila/meho/cli/internal/cmd/keycloak"
 	"github.com/evoila/meho/cli/internal/cmd/memory"
 	"github.com/evoila/meho/cli/internal/cmd/migrate"
 	"github.com/evoila/meho/cli/internal/cmd/nsx"
@@ -397,6 +398,22 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `gcloud` parent.
 	root.AddCommand(gcloud.NewRootCmd())
+
+	// G3.13-T3 (#1395) -- keycloak-admin-26.x operator alias verbs for
+	// Initiative #1388. The verb tree pre-bakes connector_id=
+	// "keycloak-admin-26.x" on top of the existing /api/v1/operations/call
+	// dispatcher route so operators don't type the connector ID on every
+	// invocation. The connector authenticates to the Keycloak Admin REST
+	// API with a Vault-sourced admin credential (the admin-vs-operator
+	// split — see docs/cross-repo/keycloak-onboarding.md), distinct from
+	// the operator's OIDC token. Ships the 6 read-only ops (realm get,
+	// client list/get, client-scope list, user list, role-mapping get)
+	// registered by G3.13-T1..T2 (#1393/#1394); the write surface is the
+	// deferred approval-gated T4 follow-up (#1406). Distinct from the
+	// `admin keycloak ...` deployer-onramp subtree (#791). Registered
+	// before registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `keycloak` parent.
+	root.AddCommand(keycloak.NewRootCmd())
 
 	// G3.7-T9 (#852) -- hetzner-rest-2026.04 operator alias verbs for
 	// Initiative #370. The verb tree pre-bakes connector_id=

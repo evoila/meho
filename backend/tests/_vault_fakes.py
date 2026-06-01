@@ -279,10 +279,12 @@ class _FakeKVv2:
     )
     list_calls: list[dict[str, Any]] = field(default_factory=list)
     put_calls: list[dict[str, Any]] = field(default_factory=list)
+    patch_calls: list[dict[str, Any]] = field(default_factory=list)
     versions_calls: list[dict[str, Any]] = field(default_factory=list)
     delete_calls: list[dict[str, Any]] = field(default_factory=list)
     list_exc: Exception | None = None
     put_exc: Exception | None = None
+    patch_exc: Exception | None = None
     versions_exc: Exception | None = None
     delete_exc: Exception | None = None
 
@@ -320,6 +322,22 @@ class _FakeKVv2:
         )
         if self.put_exc is not None:
             raise self.put_exc
+        return {"data": {"version": self.version + 1}}
+
+    def patch(
+        self,
+        path: str,
+        secret: dict[str, Any],
+        mount_point: str = "secret",
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        # hvac's ``patch`` takes no ``cas`` kwarg — it issues its own
+        # internal read+write. Mirror that signature so a stray ``cas``
+        # in a test would be a clear TypeError rather than silently
+        # accepted.
+        self.patch_calls.append({"path": path, "secret": secret, "mount_point": mount_point})
+        if self.patch_exc is not None:
+            raise self.patch_exc
         return {"data": {"version": self.version + 1}}
 
     def read_secret_metadata(
@@ -480,6 +498,7 @@ def install_fake_client(
     versions_meta: dict[str, Any] | None = None,
     list_exc: Exception | None = None,
     put_exc: Exception | None = None,
+    patch_exc: Exception | None = None,
     versions_exc: Exception | None = None,
     delete_exc: Exception | None = None,
 ) -> _FakeClient:
@@ -493,8 +512,8 @@ def install_fake_client(
     secret and KV-version overrides, the G3.3-T2 (#546) sys read
     group's seal-status / mounts / auth-methods payload + exception
     injection, and the G3.3-T1 KV-v2 verbs (list / put / versions /
-    delete) with per-verb exception injection and key/version-metadata
-    overrides.
+    patch / delete) with per-verb exception injection and
+    key/version-metadata overrides.
     """
     fake = install_fake_vault(monkeypatch, kv_version=kv_version if kv_version is not None else 11)
     fake.auth.jwt.raise_on_login = login_exc
@@ -517,6 +536,7 @@ def install_fake_client(
         kv.versions_meta = versions_meta
     kv.list_exc = list_exc
     kv.put_exc = put_exc
+    kv.patch_exc = patch_exc
     kv.versions_exc = versions_exc
     kv.delete_exc = delete_exc
     return fake

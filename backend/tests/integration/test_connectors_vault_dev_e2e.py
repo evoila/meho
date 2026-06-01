@@ -885,3 +885,251 @@ async def test_auth_approle_read_against_dev_vault(
         expected_op_class="other",
         events=captured_events,
     )
+
+
+# ---------------------------------------------------------------------------
+# auth write group (G3.15-T3 #1411) — userpass + approle credential lifecycle
+#
+# Every write op registers ``requires_approval=True``; an ordinary dispatch
+# would park it in the approval queue (G11.7-T1 #1401). These tests pass
+# ``_approved=True`` (the approvals-API resume flag) to drive the
+# authorized execution path — the same handler/audit/broadcast path that
+# runs once a human approves — against the live Vault. The redaction
+# assertions positively prove the password (request-side) and the minted
+# SecretID (response-side) never reach the serialised broadcast event.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_userpass_write_redacts_password_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.userpass.write`` creates a user; password absent from the broadcast.
+
+    The password rides in the request params, so the op classifies
+    ``credential_write`` (G11.7-T1 #1401) and the broadcast collapses to
+    aggregate-only. A distinctive sentinel password is seeded and the
+    test positively asserts it is absent from the *entire serialised
+    BroadcastEvent*; the write still lands in Vault (the user logs in).
+    """
+    target, addr = vault_e2e
+    sentinel = "userpass-write-pw-sentinel-1411"
+    operator = _make_operator(sub="op-up-write")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.userpass.write",
+        target=target,
+        params={"username": "minted-user", "password": sentinel, "token_policies": ["default"]},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result["written"] is True
+    assert sentinel not in str(result.result)
+    # The write landed — the user can authenticate with the sentinel.
+    login = _root_client(addr).auth.userpass.login(
+        username="minted-user", password=sentinel, mount_point="userpass"
+    )
+    assert login["auth"]["client_token"]
+    await _assert_audited(
+        "vault.auth.userpass.write",
+        operator_sub="op-up-write",
+        expected_op_class="credential_write",
+        events=captured_events,
+    )
+    event = next(e for e in captured_events if e.op_id == "vault.auth.userpass.write")
+    assert event.payload == {"op_class": "credential_write", "result_status": "ok"}
+    serialised = event.model_dump_json()
+    assert sentinel not in serialised, (
+        f"credential_write leak: {sentinel!r} reached the broadcast event"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_userpass_update_password_redacts_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.userpass.update_password`` rotates a password; redacted from broadcast."""
+    target, addr = vault_e2e
+    # Seed a user to rotate so this test is independent of the create test.
+    _root_client(addr).auth.userpass.create_or_update_user(
+        username="rotate-user", password="initial-pw", policies=["default"], mount_point="userpass"
+    )
+    sentinel = "userpass-rotate-pw-sentinel-1411"
+    operator = _make_operator(sub="op-up-rotate")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.userpass.update_password",
+        target=target,
+        params={"username": "rotate-user", "password": sentinel},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "username": "rotate-user",
+        "mount": "userpass",
+        "password_updated": True,
+    }
+    login = _root_client(addr).auth.userpass.login(
+        username="rotate-user", password=sentinel, mount_point="userpass"
+    )
+    assert login["auth"]["client_token"]
+    await _assert_audited(
+        "vault.auth.userpass.update_password",
+        operator_sub="op-up-rotate",
+        expected_op_class="credential_write",
+        events=captured_events,
+    )
+    event = next(e for e in captured_events if e.op_id == "vault.auth.userpass.update_password")
+    serialised = event.model_dump_json()
+    assert sentinel not in serialised, "rotated password leaked into broadcast event"
+
+
+@pytest.mark.asyncio
+async def test_auth_userpass_delete_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.userpass.delete`` removes a user; op_class=write (no secret)."""
+    target, addr = vault_e2e
+    _root_client(addr).auth.userpass.create_or_update_user(
+        username="doomed-user", password="pw", policies=["default"], mount_point="userpass"
+    )
+    operator = _make_operator(sub="op-up-delete")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.userpass.delete",
+        target=target,
+        params={"username": "doomed-user"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"username": "doomed-user", "mount": "userpass", "deleted": True}
+    # The user is gone — list no longer contains it.
+    listing = _root_client(addr).auth.userpass.list_user(mount_point="userpass")
+    assert "doomed-user" not in listing["data"]["keys"]
+    await _assert_audited(
+        "vault.auth.userpass.delete",
+        operator_sub="op-up-delete",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_approle_write_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.approle.write`` creates a role; op_class=write."""
+    target, addr = vault_e2e
+    operator = _make_operator(sub="op-ar-write")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.approle.write",
+        target=target,
+        params={"role_name": "minted-role", "token_policies": ["default"], "token_ttl": 600},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"role_name": "minted-role", "mount": "approle", "written": True}
+    role = _root_client(addr).auth.approle.read_role(role_name="minted-role", mount_point="approle")
+    assert "default" in role["data"]["token_policies"]
+    await _assert_audited(
+        "vault.auth.approle.write",
+        operator_sub="op-ar-write",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_approle_delete_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.approle.delete`` removes a role; op_class=write."""
+    target, addr = vault_e2e
+    _root_client(addr).auth.approle.create_or_update_approle(
+        role_name="doomed-role", token_policies=["default"], mount_point="approle"
+    )
+    operator = _make_operator(sub="op-ar-delete")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.approle.delete",
+        target=target,
+        params={"role_name": "doomed-role"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"role_name": "doomed-role", "mount": "approle", "deleted": True}
+    listing = _root_client(addr).auth.approle.list_roles(mount_point="approle")
+    assert "doomed-role" not in listing["data"]["keys"]
+    await _assert_audited(
+        "vault.auth.approle.delete",
+        operator_sub="op-ar-delete",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.auth.approle.generate_secret_id`` mints a SecretID; redacted from broadcast.
+
+    The minted SecretID lands in the *response*, so the op classifies
+    ``credential_mint`` and the broadcast collapses to aggregate-only. The
+    caller's OperationResult carries the SecretID (the point of minting),
+    but the test positively asserts that exact value is absent from the
+    entire serialised BroadcastEvent. Non-idempotent: a second call mints
+    a distinct SecretID.
+    """
+    target, addr = vault_e2e
+    _root_client(addr).auth.approle.create_or_update_approle(
+        role_name="sid-role", token_policies=["default"], mount_point="approle"
+    )
+    operator = _make_operator(sub="op-ar-sid")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.auth.approle.generate_secret_id",
+        target=target,
+        params={"role_name": "sid-role"},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    minted_secret_id = result.result["secret_id"]
+    assert minted_secret_id, "the minted SecretID must reach the caller's OperationResult"
+    assert result.result["role_name"] == "sid-role"
+    await _assert_audited(
+        "vault.auth.approle.generate_secret_id",
+        operator_sub="op-ar-sid",
+        expected_op_class="credential_mint",
+        events=captured_events,
+    )
+    event = next(e for e in captured_events if e.op_id == "vault.auth.approle.generate_secret_id")
+    assert event.payload == {"op_class": "credential_mint", "result_status": "ok"}
+    serialised = event.model_dump_json()
+    assert minted_secret_id not in serialised, (
+        "credential_mint leak: the minted SecretID reached the broadcast event"
+    )
+    # Non-idempotent: a second mint yields a distinct SecretID.
+    second = await dispatch(
+        operator=_make_operator(sub="op-ar-sid-2"),
+        connector_id="vault-1.x",
+        op_id="vault.auth.approle.generate_secret_id",
+        target=target,
+        params={"role_name": "sid-role"},
+        _approved=True,
+    )
+    assert second.status == "ok", second.error
+    assert second.result["secret_id"] != minted_secret_id

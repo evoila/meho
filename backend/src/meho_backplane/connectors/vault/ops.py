@@ -71,6 +71,7 @@ from typing import Any
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
+from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -854,3 +855,9 @@ async def register_vault_typed_operations(
     # module so the auth surface stays independently reviewable while
     # the package keeps a single lifespan-driven registrar entry.
     await register_vault_auth_operations(embedding_service=embedding_service)
+    # Auth credential-lifecycle write group (G3.15-T3 #1411) -- the
+    # userpass/approle write half (create/update/delete + secret-id
+    # mint), all requires_approval=True with request/response secret
+    # redaction at the classification layer. Its own module, same
+    # single-registrar-entry discipline as the read group above.
+    await register_vault_auth_write_operations(embedding_service=embedding_service)

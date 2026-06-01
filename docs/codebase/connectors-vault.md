@@ -71,11 +71,38 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   `vault.auth.approle.read` under group key `auth`, all
   `safety_level='safe'`. Mount path is parameterised (defaults
   `userpass` / `approle`); a not-mounted backend raises
-  `VaultAuthBackendNotMountedError`. AppRole secret-id generation is
-  deliberately out of scope (v0.2.next, behind a policy gate). It is
-  registered from its own module via the
-  `register_vault_auth_operations()` call at the end of
+  `VaultAuthBackendNotMountedError`. It is registered from its own
+  module via the `register_vault_auth_operations()` call at the end of
   `register_vault_typed_operations()`.
+- **`auth` write op group** (`ops_auth_write.py` /
+  `ops_auth_write_schemas.py`, G3.15-T3 #1411) —
+  `register_vault_auth_write_operations()` registers the userpass +
+  approle credential lifecycle under the same `auth` group key, all
+  `requires_approval=True`:
+
+  | op_id | hvac call | safety_level | op_class (broadcast) |
+  |---|---|---|---|
+  | `vault.auth.userpass.write` | `create_or_update_user` | dangerous | `credential_write` |
+  | `vault.auth.userpass.update_password` | `update_password_on_user` | caution | `credential_write` |
+  | `vault.auth.userpass.delete` | `delete_user` | dangerous | `write` |
+  | `vault.auth.approle.write` | `create_or_update_approle` | dangerous | `write` |
+  | `vault.auth.approle.delete` | `delete_role` | dangerous | `write` |
+  | `vault.auth.approle.generate_secret_id` | `generate_secret_id` | dangerous | `credential_mint` |
+
+  Passwords (userpass write / update_password) are **request-side**
+  secret material → `credential_write` (aggregate-only broadcast); the
+  handlers also return a value-free confirmation (username/mount/policies,
+  never the password). `generate_secret_id` mints a SecretID in its
+  **response** → `credential_mint`; it is **non-idempotent** (a fresh
+  SecretID per call), flagged as such in its `llm_instructions`, and the
+  minted value reaches only the caller's `OperationResult` (never the
+  audit row or broadcast). `delete` / `approle.write` carry no secret and
+  classify plain `write` off their suffix. Registered from its own
+  module via the `register_vault_auth_write_operations()` call at the end
+  of `register_vault_typed_operations()`. `_reclassify_not_found` /
+  `VaultAuthBackendNotMountedError` are reused from `ops_auth.py` so a
+  404 from an unmounted backend surfaces the same error class as the
+  read ops.
 
 ## KV-v2 op group
 
@@ -135,22 +162,32 @@ secret `data` is in the *request params*, and the broadcast ships
 params, so it must collapse to aggregate-only. It previously
 classified plain `write` via the `.put` write-suffix (#545), which kept
 it out of the `other` class but still broadcast the written secret in
-full — the `credential_write` reclassification closes that. Response-side
-secret-mint ops (`vault.token.create`,
+full — the `credential_write` reclassification closes that. The auth-write ops (G3.15-T3 #1411)
+`vault.auth.userpass.write` / `vault.auth.userpass.update_password` are
+also `credential_write` — the password is in their request params.
+Response-side secret-mint ops (`vault.token.create`,
 `vault.auth.approle.generate_secret_id`) classify `credential_mint`
-alongside `harbor.robot.create`. See `docs/codebase/broadcast.md` for
-the full sensitivity taxonomy.
+alongside `harbor.robot.create`: the minted value is in the response, so
+the broadcast collapses to aggregate-only and the audit row keeps only a
+`params_hash`, while the caller's `OperationResult` still carries the
+secret. See `docs/codebase/broadcast.md` for the full sensitivity
+taxonomy.
 
 ## Approval gating
 
-`vault.kv.put` (`caution`) and `vault.kv.delete` (`dangerous`)
-register with `requires_approval=False` — the dev default.
-`requires_approval` is a static boolean on the descriptor; the shipped
-G0.6 substrate has no per-path approval predicate. The
-production-path approval gate is G7/G10 policy territory (see the
-`EndpointDescriptor` model docstring: `caution`/`dangerous` ops "flow
-through G7 / G10 policy logic once those Goals land"). `safety_level`
-is the load-bearing signal that future gate keys on.
+The KV-v2 write ops `vault.kv.put` (`caution`) and `vault.kv.delete`
+(`dangerous`) register with `requires_approval=False` — the dev default.
+
+The auth-write ops (G3.15-T3 #1411) instead register
+`requires_approval=True`: each is a privilege assignment (binding
+`token_policies`), an irreversible identity removal, or a secret mint.
+By the G11.7-T1 (#1401) policy gate a human/service principal hitting a
+`requires_approval=True` op is routed to the approval queue (parked
+durably with synchronous `approval.request` / `approval.decision` audit
+rows) rather than hard-denied; the call executes on the approvals-API
+resume path once approved. `requires_approval` is a static boolean on
+the descriptor and `safety_level` is the load-bearing signal the gate
+keys on.
 
 ## JSONFlux result-handle path (`vault.kv.list`)
 

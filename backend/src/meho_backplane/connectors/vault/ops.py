@@ -514,37 +514,64 @@ async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) 
 #: result as a new version. hvac's ``patch`` exposes no ``cas`` guard
 #: (it issues its own internal read+write), so the schema omits one.
 #:
-#: ``data``'s ``additionalProperties`` subschema pins each value to a
-#: non-null JSON type (``string``/``number``/``boolean``/``object``/
-#: ``array``). This is load-bearing: hvac's ``secrets.kv.v2.patch`` uses
-#: HashiCorp Vault's JSON Merge Patch (RFC 7396), under which a ``null``
-#: value **deletes** the key rather than setting it. The op is
-#: documented as add/overwrite-only (keys absent from ``data`` are
-#: preserved, keys present are added/overwritten), so a ``null`` slipping
-#: through would silently delete a secret field — a contract the schema
-#: now rejects at validation time (``invalid_params``). Field deletion,
-#: when wanted, goes through ``kv.put`` (wholesale replace) or
+#: ``data``'s values are constrained to a *recursive* non-null JSON
+#: subschema (:data:`_NON_NULL_JSON_VALUE_REF` → ``#/$defs/nonNullJsonValue``):
+#: a value may be a ``string``/``number``/``boolean``, or an ``object``
+#: whose every value recurses the same constraint, or an ``array`` whose
+#: every item recurses it — but never ``null`` at *any* depth. This is
+#: load-bearing: hvac's ``secrets.kv.v2.patch`` uses HashiCorp Vault's
+#: JSON Merge Patch (RFC 7396), whose merge algorithm is **recursive** —
+#: a ``null`` value deletes its key whether it sits at the top level or
+#: nested inside a merged object. The op is documented as
+#: add/overwrite-only (keys absent from ``data`` are preserved, keys
+#: present are added/overwritten), so a ``null`` slipping through at any
+#: nesting depth would silently delete a secret field — a contract the
+#: schema now rejects at validation time (``invalid_params``). Field
+#: deletion, when wanted, goes through ``kv.put`` (wholesale replace) or
 #: ``kv.delete`` (version soft-delete), not a surprising side effect of
 #: patch.
+#:
+#: ``$defs``/``$ref`` resolve as a same-document reference: the
+#: dispatcher constructs ``Draft202012Validator(parameter_schema)`` with
+#: this dict as the root, so ``#/$defs/nonNullJsonValue`` resolves
+#: against it without an external registry.
+_NON_NULL_JSON_VALUE_REF: dict[str, Any] = {"$ref": "#/$defs/nonNullJsonValue"}
+
 VAULT_KV_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "$defs": {
+        # A JSON value that contains no ``null`` at any depth: a scalar,
+        # an object whose values recurse this same constraint, or an
+        # array whose items recurse it. Mirrors RFC 7396's recursive
+        # merge so a nested ``null`` cannot reach Vault as a key DELETE.
+        "nonNullJsonValue": {
+            "oneOf": [
+                {"type": ["string", "number", "boolean"]},
+                {
+                    "type": "object",
+                    "additionalProperties": _NON_NULL_JSON_VALUE_REF,
+                },
+                {"type": "array", "items": _NON_NULL_JSON_VALUE_REF},
+            ],
+        },
+    },
     "properties": {
         "mount": _MOUNT_PROPERTY,
         "path": _PATH_PROPERTY,
         "data": {
             "type": "object",
             "minProperties": 1,
-            "additionalProperties": {
-                "type": ["string", "number", "boolean", "object", "array"],
-            },
+            "additionalProperties": _NON_NULL_JSON_VALUE_REF,
             "description": (
                 "Fields to merge onto the current version. Unlike "
                 "kv.put this is a partial — keys present here are added "
                 "or overwritten; keys absent here are preserved from the "
-                "current version. Values may not be null: Vault's JSON "
-                "Merge Patch treats a null value as a key DELETE, which "
-                "this add/overwrite-only op rejects (use kv.put or "
-                "kv.delete to remove data). The secret must already exist."
+                "current version. Values may not be null at any depth: "
+                "Vault's JSON Merge Patch recurses, treating a null value "
+                "as a key DELETE whether it is top-level or nested inside "
+                "a merged object/array, which this add/overwrite-only op "
+                "rejects (use kv.put or kv.delete to remove data). The "
+                "secret must already exist."
             ),
         },
     },
@@ -579,10 +606,12 @@ _VAULT_KV_PATCH_LLM_INSTRUCTIONS: dict[str, Any] = {
         "data": (
             "Required. The fields to merge. Only these keys are "
             "added/overwritten; every other key on the current version "
-            "is carried forward unchanged. Values must not be null — "
-            "Vault's JSON Merge Patch reads a null as 'delete this key', "
-            "which this add/overwrite-only op rejects. To remove a field, "
-            "use kv.put (full replace) or kv.delete (version soft-delete)."
+            "is carried forward unchanged. Values must not be null at any "
+            "depth — Vault's JSON Merge Patch recurses and reads a null "
+            "(top-level or nested inside a merged object/array) as 'delete "
+            "this key', which this add/overwrite-only op rejects. To remove "
+            "a field, use kv.put (full replace) or kv.delete (version "
+            "soft-delete)."
         ),
     },
     "output_shape": (
@@ -609,13 +638,15 @@ async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]
     malformed hvac payload.
 
     JSON Merge Patch (RFC 7396) — which hvac's ``patch`` uses — treats a
-    ``null`` value as a key DELETE. To keep this op genuinely
-    add/overwrite-only, :data:`VAULT_KV_PATCH_PARAMETER_SCHEMA` pins each
-    ``data`` value to a non-null type, so a ``null`` is rejected as
-    ``invalid_params`` before reaching Vault rather than silently
-    deleting a secret field. Field removal goes through
-    :func:`vault_kv_put` (wholesale replace) or :func:`vault_kv_delete`
-    (version soft-delete).
+    ``null`` value as a key DELETE, and its merge algorithm is
+    *recursive*: a ``null`` nested inside a merged object deletes that
+    nested key too. To keep this op genuinely add/overwrite-only at every
+    depth, :data:`VAULT_KV_PATCH_PARAMETER_SCHEMA` constrains each
+    ``data`` value to a recursive non-null JSON subschema, so a ``null``
+    anywhere in the payload is rejected as ``invalid_params`` before
+    reaching Vault rather than silently deleting a secret field. Field
+    removal goes through :func:`vault_kv_put` (wholesale replace) or
+    :func:`vault_kv_delete` (version soft-delete).
     """
     mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()

@@ -791,6 +791,8 @@ async def test_execute_vault_kv_patch_honors_explicit_mount(
         {"path": "p", "data": {"k": "v"}, "cas": 1},
         {"path": "p", "data": {"token": None}},
         {"path": "p", "data": {"keep": "v", "drop": None}},
+        {"path": "p", "data": {"creds": {"old": None}}},
+        {"path": "p", "data": {"items": [1, None]}},
     ],
     ids=[
         "missing-data",
@@ -799,6 +801,8 @@ async def test_execute_vault_kv_patch_honors_explicit_mount(
         "rejects-cas",
         "rejects-null-value",
         "rejects-null-among-non-null",
+        "rejects-nested-object-null",
+        "rejects-nested-array-null",
     ],
 )
 async def test_execute_vault_kv_patch_invalid_params_returns_dispatcher_error(
@@ -815,10 +819,13 @@ async def test_execute_vault_kv_patch_invalid_params_returns_dispatcher_error(
 
     A ``null`` data value is also rejected: hvac's ``patch`` uses JSON
     Merge Patch (RFC 7396), under which ``null`` *deletes* the key. The
-    op is documented add/overwrite-only, so the ``data``
-    ``additionalProperties`` subschema pins each value to a non-null
-    type and a ``null`` surfaces as ``invalid_params`` before it can
-    silently delete a secret field.
+    op is documented add/overwrite-only, so the ``data`` schema pins each
+    value to a *recursive* non-null subschema and a ``null`` surfaces as
+    ``invalid_params`` before it can silently delete a secret field. The
+    recursion matters because RFC 7396 merges nested objects too: a
+    nested ``null`` (``{"creds": {"old": None}}``) or an array element
+    ``null`` (``{"items": [1, None]}``) is rejected just like a
+    top-level one.
     """
     install_fake_client(monkeypatch)
     result = await _dispatch_vault("vault.kv.patch", params)
@@ -846,6 +853,36 @@ def test_vault_kv_patch_schema_rejects_null_data_value() -> None:
 
     assert validator.is_valid({"path": "meho/test", "data": {"token": "v"}})
     assert not validator.is_valid({"path": "meho/test", "data": {"token": None}})
+
+
+def test_vault_kv_patch_schema_rejects_nested_null_data_value() -> None:
+    """Schema-level guard: a ``null`` *nested* in ``data`` fails validation.
+
+    RFC 7396 JSON Merge Patch — which hvac's ``patch`` uses — recurses,
+    so ``{"creds": {"old": null}}`` deletes the nested ``old`` key just
+    like a top-level ``null`` would. The ``data`` schema therefore
+    constrains values with a *recursive* non-null subschema
+    (``$defs/nonNullJsonValue``): a ``null`` at any object/array nesting
+    depth must fail validation, while equivalent non-null nested
+    structures still validate. Without this, the top-level-only guard
+    would let a nested ``null`` reach Vault and silently delete a field —
+    the exact contract gap #1435 was filed to close.
+    """
+    from jsonschema import Draft202012Validator
+
+    from meho_backplane.connectors.vault.ops import VAULT_KV_PATCH_PARAMETER_SCHEMA
+
+    validator = Draft202012Validator(VAULT_KV_PATCH_PARAMETER_SCHEMA)
+
+    # Non-null nested object/array structures validate.
+    assert validator.is_valid({"path": "meho/test", "data": {"creds": {"user": "u", "pass": "p"}}})
+    assert validator.is_valid({"path": "meho/test", "data": {"items": [1, "two", True]}})
+    assert validator.is_valid({"path": "meho/test", "data": {"a": {"b": {"c": "deep"}}}})
+
+    # A null anywhere in the nested structure is rejected.
+    assert not validator.is_valid({"path": "meho/test", "data": {"creds": {"old": None}}})
+    assert not validator.is_valid({"path": "meho/test", "data": {"items": [1, None]}})
+    assert not validator.is_valid({"path": "meho/test", "data": {"a": {"b": {"c": None}}}})
 
 
 async def test_execute_vault_kv_versions_returns_metadata(

@@ -79,8 +79,17 @@ jobs:
               | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' \
               || true
           )"
+          # No **Status:** token is fine *if* the README relies on the
+          # self-updating shields.io release badge: that endpoint renders
+          # the latest release dynamically and carries no static version
+          # string, so it cannot drift. Fail only when neither an honest
+          # textual version nor the badge is present.
           if [ -z "$readme_version" ]; then
-            echo "::error file=README.md::Could not find a vX.Y(.Z) version token on the README '**Status:**' line."
+            if grep -qF 'img.shields.io/github/v/release/evoila/meho' README.md; then
+              echo "No '**Status:**' version token, but the self-updating release badge is present — drift is not possible. OK."
+              exit 0
+            fi
+            echo "::error file=README.md::No vX.Y(.Z) token on the '**Status:**' line and no self-updating release badge found; the README has no honest version surface."
             exit 1
           fi
 

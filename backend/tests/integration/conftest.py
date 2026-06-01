@@ -749,7 +749,8 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
     # which probes the socket on import, so keeping the import inside
     # the fixture lets the module collect on a no-Docker sandbox.
     from testcontainers.core.container import DockerContainer
-    from testcontainers.core.waiting_utils import wait_for_logs
+
+    from tests._strategies import wait_for_log_message
 
     realm_file = Path(__file__).parent / "_fixtures" / f"{_KEYCLOAK_REALM}-realm.json"
     if not realm_file.is_file():
@@ -799,7 +800,7 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
         # "Listening on" prefix — the realm-import line that precedes
         # it is itself a useful but slightly Keycloak-version-specific
         # signal, so anchor on the Quarkus boot line instead.
-        wait_for_logs(container, "Listening on:", timeout=120)
+        wait_for_log_message(container, "Listening on:", timeout=120)
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8080)
         base_url = f"http://{host}:{port}"

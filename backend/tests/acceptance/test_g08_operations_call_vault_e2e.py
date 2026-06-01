@@ -165,7 +165,8 @@ def vault_dev_addr() -> Iterator[str]:
     # which probes the socket on import. Keeping it inside the fixture
     # lets the module collect on a no-Docker sandbox and skip cleanly.
     from testcontainers.core.container import DockerContainer
-    from testcontainers.core.waiting_utils import wait_for_logs
+
+    from tests._strategies import wait_for_log_message
 
     image = os.environ.get("MEHO_TEST_VAULT_IMAGE", "hashicorp/vault:1.18")
     container = (
@@ -185,7 +186,7 @@ def vault_dev_addr() -> Iterator[str]:
     container.start()
 
     try:
-        wait_for_logs(container, "Vault server started!", timeout=60)
+        wait_for_log_message(container, "Vault server started!", timeout=60)
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8200)
         addr = f"http://{host}:{port}"

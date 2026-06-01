@@ -236,8 +236,8 @@ def _boot_vcsim_container(
 
     Yields one endpoint and tears the container down on context
     exit. The simulator emits ``export GOVC_URL=...`` to stdout once
-    the REST endpoint is serving; ``wait_for_logs`` blocks on that
-    line up to 30 s. Longer would mask a real boot failure as
+    the REST endpoint is serving; ``wait_for_log_message`` blocks on
+    that line up to 30 s. Longer would mask a real boot failure as
     flake; shorter risks slow CI runner pulls timing out before
     vcsim is ready.
     """
@@ -246,7 +246,8 @@ def _boot_vcsim_container(
     # the context manager lets the module collect on a no-Docker
     # sandbox (the env-var path doesn't reach here at all).
     from testcontainers.core.container import DockerContainer
-    from testcontainers.core.waiting_utils import wait_for_logs
+
+    from tests._strategies import wait_for_log_message
 
     image = os.environ.get("MEHO_TEST_VCSIM_IMAGE", "vmware/vcsim:latest")
     container = (
@@ -257,7 +258,7 @@ def _boot_vcsim_container(
 
     try:
         container.start()
-        wait_for_logs(container, "export GOVC_URL", timeout=30)
+        wait_for_log_message(container, "export GOVC_URL", timeout=30)
     except Exception:
         # Best-effort cleanup; surfacing the original boot exception
         # is more useful than the secondary stop() failure.

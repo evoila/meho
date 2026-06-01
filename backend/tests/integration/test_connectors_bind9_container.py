@@ -179,7 +179,8 @@ def bind9_container_target() -> Iterator[_Bind9Target]:
     try:
         from testcontainers.core.container import DockerContainer
         from testcontainers.core.image import DockerImage
-        from testcontainers.core.waiting_utils import wait_for_logs
+
+        from tests._strategies import wait_for_log_message
     except ImportError as exc:  # pragma: no cover -- testcontainers ships these in 4.x
         pytest.skip(f"testcontainers missing module: {exc}")
 
@@ -204,11 +205,12 @@ def bind9_container_target() -> Iterator[_Bind9Target]:
         container.start()
         try:
             # Wait for sshd to log readiness before tests connect.
-            # ``wait_for_logs`` raises ``TimeoutError`` after 30 s of no
-            # match; we let it propagate so a regression in the inline
-            # entrypoint surfaces rather than silently skipping. The
-            # container is torn down in the outer ``finally`` regardless.
-            wait_for_logs(container, "Server listening on", timeout=30.0)
+            # ``wait_for_log_message`` raises ``TimeoutError`` after 30 s
+            # of no match; we let it propagate so a regression in the
+            # inline entrypoint surfaces rather than silently skipping.
+            # The container is torn down in the outer ``finally``
+            # regardless.
+            wait_for_log_message(container, "Server listening on", timeout=30.0)
             host = container.get_container_host_ip()
             port = int(container.get_exposed_port(22))
             # named starts in the background just before sshd; give

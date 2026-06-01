@@ -301,9 +301,8 @@ def bind9_container_target() -> Iterator[tuple[_Bind9Target, _ContainerCreds]]:
     try:
         from testcontainers.core.container import DockerContainer  # type: ignore[import-untyped]
         from testcontainers.core.image import DockerImage  # type: ignore[import-untyped]
-        from testcontainers.core.waiting_utils import (  # type: ignore[import-untyped]
-            wait_for_logs,
-        )
+
+        from tests._strategies import wait_for_log_message
     except ImportError as exc:  # pragma: no cover -- testcontainers ships these in 4.x
         pytest.skip(f"testcontainers missing module: {exc}")
 
@@ -318,7 +317,7 @@ def bind9_container_target() -> Iterator[tuple[_Bind9Target, _ContainerCreds]]:
         container = DockerContainer(tag).with_exposed_ports(22)
         container.start()
         try:
-            wait_for_logs(container, "Server listening on", timeout=30.0)
+            wait_for_log_message(container, "Server listening on", timeout=30.0)
             host = container.get_container_host_ip()
             port = int(container.get_exposed_port(22))
             # named starts in the background just before sshd; give

@@ -1671,6 +1671,123 @@ async def test_dispatch_agent_requires_approval_floors_safe_op_to_pending(
     assert "approval_request_id" in result.extras
 
 
+@pytest.mark.asyncio
+async def test_park_populates_proposed_effect_from_builder(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked op with a registered preview builder stores its preview.
+
+    G11.7 follow-up (#1437): when the policy gate routes an op to
+    ``needs-approval``, the dispatcher invokes the op's opt-in
+    ``proposed_effect`` builder and stores the result on the durable
+    :class:`ApprovalRequest` row -- so the reviewer reads the preview in
+    the approval queue, not just in the post-approval op result.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._preview import (
+        _PREVIEW_BUILDERS,
+        PreviewContext,
+        register_preview_builder,
+    )
+
+    async def _preview(ctx: PreviewContext) -> dict[str, Any]:
+        return {"would_change": ["deployment/web"], "param_echo": ctx.params}
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.preview_op",
+        handler=_module_handler_returning_dict,
+        summary="Op with a registered preview builder.",
+        description="Parks for approval and populates proposed_effect.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    register_preview_builder("vault.kv.preview_op", _preview)
+    try:
+        result = await dispatch(
+            operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+            connector_id="vault-1.x",
+            op_id="vault.kv.preview_op",
+            target=_FakeTarget(product="vault"),
+            params={"path": "secret/data/x"},
+        )
+        assert result.status == "awaiting_approval"
+        approval_request_id = UUID(result.extras["approval_request_id"])
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as fresh:
+            row = await fresh.get(ApprovalRequest, approval_request_id)
+            assert row is not None
+            # The builder's preview landed under the {op_class, preview}
+            # envelope -- not the identifier-only default.
+            assert row.proposed_effect["op_class"] == "other"
+            assert row.proposed_effect["preview"]["would_change"] == ["deployment/web"]
+            # The identifier-only default keys are NOT present (a built
+            # preview replaces the default, it doesn't merge into it).
+            assert "op_id" not in row.proposed_effect
+    finally:
+        _PREVIEW_BUILDERS.pop("vault.kv.preview_op", None)
+
+
+@pytest.mark.asyncio
+async def test_park_without_builder_uses_identifier_default(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """An op with no preview builder parks with the identifier-only default.
+
+    G11.7 follow-up (#1437): the hook is opt-in. An op that registers no
+    builder must park exactly as before -- the durable row carries the
+    ``{op_id, connector_id, target_id}`` default, with no error and no
+    regression.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.no_preview_op",
+        handler=_module_handler_returning_dict,
+        summary="Op without a preview builder.",
+        description="Parks for approval; no proposed_effect builder registered.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="vault-1.x",
+        op_id="vault.kv.no_preview_op",
+        target=target,
+        params={},
+    )
+    assert result.status == "awaiting_approval"
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        # Identifier-only default -- no built-preview envelope.
+        assert row.proposed_effect == {
+            "op_id": "vault.kv.no_preview_op",
+            "connector_id": "vault-1.x",
+            "target_id": str(target.id),
+        }
+        assert "preview" not in row.proposed_effect
+
+
 # ---------------------------------------------------------------------------
 # compute_params_hash
 # ---------------------------------------------------------------------------

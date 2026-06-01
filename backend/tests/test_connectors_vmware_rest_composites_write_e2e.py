@@ -538,6 +538,8 @@ async def test_write_composite_passes_preflight_through_dispatch(
     """
     await _bootstrap_registry(stub_embedding_service)
     await _clear_requires_approval(set(_WRITE_COMPOSITES))
+    for op_id, payload in _benign_responses_for(composite_op_id).items():
+        _RESPONSES[op_id] = payload
 
     operator = _make_operator()
     target = _FakeVmwareTarget()
@@ -559,6 +561,17 @@ async def test_write_composite_passes_preflight_through_dispatch(
     # here; the point is the L2 dependency walk resolved every declared
     # ``_SUB_OPS_*`` op_id against the registered descriptor set.
     assert "composite_l2_missing" not in (result.error or ""), result.error
+    # AC1 (#1436): a *non*-``composite_l2_missing`` failure would still
+    # satisfy the negative check above — an ``unknown_op`` /
+    # ``invalid_params`` / ``connector_error`` generic error has a
+    # different error text yet is plainly not a passing pre-flight. Pin
+    # the positive outcome too (``status != "error"``) so only a genuine
+    # pre-flight pass through the production dispatch path satisfies the
+    # test. The benign leaf responses above let every composite reach its
+    # no-work business status (``OperationResult.status`` ∈ {ok, pending}),
+    # never a generic execution error.
+    assert result.status != "error", result.error
+    assert result.status in {"ok", "pending"}, (result.status, result.error)
 
 
 def _benign_params_for(composite_op_id: str) -> dict[str, Any]:
@@ -592,6 +605,49 @@ def _benign_params_for(composite_op_id: str) -> dict[str, Any]:
         },
         "vmware.composite.cluster.patch": {"cluster": "domain-c1"},
     }[composite_op_id]
+
+
+def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
+    """Per-op leaf responses that steer each composite to a no-work status.
+
+    The recorder's default leaf payload is ``{"value": {}}`` (an empty
+    *object* envelope). Composites whose first sub-op is a listing read
+    unwrap ``value`` and expect a *list*; the empty-object default trips
+    their ``isinstance(..., list)`` guard and raises ``RuntimeError`` —
+    surfacing as a generic ``connector_error`` (``status='error'``), which
+    is exactly the non-``composite_l2_missing`` failure AC1 (#1436) now
+    rejects. Returning an empty *list* envelope for those listing ops lets
+    the composite short-circuit to its benign no-work business status
+    (``no_recommendation`` / ``detached`` / ``completed`` / ...) so the
+    strengthened ``status != "error"`` assertion checks a genuine
+    pre-flight pass rather than masking an execution error.
+
+    ``vm.clone`` is fire-and-forget here (``wait_for_completion=False``):
+    it reads the source VM (the empty-object default is a valid non-list
+    payload) then deploys, so it needs a deploy envelope carrying a task
+    id to reach the benign ``pending`` status without a poll.
+    """
+    empty_listing: dict[str, Any] = {"value": []}
+    per_composite: dict[str, dict[str, Any]] = {
+        "vmware.composite.vm.create": {"GET:/vcenter/folder": empty_listing},
+        "vmware.composite.vm.clone": {
+            "POST:/vcenter/vm-template/library-items?action=deploy": {
+                "value": {"task": "task-benign"}
+            },
+        },
+        "vmware.composite.vm.snapshot.revert": {"GET:/vcenter/vm/{vm}/snapshot": empty_listing},
+        "vmware.composite.vm.migrate": {
+            "GET:/vcenter/cluster/{cluster}/drs/recommendations": empty_listing,
+        },
+        "vmware.composite.vm.power.bulk": {"GET:/vcenter/vm": empty_listing},
+        "vmware.composite.host.evacuate": {"GET:/vcenter/vm": empty_listing},
+        "vmware.composite.host.detach_from_vds": {
+            "GET:/vcenter/network/distributed-portgroup": empty_listing,
+            "GET:/vcenter/vm": empty_listing,
+        },
+        "vmware.composite.cluster.patch": {"GET:/vcenter/cluster/{cluster}/host": empty_listing},
+    }
+    return per_composite[composite_op_id]
 
 
 # ===========================================================================

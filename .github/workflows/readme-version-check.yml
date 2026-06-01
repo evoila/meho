@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# README version drift check.
+#
+# Fails the build when the version named in the README **Status:** line
+# drifts from the repo's latest release tag. The README went ~9 minors
+# stale because keeping it current depended on someone remembering; this
+# guard makes the landing page load-bearingly honest instead of
+# honest-by-remembering (Task #1449).
+#
+# Scope is version drift only — it does not lint README prose or links,
+# and it never edits the README from CI. The guard *fails*; a human
+# fixes the Status line (or the shields.io badge introduced in #1450
+# keeps the displayed version self-updating).
+#
+# Token shapes: the Status line may carry a two-component (`v0.9`) or
+# three-component (`v0.9.0`) version. The check accepts the README token
+# when it equals the latest tag OR is a dotted-version prefix of it, so
+# `v0.9` satisfies tag `v0.9.0` while `v0.1` still fails against
+# `v0.9.0`. This keeps the guard honest without forcing a specific
+# component count on the prose.
+
+name: README Version Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - '.github/workflows/readme-version-check.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - '.github/workflows/readme-version-check.yml'
+  # Fires when a PR enters the GitHub merge queue. Required so the
+  # `README Version Check` status context — a required check in branch
+  # protection — reports against the synthesised merge commit, not just
+  # the PR head. Bare `merge_group:` is intentional: the `merge_group`
+  # event does not support `paths:` filtering (GitHub docs only allow
+  # `types:`), so the job runs on every queue admission. It is a single
+  # cheap grep + tag lookup, so the redundant runs are negligible. Same
+  # rationale as ci.yml / dependency-license-check.yml (#769).
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  # Mirrors dependency-license-check.yml (#769): event-suffixed group key
+  # so pull_request / push / merge_group runs don't collide, and
+  # cancel-in-progress is scoped OFF for merge_group because a cancelled
+  # queue check fails the merge attempt and defeats the queue.
+  group: readme-version-check-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+permissions:
+  contents: read
+
+jobs:
+  readme-version:
+    name: README Version Check
+    runs-on: meho-runners-ci
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # Tags are not fetched in a shallow clone; `git describe
+          # --tags` needs the full history + tag refs to resolve the
+          # latest release.
+          fetch-depth: 0
+      - name: Verify README status version matches latest release tag
+        run: |
+          set -euo pipefail
+
+          # Extract the version token from the README **Status:** line.
+          # Accepts vX.Y or vX.Y.Z.
+          readme_version="$(
+            grep -m1 -oE '\*\*Status:\*\*[^v]*\bv[0-9]+\.[0-9]+(\.[0-9]+)?' README.md \
+              | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' \
+              || true
+          )"
+          if [ -z "$readme_version" ]; then
+            echo "::error file=README.md::Could not find a vX.Y(.Z) version token on the README '**Status:**' line."
+            exit 1
+          fi
+
+          # Resolve the latest release tag.
+          latest_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -z "$latest_tag" ]; then
+            echo "::error::No git tags found; cannot determine the latest release tag."
+            exit 1
+          fi
+
+          echo "README Status version: ${readme_version}"
+          echo "Latest release tag:    ${latest_tag}"
+
+          # Pass when the README token equals the tag, or is a
+          # dotted-version prefix of it (so `v0.9` matches `v0.9.0`).
+          # Anchoring on the trailing dot prevents `v0.1` from matching
+          # `v0.10.0`.
+          if [ "$readme_version" = "$latest_tag" ] \
+            || [ "${latest_tag#"$readme_version".}" != "$latest_tag" ]; then
+            echo "OK: README Status version is consistent with the latest release tag."
+            exit 0
+          fi
+
+          echo "::error file=README.md::README '**Status:**' version (${readme_version}) does not match the latest release tag (${latest_tag}). Update the README Status line (or its release badge) to ${latest_tag}."
+          exit 1

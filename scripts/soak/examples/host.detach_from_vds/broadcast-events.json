@@ -1,0 +1,5 @@
+[
+  {"op_id": "approval.request", "op_class": "other", "payload": {}},
+  {"op_id": "approval.decision", "op_class": "other", "payload": {}},
+  {"op_id": "vmware.composite.host.detach_from_vds", "op_class": "write", "payload": {"op_class": "write", "result_status": "detached"}}
+]

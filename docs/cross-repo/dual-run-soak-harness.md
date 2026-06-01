@@ -165,6 +165,126 @@ proving the governance invariant holds against the actual substrate. When
 same evidence shape against the real `k8s.scale` op and this same driver
 grades it; no harness change is required.
 
+## Worked retirement — `host.detach_from_vds` (the headline VCF retirement)
+
+Initiative [#1400](https://github.com/evoila/meho/issues/1400) wires the
+8 VCF write composites onto this harness. The first op to soak is
+`vmware.composite.host.detach_from_vds`, and it is the **highest-value
+retirement of the whole initiative** for one reason:
+
+> **`govc` cannot express it.** Every other composite has a `govc`
+> equivalent the operator falls back to. `host.detach_from_vds` does
+> not — there is no `govc host.detach-from-vds` verb. The consumer's
+> `scripts/host-detach-from-vds.py` exists *precisely because* govc
+> could not do the per-VM NIC migration + DVS `remove_host` sequence in
+> one safe, ordered step. Retiring that script is the one place this
+> initiative removes a capability gap rather than a convenience wrapper
+> — so it soaks first and graduates first.
+
+### What the composite does
+
+`host.detach_from_vds` (`safety_level="dangerous"`,
+`requires_approval=True`) lists the DVS portgroups + VMs on a host,
+migrates each VM's NICs off the DVS to the supplied `fallback_network`
+via `PATCH:/vcenter/vm/{vm}/network`, then dispatches
+`POST:/vcenter/network/dvs/{dvs}?action=remove_host`. vSphere refuses
+the detach while any VM still has an active NIC on the DVS, so the
+composite verifies every NIC migrated before attempting the detach; on
+partial migration it returns `status="incomplete"` and skips the
+detach. Parameters: `host`, `dvs`, `fallback_network` (all required).
+
+### The committed evidence bundle
+
+A worked, runnable bundle ships at
+[`scripts/soak/examples/host.detach_from_vds/`](../../scripts/soak/examples/host.detach_from_vds)
+and is CI-exercised end-to-end by
+[`backend/tests/test_soak_harness_host_detach_from_vds.py`](../../backend/tests/test_soak_harness_host_detach_from_vds.py).
+It is the VCF analogue of the `k8s.scale` example: the same seven-file
+contract, populated with realistic vSphere shapes —
+
+* **stage 1** — `wrapper-plan.json` / `meho-plan.json`: the planned
+  per-VM NIC migrations + the `remove_host` detach. MEHO's plan omits
+  the vSphere task envelope (`taskId` / `startTime`) the wrapper carries;
+  those keys normalise away, so the two plans grade as semantic parity.
+* **stage 3** — `wrapper-state.json` / `meho-state.json`: the post-op
+  read-back (host DVS membership `false`, each VM's NIC re-homed on
+  `network-9`, zero DVS proxy switches left on the host), read via the
+  **shipped READ ops** — not the write op's own `status` framing. The
+  two runs differ only in fresh `taskId` / `endTime`, which strip away.
+* **stage 4** — `audit-rows.json` / `broadcast-events.json` /
+  `meta.json`: the two `approval.*` rows bracketing the single
+  `path == "vmware.composite.host.detach_from_vds"` dispatch row, one
+  write broadcast event, `returned_after_decision: true`.
+
+Run it:
+
+```bash
+scripts/soak/soak-harness.sh \
+  --op vmware.composite.host.detach_from_vds --connector vmware-rest-8.x \
+  --evidence-dir scripts/soak/examples/host.detach_from_vds
+```
+
+The clean bundle grades 🟡 **SHADOW** (stages 1–4 pass; the op is ready
+to *enter* the live soak, not yet retirement-ready). The test also
+proves the two failure classes the harness exists to catch: a NIC
+migrated to the **wrong** `fallback_network` (a silently diverging plan
+that would strand a VM once the host loses DVS connectivity) and a
+missing dispatch audit row both drop the cell to ⛔ **BLOCKED**.
+
+### Running the live dual-run soak (stage 5, operator action)
+
+The committed bundle proves stages 1, 3, and 4 against a static fixture.
+The 🟡→✅ promotion requires the **live holodeck dual-run** — an operator
+protocol, not a CI step, because it needs a real PowerShell-over-SSH
+ESXi host and a real vDS. On the holodeck lab:
+
+1. Stand up a **disposable** host on a scratch DVS with ≥2 VMs whose
+   NICs sit on a DVS portgroup, plus a standard-switch fallback network.
+2. For each soak invocation, run both paths against the same scratch
+   host (the consumer's `scripts/host-detach-from-vds.py` and
+   `meho vmware composite host detach_from_vds`), capture each side's
+   plan + post-op read-back into the bundle file shapes above, and run
+   the driver. Wrapper stays authoritative for the window.
+3. Soak for the bounded window (~2 weeks **or** N≥10 real detaches,
+   whichever is later — see *Stage 5* above). Triage every diff: a
+   blocker either earns a recorded rationale (`--explained-file`) or
+   stops the soak and the slice is fixed.
+4. **Pass criterion:** the window completes with **zero unexplained
+   diffs and zero governance gaps** across every invocation. The
+   operator then re-runs the driver with `--soak-clean` to emit the ✅
+   READY cell.
+
+### Cross-repo handoff — queue the script for Phase-D deletion
+
+`scripts/host-detach-from-vds.py` lives in the consumer/ops repo
+[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc),
+**not** in `evoila/meho` — its deletion is a cross-repo operator action,
+tracked but not performed here. Once the soak grades ✅ READY:
+
+1. File the wrapper-retirement issue on the consumer repo (`Retire
+   scripts/host-detach-from-vds.py — superseded by
+   meho vmware composite host detach_from_vds`), linking the ✅
+   `soak-report.json` as the proof the cell rests on and this section
+   as the methodology.
+2. Move the `host.detach_from_vds` write column to ✅ on the ops team's
+   retirement scorecard (see *Updating the retirement scorecard* above).
+3. The consumer deletes `scripts/host-detach-from-vds.py` in its Phase-D
+   wrapper-retirement PR. **Only `evoila/meho`'s side is in scope here**
+   — this repo never edits the consumer repo.
+
+### Out of scope — NSX and SDDC Manager **writes**
+
+This initiative activates **vSphere/vCenter** write composites only. NSX
+and SDDC Manager stay **read-only-curated**: their READ ops are ingested
+and useful, but **no net-new write composite is authored** for them yet.
+Rationale: the headline operator pain this initiative removes is the
+vSphere wrapper set (govc + the `host-detach-from-vds.py` gap), and
+there is no comparable retirement-driving demand for NSX/SDDC writes —
+authoring dangerous write surfaces for them without a wrapper to retire
+would add governance + soak burden with no offsetting wrapper removal.
+NSX/SDDC write composites are a deliberate follow-up, gated on their own
+demand signal, not part of #1400.
+
 ## Related
 
 * Initiative [#1397](https://github.com/evoila/meho/issues/1397) — the

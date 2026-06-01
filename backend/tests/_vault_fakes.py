@@ -415,6 +415,20 @@ class _FakeSysBackend:
     policy_write_calls: list[dict[str, Any]] = field(default_factory=list)
     raise_on_policy_delete: Exception | None = None
     policy_delete_calls: list[dict[str, Any]] = field(default_factory=list)
+    # G3.15-T5 (#1413) sys bootstrap writes — auth-method + secret-mount
+    # enable/tune. Each verb records its call args and gets a failure
+    # knob; the two enables return 204 (no body) on success, so there is
+    # no payload to inject — only the failure knob plus the call log so
+    # the idempotency / forwarding assertions can introspect what hvac
+    # was handed.
+    raise_on_auth_enable: Exception | None = None
+    auth_enable_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_auth_tune: Exception | None = None
+    auth_tune_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_mount_enable: Exception | None = None
+    mount_enable_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_mount_tune: Exception | None = None
+    mount_tune_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
         self.read_calls.append({"method": method})
@@ -467,6 +481,38 @@ class _FakeSysBackend:
         self.policy_delete_calls.append({"name": name})
         if self.raise_on_policy_delete is not None:
             raise self.raise_on_policy_delete
+        return _DeleteResponse()
+
+    def enable_auth_method(
+        self, method_type: str, path: str | None = None, description: str | None = None
+    ) -> _DeleteResponse:
+        self.auth_enable_calls.append(
+            {"method_type": method_type, "path": path, "description": description}
+        )
+        if self.raise_on_auth_enable is not None:
+            raise self.raise_on_auth_enable
+        return _DeleteResponse()
+
+    def tune_auth_method(self, path: str, **kwargs: Any) -> _DeleteResponse:
+        self.auth_tune_calls.append({"path": path, **kwargs})
+        if self.raise_on_auth_tune is not None:
+            raise self.raise_on_auth_tune
+        return _DeleteResponse()
+
+    def enable_secrets_engine(
+        self, backend_type: str, path: str | None = None, description: str | None = None
+    ) -> _DeleteResponse:
+        self.mount_enable_calls.append(
+            {"backend_type": backend_type, "path": path, "description": description}
+        )
+        if self.raise_on_mount_enable is not None:
+            raise self.raise_on_mount_enable
+        return _DeleteResponse()
+
+    def tune_mount_configuration(self, path: str, **kwargs: Any) -> _DeleteResponse:
+        self.mount_tune_calls.append({"path": path, **kwargs})
+        if self.raise_on_mount_tune is not None:
+            raise self.raise_on_mount_tune
         return _DeleteResponse()
 
 
@@ -544,6 +590,10 @@ def install_fake_client(
     policy_list_exc: Exception | None = None,
     policy_write_exc: Exception | None = None,
     policy_delete_exc: Exception | None = None,
+    auth_enable_exc: Exception | None = None,
+    auth_tune_exc: Exception | None = None,
+    mount_enable_exc: Exception | None = None,
+    mount_tune_exc: Exception | None = None,
     keys: list[str] | None = None,
     versions_meta: dict[str, Any] | None = None,
     list_exc: Exception | None = None,
@@ -563,9 +613,13 @@ def install_fake_client(
     group's seal-status / mounts / auth-methods payload + exception
     injection, the G3.3-T1 KV-v2 verbs (list / put / versions / patch /
     delete) with per-verb exception injection and key/version-metadata
-    overrides, and the G3.15-T2 (#1410) ACL-policy verbs (read / list
+    overrides, the G3.15-T2 (#1410) ACL-policy verbs (read / list
     payload + exception injection; write / delete exception injection,
-    write/delete returning 204 with no body).
+    write/delete returning 204 with no body), and the G3.15-T5 (#1413)
+    sys bootstrap verbs (auth/mount enable + tune; exception injection
+    only — all four return 204 with no body, so an injected
+    :class:`hvac.exceptions.InvalidRequest` carrying "path is already in
+    use" drives the enable-idempotency unwrap).
     """
     fake = install_fake_vault(monkeypatch, kv_version=kv_version if kv_version is not None else 11)
     fake.auth.jwt.raise_on_login = login_exc
@@ -584,6 +638,10 @@ def install_fake_client(
     fake.sys.raise_on_policy_list = policy_list_exc
     fake.sys.raise_on_policy_write = policy_write_exc
     fake.sys.raise_on_policy_delete = policy_delete_exc
+    fake.sys.raise_on_auth_enable = auth_enable_exc
+    fake.sys.raise_on_auth_tune = auth_tune_exc
+    fake.sys.raise_on_mount_enable = mount_enable_exc
+    fake.sys.raise_on_mount_tune = mount_tune_exc
     kv = fake.secrets.kv.v2
     if secret is not None:
         kv.secret = secret

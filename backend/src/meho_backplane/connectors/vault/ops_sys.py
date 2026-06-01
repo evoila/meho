@@ -94,6 +94,24 @@ from typing import Any
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vault.ops_sys_bootstrap import (
+    VAULT_SYS_AUTH_ENABLE_LLM_INSTRUCTIONS,
+    VAULT_SYS_AUTH_ENABLE_PARAMETER_SCHEMA,
+    VAULT_SYS_AUTH_ENABLE_RESPONSE_SCHEMA,
+    VAULT_SYS_AUTH_TUNE_LLM_INSTRUCTIONS,
+    VAULT_SYS_AUTH_TUNE_PARAMETER_SCHEMA,
+    VAULT_SYS_AUTH_TUNE_RESPONSE_SCHEMA,
+    VAULT_SYS_MOUNTS_ENABLE_LLM_INSTRUCTIONS,
+    VAULT_SYS_MOUNTS_ENABLE_PARAMETER_SCHEMA,
+    VAULT_SYS_MOUNTS_ENABLE_RESPONSE_SCHEMA,
+    VAULT_SYS_MOUNTS_TUNE_LLM_INSTRUCTIONS,
+    VAULT_SYS_MOUNTS_TUNE_PARAMETER_SCHEMA,
+    VAULT_SYS_MOUNTS_TUNE_RESPONSE_SCHEMA,
+    vault_sys_auth_enable,
+    vault_sys_auth_tune,
+    vault_sys_mounts_enable,
+    vault_sys_mounts_tune,
+)
 from meho_backplane.connectors.vault.ops_sys_policy import (
     VAULT_SYS_POLICY_DELETE_LLM_INSTRUCTIONS,
     VAULT_SYS_POLICY_DELETE_PARAMETER_SCHEMA,
@@ -118,9 +136,13 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "register_vault_sys_typed_operations",
+    "vault_sys_auth_enable",
     "vault_sys_auth_list",
+    "vault_sys_auth_tune",
     "vault_sys_health",
+    "vault_sys_mounts_enable",
     "vault_sys_mounts_list",
+    "vault_sys_mounts_tune",
     "vault_sys_policy_delete",
     "vault_sys_policy_list",
     "vault_sys_policy_read",
@@ -725,5 +747,109 @@ async def register_vault_sys_typed_operations(
         safety_level="dangerous",
         requires_approval=True,
         llm_instructions=VAULT_SYS_POLICY_DELETE_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    # G3.15-T5 (#1413) sys bootstrap writes — auth-method + secret-mount
+    # enable/tune, the last slice of the /vault-admin write surface.
+    # Enables are dangerous (a new auth method / secret engine widens the
+    # cluster surface); tunes are caution (reconfigure an existing mount).
+    # All four are approval-gated. Enables are idempotent-tolerant (an
+    # already-enabled path returns created=False, not an error).
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.auth.enable",
+        handler=vault_sys_auth_enable,
+        summary="Enable a HashiCorp Vault auth method (dangerous, approval-gated).",
+        description=(
+            "Enables an auth method (userpass, approle, jwt, kubernetes, "
+            "...) at a mount path via POST /v1/sys/auth/<path>. DANGEROUS: "
+            "opens a new login path into the cluster. Approval-gated. "
+            "Idempotent — re-enabling the same type at the same path "
+            "returns {'created': false}. Returns {'path', 'method_type', "
+            "'created'}."
+        ),
+        parameter_schema=VAULT_SYS_AUTH_ENABLE_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_AUTH_ENABLE_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["write", "auth-methods", "bootstrap", "dangerous"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VAULT_SYS_AUTH_ENABLE_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.auth.tune",
+        handler=vault_sys_auth_tune,
+        summary="Tune an enabled HashiCorp Vault auth method (caution, approval-gated).",
+        description=(
+            "Tunes an already-enabled auth method's mount config (lease "
+            "TTLs, description, listing visibility) via POST "
+            "/v1/sys/auth/<path>/tune. CAUTION: reconfigures an existing "
+            "mount; the method must already be enabled. Approval-gated. "
+            "Returns {'path', 'tuned': true} on success."
+        ),
+        parameter_schema=VAULT_SYS_AUTH_TUNE_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_AUTH_TUNE_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["write", "auth-methods", "bootstrap", "caution"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VAULT_SYS_AUTH_TUNE_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.mounts.enable",
+        handler=vault_sys_mounts_enable,
+        summary="Enable a HashiCorp Vault secret engine (dangerous, approval-gated).",
+        description=(
+            "Enables a secret engine (kv, transit, pki, database, ...) at "
+            "a mount path via POST /v1/sys/mounts/<path>. DANGEROUS: "
+            "stands up a new secret-management surface. Approval-gated. "
+            "Idempotent — re-enabling the same type at the same path "
+            "returns {'created': false}. Returns {'path', 'backend_type', "
+            "'created'}."
+        ),
+        parameter_schema=VAULT_SYS_MOUNTS_ENABLE_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_MOUNTS_ENABLE_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["write", "mounts", "bootstrap", "dangerous"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions=VAULT_SYS_MOUNTS_ENABLE_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.mounts.tune",
+        handler=vault_sys_mounts_tune,
+        summary="Tune an enabled HashiCorp Vault secret engine (caution, approval-gated).",
+        description=(
+            "Tunes an already-enabled secret engine's mount config (lease "
+            "TTLs, description, listing visibility) via POST "
+            "/v1/sys/mounts/<path>/tune. CAUTION: reconfigures an existing "
+            "mount; the engine must already be enabled. Approval-gated. "
+            "Returns {'path', 'tuned': true} on success."
+        ),
+        parameter_schema=VAULT_SYS_MOUNTS_TUNE_PARAMETER_SCHEMA,
+        response_schema=VAULT_SYS_MOUNTS_TUNE_RESPONSE_SCHEMA,
+        group_key="sys",
+        when_to_use=sys_when_to_use,
+        tags=["write", "mounts", "bootstrap", "caution"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions=VAULT_SYS_MOUNTS_TUNE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

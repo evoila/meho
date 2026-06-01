@@ -47,11 +47,11 @@ Six ops total, every one `safety_level="safe"`, `requires_approval=False`,
 `read-only` tag. They dispatch through the same
 `POST /api/v1/operations/call` route the agent surface uses — auth,
 policy, audit, broadcast, and JSONFlux all run as documented in
-[CLAUDE.md](../../CLAUDE.md) §6. Operators reach them via the **generic**
-`meho operation call argocd-api-3.x <op_id> …` verb (there is no
-per-connector `meho argocd …` verb tree — see [the CLI invocation
-surface](#the-cli-invocation-surface)); agents reach them via the
-narrow-waist meta-tools (see [the agent meta-tool
+[CLAUDE.md](../../CLAUDE.md) §6. Operators reach them via the
+per-connector `meho argocd …` verb tree (the primary surface — see [the
+CLI invocation surface](#the-cli-invocation-surface)), or the equivalent
+generic `meho operation call argocd-api-3.x <op_id> …` verb; agents reach
+them via the narrow-waist meta-tools (see [the agent meta-tool
 path](#the-agent-meta-tool-path)).
 
 ## Prerequisites
@@ -106,39 +106,55 @@ in the `OperationResult` envelope.
 ### Storing the bearer token in Vault
 
 Use the tenant's KV-v2 path convention `<tenant>/argocd/<host>`. The
-secret carries the single `token` field:
+secret carries the single `token` field. `meho vault kv put` takes the
+`<mount> <path>` positional pair (`ExactArgs(2)` — here mount `secret`,
+logical path `rdc-hetzner-dc/argocd/api-token`, no `/data/` infix) and
+the secret body as a JSON object via `--data` (inline or `@<file>`):
 
 ```console
 $ meho vault kv put --target rdc-vault secret \
     rdc-hetzner-dc/argocd/api-token \
-    token=@./argocd-token.txt
+    --data "{\"token\":\"$(cat ./argocd-token.txt)\"}"
 ```
 
 `argocd-token.txt` is the raw token string emitted by
 `argocd account generate-token --account meho-readonly` (or the project
-token). The federation chain's `meho-mcp` Vault policy already grants the
-operator read on `secret/<tenant>/*`, so no per-target policy edit is
-needed (see [`vault-onboarding.md`](./vault-onboarding.md) for the
-federation setup).
+token); `--data @<file>` accepts a JSON object file directly if you'd
+rather not inline it. The federation chain's `meho-mcp` Vault policy
+already grants the operator read on `secret/<tenant>/*`, so no per-target
+policy edit is needed (see [`vault-onboarding.md`](./vault-onboarding.md)
+for the federation setup).
 
 ### Registering the target
 
-```console
-$ meho targets create \
-    --name rdc-argocd \
-    --product argocd \
-    --host argocd.rdc-hetzner-dc.example.com \
-    --port 443 \
-    --secret-ref secret/data/rdc-hetzner-dc/argocd/api-token \
-    --auth-model shared_service_account \
-    --preferred-impl-id argocd-api
+Targets are registered by importing a `targets.yaml` descriptor — `meho
+targets import <file>` (`ExactArgs(1)`) is the verb every sibling
+onboarding doc uses; there is no `meho targets create`. Add an entry:
+
+```yaml
+# targets.yaml
+targets:
+  - name: rdc-argocd
+    product: argocd
+    host: argocd.rdc-hetzner-dc.example.com
+    port: 443
+    secret_ref: secret/data/rdc-hetzner-dc/argocd/api-token
+    auth_model: shared_service_account
+    preferred_impl_id: argocd-api
 ```
 
-The `--secret-ref` value matches the Vault path above with the KV-v2
-`/data/` infix (Vault's KV-v2 API path shape). `--preferred-impl-id
-argocd-api` pins the resolver to this connector (defensive — there is
-only one `argocd` impl today, but it future-proofs against a sibling
-transport).
+Then import it:
+
+```console
+$ meho targets import targets.yaml
+```
+
+The `secret_ref` value matches the Vault path above with the KV-v2
+`/data/` infix (Vault's KV-v2 API path shape — distinct from the
+`<mount> <path>` positional form `meho vault kv put` takes, which omits
+`/data/`). `preferred_impl_id: argocd-api` pins the resolver to this
+connector (defensive — there is only one `argocd` impl today, but it
+future-proofs against a sibling transport).
 
 ### Verify — the `GET /api/version` probe
 
@@ -167,41 +183,61 @@ the bundled build-tool versions (`BuildDate`, `KustomizeVersion`,
 
 ## The CLI invocation surface
 
-ArgoCD ops are invoked through the **generic** `meho operation` verbs —
-there is no `meho argocd …` verb tree. (Per-connector verb trees, like
-`meho bind9 …`, are an ergonomics layer the earlier SSH connectors added;
-the read-only HTTP connectors reach the ops through the generic
-dispatcher verb, the same surface the keycloak read ops use.) The
-connector id is `argocd-api-3.x`; the target slug is whatever you
-registered.
+The primary operator surface is the per-connector `meho argocd …` verb
+tree — a thin Cobra-over-HTTP layer (`cli/internal/cmd/argocd/`) that
+pre-bakes `connector_id="argocd-api-3.x"` so you don't retype the
+connector id on every call, mirroring the sibling `meho keycloak …`
+(#1395), `meho harbor …` (#622), and `meho nsx …` (#615) trees. Per
+CLAUDE.md postulate 5 these alias verbs are operator-only ergonomics —
+they are not mirrored on the MCP surface. All six read ops have a verb;
+each `meho argocd …` invocation and its generic `meho operation call`
+equivalent dispatch the identical `POST /api/v1/operations/call` route.
+The target slug is whatever you registered.
 
 ```console
 # List every app + its sync/health status:
-$ meho operation call argocd-api-3.x argocd.app.list --target rdc-argocd
+$ meho argocd app list --target rdc-argocd
 
 # Narrow to one project / a label selector:
-$ meho operation call argocd-api-3.x argocd.app.list --target rdc-argocd \
-    --params '{"projects": ["payments"], "selector": "env=prod"}'
+$ meho argocd app list --target rdc-argocd --project payments --selector env=prod
 
 # One app's full spec + status:
-$ meho operation call argocd-api-3.x argocd.app.get --target rdc-argocd \
-    --params '{"name": "guestbook"}'
+$ meho argocd app get --target rdc-argocd --name guestbook
 
-# The desired-vs-live drift (the `argocd app diff <app>` equivalent):
-$ meho operation call argocd-api-3.x argocd.app.diff --target rdc-argocd \
-    --params '{"name": "guestbook"}'
+# The desired-vs-live drift (the read-only `argocd app diff <app>` equivalent):
+$ meho argocd app diff --target rdc-argocd --name guestbook
 
 # The reconciled resource tree with per-node health:
-$ meho operation call argocd-api-3.x argocd.app.resource_tree --target rdc-argocd \
-    --params '{"name": "guestbook"}'
+$ meho argocd app resource-tree --target rdc-argocd --name guestbook
 
 # AppProjects + their allow-lists:
-$ meho operation call argocd-api-3.x argocd.appproject.list --target rdc-argocd
+$ meho argocd appproject list --target rdc-argocd
 
 # Configured repos + their connection state:
-$ meho operation call argocd-api-3.x argocd.repo.list --target rdc-argocd
+$ meho argocd repo list --target rdc-argocd
 
-# Machine-readable envelope for jq:
+# Machine-readable envelope for jq (every verb takes --json):
+$ meho argocd repo list --target rdc-argocd --json \
+    | jq '.result.items[] | {repo, status: .connectionState.status}'
+```
+
+Every verb also takes `--backplane <url>` (defaults to the URL from the
+most recent `meho login`). Exit codes: `0`=ok, `1`=error/denied,
+`2`=auth_expired, `3`=unreachable, `4`=unexpected.
+
+### The generic dispatcher alternative
+
+The same six ops are equally reachable through the generic `meho
+operation` verbs — useful for scripting against any connector with one
+code path, or when the op surface is newer than your CLI build's verb
+tree. The connector id is `argocd-api-3.x`:
+
+```console
+$ meho operation call argocd-api-3.x argocd.app.list --target rdc-argocd
+$ meho operation call argocd-api-3.x argocd.app.get --target rdc-argocd \
+    --params '{"name": "guestbook"}'
+$ meho operation call argocd-api-3.x argocd.app.diff --target rdc-argocd \
+    --params '{"name": "guestbook"}'
 $ meho operation call argocd-api-3.x argocd.repo.list --target rdc-argocd --json \
     | jq '.result.items[] | {repo, status: .connectionState.status}'
 ```
@@ -239,7 +275,7 @@ search_operations(
 )                                                  → top hit: argocd.app.list
 call_operation(
     connector_id="argocd-api-3.x",
-    operation_id="argocd.app.diff",
+    op_id="argocd.app.diff",
     target={"name": "rdc-argocd"},
     params={"name": "guestbook"},
 )

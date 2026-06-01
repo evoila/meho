@@ -11,10 +11,13 @@ dual registration. G3.12-T2 (#1391) layers the curated read core on top:
 `argocd.app.list` / `argocd.app.get` / `argocd.app.diff` /
 `argocd.app.resource_tree` / `argocd.appproject.list` / `argocd.repo.list` —
 all `safety_level="safe"`, `requires_approval=False`, read-only. G3.12-T3
-(#1392) closes the connector out: the ops are operator-usable via the generic
-`meho operation call argocd-api-3.x <op_id> …` verb and agent-usable via the
-`search_operations` / `call_operation` meta-tools (no per-connector CLI verb
-tree, no per-op MCP tools — CLAUDE.md postulate 5), with a recorded-fixture E2E
+(#1392) closes the connector out: the ops are operator-usable via the
+per-connector `meho argocd …` Cobra verb tree (`cli/internal/cmd/argocd/`,
+pre-baking `connector_id="argocd-api-3.x"`, mirroring the keycloak/harbor/nsx
+siblings) or the equivalent generic `meho operation call argocd-api-3.x
+<op_id> …` verb, and agent-usable via the `search_operations` /
+`call_operation` meta-tools (the verb tree is operator-only — no per-op MCP
+tools, CLAUDE.md postulate 5), with a recorded-fixture E2E
 ([`tests/test_connectors_argocd_e2e.py`](../../backend/tests/test_connectors_argocd_e2e.py))
 and the operator runbook
 [`docs/cross-repo/argocd-onboarding.md`](../cross-repo/argocd-onboarding.md).

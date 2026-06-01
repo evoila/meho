@@ -12,9 +12,7 @@
      files the consumer-side issue using
      docs/cross-repo/issue-58-consumer-ticket-body.md verbatim. -->
 
-**Status:** v0.1 in development. The backplane image, the Helm chart, and
-the operator CLI are all building toward the first tagged release; nothing
-is GA yet.
+**Status:** v0.9.0 released (2026-05-31). The backplane image, Helm chart, and operator CLI are all shipped and cosign-signed.
 
 ## What this is
 
@@ -153,7 +151,7 @@ MEHO ships as three operator-facing artefacts:
   walkthrough: [`docs/codebase/devops.md`](./docs/codebase/devops.md).
 - **Operator CLI** — `meho` Go binary (cobra). Wires `version`,
   `login` (Keycloak device-code flow, Task #44), and `status`
-  (server-driven discovery, Task #45) for v0.1. Released as
+  (server-driven discovery, Task #45) for v0.9.0. Released as
   multi-platform tarballs (`linux/macOS × amd64/arm64`) on every
   `v*` tag, each individually cosign-signed (Task #47). CLI
   walkthrough: [`docs/codebase/cli.md`](./docs/codebase/cli.md).
@@ -176,7 +174,7 @@ docker pull ghcr.io/evoila/meho:sha-<40-char-git-sha>
 docker pull ghcr.io/evoila/meho:main
 
 # Tagged release:
-docker pull ghcr.io/evoila/meho:v0.1.0
+docker pull ghcr.io/evoila/meho:v0.9.0
 ```
 
 **No `:latest` tag is ever published.** `:main` is a moving alias for

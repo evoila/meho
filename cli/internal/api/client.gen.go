@@ -278,6 +278,7 @@ const (
 
 // Defines values for TargetCreateProduct.
 const (
+	Argocd        TargetCreateProduct = "argocd"
 	Bind9         TargetCreateProduct = "bind9"
 	Gcloud        TargetCreateProduct = "gcloud"
 	Gh            TargetCreateProduct = "gh"

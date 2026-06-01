@@ -55,10 +55,26 @@ proposed_effect snapshots (set / delete / appproject.update)
 **after** the change; ``app.delete`` snapshots the managed resource tree
 (the cascade list) before the delete. Each lands under a ``proposed_effect``
 key in the returned result so the reviewer/auditor sees exactly what shifted
-or what the cascade will remove. (The substrate computes the durable
-``ApprovalRequest.proposed_effect`` at park-time from params; this in-result
-block is the post-approval execution evidence the op author can compute —
-it needs a live read against the target, which only happens once approved.)
+or what the cascade will remove.
+
+The same snapshot is *also* computed at **park time** — before any human
+approves — via the per-op preview-builder hook (G11.7 follow-up #1452,
+attaching to the #1437 dispatcher seam). The builders at the bottom of this
+module reuse the read-only snapshot helpers (:func:`_read_app_spec` /
+:func:`_read_cascade_resources` / :func:`_read_project_spec`) the handlers
+themselves use, issuing only the read GETs (``GET .../applications/{name}``,
+``.../resource-tree``, ``GET .../projects``) and never the mutating
+PUT/DELETE. The result is stored in the durable
+:attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect` so the
+reviewer sees the diff / cascade in the approval queue **before** approving,
+not only in the post-approval op result. ``after_spec`` at park time is the
+*proposed* spec the dispatch carried in ``params`` (what the approved call
+would apply); the in-result ``after_spec`` is the argocd-server-accepted
+spec echoed by the PUT response.
+
+The ops with no natural read-only preview (``app.sync`` / ``app.rollback`` /
+``app.refresh``) register no builder and park with the identifier-only
+default exactly as before.
 
 References
 ----------
@@ -267,6 +283,28 @@ async def argocd_app_rollback(
     return {"name": name, "rollback_id": rollback_id, **outcome}
 
 
+async def _read_app_spec(
+    self: ArgoCdConnector,
+    operator: Operator,
+    target: ArgoCdTargetLike,
+    *,
+    name: str,
+    query: dict[str, Any],
+) -> Any:
+    """Read-only: GET the Application and return its current ``spec``.
+
+    The single source of truth for the ``before_spec`` snapshot, shared by
+    the :func:`argocd_app_set` handler (post-approval) and its park-time
+    preview builder. Issues only ``GET /api/v1/applications/{name}`` — never
+    a mutating verb.
+    """
+    encoded = _quote_name(name)
+    before = await self._get_json(
+        target, f"/api/v1/applications/{encoded}", operator=operator, params=query or None
+    )
+    return before.get("spec") if isinstance(before, dict) else None
+
+
 async def argocd_app_set(
     self: ArgoCdConnector,
     operator: Operator,
@@ -282,10 +320,7 @@ async def argocd_app_set(
     name = str(params["name"])
     encoded = _quote_name(name)
     query = _project_query(params)
-    before = await self._get_json(
-        target, f"/api/v1/applications/{encoded}", operator=operator, params=query or None
-    )
-    before_spec = before.get("spec") if isinstance(before, dict) else None
+    before_spec = await _read_app_spec(self, operator, target, name=name, query=query)
     put_query: dict[str, Any] = dict(query)
     if params.get("validate") is not None:
         put_query["validate"] = bool(params["validate"])
@@ -359,6 +394,41 @@ def _cascade_resources(tree: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+async def _read_cascade_resources(
+    self: ArgoCdConnector,
+    operator: Operator,
+    target: ArgoCdTargetLike,
+    *,
+    name: str,
+    cascade: bool,
+    query: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Read-only: GET the resource tree, reduce to the cascade list.
+
+    Shared by the :func:`argocd_app_delete` handler and its park-time
+    preview builder. Returns ``[]`` without any HTTP call when
+    ``cascade`` is ``False`` (a non-cascading delete removes no managed
+    resources, so there is nothing to preview). Issues only
+    ``GET /api/v1/applications/{name}/resource-tree``.
+    """
+    if not cascade:
+        return []
+    encoded = _quote_name(name)
+    tree = await self._get_json(
+        target,
+        f"/api/v1/applications/{encoded}/resource-tree",
+        operator=operator,
+        params=query or None,
+    )
+    return _cascade_resources(tree)
+
+
+def _delete_cascade_flag(params: dict[str, Any]) -> bool:
+    """Resolve the effective ``cascade`` flag (default ``True``)."""
+    cascade = params.get("cascade")
+    return True if cascade is None else bool(cascade)
+
+
 async def argocd_app_delete(
     self: ArgoCdConnector,
     operator: Operator,
@@ -374,19 +444,12 @@ async def argocd_app_delete(
     """
     name = str(params["name"])
     encoded = _quote_name(name)
-    cascade = params.get("cascade")
-    cascade = True if cascade is None else bool(cascade)
+    cascade = _delete_cascade_flag(params)
     query = _project_query(params)
 
-    cascade_resources: list[dict[str, Any]] = []
-    if cascade:
-        tree = await self._get_json(
-            target,
-            f"/api/v1/applications/{encoded}/resource-tree",
-            operator=operator,
-            params=query or None,
-        )
-        cascade_resources = _cascade_resources(tree)
+    cascade_resources = await _read_cascade_resources(
+        self, operator, target, name=name, cascade=cascade, query=query
+    )
 
     delete_query: dict[str, Any] = dict(query)
     delete_query["cascade"] = "true" if cascade else "false"
@@ -441,6 +504,29 @@ async def argocd_appproject_create(
     return {"name": name, "created": True}
 
 
+async def _read_project_spec(
+    self: ArgoCdConnector,
+    operator: Operator,
+    target: ArgoCdTargetLike,
+    *,
+    name: str,
+) -> Any:
+    """Read-only: GET the project list, return the named project's ``spec``.
+
+    argocd-server has no single-project GET on the gRPC-gateway; the list
+    endpoint is the read the handler and its park-time preview builder both
+    use to capture ``before_spec``. Issues only ``GET /api/v1/projects``;
+    returns ``None`` when the project is not (yet) present.
+    """
+    projects = await self._get_json(target, "/api/v1/projects", operator=operator)
+    items = projects.get("items") if isinstance(projects, dict) else None
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and _project_metadata_name(item) == name:
+                return item.get("spec")
+    return None
+
+
 async def argocd_appproject_update(
     self: ArgoCdConnector,
     operator: Operator,
@@ -457,14 +543,7 @@ async def argocd_appproject_update(
     name = _project_name(project)
     encoded = _quote_name(name)
 
-    before_spec: Any = None
-    projects = await self._get_json(target, "/api/v1/projects", operator=operator)
-    items = projects.get("items") if isinstance(projects, dict) else None
-    if isinstance(items, list):
-        for item in items:
-            if isinstance(item, dict) and _project_metadata_name(item) == name:
-                before_spec = item.get("spec")
-                break
+    before_spec = await _read_project_spec(self, operator, target, name=name)
 
     body: dict[str, Any] = {"project": project}
     updated = await self._write_json(

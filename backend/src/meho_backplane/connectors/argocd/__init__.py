@@ -40,6 +40,12 @@ resolver tie-break ladder. Only the v2 triple (+ wildcard) advertises this
 class — the same decision Harbor, bind9, NSX, and SDDC Manager made.
 """
 
+# Import for the registration side-effect: at module load this wires the
+# park-time ``proposed_effect`` preview builders for ``argocd.app.set`` /
+# ``app.delete`` / ``appproject.update`` onto the #1437 dispatcher hook
+# (G11.7 follow-up #1452) so the reviewer sees the diff / cascade in the
+# approval queue before approving.
+from meho_backplane.connectors.argocd import ops_write_preview  # noqa: F401
 from meho_backplane.connectors.argocd.connector import ArgoCdConnector
 from meho_backplane.connectors.argocd.ops import (
     ARGOCD_OPS,

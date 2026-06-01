@@ -71,6 +71,7 @@ from typing import Any
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
+from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -79,6 +80,7 @@ __all__ = [
     "register_vault_typed_operations",
     "vault_kv_delete",
     "vault_kv_list",
+    "vault_kv_patch",
     "vault_kv_put",
     "vault_kv_read",
     "vault_kv_versions",
@@ -503,6 +505,103 @@ async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) 
 
 
 # ---------------------------------------------------------------------------
+# vault.kv.patch — merge-write fields onto the current version
+# ---------------------------------------------------------------------------
+
+#: ``vault.kv.patch`` param schema. ``data`` carries only the fields to
+#: merge; unlike ``kv.put`` it is NOT the full secret body — Vault reads
+#: the current version, JSON-merges ``data`` over it, and writes the
+#: result as a new version. hvac's ``patch`` exposes no ``cas`` guard
+#: (it issues its own internal read+write), so the schema omits one.
+VAULT_KV_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mount": _MOUNT_PROPERTY,
+        "path": _PATH_PROPERTY,
+        "data": {
+            "type": "object",
+            "minProperties": 1,
+            "description": (
+                "Fields to merge onto the current version. Unlike "
+                "kv.put this is a partial — keys present here are added "
+                "or overwritten; keys absent here are preserved from the "
+                "current version. The secret must already exist."
+            ),
+        },
+    },
+    "required": ["path", "data"],
+    "additionalProperties": False,
+}
+
+_VAULT_KV_PATCH_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "version": {
+            "type": ["integer", "null"],
+            "description": "The newly written KV v2 version number.",
+        },
+    },
+    "required": ["version"],
+}
+
+_VAULT_KV_PATCH_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": (
+        "Merge one or more fields into an existing KV v2 secret without "
+        "supplying the whole body. Mutating — Vault reads the current "
+        "version, JSON-merges the supplied fields, and writes the result "
+        "as a new version (history is kept). Use to set or rotate a "
+        "single field ('vault-store patch --field') when you do not have "
+        "(or do not want to re-send) the other keys. The secret must "
+        "already exist — patching a missing path fails."
+    ),
+    "parameter_hints": {
+        "mount": "Optional. KV v2 mount point; defaults to 'secret'.",
+        "path": "Required. The existing secret path under the mount.",
+        "data": (
+            "Required. The fields to merge. Only these keys are "
+            "added/overwritten; every other key on the current version "
+            "is carried forward unchanged."
+        ),
+    },
+    "output_shape": (
+        "On success: {'version': <new int version>}. On failure: a "
+        "connector_error OperationResult with extras.exception_class — "
+        "patching a non-existent path surfaces as hvac's InvalidPath "
+        "class."
+    ),
+}
+
+
+async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Merge fields onto the current version of a KV v2 secret.
+
+    Op-id: ``vault.kv.patch``. Mutating (``op_class=credential_write``,
+    ``safety_level=caution``, ``requires_approval=True``). Delegates to
+    hvac's ``secrets.kv.v2.patch`` (``PATCH
+    /v1/<mount>/data/<path>`` with the JSON-merge content type), which
+    reads the current version, merges the supplied fields over it, and
+    writes a new version. Unlike :func:`vault_kv_put` this is a partial
+    write — keys absent from ``data`` are preserved. The secret must
+    already exist; patching a missing path raises (surfaced as a
+    structured ``connector_error``). The structural unwrap raises on a
+    malformed hvac payload.
+    """
+    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
+    path: str = str(params["path"]).strip()
+    secret: dict[str, Any] = params["data"]
+
+    async with _auth_vault.vault_client_for_operator(operator) as client:
+        patch_payload = await asyncio.to_thread(
+            client.secrets.kv.v2.patch,
+            path=path,
+            secret=secret,
+            mount_point=mount,
+        )
+        version = patch_payload["data"]["version"]
+        return {"version": version}
+
+
+# ---------------------------------------------------------------------------
 # vault.kv.versions — version metadata for a secret
 # ---------------------------------------------------------------------------
 
@@ -727,15 +826,39 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
             "v2 keeps version history; the write replaces the latest "
             "version wholesale (no merge). Optional Check-And-Set guard "
             "('cas'). safety_level=caution; the production-path "
-            "approval gate is G7/G10 policy territory. Failures land as "
-            "a connector_error OperationResult with "
-            "extras.exception_class naming the failure class."
+            "approval gate routes humans to the approval queue "
+            "(G11.7-T1 #1401). Failures land as a connector_error "
+            "OperationResult with extras.exception_class naming the "
+            "failure class."
         ),
         "parameter_schema": VAULT_KV_PUT_PARAMETER_SCHEMA,
         "response_schema": _VAULT_KV_PUT_RESPONSE_SCHEMA,
         "tags": ["write", "secret-write"],
         "safety_level": "caution",
+        "requires_approval": True,
         "llm_instructions": _VAULT_KV_PUT_LLM_INSTRUCTIONS,
+    },
+    {
+        "op_id": "vault.kv.patch",
+        "handler": vault_kv_patch,
+        "summary": "Merge fields onto the current version of a KV v2 secret.",
+        "description": (
+            "Merges the supplied fields onto the current version of the "
+            "secret at the KV v2 path via the operator's OIDC-forwarded "
+            "JWT, writing the result as a new version. Mutating partial "
+            "write — keys absent from the request are preserved (unlike "
+            "kv.put, which replaces wholesale). The secret must already "
+            "exist. safety_level=caution; requires_approval=True routes "
+            "humans to the approval queue (G11.7-T1 #1401). Failures "
+            "land as a connector_error OperationResult with "
+            "extras.exception_class naming the failure class."
+        ),
+        "parameter_schema": VAULT_KV_PATCH_PARAMETER_SCHEMA,
+        "response_schema": _VAULT_KV_PATCH_RESPONSE_SCHEMA,
+        "tags": ["write", "secret-write"],
+        "safety_level": "caution",
+        "requires_approval": True,
+        "llm_instructions": _VAULT_KV_PATCH_LLM_INSTRUCTIONS,
     },
     {
         "op_id": "vault.kv.versions",
@@ -765,15 +888,16 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
             "operator's OIDC-forwarded JWT. Reversible — Vault marks "
             "the versions deleted and stops returning them from reads "
             "while retaining the underlying data (undeletable until "
-            "destroyed). safety_level=dangerous; the production-path "
-            "approval gate is G7/G10 policy territory. Failures land as "
-            "a connector_error OperationResult with "
+            "destroyed). safety_level=dangerous; requires_approval=True "
+            "routes humans to the approval queue (G11.7-T1 #1401). "
+            "Failures land as a connector_error OperationResult with "
             "extras.exception_class naming the failure class."
         ),
         "parameter_schema": VAULT_KV_DELETE_PARAMETER_SCHEMA,
         "response_schema": _VAULT_KV_DELETE_RESPONSE_SCHEMA,
         "tags": ["write", "destructive", "reversible"],
         "safety_level": "dangerous",
+        "requires_approval": True,
         "llm_instructions": _VAULT_KV_DELETE_LLM_INSTRUCTIONS,
     },
 )
@@ -799,8 +923,9 @@ async def register_vault_typed_operations(
     process-wide singleton via the ``register_typed_operation`` body.
 
     Scope: G3.3-T1 registers the full KV-v2 group — ``vault.kv.read``,
-    ``vault.kv.list``, ``vault.kv.put``, ``vault.kv.versions``,
-    ``vault.kv.delete``. The identity-read group (Task #547,
+    ``vault.kv.list``, ``vault.kv.put``, ``vault.kv.patch``,
+    ``vault.kv.versions``, ``vault.kv.delete`` (``vault.kv.patch`` added
+    by G3.15-T1 #1409). The identity-read group (Task #547,
     ``vault.auth.userpass.list/read`` / ``vault.auth.approle.list/read``)
     is registered from its own module via the
     :func:`~meho_backplane.connectors.vault.ops_auth.register_vault_auth_operations`
@@ -811,15 +936,14 @@ async def register_vault_typed_operations(
     are needed.
 
     ``requires_approval`` for the mutating ops (``kv.put`` /
-    ``kv.delete``) is registered ``False`` (the dev default). The
-    shipped G0.6 substrate has no per-path approval predicate —
-    ``requires_approval`` is a static boolean on the descriptor and the
-    production-path gate is G7/G10 policy territory (see the
-    :class:`~meho_backplane.db.models.EndpointDescriptor` docstring:
-    ``caution``/``dangerous`` ops "flow through G7 / G10 policy logic
-    once those Goals land"). ``safety_level`` (``caution`` for
-    ``kv.put``, ``dangerous`` for ``kv.delete``) is the load-bearing
-    signal the future policy gate keys on.
+    ``kv.patch`` / ``kv.delete``) is registered ``True`` (G3.15-T1
+    #1409). It became meaningful once G11.7-T1 (#1401) routed human
+    principals hitting a ``requires_approval`` op to the approval queue
+    instead of hard-denying — so the gate parks the write for review
+    rather than blocking the operator. The read ops (``kv.read`` /
+    ``kv.list`` / ``kv.versions``) omit the key and default ``False``.
+    ``safety_level`` (``caution`` for ``kv.put`` / ``kv.patch``,
+    ``dangerous`` for ``kv.delete``) is the orthogonal posture signal.
     """
     # Curated by T4b (#732); surfaced verbatim by
     # ``list_operation_groups``. Differentiates the KV-v2 read/write
@@ -840,17 +964,28 @@ async def register_vault_typed_operations(
         "value itself."
     )
     for spec in _KV_OP_SPECS:
+        # ``requires_approval`` is carried per-op in the spec (default
+        # False for the read ops, which omit the key). The mutating KV
+        # ops (put / patch / delete) set it True so the dispatcher routes
+        # human principals to the approval queue rather than executing
+        # the write inline (G3.15-T1 #1409, on the G11.7-T1 #1401 queue).
         await register_typed_operation(
             product="vault",
             version="1.x",
             impl_id="vault",
             group_key="kv",
             when_to_use=kv_when_to_use,
-            requires_approval=False,
+            requires_approval=spec.get("requires_approval", False),
             embedding_service=embedding_service,
-            **spec,
+            **{k: v for k, v in spec.items() if k != "requires_approval"},
         )
     # Identity-read group (Task #547) -- registered from its own
     # module so the auth surface stays independently reviewable while
     # the package keeps a single lifespan-driven registrar entry.
     await register_vault_auth_operations(embedding_service=embedding_service)
+    # Auth credential-lifecycle write group (G3.15-T3 #1411) -- the
+    # userpass/approle write half (create/update/delete + secret-id
+    # mint), all requires_approval=True with request/response secret
+    # redaction at the classification layer. Its own module, same
+    # single-registrar-entry discipline as the read group above.
+    await register_vault_auth_write_operations(embedding_service=embedding_service)

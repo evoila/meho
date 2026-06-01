@@ -208,6 +208,7 @@ class TestClassifyOp:
             "vault.auth.userpass.write",
             "vault.auth.userpass.update_password",
             "vault.kv.put",
+            "vault.kv.patch",
             "k8s.secret.create",
         ],
     )
@@ -308,16 +309,43 @@ class TestClassifyOp:
             # than redact under the ``write`` branch.
             ("bind9.record.add", "write"),
             ("bind9.record.remove", "write"),
-            # Vault ACL-policy write (G3.15-T2 #1410). ``policy.write``
-            # carries the full HCL body in its params; the ``.write``
-            # suffix redacts it under the ``write`` branch rather than
-            # broadcasting the policy text as an ``other``-class event.
+            # Vault ``.write`` mutating verb (G3.15 #1410/#1411).
+            # ``vault.auth.approle.write`` carries no secret in its
+            # params (a role definition), so it classifies as plain
+            # ``write`` via the ``.write`` suffix; ``vault.sys.policy.write``
+            # writes a policy document (full HCL body in its params).
+            # Both would fall through to ``other`` without the ``.write``
+            # suffix. ``vault.sys.policy.delete`` removes a policy by name
+            # (G3.15-T2 #1410), classified ``write`` via the ``.delete``
+            # suffix.
+            ("vault.auth.approle.write", "write"),
             ("vault.sys.policy.write", "write"),
             ("vault.sys.policy.delete", "write"),
         ],
     )
     def test_write_suffixes(self, op_id: str, expected: str) -> None:
         assert classify_op(op_id) == expected
+
+    @pytest.mark.parametrize(
+        "op_id",
+        [
+            "vault.auth.userpass.write",
+            "vault.auth.userpass.update_password",
+        ],
+    )
+    def test_credential_write_allowlist_wins_over_write_suffix(self, op_id: str) -> None:
+        """Userpass ``.write`` ops stay ``credential_write``, never plain ``write``.
+
+        Critical safety precedence: ``vault.auth.userpass.write`` ends in
+        ``.write`` (a mutation suffix). The credential-write allowlist is
+        consulted in :func:`classify_op` *before* the ``.write`` suffix
+        branch, so the password riding in ``params`` collapses to
+        aggregate-only — it is never broadcast in full under the plain
+        ``write`` class. This test pins that ordering so a future suffix
+        reshuffle can't silently downgrade a credential write and leak the
+        password to every operator on the feed.
+        """
+        assert classify_op(op_id) == "credential_write"
 
     @pytest.mark.parametrize(
         "op_id",

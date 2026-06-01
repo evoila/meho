@@ -14,12 +14,13 @@ authenticate to Vault:
 * ``vault.auth.approle.list``  -- ``LIST /v1/auth/<mount>/role``
 * ``vault.auth.approle.read``  -- ``GET  /v1/auth/<mount>/role/<role>``
 
-AppRole **secret-id generation** and every userpass/approle **write**
-(create/update/delete user or role) are explicitly out of scope for
-v0.2 -- secret-id generation is a high-risk write with policy
-implications, deferred to v0.2.next behind a policy gate (Initiative
-#366, Task #547 out-of-scope sections). Only the four read ops above
-land here.
+Only the four **read** ops above land in this module. The userpass /
+approle **write** half -- create/update/delete user or role plus
+AppRole secret-id generation, all ``requires_approval=True`` with
+request/response secret redaction -- lives in the sibling
+:mod:`meho_backplane.connectors.vault.ops_auth_write` module (G3.15-T3
+#1411), registered from the same package registrar so the read and
+write surfaces stay independently reviewable.
 
 Handler shape mirrors :mod:`meho_backplane.connectors.vault.ops`
 verbatim: each handler is a module-level ``async def`` with the

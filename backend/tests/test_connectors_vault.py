@@ -83,6 +83,7 @@ from meho_backplane.connectors.vault import (
     VaultConnector,
     register_vault_typed_operations,
 )
+from meho_backplane.connectors.vault.ops import _KV_OP_SPECS
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
@@ -203,7 +204,11 @@ def _make_operator(jwt: str = "fake.jwt.value") -> Operator:
 
 
 async def _dispatch_vault(
-    op_id: str, params: dict[str, Any], *, jwt: str = "fake.jwt.value"
+    op_id: str,
+    params: dict[str, Any],
+    *,
+    jwt: str = "fake.jwt.value",
+    approved: bool = True,
 ) -> OperationResult:
     """Dispatch a vault op through the real operator-aware path.
 
@@ -213,6 +218,14 @@ async def _dispatch_vault(
     resolved by ``connector_id``, ``target`` is ``None`` (vault
     connection params come from settings). The handler reads the JWT
     from ``operator.raw_jwt`` — exactly the contract #629 establishes.
+
+    ``approved`` threads the dispatcher's ``_approved`` resume-path flag
+    (default ``True`` here). The mutating KV ops register
+    ``requires_approval=True`` (G3.15-T1 #1409), so without it the
+    policy gate would park the call at ``awaiting_approval`` and the
+    handler→hvac contract these tests assert would never run. The
+    parking behaviour itself is covered by ``test_approval_queue.py``;
+    these tests exercise the handler as the approval-resume path does.
     """
     return await dispatch(
         operator=_make_operator(jwt),
@@ -220,6 +233,7 @@ async def _dispatch_vault(
         op_id=op_id,
         target=None,
         params=params,
+        _approved=approved,
     )
 
 
@@ -659,6 +673,40 @@ async def test_execute_vault_kv_put_writes_new_version(
     ]
 
 
+@pytest.mark.parametrize(
+    "op_id,params",
+    [
+        ("vault.kv.put", {"path": "p", "data": {"k": "v"}}),
+        ("vault.kv.patch", {"path": "p", "data": {"k": "v"}}),
+        ("vault.kv.delete", {"path": "p", "versions": [1]}),
+    ],
+    ids=["put", "patch", "delete"],
+)
+async def test_execute_mutating_kv_op_parks_without_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    _registered_vault_typed_ops: None,
+) -> None:
+    """A human principal hitting a mutating KV op is parked, not executed.
+
+    End-to-end proof that ``requires_approval=True`` (G3.15-T1 #1409) is
+    live on the registered descriptor: dispatching without the
+    approval-resume flag routes the call to the approval queue
+    (``awaiting_approval``) per G11.7-T1 (#1401) rather than reaching
+    hvac. The handler's ``*_calls`` log stays empty — the write never
+    ran.
+    """
+    fake = install_fake_client(monkeypatch)
+    result = await _dispatch_vault(op_id, params, approved=False)
+
+    assert result.status == "awaiting_approval", result.error
+    kv = fake.secrets.kv.v2
+    assert kv.put_calls == []
+    assert kv.patch_calls == []
+    assert kv.delete_calls == []
+
+
 async def test_execute_vault_kv_put_cas_omitted_passes_none(
     monkeypatch: pytest.MonkeyPatch,
     _registered_vault_typed_ops: None,
@@ -687,6 +735,77 @@ async def test_execute_vault_kv_put_invalid_params_returns_dispatcher_error(
     """Schema enforces ``required`` path+data and ``minProperties`` on data."""
     install_fake_client(monkeypatch)
     result = await _dispatch_vault("vault.kv.put", params)
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("invalid_params:")
+    assert result.extras.get("error_code") == "invalid_params"
+
+
+async def test_execute_vault_kv_patch_merges_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """``vault.kv.patch`` forwards the merge fields to hvac's ``patch``."""
+    fake = install_fake_client(monkeypatch, kv_version=4)
+    result = await _dispatch_vault(
+        "vault.kv.patch",
+        {"path": "meho/test", "data": {"token": "rotated"}},
+        jwt="op-jwt",
+    )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["version"] == 5
+    assert fake.secrets.kv.v2.patch_calls == [
+        {
+            "path": "meho/test",
+            "secret": {"token": "rotated"},
+            "mount_point": "secret",
+        },
+    ]
+
+
+async def test_execute_vault_kv_patch_honors_explicit_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    fake = install_fake_client(monkeypatch)
+    result = await _dispatch_vault(
+        "vault.kv.patch",
+        {"mount": "kv-prod", "path": "team", "data": {"k": "v"}},
+    )
+
+    assert result.status == "ok", result.error
+    assert fake.secrets.kv.v2.patch_calls == [
+        {"path": "team", "secret": {"k": "v"}, "mount_point": "kv-prod"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"path": "p"},
+        {"data": {"k": "v"}},
+        {"path": "p", "data": {}},
+        {"path": "p", "data": {"k": "v"}, "cas": 1},
+    ],
+    ids=["missing-data", "missing-path", "empty-data", "rejects-cas"],
+)
+async def test_execute_vault_kv_patch_invalid_params_returns_dispatcher_error(
+    monkeypatch: pytest.MonkeyPatch,
+    params: dict[str, Any],
+    _registered_vault_typed_ops: None,
+) -> None:
+    """Schema enforces required path+data, minProperties on data, and rejects ``cas``.
+
+    hvac's ``patch`` exposes no ``cas`` guard (it issues its own
+    internal read+write), so the schema's ``additionalProperties=False``
+    turns a stray ``cas`` into an ``invalid_params`` error rather than
+    silently dropping it.
+    """
+    install_fake_client(monkeypatch)
+    result = await _dispatch_vault("vault.kv.patch", params)
 
     assert result.status == "error"
     assert result.error is not None
@@ -764,10 +883,11 @@ async def test_execute_vault_kv_delete_invalid_params_returns_dispatcher_error(
     [
         ("vault.kv.list", {"path": "p"}, "list_exc"),
         ("vault.kv.put", {"path": "p", "data": {"k": "v"}}, "put_exc"),
+        ("vault.kv.patch", {"path": "p", "data": {"k": "v"}}, "patch_exc"),
         ("vault.kv.versions", {"path": "p"}, "versions_exc"),
         ("vault.kv.delete", {"path": "p", "versions": [1]}, "delete_exc"),
     ],
-    ids=["list", "put", "versions", "delete"],
+    ids=["list", "put", "patch", "versions", "delete"],
 )
 async def test_execute_kv_ops_vault_error_envelope_surfaces_connector_error(
     monkeypatch: pytest.MonkeyPatch,
@@ -824,6 +944,12 @@ async def test_execute_vault_kv_list_malformed_payload_is_structured_error(
         # broadcast the written secret in full). ``vault.kv.delete``
         # carries no secret and stays ``write``.
         ("vault.kv.put", "credential_write"),
+        # G3.15-T1 #1409 — ``vault.kv.patch`` carries the merged fields in
+        # its request params, same posture as ``vault.kv.put``, so it
+        # classifies ``credential_write`` rather than falling through to
+        # the ``.patch`` write-suffix (which would broadcast the partial
+        # secret in full).
+        ("vault.kv.patch", "credential_write"),
         ("vault.kv.delete", "write"),
     ],
 )
@@ -841,3 +967,42 @@ def test_kv_op_ids_classify_per_decision_3(op_id: str, expected_class: str) -> N
     secret-free mutating verbs are ``write``.
     """
     assert classify_op(op_id) == expected_class
+
+
+# ---------------------------------------------------------------------------
+# Register-time safety / approval contract (G3.15-T1 #1409)
+# ---------------------------------------------------------------------------
+
+#: The KV-v2 ops that register ``requires_approval=True`` plus their
+#: ``safety_level`` posture. Read ops are excluded — they default
+#: ``requires_approval=False``.
+_KV_APPROVAL_CONTRACT = {
+    "vault.kv.put": "caution",
+    "vault.kv.patch": "caution",
+    "vault.kv.delete": "dangerous",
+}
+
+
+@pytest.mark.parametrize("op_id,expected_safety", sorted(_KV_APPROVAL_CONTRACT.items()))
+def test_kv_mutating_ops_require_approval(op_id: str, expected_safety: str) -> None:
+    """Mutating KV-v2 ops register ``requires_approval=True`` + their safety level.
+
+    G3.15-T1 (#1409) flips ``vault.kv.put`` / ``vault.kv.delete`` to
+    ``requires_approval=True`` and adds ``vault.kv.patch`` (also
+    ``requires_approval=True``). The flag became meaningful once
+    G11.7-T1 (#1401) routed human principals hitting a
+    ``requires_approval`` op to the approval queue instead of
+    hard-denying. Asserting against ``_KV_OP_SPECS`` pins the
+    register-time contract without standing up a DB row.
+    """
+    by_id = {spec["op_id"]: spec for spec in _KV_OP_SPECS}
+    spec = by_id[op_id]
+    assert spec.get("requires_approval") is True, f"{op_id} must require approval"
+    assert spec["safety_level"] == expected_safety, op_id
+
+
+@pytest.mark.parametrize("op_id", ["vault.kv.read", "vault.kv.list", "vault.kv.versions"])
+def test_kv_read_ops_do_not_require_approval(op_id: str) -> None:
+    """Read-only KV-v2 ops omit ``requires_approval`` (default False)."""
+    by_id = {spec["op_id"]: spec for spec in _KV_OP_SPECS}
+    assert by_id[op_id].get("requires_approval", False) is False, op_id

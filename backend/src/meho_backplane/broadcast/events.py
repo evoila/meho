@@ -118,6 +118,10 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
 #:   op shipped pre-G11.7 classified as plain ``write``, which broadcast
 #:   the written secret in full; reclassifying it here closes that latent
 #:   leak — see ``docs/codebase/connectors-vault.md``).
+#: * ``vault.kv.patch`` — same posture as ``vault.kv.put``: the merged
+#:   fields ride in ``params`` (G3.15-T1 #1409). Without the explicit
+#:   pin the ``.patch`` write-suffix would classify it plain ``write``
+#:   and broadcast the partial secret in full.
 #: * ``k8s.secret.create`` — the Secret ``data`` / ``stringData`` is in
 #:   ``params``.
 #: * ``k8s.job.create`` — the Job ``spec`` carries a pod template whose
@@ -128,6 +132,7 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         "vault.auth.userpass.write",
         "vault.auth.userpass.update_password",
         "vault.kv.put",
+        "vault.kv.patch",
         "k8s.secret.create",
         "k8s.job.create",
     }
@@ -146,6 +151,17 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     ".delete",
     ".patch",
     ".put",
+    # ``.write`` is the Vault mutating-write verb spelling for the auth
+    # and sys-policy surfaces (G3.15 #1410/#1411): ``vault.auth.approle.write``
+    # creates an AppRole (no secret in params → plain ``write``),
+    # ``vault.sys.policy.write`` writes a policy document. Without this
+    # suffix they fall through to ``other`` and broadcast their full
+    # params. The secret-bearing ``.write`` ops
+    # (``vault.auth.userpass.write`` / ``vault.auth.userpass.update_password``)
+    # are pinned in :data:`_CREDENTIAL_WRITE_OPS`, which ``classify_op``
+    # consults BEFORE this suffix branch, so this addition never downgrades
+    # a credential write to plain ``write``.
+    ".write",
     # bind9 record-write verbs (G3.4-T3 #589). The bind9 connector
     # uses ``.add`` / ``.remove`` rather than ``.create`` / ``.delete``
     # to match the consumer wrapper's verb shape (``--add-a-record``
@@ -156,14 +172,6 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     # branch.
     ".add",
     ".remove",
-    # Vault policy-write verb (G3.15-T2 #1410). ``vault.sys.policy.write``
-    # carries the full HCL/JSON policy body in its params; without
-    # ``.write`` in the write-suffix tuple it would fall through to
-    # ``other`` and broadcast the policy text to every operator. The
-    # ``_CREDENTIAL_WRITE_OPS`` allowlist is consulted first, so the
-    # ``.write``-shaped ``vault.auth.userpass.write`` keeps its
-    # ``credential_write`` class.
-    ".write",
 )
 
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
@@ -313,8 +321,8 @@ def classify_op(op_id: str) -> str:
        map to ``write``. Checked before the dot-suffix branches since
        ingested ops carry no meho verb suffix.
     6. ``write`` — mutation suffixes (``.create`` / ``.update`` /
-       ``.delete`` / ``.patch`` / ``.put`` / ``.add`` / ``.remove`` /
-       ``.write``). The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3)
+       ``.delete`` / ``.patch`` / ``.put`` / ``.write`` / ``.add`` /
+       ``.remove``). The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3)
        runs first, so a ``.write``-shaped secret-bearing op like
        ``vault.auth.userpass.write`` keeps its ``credential_write``
        class.

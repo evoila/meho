@@ -9,8 +9,12 @@ this connector manages that Keycloak through its Admin REST surface.
 G3.13-T1 (#1393) shipped the **substrate**: the connector class, the
 admin credential loader, `fingerprint()`, and dual registry registration.
 G3.13-T2 (#1394) layers the **six curated read ops** onto that surface
-(realm/client/client-scope/user/role-mapping). Onboarding docs land in T3
-and the approval-gated write surface in T4.
+(realm/client/client-scope/user/role-mapping); T3 (#1395) adds the CLI
+verbs + onboarding docs. G3.13-T4 (#1406) adds the **nine approval-gated
+write ops** (realm/client/client-scope/protocol-mapper/user/role-mapping
+creates + updates + reset-password) that retire the consumer's five
+Keycloak bootstrap scripts; `idp.create` is deferred (not exercised by
+those scripts).
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -23,12 +27,28 @@ fresh target with no asserted version still resolves.
   TTL-driven refresh and an injectable admin-credential loader. Exposes a
   thin bound-method shim per read op (`realm_get`, `client_list`,
   `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`) and
-  the `_get_admin_json` / `_get_admin_list` GET helpers (object vs array
-  responses).
+  per write op (`realm_create`/`realm_update`, `client_create`/
+  `client_update`, `client_scope_create`, `protocol_mapper_create`,
+  `user_create`/`user_reset_password`, `role_mapping_assign`), the
+  `_get_admin_json` / `_get_admin_list` GET helpers (object vs array
+  responses), and the `_write_admin` mutating helper plus the
+  `_find_client_uuid` / `_find_user_uuid` / `_find_realm_role` name→UUID
+  resolvers.
 - `KeycloakOp` + `READ_OPS` (`connectors/keycloak/ops_read.py`) — the
-  op-metadata dataclass and the six-op registration table (the bind9 /
+  op-metadata dataclass and the six-op read registration table (the bind9 /
   pfSense `ops`-table precedent). `WHEN_TO_USE_BY_GROUP` maps each op
   group to its curated selection blurb.
+- `WRITE_OPS` + the write handlers (`connectors/keycloak/ops_write.py`) —
+  the nine approval-gated write ops, reusing the `KeycloakOp` dataclass.
+  Every op is `requires_approval=True`; a create treats HTTP 409 as an
+  idempotent success; `user.create`/`user.reset_password` source the
+  password from Vault via `_read_password_from_vault` (never inline).
+  `WHEN_TO_USE_WRITE_BY_GROUP` carries the write groups' blurbs (keyed with
+  a `_write` suffix so they never collide with the read groups when
+  `register_operations` merges both maps).
+- `KeycloakWriteResult` (`connectors/keycloak/connector.py`) — the
+  status + `Location` + `conflict` outcome of a mutating request;
+  `created_uuid()` parses the new object's UUID out of `Location`.
 - `redact_secret_fields` (`connectors/keycloak/redaction.py`) — the
   recursive scrubber every read handler runs its response through.
 - `KeycloakClientCredentials` / `KeycloakPasswordCredentials`
@@ -105,10 +125,19 @@ The password shape accepts an optional `client_id` field (default
   `reachable=False`).
 - `probe(target)` — delegates to `fingerprint`; one admin round-trip
   covers reachability + admin-auth validity.
-- `register_operations()` — walks `READ_OPS`, resolves each
-  `handler_attr` to a bound method, looks the group's `when_to_use` up in
-  `WHEN_TO_USE_BY_GROUP` (a missing entry is a hard error), and upserts
-  via `register_typed_operation`. Idempotent across restarts.
+- `register_operations()` — walks `READ_OPS` **and** `WRITE_OPS`,
+  resolves each `handler_attr` to a bound method, looks the group's
+  `when_to_use` up in the merged `WHEN_TO_USE_BY_GROUP` ∪
+  `WHEN_TO_USE_WRITE_BY_GROUP` (a missing entry is a hard error), and
+  upserts via `register_typed_operation`. Idempotent across restarts.
+- `_write_admin(target, method, path, *, operator, json, idempotent_conflict=True)`
+  — the mutating POST/PUT helper. Rejects non-mutating verbs, never
+  retries (a 5xx on a write must surface, not re-fire), and — when
+  `idempotent_conflict` — swallows an HTTP 409 into a
+  `KeycloakWriteResult(conflict=True)` rather than raising.
+- `_find_client_uuid` / `_find_user_uuid` / `_find_realm_role` — the
+  name→UUID (and role-name→representation) resolvers the write handlers
+  call before keying a mutation on the object's UUID.
 
 ## Read ops (G3.13-T2)
 
@@ -139,8 +168,43 @@ including secrets nested inside protocol mappers or identity-provider
 configs. The scrub happens at the connector boundary (not the broadcast
 layer) because these are config reads where the secret is incidental: it
 must never enter the synchronous `OperationResult` the caller receives.
-The write surface (T4) will continue to redact secret *inputs* at the
-classification layer per the general posture.
+The write surface redacts secret *inputs* at the classification layer per
+the general posture (see "Write ops" below).
+
+## Write ops (G3.13-T4)
+
+Nine approval-gated write ops (`requires_approval=True`), all dispatching
+via the admin-auth path, all keyed on the object's **UUID**:
+
+| op_id | safety | Admin REST API |
+|---|---|---|
+| `keycloak.realm.create` | dangerous | `POST /admin/realms` |
+| `keycloak.realm.update` | caution | `PUT .../realms/{realm}` |
+| `keycloak.client.create` | caution | `POST .../realms/{realm}/clients` |
+| `keycloak.client.update` | caution | `PUT .../clients/{id}` |
+| `keycloak.client_scope.create` | caution | `POST .../client-scopes` |
+| `keycloak.protocol_mapper.create` | caution | `POST .../clients/{id}/protocol-mappers/models` |
+| `keycloak.user.create` | caution | `POST .../realms/{realm}/users` |
+| `keycloak.user.reset_password` | caution | `PUT .../users/{id}/reset-password` |
+| `keycloak.role_mapping.assign` | dangerous | `POST .../users/{id}/role-mappings/realm` |
+
+Three load-bearing properties:
+
+- **Name→UUID resolution.** `client.update` / `protocol_mapper.create`
+  resolve `client_id` → UUID via `?clientId=`; `user.reset_password` /
+  `role_mapping.assign` resolve `username` → UUID via
+  `?username=&exact=true`; `role_mapping.assign` also resolves each realm
+  role name to its `RoleRepresentation`. A create returns the new UUID
+  from the `Location` header.
+- **Idempotency.** A create that hits HTTP 409 (already-exists) is a
+  success (`conflict: true`), and the existing object's UUID is resolved.
+- **Password handling.** `user.create` / `user.reset_password` source the
+  password from Vault (`_read_password_from_vault`, operator-context
+  `vault_client_for_operator`) via a `password_secret_ref` path param —
+  **never** an inline `password`. The password lands in the Keycloak
+  credential body but never in op params; audit stores a `params_hash`
+  (never raw params); and both ops are pinned in
+  `broadcast.events._CREDENTIAL_WRITE_OPS` → aggregate-only broadcast.
 
 ## Target configuration
 
@@ -171,9 +235,12 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 
 ## Known issues / future work
 
-- The write surface (client/user/scope/role-mapping CRUD,
-  `requires_approval=True`) is the deferred T4 follow-up; T2 ships
-  read-only.
+- `keycloak.idp.create` (identity-provider federation) is deferred — not
+  exercised by the bootstrap scripts (#1406). A future task can add it
+  under the same registrar walk.
+- The write ops do **not** ship deletes — the bootstrap scripts only
+  create/update; a delete surface (client/user/scope removal) is a
+  separate follow-up if an operator workflow needs it.
 - No logout-revoke on `aclose` — admin access tokens are short-lived;
   revoke-on-close is deferred (same posture as NSX / vRLI).
 - `/admin/serverinfo` is undocumented (though stable across 26.x); the

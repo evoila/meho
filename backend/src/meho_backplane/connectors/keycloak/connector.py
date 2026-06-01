@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -107,7 +108,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 
-__all__ = ["KeycloakAdminTokenError", "KeycloakConnector"]
+__all__ = ["KeycloakAdminTokenError", "KeycloakConnector", "KeycloakWriteResult"]
 
 _log = structlog.get_logger(__name__)
 
@@ -122,6 +123,42 @@ _TOKEN_REFRESH_MARGIN_SECONDS: float = 30.0
 #: 60 s; we use that as a conservative floor so a malformed response
 #: doesn't pin a token forever.
 _DEFAULT_TOKEN_TTL_SECONDS: float = 60.0
+
+#: Mutating verbs ``_write_admin`` accepts. Kept distinct from the
+#: inherited ``_IDEMPOTENT_METHODS`` so a write never rides the
+#: idempotent-GET retry decorator (re-firing a side effect on a transient
+#: 5xx is the bug that guard prevents).
+_MUTATING_METHODS: frozenset[str] = frozenset({"POST", "PUT"})
+
+
+@dataclass(frozen=True)
+class KeycloakWriteResult:
+    """Outcome of an admin-auth mutating request.
+
+    ``status_code`` is the HTTP status of the write; ``location`` is the
+    ``Location`` header Keycloak returns on a create (its trailing segment
+    is the new object's UUID); ``conflict`` is ``True`` when the write hit
+    an already-exists 409 that :meth:`KeycloakConnector._write_admin`
+    swallowed for idempotency.
+    """
+
+    status_code: int
+    location: str | None
+    conflict: bool
+
+    def created_uuid(self) -> str | None:
+        """Return the new object's UUID parsed from the ``Location`` header.
+
+        Keycloak create endpoints respond ``201`` with
+        ``Location: .../{resource}/{uuid}``; the UUID is the final
+        non-empty path segment. Returns ``None`` when there is no
+        ``Location`` (e.g. an idempotent 409, or an update that returns
+        ``204`` with no body).
+        """
+        if not self.location:
+            return None
+        segment = self.location.rstrip("/").rsplit("/", 1)[-1]
+        return segment or None
 
 
 class KeycloakAdminTokenError(RuntimeError):
@@ -516,6 +553,145 @@ class KeycloakConnector(HttpConnector):
         payload = resp.json()
         return payload if isinstance(payload, list) else []
 
+    # -- admin-auth write helpers (G3.13-T4 #1406) ----------------------
+
+    async def _write_admin(
+        self,
+        target: KeycloakTargetLike,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+        idempotent_conflict: bool = True,
+    ) -> KeycloakWriteResult:
+        """Issue an admin-auth mutating request (POST/PUT) — never retried.
+
+        Returns a :class:`KeycloakWriteResult` carrying the HTTP status,
+        the ``Location`` header (Keycloak's create endpoints return the
+        new object's URL there — the trailing path segment is the new
+        object's UUID), and a flag recording whether the request hit an
+        already-exists conflict.
+
+        Idempotency contract (issue acceptance criterion): when
+        *idempotent_conflict* is ``True`` (the default) an HTTP **409**
+        is swallowed and surfaced as ``conflict=True`` rather than raised,
+        so a re-run of a create is a no-op-equivalent success rather than
+        an error. Every other non-2xx status raises
+        :exc:`httpx.HTTPStatusError` (the dispatcher's ``connector_error``
+        branch records it). Mutating verbs are **not** retried — a 5xx on a
+        non-idempotent write must surface, not silently re-fire the side
+        effect.
+
+        The admin Bearer is applied by :meth:`auth_headers`; the operator
+        authorises only the Vault read behind the token mint and is never
+        sent to Keycloak.
+        """
+        verb = method.upper()
+        if verb not in _MUTATING_METHODS:
+            raise ValueError(
+                f"_write_admin only accepts mutating methods {sorted(_MUTATING_METHODS)}; "
+                f"got {verb!r}"
+            )
+        client = await self._http_client(target)
+        headers = await self.auth_headers(target, operator)
+        resp = await client.request(verb, path, json=json, headers=headers)
+        if idempotent_conflict and resp.status_code == 409:
+            return KeycloakWriteResult(status_code=409, location=None, conflict=True)
+        resp.raise_for_status()
+        return KeycloakWriteResult(
+            status_code=resp.status_code,
+            location=resp.headers.get("location"),
+            conflict=False,
+        )
+
+    async def _find_client_uuid(
+        self,
+        target: KeycloakTargetLike,
+        managed_realm: str,
+        client_id: str,
+        *,
+        operator: Operator,
+    ) -> str | None:
+        """Resolve a client's internal UUID from its human ``clientId``.
+
+        Keycloak addresses clients by an internal UUID ``id``, never the
+        human ``clientId`` — so every client write keys on the UUID, which
+        is discovered via ``GET .../clients?clientId=<clientId>`` (exact
+        match). Returns the first matching row's ``id`` or ``None`` when no
+        client carries that ``clientId``.
+        """
+        rows = await self._get_admin_list(
+            target,
+            f"/admin/realms/{managed_realm}/clients",
+            operator=operator,
+            params={"clientId": client_id},
+        )
+        for row in rows:
+            if isinstance(row, dict) and row.get("clientId") == client_id:
+                uuid_value = row.get("id")
+                if isinstance(uuid_value, str) and uuid_value:
+                    return uuid_value
+        return None
+
+    async def _find_user_uuid(
+        self,
+        target: KeycloakTargetLike,
+        managed_realm: str,
+        username: str,
+        *,
+        operator: Operator,
+    ) -> str | None:
+        """Resolve a user's internal UUID from their ``username``.
+
+        Keycloak's ``GET .../users?username=<u>`` filter is a substring
+        match by default, so the rows are re-filtered to the **exact**
+        username (case-insensitive, matching Keycloak's own username
+        casing rules) before returning a UUID. Returns ``None`` when no
+        exact match exists.
+        """
+        rows = await self._get_admin_list(
+            target,
+            f"/admin/realms/{managed_realm}/users",
+            operator=operator,
+            params={"username": username, "exact": "true"},
+        )
+        wanted = username.casefold()
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("username", "")).casefold() == wanted:
+                uuid_value = row.get("id")
+                if isinstance(uuid_value, str) and uuid_value:
+                    return uuid_value
+        return None
+
+    async def _find_realm_role(
+        self,
+        target: KeycloakTargetLike,
+        managed_realm: str,
+        role_name: str,
+        *,
+        operator: Operator,
+    ) -> dict[str, Any] | None:
+        """Resolve a realm role's full representation by name.
+
+        The role-mapping assign endpoint takes the full RoleRepresentation
+        (``{id, name, ...}``) in its body, so the assign handler must fetch
+        it first via ``GET .../roles/{role-name}``. Returns ``None`` when
+        the role does not exist (a 404), so the handler can surface a clean
+        operator-actionable error rather than a raw transport failure.
+        """
+        try:
+            role = await self._get_admin_json(
+                target,
+                f"/admin/realms/{managed_realm}/roles/{role_name}",
+                operator=operator,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        return role if isinstance(role, dict) else None
+
     # -- typed-op handler shims (G3.13-T2 #1394) ------------------------
 
     async def realm_get(
@@ -566,6 +742,80 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_role_mapping_get(self, operator, target, params)
 
+    # -- typed-op write handler shims (G3.13-T4 #1406) ------------------
+
+    async def realm_create(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.realm.create`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_realm_create
+
+        return await keycloak_realm_create(self, operator, target, params)
+
+    async def realm_update(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.realm.update`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_realm_update
+
+        return await keycloak_realm_update(self, operator, target, params)
+
+    async def client_create(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.client.create`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_client_create
+
+        return await keycloak_client_create(self, operator, target, params)
+
+    async def client_update(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.client.update`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_client_update
+
+        return await keycloak_client_update(self, operator, target, params)
+
+    async def client_scope_create(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.client_scope.create`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_client_scope_create
+
+        return await keycloak_client_scope_create(self, operator, target, params)
+
+    async def protocol_mapper_create(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.protocol_mapper.create`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_protocol_mapper_create
+
+        return await keycloak_protocol_mapper_create(self, operator, target, params)
+
+    async def user_create(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.create`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_user_create
+
+        return await keycloak_user_create(self, operator, target, params)
+
+    async def user_reset_password(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.reset_password`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_user_reset_password
+
+        return await keycloak_user_reset_password(self, operator, target, params)
+
+    async def role_mapping_assign(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.role_mapping.assign`` (G3.13-T4 #1406)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_role_mapping_assign
+
+        return await keycloak_role_mapping_assign(self, operator, target, params)
+
     # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 
     @classmethod
@@ -586,8 +836,13 @@ class KeycloakConnector(HttpConnector):
 
         G3.13-T2 (#1394) lands the six read ops
         (``keycloak.realm.get`` / ``client.list`` / ``client.get`` /
-        ``client_scope.list`` / ``user.list`` / ``role_mapping.get``); the
-        write surface is the deferred approval-gated T4 follow-up.
+        ``client_scope.list`` / ``user.list`` / ``role_mapping.get``).
+        G3.13-T4 (#1406) layers the approval-gated write ops
+        (``realm.create`` / ``realm.update`` / ``client.create`` /
+        ``client.update`` / ``client_scope.create`` /
+        ``protocol_mapper.create`` / ``user.create`` /
+        ``user.reset_password`` / ``role_mapping.assign``) onto the same
+        walk — every write registers ``requires_approval=True``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a
@@ -598,10 +853,19 @@ class KeycloakConnector(HttpConnector):
             READ_OPS,
             WHEN_TO_USE_BY_GROUP,
         )
+        from meho_backplane.connectors.keycloak.ops_write import (
+            WHEN_TO_USE_WRITE_BY_GROUP,
+            WRITE_OPS,
+        )
         from meho_backplane.operations.typed_register import register_typed_operation
 
+        # The two when_to_use maps are disjoint by group_key suffix
+        # (read groups are bare nouns; write groups carry a ``_write``
+        # suffix) so a merge never clobbers a read blurb with a write one.
+        when_to_use_by_group = {**WHEN_TO_USE_BY_GROUP, **WHEN_TO_USE_WRITE_BY_GROUP}
+
         bindings: list[tuple[Any, Any]] = []
-        for op in READ_OPS:
+        for op in (*READ_OPS, *WRITE_OPS):
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:
                 raise AttributeError(
@@ -615,7 +879,7 @@ class KeycloakConnector(HttpConnector):
             if op.group_key is None:
                 when_to_use = None
             else:
-                when_to_use = WHEN_TO_USE_BY_GROUP.get(op.group_key)
+                when_to_use = when_to_use_by_group.get(op.group_key)
                 if when_to_use is None:
                     raise ValueError(
                         f"KeycloakConnector op {op.op_id!r} declares "

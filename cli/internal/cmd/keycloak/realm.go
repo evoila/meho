@@ -12,15 +12,103 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// newRealmCmd returns the `meho keycloak realm` parent with one
-// sub-verb: `get` (keycloak.realm.get).
+// newRealmCmd returns the `meho keycloak realm` parent with the read verb
+// `get` (keycloak.realm.get) and the approval-gated write verbs `create`
+// (keycloak.realm.create) and `update` (keycloak.realm.update).
 func newRealmCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "realm",
-		Short:        "Keycloak realm sub-verbs (get)",
+		Short:        "Keycloak realm sub-verbs (get, create, update)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newRealmGetCmd())
+	cmd.AddCommand(newRealmCreateCmd())
+	cmd.AddCommand(newRealmUpdateCmd())
+	return cmd
+}
+
+// newRealmCreateCmd returns the `meho keycloak realm create` command
+// (keycloak.realm.create — approval-gated). POSTs /admin/realms with the
+// RealmRepresentation from --representation-file. A 409 already-exists is
+// treated as an idempotent success.
+func newRealmCreateCmd() *cobra.Command {
+	var (
+		f       writeFlags
+		repFile string
+	)
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a Keycloak realm (approval-gated)",
+		Long: "create dispatches keycloak.realm.create with the\n" +
+			"RealmRepresentation read from --representation-file (JSON). The op\n" +
+			"requires approval; a 409 already-exists is an idempotent success.\n\n" +
+			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
+			"3=unreachable, 4=unexpected.",
+		Example:       "  meho keycloak realm create --target rdc-keycloak -f realm-evba.json",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			rep, serr := loadRepresentation(repFile)
+			if serr != nil {
+				return output.RenderError(cmd.ErrOrStderr(), serr, f.jsonOut)
+			}
+			return dispatchWrite(cmd, "keycloak.realm.create", f.targetName,
+				map[string]any{"representation": rep}, f.jsonOut, f.backplaneOverride)
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().StringVarP(&repFile, "representation-file", "f", "",
+		"path to a JSON file with the RealmRepresentation body (required)")
+	if err := cmd.MarkFlagRequired("representation-file"); err != nil {
+		panic(err) // programmer error: the flag is defined directly above
+	}
+	return cmd
+}
+
+// newRealmUpdateCmd returns the `meho keycloak realm update` command
+// (keycloak.realm.update — approval-gated). PUTs /admin/realms/{realm}
+// (default the target's managed realm; --realm overrides) with the partial
+// RealmRepresentation from --representation-file.
+func newRealmUpdateCmd() *cobra.Command {
+	var (
+		f         writeFlags
+		repFile   string
+		realmName string
+	)
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update a Keycloak realm's top-level config (approval-gated)",
+		Long: "update dispatches keycloak.realm.update with the partial\n" +
+			"RealmRepresentation from --representation-file (JSON). Defaults to\n" +
+			"the target's managed realm; --realm overrides. Requires approval.\n\n" +
+			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
+			"3=unreachable, 4=unexpected.",
+		Example:       "  meho keycloak realm update --target rdc-keycloak -f realm-patch.json",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			rep, serr := loadRepresentation(repFile)
+			if serr != nil {
+				return output.RenderError(cmd.ErrOrStderr(), serr, f.jsonOut)
+			}
+			params := map[string]any{"representation": rep}
+			if realmName != "" {
+				params["realm"] = realmName
+			}
+			return dispatchWrite(cmd, "keycloak.realm.update", f.targetName,
+				params, f.jsonOut, f.backplaneOverride)
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().StringVarP(&repFile, "representation-file", "f", "",
+		"path to a JSON file with the partial RealmRepresentation body (required)")
+	cmd.Flags().StringVar(&realmName, "realm", "",
+		"realm to update (defaults to the target's managed realm)")
+	if err := cmd.MarkFlagRequired("representation-file"); err != nil {
+		panic(err) // programmer error: the flag is defined directly above
+	}
 	return cmd
 }
 

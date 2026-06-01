@@ -15,6 +15,22 @@
 //   - `meho keycloak user list [--username U] [--max N] [--target T]` — keycloak.user.list
 //   - `meho keycloak role-mapping get --id UUID [--target T]` — keycloak.role_mapping.get
 //
+// G3.13-T4 (#1406) adds the approval-gated write verbs that retire the
+// five Keycloak bootstrap scripts (every write requires human approval
+// through the queue — G11.7-T1 #1401):
+//
+//   - `meho keycloak realm create -f F` / `realm update -f F`
+//   - `meho keycloak client create -f F` / `client update (--id|--client-id) -f F`
+//   - `meho keycloak client-scope create -f F`
+//   - `meho keycloak protocol-mapper create (--id|--client-id) -f F`
+//   - `meho keycloak user create -f F --password-secret-ref R`
+//   - `meho keycloak user reset-password (--id|--username) --password-secret-ref R`
+//   - `meho keycloak role-mapping assign (--id|--username) --role R`
+//
+// User passwords are NEVER passed inline — only a Vault path
+// (--password-secret-ref) — so the password never lands in shell history
+// or op params.
+//
 // Every verb is a thin Cobra command that POSTs to
 // `/api/v1/operations/call` with a pre-baked connector_id. No new
 // backend code; no new HTTP routes — the CLI alias verbs are pure
@@ -85,9 +101,10 @@ func NewRootCmd() *cobra.Command {
 			"(product=\"keycloak\", version=\"26.x\", impl_id=\"keycloak-admin\")).\n" +
 			"Each verb dispatches through POST /api/v1/operations/call with\n" +
 			"connector_id=\"keycloak-admin-26.x\" pre-baked so operators don't\n" +
-			"type the connector ID on every command. All shipped ops are\n" +
-			"read-only; the write surface is the deferred approval-gated T4\n" +
-			"follow-up (#1406).\n\n" +
+			"type the connector ID on every command. Read verbs are safe;\n" +
+			"the write verbs (create / update / reset-password / assign) are\n" +
+			"approval-gated — every write requires human approval through the\n" +
+			"queue before it dispatches.\n\n" +
 			"Per CLAUDE.md postulate 5, these alias verbs are operator-only\n" +
 			"ergonomics — they are not mirrored on the MCP surface. Agents\n" +
 			"continue to use search_operations / call_operation against the\n" +
@@ -102,6 +119,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newRealmCmd())
 	cmd.AddCommand(newClientCmd())
 	cmd.AddCommand(newClientScopeCmd())
+	cmd.AddCommand(newProtocolMapperCmd())
 	cmd.AddCommand(newUserCmd())
 	cmd.AddCommand(newRoleMappingCmd())
 	return cmd

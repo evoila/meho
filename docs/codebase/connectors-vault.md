@@ -260,6 +260,17 @@ exist (patching a missing path fails). `patch` exposes no `cas` guard
 unlike `kv.put` — has no `cas` property and `additionalProperties=False`
 rejects a stray one.
 
+`kv.patch` is **add/overwrite-only**: its `data` schema constrains each
+value to a non-null JSON type (`string`/`number`/`boolean`/`object`/
+`array`). This is deliberate. hvac's `secrets.kv.v2.patch` speaks JSON
+Merge Patch (RFC 7396), under which a `null` value **deletes** the key
+rather than setting it. Allowing `null` would let a caller silently
+delete a secret field through an op documented as additive, so the
+schema rejects a null value at validation time (`invalid_params`)
+before it reaches Vault. Field removal is an explicit operation: use
+`kv.put` to replace the version wholesale (omitted keys drop) or
+`kv.delete` to soft-delete a version — never a side effect of `patch`.
+
 **Mount handling.** Every handler — including `vault.kv.read` —
 accepts an optional `mount` param (JSON Schema default `"secret"`,
 mirroring hvac's `mount_point` default) forwarded as hvac's

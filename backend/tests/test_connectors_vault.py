@@ -789,20 +789,36 @@ async def test_execute_vault_kv_patch_honors_explicit_mount(
         {"data": {"k": "v"}},
         {"path": "p", "data": {}},
         {"path": "p", "data": {"k": "v"}, "cas": 1},
+        {"path": "p", "data": {"token": None}},
+        {"path": "p", "data": {"keep": "v", "drop": None}},
     ],
-    ids=["missing-data", "missing-path", "empty-data", "rejects-cas"],
+    ids=[
+        "missing-data",
+        "missing-path",
+        "empty-data",
+        "rejects-cas",
+        "rejects-null-value",
+        "rejects-null-among-non-null",
+    ],
 )
 async def test_execute_vault_kv_patch_invalid_params_returns_dispatcher_error(
     monkeypatch: pytest.MonkeyPatch,
     params: dict[str, Any],
     _registered_vault_typed_ops: None,
 ) -> None:
-    """Schema enforces required path+data, minProperties on data, and rejects ``cas``.
+    """Schema enforces required path+data, minProperties, rejects ``cas`` and null values.
 
     hvac's ``patch`` exposes no ``cas`` guard (it issues its own
     internal read+write), so the schema's ``additionalProperties=False``
     turns a stray ``cas`` into an ``invalid_params`` error rather than
     silently dropping it.
+
+    A ``null`` data value is also rejected: hvac's ``patch`` uses JSON
+    Merge Patch (RFC 7396), under which ``null`` *deletes* the key. The
+    op is documented add/overwrite-only, so the ``data``
+    ``additionalProperties`` subschema pins each value to a non-null
+    type and a ``null`` surfaces as ``invalid_params`` before it can
+    silently delete a secret field.
     """
     install_fake_client(monkeypatch)
     result = await _dispatch_vault("vault.kv.patch", params)
@@ -811,6 +827,25 @@ async def test_execute_vault_kv_patch_invalid_params_returns_dispatcher_error(
     assert result.error is not None
     assert result.error.startswith("invalid_params:")
     assert result.extras.get("error_code") == "invalid_params"
+
+
+def test_vault_kv_patch_schema_rejects_null_data_value() -> None:
+    """Schema-level guard: a ``null`` ``data`` value fails validation.
+
+    Asserts the contract directly against
+    :data:`VAULT_KV_PATCH_PARAMETER_SCHEMA` so it holds independently of
+    the dispatcher wiring. A non-null value of the same shape validates;
+    swapping it for ``null`` does not — matching the add/overwrite-only
+    docs (a JSON-Merge-Patch ``null`` would otherwise delete the key).
+    """
+    from jsonschema import Draft202012Validator
+
+    from meho_backplane.connectors.vault.ops import VAULT_KV_PATCH_PARAMETER_SCHEMA
+
+    validator = Draft202012Validator(VAULT_KV_PATCH_PARAMETER_SCHEMA)
+
+    assert validator.is_valid({"path": "meho/test", "data": {"token": "v"}})
+    assert not validator.is_valid({"path": "meho/test", "data": {"token": None}})
 
 
 async def test_execute_vault_kv_versions_returns_metadata(

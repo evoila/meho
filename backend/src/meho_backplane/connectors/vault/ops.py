@@ -513,6 +513,19 @@ async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) 
 #: the current version, JSON-merges ``data`` over it, and writes the
 #: result as a new version. hvac's ``patch`` exposes no ``cas`` guard
 #: (it issues its own internal read+write), so the schema omits one.
+#:
+#: ``data``'s ``additionalProperties`` subschema pins each value to a
+#: non-null JSON type (``string``/``number``/``boolean``/``object``/
+#: ``array``). This is load-bearing: hvac's ``secrets.kv.v2.patch`` uses
+#: HashiCorp Vault's JSON Merge Patch (RFC 7396), under which a ``null``
+#: value **deletes** the key rather than setting it. The op is
+#: documented as add/overwrite-only (keys absent from ``data`` are
+#: preserved, keys present are added/overwritten), so a ``null`` slipping
+#: through would silently delete a secret field — a contract the schema
+#: now rejects at validation time (``invalid_params``). Field deletion,
+#: when wanted, goes through ``kv.put`` (wholesale replace) or
+#: ``kv.delete`` (version soft-delete), not a surprising side effect of
+#: patch.
 VAULT_KV_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -521,11 +534,17 @@ VAULT_KV_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
         "data": {
             "type": "object",
             "minProperties": 1,
+            "additionalProperties": {
+                "type": ["string", "number", "boolean", "object", "array"],
+            },
             "description": (
                 "Fields to merge onto the current version. Unlike "
                 "kv.put this is a partial — keys present here are added "
                 "or overwritten; keys absent here are preserved from the "
-                "current version. The secret must already exist."
+                "current version. Values may not be null: Vault's JSON "
+                "Merge Patch treats a null value as a key DELETE, which "
+                "this add/overwrite-only op rejects (use kv.put or "
+                "kv.delete to remove data). The secret must already exist."
             ),
         },
     },
@@ -560,7 +579,10 @@ _VAULT_KV_PATCH_LLM_INSTRUCTIONS: dict[str, Any] = {
         "data": (
             "Required. The fields to merge. Only these keys are "
             "added/overwritten; every other key on the current version "
-            "is carried forward unchanged."
+            "is carried forward unchanged. Values must not be null — "
+            "Vault's JSON Merge Patch reads a null as 'delete this key', "
+            "which this add/overwrite-only op rejects. To remove a field, "
+            "use kv.put (full replace) or kv.delete (version soft-delete)."
         ),
     },
     "output_shape": (
@@ -585,6 +607,15 @@ async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]
     already exist; patching a missing path raises (surfaced as a
     structured ``connector_error``). The structural unwrap raises on a
     malformed hvac payload.
+
+    JSON Merge Patch (RFC 7396) — which hvac's ``patch`` uses — treats a
+    ``null`` value as a key DELETE. To keep this op genuinely
+    add/overwrite-only, :data:`VAULT_KV_PATCH_PARAMETER_SCHEMA` pins each
+    ``data`` value to a non-null type, so a ``null`` is rejected as
+    ``invalid_params`` before reaching Vault rather than silently
+    deleting a secret field. Field removal goes through
+    :func:`vault_kv_put` (wholesale replace) or :func:`vault_kv_delete`
+    (version soft-delete).
     """
     mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()

@@ -286,6 +286,21 @@ Walk the four gates in the order an operator hits them:
   for the end-to-end first-day on-ramp (target probe → catalog
   ingest → group enable → write-op annotation → composite smoke-test).
 
+- [ ] **Spec-ingestion grouping** (`meho connector ingest --catalog` /
+  `--spec`; affects every connector that becomes dispatchable only
+  after the LLM grouping pass — vmware-rest, nsx, sddc-manager, the
+  `gh` L2 surface). The grouping pass reuses the agent runtime's
+  `ANTHROPIC_API_KEY` (wired at lifespan startup, G3.17 #1407 / #1386).
+  The chart renders that env **only under `agent.enabled: true`**, so a
+  deploy that left the agent runtime off has no ingest key either and a
+  non-dry-run ingest 503s `LlmClientUnavailable` on the grouping step.
+  Set `agent.enabled: true` plus an operator-managed Secret or
+  `eso.agent.enabled: true` per
+  [`docs/cross-repo/ingest-llm-key.md`](cross-repo/ingest-llm-key.md).
+  `--dry-run` ingest works without the key (no LLM call); a keyless
+  air-gapped deploy keeps the 503 until grouping routes through the
+  G11.5 resolver.
+
 Verify the gates by re-hitting `GET /ready` after each provisioning
 step and reading the `features` block:
 

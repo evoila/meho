@@ -552,6 +552,11 @@ async def test_kv_put_against_dev_vault(
         op_id="vault.kv.put",
         target=target,
         params={"path": "app/written", "data": {"k": sentinel}},
+        # ``vault.kv.put`` is now approval-gated (requires_approval=True, G3.15-T1
+        # #1409); the approvals-API resume flag drives the authorized-execution
+        # path so the write actually lands and the read-back + redaction
+        # assertions below still run (the same flag a human approval sets).
+        _approved=True,
     )
     assert result.status == "ok", result.error
     assert result.result == {"version": 1}
@@ -613,6 +618,10 @@ async def test_kv_patch_against_dev_vault(
         op_id="vault.kv.patch",
         target=target,
         params={"path": "app/to-patch", "data": {"rotate": sentinel, "added": "new"}},
+        # ``vault.kv.patch`` is approval-gated (requires_approval=True, G3.15-T1
+        # #1409); resume via the approvals-API flag so the partial-merge write
+        # executes and the read-back + redaction assertions still run.
+        _approved=True,
     )
     assert result.status == "ok", result.error
     assert result.result == {"version": 2}
@@ -694,6 +703,10 @@ async def test_kv_delete_against_dev_vault(
         op_id="vault.kv.delete",
         target=target,
         params={"path": "app/to-delete", "versions": [1]},
+        # ``vault.kv.delete`` is approval-gated (requires_approval=True, G3.15-T1
+        # #1409); resume via the approvals-API flag so the soft-delete executes
+        # and the audit/op_class assertions still run.
+        _approved=True,
     )
     assert result.status == "ok", result.error
     assert result.result == {"deleted_versions": [1]}

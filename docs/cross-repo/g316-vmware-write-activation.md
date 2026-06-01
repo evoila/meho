@@ -192,6 +192,19 @@ A missing L2 sub-op would surface as a `composite_l2_missing` structured
 error naming the absent op_ids; a clean Step 2 means that error cannot
 fire.
 
+The code-verifiable proof of this — for all 8 composites, against the
+production `dispatch` entry point rather than a live appliance — is the
+E2E suite
+[`backend/tests/test_connectors_vmware_rest_composites_write_e2e.py`](../../backend/tests/test_connectors_vmware_rest_composites_write_e2e.py)
+(G3.16-T2 / [#1415](https://github.com/evoila/meho/issues/1415)). It
+registers each composite's `_SUB_OPS_*` op_ids as descriptor rows, drives
+every composite through `dispatch`, and asserts (a) no
+`composite_l2_missing` ever fires, (b) the sub-op call sequence + rollback
+branch match the documented workflow, and (c) the human approval-queue
+path: a USER principal hitting a `requires_approval=True` composite is
+parked at `awaiting_approval`, then approve + resume (`_approved=True`)
+executes it.
+
 ## Rollback
 
 `meho connector disable vmware-rest-9.0 --confirm` flips every group to
@@ -203,8 +216,11 @@ re-enable. There is no `delete` verb.
 
 ## References
 
-- Reconciliation test (the code-verifiable proof):
+- Reconciliation test (op_id reconcile, code-verifiable proof for T1):
   [`backend/tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`](../../backend/tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py).
+- End-to-end dispatch + approval-queue test (code-verifiable proof for
+  T2):
+  [`backend/tests/test_connectors_vmware_rest_composites_write_e2e.py`](../../backend/tests/test_connectors_vmware_rest_composites_write_e2e.py).
 - Composite sub-op declarations:
   [`connectors/vmware_rest/composites/_write.py`](../../backend/src/meho_backplane/connectors/vmware_rest/composites/_write.py)
   (`_SUB_OPS_*`, `_power_vm_op_id`, `_host_maintenance_op_id`).
@@ -214,5 +230,6 @@ re-enable. There is no `delete` verb.
   (`_build_proto`, `op_id = f"{method}:{path}"`).
 - General ingest workflow: [`connector-ingestion.md`](./connector-ingestion.md).
 - Engineering doc: [`docs/codebase/connectors-vmware-rest.md`](../codebase/connectors-vmware-rest.md).
-- Out of scope (other G3.16 tasks): composite end-to-end dispatch
-  (G3.16-T2), soak / wrapper retirement (G3.16-T3).
+- Out of scope (other G3.16 tasks): soak / wrapper retirement
+  (G3.16-T3). Composite end-to-end dispatch + approval-queue
+  verification (G3.16-T2) landed via the E2E suite linked above.

@@ -15191,6 +15191,7 @@
             "minLength": 1,
             "title": "Product",
             "enum": [
+              "argocd",
               "bind9",
               "gcloud",
               "gh",

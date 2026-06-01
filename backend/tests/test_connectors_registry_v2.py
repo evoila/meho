@@ -325,6 +325,30 @@ def test_harbor_connector_registered_under_v2_triple() -> None:
     assert snapshot[key] is HarborConnector
 
 
+def test_argocd_connector_registered_under_v2_triple_and_wildcard() -> None:
+    """ArgoCdConnector package registers under (argocd, 3.x, argocd-api) + wildcard.
+
+    G3.12-T1 (#1390) ships dual registration from day one per G0.15-T6:
+    the versioned triple ``("argocd", "3.x", "argocd-api")`` and the
+    wildcard fallback ``("argocd", "", "")`` both resolve to the connector.
+    Same idempotent-registration pattern as the Harbor test above; the
+    wildcard leg is registered via a second ``_ensure_registered_v2``-style
+    guard since the connector class only carries the versioned triple in
+    its class attributes.
+    """
+    from meho_backplane.connectors.argocd import ArgoCdConnector
+
+    _ensure_registered_v2(ArgoCdConnector)
+    wildcard = ("argocd", "", "")
+    if wildcard not in all_connectors_v2():
+        register_connector_v2(product="argocd", version="", impl_id="", cls=ArgoCdConnector)
+
+    snapshot = all_connectors_v2()
+    versioned = ("argocd", "3.x", "argocd-api")
+    assert snapshot[versioned] is ArgoCdConnector
+    assert snapshot[wildcard] is ArgoCdConnector
+
+
 def test_vcf_automation_connector_registered_under_v2_triple() -> None:
     """VcfAutomationConnector package registers under (vcf-automation, 9.0, vcfa-rest).
 

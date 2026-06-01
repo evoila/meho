@@ -174,6 +174,10 @@ from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
 )
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    build_proposed_effect,
+)
 from meho_backplane.operations._validate import (
     compute_params_hash,
     policy_gate,
@@ -808,6 +812,55 @@ async def _reduce_or_error(
         return result_connector_error(op_id, exc, duration_ms)
 
 
+async def _build_proposed_effect(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve the connector + invoke the op's preview builder, if any.
+
+    G11.7 follow-up (#1437). Resolves the connector instance the same way
+    the execute path does (so a ``k8s.apply`` preview hits the same target
+    the real apply would), assembles a :class:`PreviewContext`, and
+    delegates to :func:`build_proposed_effect`. Returns ``None`` -- the
+    caller's identifier-only default -- when the op has no builder, when
+    connector resolution can't pick an instance, or (inside
+    :func:`build_proposed_effect`) when the builder declines or the op is
+    a credential class. Never raises: connector-resolution faults degrade
+    to "no preview" so the park always proceeds.
+    """
+    try:
+        connector_instance, resolution_error, _ = await _resolve_connector_instance(
+            descriptor, target
+        )
+        if resolution_error is not None:
+            # The op can't be previewed against an unresolved connector;
+            # the reviewer still gets the identifier-only default.
+            return None
+        return await build_proposed_effect(
+            PreviewContext(
+                descriptor=descriptor,
+                connector_instance=connector_instance,
+                operator=operator,
+                target=target,
+                params=params,
+            )
+        )
+    except Exception:
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning(
+            "proposed_effect_resolution_failed",
+            op_id=op_id,
+            operator_sub=operator.sub,
+            exc_info=True,
+        )
+        return None
+
+
 async def _handle_needs_approval(
     *,
     op_id: str,
@@ -842,6 +895,20 @@ async def _handle_needs_approval(
 
     run_id = current_agent_run_id_var.get()
 
+    # G11.7 follow-up (#1437): give an op that can compute a
+    # side-effect-free preview (notably ``k8s.apply``'s server-dry-run) a
+    # chance to populate ``proposed_effect`` so the reviewer sees the diff
+    # in the approval queue. Opt-in per op + fail-soft: ops without a
+    # registered builder (and any builder that raises) yield ``None`` and
+    # the queue stores the identifier-only default exactly as before.
+    proposed_effect = await _build_proposed_effect(
+        op_id=op_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+    )
+
     try:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -854,6 +921,7 @@ async def _handle_needs_approval(
                 params=params,
                 params_hash=params_hash,
                 run_id=run_id,
+                proposed_effect=proposed_effect,
             )
             await session.commit()
         # Publish AFTER commit so a phantom event cannot outlive a failed

@@ -85,6 +85,51 @@ routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
 the call instead of executing it, so the bypass is what lets the
 approved op run.
 
+## `proposed_effect` builder hook (#1437)
+
+`ApprovalRequest.proposed_effect` holds what the reviewer sees in the
+queue. By default `create_pending_request`
+(`backend/src/meho_backplane/operations/approval_queue.py`) stores an
+identifier-only summary — `{op_id, connector_id, target_id}`. Some ops
+can do better: they can compute a **side-effect-free preview** of what
+the approved call would do, so the reviewer reads the diff in the queue
+rather than only in the post-approval op result.
+
+The per-op preview is opt-in via a builder registry in
+`backend/src/meho_backplane/operations/_preview.py`:
+
+- `register_preview_builder(op_id, builder)` registers an
+  `async (PreviewContext) -> dict | None` callable for an op-id.
+  `PreviewContext` carries the resolved connector instance + descriptor +
+  operator + target + params.
+- At the park point, `dispatcher._handle_needs_approval` resolves the
+  connector instance (same path the execute branch uses) and calls
+  `build_proposed_effect`. The result — wrapped as
+  `{op_class, preview}` — is passed to `create_pending_request` as
+  `proposed_effect`; `None` falls back to the identifier-only default.
+
+Three invariants make the hook safe to wire on the park path:
+
+1. **Opt-in / no regression.** An op with no registered builder yields
+   `None` and parks exactly as before.
+2. **Fail-soft.** A builder that raises (a dry-run that hits the API and
+   errors) degrades to `None`; the park — the safety-relevant action —
+   always proceeds. Connector-resolution faults degrade the same way.
+3. **Redaction-safe.** `build_proposed_effect` classifies the op via
+   `classify_op` (the same single-sourced sensitivity classification used
+   for broadcast/audit redaction, #1401) and **suppresses** the preview
+   for any credential class (`credential_read` / `credential_mint` /
+   `credential_write`) before the builder even runs — a durable row
+   never carries secret material. Builders are themselves expected to
+   return identity-only summaries.
+
+The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
+`k8s_apply` handler with `dry_run="server"` forced on (the API's
+`?dryRun=All`), so nothing persists and the per-document summary
+(resource identity + `resourceVersion` + `uid`) is the diff-preview the
+reviewer reads. Other ops (e.g. argocd writes, #1452) register their own
+builders as needed.
+
 ## Transports
 
 ### REST (`backend/src/meho_backplane/api/v1/approvals.py`)

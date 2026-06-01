@@ -118,6 +118,10 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
 #:   op shipped pre-G11.7 classified as plain ``write``, which broadcast
 #:   the written secret in full; reclassifying it here closes that latent
 #:   leak — see ``docs/codebase/connectors-vault.md``).
+#: * ``vault.kv.patch`` — same posture as ``vault.kv.put``: the merged
+#:   fields ride in ``params`` (G3.15-T1 #1409). Without the explicit
+#:   pin the ``.patch`` write-suffix would classify it plain ``write``
+#:   and broadcast the partial secret in full.
 #: * ``k8s.secret.create`` — the Secret ``data`` / ``stringData`` is in
 #:   ``params``.
 #: * ``k8s.job.create`` — the Job ``spec`` carries a pod template whose
@@ -128,6 +132,7 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         "vault.auth.userpass.write",
         "vault.auth.userpass.update_password",
         "vault.kv.put",
+        "vault.kv.patch",
         "k8s.secret.create",
         "k8s.job.create",
     }

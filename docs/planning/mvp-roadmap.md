@@ -23,7 +23,7 @@ v0.2" framing on the board.
 | **v0.7** | **MVP6** | **Agent runtime — floor** (G11.1 runtime + G11.2 identity/RBAC/approval + G11.3 scheduler) | **shipped — tag `v0.7.0` (2026-05-27)** |
 | **v0.8** | **MVP7** | **Consolidated post-v0.7 release** — agent runtime hardening (G11.4–G11.6) + operator web UI (G10.0–G10.5) + topology time-travel (G9.3) + audit replay (G8.2) + Holodeck (G3.8) + github-rest connector (G3.11) + broadcast meta-tools (G6.4) + retrieval enhancements (G4.4) + v0.6/v0.7 dogfood hardening cycles (G0.13/G0.14/G0.15) | **shipped — tag `v0.8.0` (2026-05-28)** |
 | **v0.9** | **MVP8** | **Runbooks** (G12 — schema + template + run lifecycle + session priming + CLI) + CLI hygiene (G0.12) + v0.8.x consumer closed-loop dogfood hardening (G0.16/G0.17/G0.18) + release-tooling unblock (G0.11 partial: #1126/#1127) | **shipped — tag `v0.9.0` (2026-05-31)** — all of G12 + G0.12 + G0.16/17/18 closed; rest of G0.11 → v0.10 |
-| **v0.10** | **MVP9** | **Connector write surface + operator UX** — G3 remainder: argocd reads (G3.12 #1387) + keycloak reads (G3.13 #1388) + k8s / vault / VCF write activation (G3.14 #1398 / G3.15 #1399 / G3.16 #1400) + approval-policy hardening for connector writes (G11.7 #1397) + Runbooks UI (G10.6 #1381). G0.11 substrate remainder (#1111, #292) + next dogfood cycle ride along. | **◀ next to ship** — planning; write activations (G3.14/15/16) gated on production ingest LLM client [#1386](https://github.com/evoila/meho/issues/1386) + G11.7 approval path |
+| **v0.10** | **MVP9** | **Connector write surface + operator UX** — argocd (G3.12 #1387) + keycloak (G3.13 #1388) connectors, both **read + approval-gated write** + k8s / vault / VCF write activation (G3.14 #1398 / G3.15 #1399 / G3.16 #1400) + production ingest LLM client (G3.17 #1407) + approval-policy hardening for connector writes (G11.7 #1397) + Runbooks UI (G10.6 #1381) + README front-door rework (#1447). G0.11 substrate remainder (#956: #1111/#292) carries forward. | **shipped — tag `v0.10.0` (2026-06-01)** — all 8 release Initiatives + #1447 closed; write half landed behind the G11.7 approval queue once ingest client #1386 shipped |
 
 ---
 
@@ -534,20 +534,26 @@ v0.9.0. G12.3 (#1198) closed before the tag, so all of G12 ships in v0.9.0.
 
 ## v0.10 — MVP9 — Connector write surface + operator UX
 
-**Planning milestone.** Slotted 2026-05-31, immediately after the `v0.9.0`
-tag. This is the **connector write-surface release**: it takes the G3 connector
-set from State-1 reads to State-2 writes, hardens the approval path that gates
-those writes, and lands the Runbooks UI. The G0.11 substrate remainder + next
-dogfood cycle ride along (the user's call 2026-05-31) rather than getting their
-own tag.
+**Shipped — tag `v0.10.0` (2026-06-01).** Slotted 2026-05-31 immediately after
+the `v0.9.0` tag; cut 2026-06-01. This is the **connector write-surface
+release**: it took the G3 connector set from State-1 reads to State-2
+approval-gated writes, hardened the approval queue that gates those writes,
+landed the Runbooks UI, and reworked the README into a credible front door
+(#1447). The G0.11 substrate remainder carries forward into the next cut rather
+than getting its own tag.
 
 ### What ships
 
-- **argocd connector — L1-typed GitOps reads** (G3.12 #1387) — read-side
-  control-plane parity. **Not** gated on the ingest LLM client.
-- **keycloak connector — L1-typed Admin-REST reads** (G3.13 #1388) — read-side
-  IAM parity. **Not** gated on the ingest LLM client; the keycloak *write*
-  surface is a follow-up under the same Initiative.
+- **argocd connector — L1-typed GitOps control** (G3.12 #1387) — skeleton +
+  curated reads (`app.list/get/diff/resource_tree`) + CLI/MCP + **approval-gated
+  writes** (`app.sync/rollback/set`, #1446) wired to a park-time
+  `proposed_effect` preview (#1457). Bearer-token / Vault auth; **not** gated on
+  the ingest LLM client.
+- **keycloak connector — L1-typed Admin-REST control** (G3.13 #1388) — skeleton
+  + secret-redacted curated reads + CLI + **approval-gated writes** (realm /
+  client / scope / protocol-mapper, #1445). Admin `client_credentials` auth
+  (distinct from operator-OIDC to avoid a bootstrap circular dependency);
+  **not** gated on the ingest LLM client.
 - **kubernetes write/exec op surface** (G3.14 #1398) — apply / scale / rollout
   / exec, all `requires_approval=True`.
 - **vault write/admin op surface** (G3.15 #1399) — promote `kv.put`/`delete`
@@ -567,6 +573,11 @@ own tag.
   `--catalog` ingest works on deployed backplanes. **The prerequisite that
   unblocks the write half** (hard-gates G3.16; gates G3.14/G3.15 L2 dispatch).
   Adopts #1386 as its T1.
+- **README front-door rework** (#1447) — restructure the README into a credible
+  front door: positioning, relocated values tables + cosign recipes, a
+  version-drift guard workflow, and corrected stale v0.9.0 claims (#1453/#1455/
+  #1456/#1458/#1460). Filed off-roadmap during the v0.9.0 audit; shipped with
+  this tag.
 - **G0.11 substrate remainder** (riding along) — testcontainers
   `LogMessageWaitStrategy` (#1111) + SonarCloud CPD exclusions (#292), the tail
   of #956 left after the two release-blocking children shipped in v0.9.0. Plus
@@ -576,17 +587,23 @@ own tag.
 
 | Initiative | # | State | Tasks |
 |---|---|---|---|
-| [G3.12 argocd connector — L1 reads](https://github.com/evoila/meho/issues/1387) | #1387 | open | 0/4 |
-| [G3.13 keycloak connector — L1 reads](https://github.com/evoila/meho/issues/1388) | #1388 | open | 0/4 |
-| [G3.14 kubernetes write/exec op surface](https://github.com/evoila/meho/issues/1398) | #1398 | open | 0/2 |
-| [G3.15 vault write/admin op surface](https://github.com/evoila/meho/issues/1399) | #1399 | open | 0/5 |
-| [G3.16 VCF write activation](https://github.com/evoila/meho/issues/1400) | #1400 | open | 0/3 |
-| [G3.17 production ingest LLM client](https://github.com/evoila/meho/issues/1407) | #1407 | open | 0/2 (adopts #1386 as T1) |
-| [G11.7 approval-policy hardening](https://github.com/evoila/meho/issues/1397) | #1397 | open | 0/2 |
-| [G10.6 Runbooks UI](https://github.com/evoila/meho/issues/1381) | #1381 | open | 1/4 |
-| [G0.11 CI/test-infra/release-tooling (remainder)](https://github.com/evoila/meho/issues/956) | #956 | open (carried from v0.9) | 10/12 |
+| [G3.12 argocd connector — L1 read + write](https://github.com/evoila/meho/issues/1387) | #1387 | closed | 4/4 |
+| [G3.13 keycloak connector — L1 read + write](https://github.com/evoila/meho/issues/1388) | #1388 | closed | 4/4 |
+| [G3.14 kubernetes write/exec op surface](https://github.com/evoila/meho/issues/1398) | #1398 | closed | 2/2 |
+| [G3.15 vault write/admin op surface](https://github.com/evoila/meho/issues/1399) | #1399 | closed | 6/6 |
+| [G3.16 VCF write activation](https://github.com/evoila/meho/issues/1400) | #1400 | closed | 4/4 |
+| [G3.17 production ingest LLM client](https://github.com/evoila/meho/issues/1407) | #1407 | closed | 2/2 (adopted #1386 as T1) |
+| [G11.7 approval-policy hardening](https://github.com/evoila/meho/issues/1397) | #1397 | closed | 4/4 |
+| [G10.6 Runbooks UI](https://github.com/evoila/meho/issues/1381) | #1381 | closed | 4/4 |
+| [README front-door rework (off-roadmap, shipped here)](https://github.com/evoila/meho/issues/1447) | #1447 | closed | 5/5 |
+| [G0.11 CI/test-infra/release-tooling (remainder)](https://github.com/evoila/meho/issues/956) | #956 | open (carries forward) | 11/13 |
 
 ### Sequencing / dependencies
+
+> **Shipped note (2026-06-01):** the #1386 prerequisite below landed as
+> G3.17-T1 (closed), the G11.7 approval queue shipped, and the entire write
+> half tagged in `v0.10.0`. The original sequencing plan is retained below as
+> the authored record.
 
 The write half of the release has a hard prerequisite **outside the seven
 Initiatives**:
@@ -659,20 +676,18 @@ Tier is fixed by operator value, not architectural dependency:
 - **CI/test/release hardening (G0.11)** + **CLI hygiene (G0.12)** — substrate
   work that doesn't earn its own milestone; travels with v0.9.
 
-### Ownership today (updated 2026-05-31)
+### Ownership today (updated 2026-06-01)
 
 | Version | Status | Notes |
 |---|---|---|
-| v0.2 → v0.9 | **shipped** | tags `v0.2.0` through `v0.9.0` cut |
-| v0.10 (◀ next) | **mostly unstaffed** | 7 open Initiatives: G3.12/13/14/15/16 + G11.7 + G10.6, all `unassigned` except G0.11 #956 (@ddzafic, carried). Connector lane → propose @kr3s0; G11.7 approval/backplane → @zdamir; G10.6 frontend → @damir-topic |
+| v0.2 → v0.10 | **shipped** | tags `v0.2.0` through `v0.10.0` cut |
+| next cut | **planning** | G0.11 substrate remainder (#956: #1111/#292) + the next consumer dogfood-hardening cycle carry forward; no milestone slotted yet |
 
-**Immediate planning need for v0.10:** (1) **land G3.17 #1407** (ingest LLM
-client, prerequisite #1386 = T1) — without it the write half (G3.14/15/16)
-can't ship; (2) ~~decomposition~~ — done 2026-05-31 (G3.15/G3.16/G3.17 tasks
-filed + on board); (3) **assign owners** to the connector wave — propose
-@kr3s0 for G3.12–G3.17, @zdamir for G11.7 (approval-queue/backplane),
-@damir-topic for G10.6 (frontend). Read-side connectors (G3.12/G3.13) + G10.6
-carry no ingest-client dependency and can start immediately.
+**v0.10 planning need — resolved (shipped 2026-06-01).** G3.17 #1407 landed
+(#1386 as its T1) and the full connector wave (G3.12–G3.16) + G11.7 approval
+queue + G10.6 Runbooks UI tagged in `v0.10.0`, with the off-roadmap README
+front-door rework (#1447) riding along. Carrying forward: the G0.11 substrate
+remainder (#956) + the next dogfood cycle.
 
 ---
 

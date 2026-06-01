@@ -208,6 +208,7 @@ class TestClassifyOp:
             "vault.auth.userpass.write",
             "vault.auth.userpass.update_password",
             "vault.kv.put",
+            "vault.kv.patch",
             "k8s.secret.create",
         ],
     )

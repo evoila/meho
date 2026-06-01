@@ -32,9 +32,10 @@ What this harness proves (issue #551 DoD)
   response shape, that a synchronous ``audit_log`` row committed
   (CLAUDE.md postulate 7), and that the broadcast event's
   ``op_class`` is correct — ``credential_write`` for ``vault.kv.put``
-  (its KV-v2 secret rides in the request params, so the broadcast
-  collapses to aggregate-only per G11.7-T1 #1401), ``write`` for
-  ``vault.kv.delete``, ``credential_read`` for ``vault.kv.read`` /
+  and ``vault.kv.patch`` (their KV-v2 secret rides in the request
+  params, so the broadcast collapses to aggregate-only per G11.7-T1
+  #1401 / G3.15-T1 #1409), ``write`` for ``vault.kv.delete``,
+  ``credential_read`` for ``vault.kv.read`` /
   ``vault.kv.list``, ``read`` for the KV-v2 / sys metadata reads and
   the ``.list`` auth ops, and ``other`` for the two ``.read``
   auth-config ops (``vault.auth.userpass.read`` /
@@ -551,6 +552,11 @@ async def test_kv_put_against_dev_vault(
         op_id="vault.kv.put",
         target=target,
         params={"path": "app/written", "data": {"k": sentinel}},
+        # ``vault.kv.put`` is now approval-gated (requires_approval=True, G3.15-T1
+        # #1409); the approvals-API resume flag drives the authorized-execution
+        # path so the write actually lands and the read-back + redaction
+        # assertions below still run (the same flag a human approval sets).
+        _approved=True,
     )
     assert result.status == "ok", result.error
     assert result.result == {"version": 1}
@@ -580,6 +586,72 @@ async def test_kv_put_against_dev_vault(
     assert sentinel not in serialised, (
         f"credential_write leak: {sentinel!r} reached the broadcast event for "
         f"vault.kv.put — serialised event: {serialised}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_kv_patch_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``vault.kv.patch`` merges a field; audited; op_class=credential_write.
+
+    Proves the partial-write semantics end-to-end: an existing secret is
+    seeded with two keys, ``vault.kv.patch`` merges a third (and rotates
+    one), and the read-back shows the untouched key preserved alongside
+    the merged fields — the distinguishing behaviour vs. ``vault.kv.put``
+    (wholesale replace). The merged sentinel value must be absent from
+    the serialised broadcast event (``credential_write`` redaction,
+    same posture as ``vault.kv.put``).
+    """
+    target, addr = vault_e2e
+    sentinel = "kvpatch-secret-sentinel-1409"
+    _root_client(addr).secrets.kv.v2.create_or_update_secret(
+        path="app/to-patch",
+        secret={"keep": "original", "rotate": "old"},
+        mount_point=_KV_MOUNT,
+    )
+    operator = _make_operator(sub="op-kv-patch")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.patch",
+        target=target,
+        params={"path": "app/to-patch", "data": {"rotate": sentinel, "added": "new"}},
+        # ``vault.kv.patch`` is approval-gated (requires_approval=True, G3.15-T1
+        # #1409); resume via the approvals-API flag so the partial-merge write
+        # executes and the read-back + redaction assertions still run.
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result == {"version": 2}
+    # Read back: the untouched key survives, the rotated/added keys land —
+    # the partial-merge contract that separates patch from put.
+    readback = _root_client(addr).secrets.kv.v2.read_secret_version(
+        path="app/to-patch",
+        mount_point=_KV_MOUNT,
+        raise_on_deleted_version=False,
+    )
+    assert readback["data"]["data"] == {
+        "keep": "original",
+        "rotate": sentinel,
+        "added": "new",
+    }
+    await _assert_audited(
+        "vault.kv.patch",
+        operator_sub="op-kv-patch",
+        expected_op_class="credential_write",
+        events=captured_events,
+    )
+    patch_event = next(e for e in captured_events if e.op_id == "vault.kv.patch")
+    assert patch_event.payload == {
+        "op_class": "credential_write",
+        "result_status": "ok",
+    }
+    serialised = patch_event.model_dump_json()
+    assert sentinel not in serialised, (
+        f"credential_write leak: {sentinel!r} reached the broadcast event for "
+        f"vault.kv.patch — serialised event: {serialised}"
     )
 
 
@@ -631,6 +703,10 @@ async def test_kv_delete_against_dev_vault(
         op_id="vault.kv.delete",
         target=target,
         params={"path": "app/to-delete", "versions": [1]},
+        # ``vault.kv.delete`` is approval-gated (requires_approval=True, G3.15-T1
+        # #1409); resume via the approvals-API flag so the soft-delete executes
+        # and the audit/op_class assertions still run.
+        _approved=True,
     )
     assert result.status == "ok", result.error
     assert result.result == {"deleted_versions": [1]}

@@ -80,6 +80,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -387,6 +388,216 @@ class ArgoCdConnector(HttpConnector):
             op_id=op_id,
             target=target,
             params=params,
+        )
+
+    # ------------------------------------------------------------------
+    # Curated read ops (G3.12-T2 #1391)
+    #
+    # Each handler is a thin retried-GET against an argocd-server endpoint.
+    # The dispatcher binds these bound methods to the per-process connector
+    # instance at dispatch time and threads ``operator`` by parameter name
+    # (see :func:`~meho_backplane.operations._branches.dispatch_typed`); the
+    # ``operator`` is forwarded to :meth:`_get_json` so the credential loader
+    # reads the per-target bearer token under the operator's identity. All
+    # six are read-only — no write/mutating op ships in this Task.
+    # ------------------------------------------------------------------
+
+    async def app_list(
+        self,
+        operator: Operator,
+        target: ArgoCdTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``argocd.app.list`` — ``GET /api/v1/applications``.
+
+        Optional ``projects`` (list of AppProject names) and ``selector``
+        (Kubernetes label selector) narrow the result. Returns ArgoCD's
+        ``ApplicationList`` (``{"items": [...], "metadata": {...}}``); each
+        item carries the app's sync + health status.
+        """
+        query: dict[str, Any] = {}
+        projects = params.get("projects")
+        if projects:
+            # ArgoCD's gRPC-gateway accepts the repeated ``projects`` query
+            # param as a list; httpx serialises a list value into repeated
+            # ``projects=a&projects=b`` pairs, which is exactly the wire shape.
+            query["projects"] = list(projects)
+        selector = params.get("selector")
+        if selector:
+            query["selector"] = selector
+        return await self._get_json(
+            target, "/api/v1/applications", operator=operator, params=query or None
+        )
+
+    async def app_get(
+        self,
+        operator: Operator,
+        target: ArgoCdTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``argocd.app.get`` — ``GET /api/v1/applications/{name}``.
+
+        Returns the full ``Application`` object (spec + status). The
+        optional ``project`` query param scopes the lookup (ArgoCD returns
+        404 rather than the app if it is not in that project).
+        """
+        name = quote(str(params["name"]), safe="")
+        query: dict[str, Any] = {}
+        project = params.get("project")
+        if project:
+            query["project"] = project
+        return await self._get_json(
+            target, f"/api/v1/applications/{name}", operator=operator, params=query or None
+        )
+
+    async def app_diff(
+        self,
+        operator: Operator,
+        target: ArgoCdTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``argocd.app.diff`` — ``GET /api/v1/applications/{name}/managed-resources``.
+
+        Returns the managed-resources delta — the same desired-vs-live drift
+        ``argocd app diff <app>`` renders. Each ``items`` entry carries
+        ``liveState`` / ``targetState`` (and the normalized / predicted pair
+        the controller compares) for one managed resource.
+        """
+        name = quote(str(params["name"]), safe="")
+        query: dict[str, Any] = {}
+        project = params.get("project")
+        if project:
+            query["project"] = project
+        return await self._get_json(
+            target,
+            f"/api/v1/applications/{name}/managed-resources",
+            operator=operator,
+            params=query or None,
+        )
+
+    async def app_resource_tree(
+        self,
+        operator: Operator,
+        target: ArgoCdTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``argocd.app.resource_tree`` — ``GET /api/v1/applications/{name}/resource-tree``.
+
+        Returns the reconciled resource tree (``nodes`` / ``orphanedNodes`` /
+        ``hosts`` / ``shardsCount``); each node carries per-resource health
+        and sync status plus ``parentRefs`` linking it into the hierarchy.
+        """
+        name = quote(str(params["name"]), safe="")
+        query: dict[str, Any] = {}
+        project = params.get("project")
+        if project:
+            query["project"] = project
+        return await self._get_json(
+            target,
+            f"/api/v1/applications/{name}/resource-tree",
+            operator=operator,
+            params=query or None,
+        )
+
+    async def appproject_list(
+        self,
+        operator: Operator,
+        target: ArgoCdTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``argocd.appproject.list`` — ``GET /api/v1/projects``.
+
+        Returns the ``AppProjectList`` (``{"items": [...], "metadata": {...}}``);
+        each item's ``spec`` carries the project allow-lists (``sourceRepos`` /
+        ``destinations`` / resource allow- and deny-lists).
+        """
+        del params  # schema declares the param object empty
+        return await self._get_json(target, "/api/v1/projects", operator=operator)
+
+    async def repo_list(
+        self,
+        operator: Operator,
+        target: ArgoCdTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``argocd.repo.list`` — ``GET /api/v1/repositories``.
+
+        Returns the ``RepositoryList`` (``{"items": [...], "metadata": {...}}``);
+        each item carries the repo URL/type plus ``connectionState`` (whether
+        ArgoCD can currently reach and authenticate to the repo).
+        """
+        del params  # schema declares the param object empty
+        return await self._get_json(target, "/api/v1/repositories", operator=operator)
+
+    @classmethod
+    async def register_operations(cls) -> None:
+        """Upsert every op in :data:`ARGOCD_OPS` into ``endpoint_descriptor``.
+
+        Called from the application lifespan (via the registrar queued in
+        :mod:`meho_backplane.connectors.argocd.__init__`) after the registry
+        has eager-imported every connector module. Walks
+        :data:`~meho_backplane.connectors.argocd.ops.ARGOCD_OPS`, resolves
+        each op's ``handler_attr`` to the bound classmethod-visible handler,
+        looks the group's curated ``when_to_use`` blurb up in
+        :data:`~meho_backplane.connectors.argocd.ops.ARGOCD_WHEN_TO_USE_BY_GROUP`,
+        and routes each row through
+        :func:`~meho_backplane.operations.typed_register.register_typed_operation`.
+        Idempotent across pod restarts (the helper skips the embedding
+        recompute on unchanged summary / description / tags) — mirrors the
+        :meth:`Bind9Connector.register_operations` / Kubernetes shape.
+        """
+        # Lazy import: the operations package pulls in the embedding pipeline
+        # (ONNX runtime + model), which pure-fingerprint/probe unit tests
+        # should not pay. Lifespan callers have it warmed by the time this runs.
+        from meho_backplane.connectors.argocd.ops import (
+            ARGOCD_OPS,
+            ARGOCD_WHEN_TO_USE_BY_GROUP,
+        )
+        from meho_backplane.operations.typed_register import register_typed_operation
+
+        for op in ARGOCD_OPS:
+            handler = getattr(cls, op.handler_attr, None)
+            if handler is None:
+                raise AttributeError(
+                    f"ArgoCdConnector op {op.op_id!r} declares "
+                    f"handler_attr={op.handler_attr!r} but the class has no such attribute"
+                )
+            when_to_use: str | None
+            if op.group_key is None:
+                when_to_use = None
+            else:
+                when_to_use = ARGOCD_WHEN_TO_USE_BY_GROUP.get(op.group_key)
+                if when_to_use is None:
+                    raise ValueError(
+                        f"ArgoCdConnector op {op.op_id!r} declares "
+                        f"group_key={op.group_key!r} but no curated when_to_use "
+                        f"exists for that key. Add an entry to "
+                        f"ARGOCD_WHEN_TO_USE_BY_GROUP in "
+                        f"meho_backplane.connectors.argocd.ops."
+                    )
+            await register_typed_operation(
+                product=cls.product,
+                version=cls.version,
+                impl_id=cls.impl_id,
+                op_id=op.op_id,
+                handler=handler,
+                summary=op.summary,
+                description=op.description,
+                parameter_schema=op.parameter_schema,
+                response_schema=op.response_schema,
+                group_key=op.group_key,
+                when_to_use=when_to_use,
+                tags=list(op.tags),
+                safety_level=op.safety_level,
+                requires_approval=op.requires_approval,
+                llm_instructions=op.llm_instructions,
+            )
+        _log.info(
+            "argocd_operations_registered",
+            count=len(ARGOCD_OPS),
+            product=cls.product,
+            version=cls.version,
+            impl_id=cls.impl_id,
         )
 
     async def aclose(self) -> None:

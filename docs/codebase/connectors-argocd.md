@@ -7,11 +7,11 @@ dispatches ArgoCD `argocd-server` REST operations under the
 `(product="argocd", version="3.x", impl_id="argocd-api")` registry triple
 (plus the `("argocd", "", "")` wildcard fallback). G3.12-T1 (#1390) ships the
 skeleton — bearer-token auth, fingerprint, probe, the G0.6 dispatch shim, and
-dual registration. The curated read core (`argocd.app.list` /
-`argocd.app.get` / `argocd.app.diff` / `argocd.app.resource_tree` /
-`argocd.appproject.list` / `argocd.repo.list`) arrives in G3.12-T2; CLI verbs
-+ MCP review + recorded-fixture E2E + `docs/cross-repo/argocd-onboarding.md`
-arrive in G3.12-T3.
+dual registration. G3.12-T2 (#1391) layers the curated read core on top:
+`argocd.app.list` / `argocd.app.get` / `argocd.app.diff` /
+`argocd.app.resource_tree` / `argocd.appproject.list` / `argocd.repo.list` —
+all `safety_level="safe"`, `requires_approval=False`, read-only. CLI verbs +
+MCP review + `docs/cross-repo/argocd-onboarding.md` arrive in G3.12-T3.
 
 Source: `backend/src/meho_backplane/connectors/argocd/`.
 
@@ -39,6 +39,16 @@ Source: `backend/src/meho_backplane/connectors/argocd/`.
 - **`ARGOCD_TOKEN_FIELD`** (`session.py`) — the single KV-v2 secret field name
   (`"token"`) an operator stores under `target.secret_ref`. Shared by the
   connector, the loader, and the tests.
+- **`ArgoCdOp`** + **`ARGOCD_OPS`** (`ops.py`) — the typed-op metadata dataclass
+  and the six-entry registration tuple (the curated read core). Mirrors the
+  bind9 `Bind9Op` / `BIND9_OPS` shape: one frozen dataclass per op carrying the
+  `register_typed_operation` kwargs plus a `handler_attr` naming the bound
+  method on `ArgoCdConnector`. **`ARGOCD_WHEN_TO_USE_BY_GROUP`** maps each op's
+  `group_key` (`argocd-apps` / `argocd-projects` / `argocd-repos`) to its
+  curated `when_to_use` blurb.
+- **`register_argocd_typed_operations`** (`__init__.py`) — the lifespan-driven
+  registrar (queued via `register_typed_op_registrar`) that delegates to
+  `ArgoCdConnector.register_operations()`.
 
 ## Control flow
 
@@ -107,6 +117,34 @@ structured `error` string as `reason`. ArgoCD exposes no dedicated composite
 health endpoint comparable to Harbor's `/api/v2.0/health`, so the
 unauthenticated `GET /api/version` probe is the right reachability surface.
 
+### Curated read ops (G3.12-T2)
+
+Six read-only ops are upserted into `endpoint_descriptor` at lifespan startup
+by `register_argocd_typed_operations` → `ArgoCdConnector.register_operations()`,
+which walks `ARGOCD_OPS` and routes each row through `register_typed_operation`
+(idempotent across pod restarts — re-embed is skipped on unchanged text). Each
+handler is a thin bound method on `ArgoCdConnector` (`app_list` / `app_get` /
+`app_diff` / `app_resource_tree` / `appproject_list` / `repo_list`) that the
+dispatcher binds to the per-process instance and threads `operator` into; the
+handler forwards `operator` to `_get_json` so the bearer token is read under
+the operator's identity.
+
+| op_id | endpoint | returns |
+|---|---|---|
+| `argocd.app.list` | `GET /api/v1/applications` (opt. `projects[]`, `selector`) | `{items, metadata}` — apps + sync/health status |
+| `argocd.app.get` | `GET /api/v1/applications/{name}` (opt. `project`) | one app's full spec + status |
+| `argocd.app.diff` | `GET /api/v1/applications/{name}/managed-resources` | `{items: [ResourceDiff]}` — `liveState`/`targetState` per resource |
+| `argocd.app.resource_tree` | `GET /api/v1/applications/{name}/resource-tree` | `{nodes, orphanedNodes, hosts, shardsCount}` |
+| `argocd.appproject.list` | `GET /api/v1/projects` | `{items, metadata}` — AppProjects + allow-lists |
+| `argocd.repo.list` | `GET /api/v1/repositories` | `{items, metadata}` — repos + connectionState |
+
+`argocd.app.diff` is the API-level equivalent of `argocd app diff <app>`: the
+managed-resources delta where each item's `liveState` (cluster) is compared
+against `targetState` (Git-rendered desired). The per-app ops URL-encode the
+`name` param into the path (so a slash in the name stays one segment) and
+forward the optional `project` scoping query. `app.list` serialises `projects`
+as repeated query pairs (the gRPC-gateway repeated-field shape).
+
 ### execute() shim
 
 `execute()` synthesises a system `Operator` with
@@ -144,13 +182,15 @@ shim.
   respx-mocked ArgoCD, plus the canary-token leak assertions.
 - `tests/test_connectors_registry_v2.py::test_argocd_connector_registered_under_v2_triple_and_wildcard`
   — asserts the dual registration resolves.
+- `tests/test_connectors_argocd_reads.py` — the G3.12-T2 read-core suite: each
+  of the six ops dispatched live through `dispatch` against respx-mocked
+  `argocd-server` (right path + bearer token + payload), `app.diff` returns the
+  managed-resources drift, query-param plumbing (`projects`/`selector`/`project`
+  + name URL-encoding), `search_operations` visibility, and the `ARGOCD_OPS`
+  registration-shape invariants (all `safe`/no-approval/`read-only`, no write op).
 
 ## Known issues
 
-- This Task ships **zero operations** — `execute(target, op_id, ...)` against
-  any `op_id` resolves to "unknown operation" at the dispatcher layer, the
-  correct behaviour for a registered-but-empty connector at this stage. The
-  curated read core lands in G3.12-T2.
 - The write ops (`argocd.app.sync` / `app.rollback` / `app.set`, gated by the
   approval queue) and any full-Swagger L2 ingest are deferred follow-up Tasks
   under Initiative #1387, per Hard rule 2 (no speculative optionality).
@@ -162,8 +202,9 @@ shim.
 
 ## References
 
-- Issues: #1390 (G3.12-T1 skeleton). Initiative: #1387 (G3.12 argocd
-  connector). Goal: #214 (connector parity / wrapper retirement).
+- Issues: #1390 (G3.12-T1 skeleton), #1391 (G3.12-T2 curated read core).
+  Initiative: #1387 (G3.12 argocd connector). Goal: #214 (connector parity /
+  wrapper retirement).
 - HttpConnector base: `backend/src/meho_backplane/connectors/adapters/http.py`
 - Shared Vault loader: `backend/src/meho_backplane/connectors/_shared/vault_creds.py`
 - ArgoCD API: https://argo-cd.readthedocs.io/en/stable/developer-guide/api-docs/

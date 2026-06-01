@@ -285,6 +285,7 @@ const (
 	HetznerRobot  TargetCreateProduct = "hetzner-robot"
 	Holodeck      TargetCreateProduct = "holodeck"
 	K8s           TargetCreateProduct = "k8s"
+	Keycloak      TargetCreateProduct = "keycloak"
 	Nsx           TargetCreateProduct = "nsx"
 	Pfsense       TargetCreateProduct = "pfsense"
 	SddcManager   TargetCreateProduct = "sddc-manager"

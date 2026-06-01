@@ -445,6 +445,21 @@ def test_holodeck_connector_registered_under_v2_triple() -> None:
     assert snapshot[key] is HolodeckConnector
 
 
+def test_keycloak_connector_registered_under_v2_triple() -> None:
+    """KeycloakConnector package registers under (keycloak, 26.x, keycloak-admin).
+
+    G3.13-T1 (#1393) substrate. Same idempotent-registration pattern as
+    the SDDC Manager / Harbor / pfSense tests above.
+    """
+    from meho_backplane.connectors.keycloak import KeycloakConnector
+
+    _ensure_registered_v2(KeycloakConnector)
+    snapshot = all_connectors_v2()
+    key = ("keycloak", "26.x", "keycloak-admin")
+    assert key in snapshot
+    assert snapshot[key] is KeycloakConnector
+
+
 # ---------------------------------------------------------------------------
 # registered_product_tokens — G0.14-T3 #1144
 # ---------------------------------------------------------------------------

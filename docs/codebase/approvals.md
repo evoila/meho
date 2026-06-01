@@ -127,8 +127,13 @@ The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
 `?dryRun=All`), so nothing persists and the per-document summary
 (resource identity + `resourceVersion` + `uid`) is the diff-preview the
-reviewer reads. Other ops (e.g. argocd writes, #1452) register their own
-builders as needed.
+reviewer reads. The ArgoCD write ops register their own builders the same
+way (#1452): `argocd.app.set` / `argocd.appproject.update` populate
+`{before_spec, after_spec}` and `argocd.app.delete` populates
+`{cascade_resources}` from read-only GETs against the live
+Application / AppProject — wired in
+`connectors/argocd/ops_write_preview.py`. Further connectors register
+their own builders as needed.
 
 ## Transports
 

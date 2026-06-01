@@ -199,9 +199,25 @@ last-observed phase with `timed_out=true`.
 current spec before the PUT and return `{before_spec, after_spec}` under a
 `proposed_effect` key; `app.delete` reads the resource tree before the
 DELETE and returns the cascade list. These ride in the op result (the
-post-approval execution evidence the reviewer/auditor sees) — the durable
-`ApprovalRequest.proposed_effect` the queue stores at park time is computed
-separately by `create_pending_request` from params.
+post-approval execution evidence the reviewer/auditor sees).
+
+The **same** snapshot is also computed at **park time** — before any human
+approves — via the per-op preview-builder hook (G11.7 follow-up #1452, on
+the #1437 dispatcher seam). `ops_write_preview.py` registers a builder for
+`argocd.app.set`, `argocd.app.delete`, and `argocd.appproject.update`; each
+reuses the read-only snapshot helpers the handlers use (`_read_app_spec` /
+`_read_cascade_resources` / `_read_project_spec`), issuing **only** the read
+GETs (`GET .../applications/{name}`, `.../resource-tree`, `GET
+.../projects`) and never the mutating PUT/DELETE. The result lands in the
+durable `ApprovalRequest.proposed_effect` (wrapped `{op_class, preview}` by
+the hook) so the reviewer reads the diff / cascade in the approval queue
+*before* approving. `after_spec` at park time is the proposed spec the
+parked dispatch carried in `params`; the in-result `after_spec` is the
+argocd-server-accepted spec echoed by the PUT response, which only exists
+post-approval. The ops with no natural read-only preview (`app.sync` /
+`app.rollback` / `app.refresh` / `appproject.create`) register no builder
+and park with the identifier-only default `create_pending_request` computes
+from params.
 
 Writes go through the connector's `_write_json` helper (POST/PUT/DELETE,
 **not** retried — a side-effecting verb must not silently re-fire on a 5xx),

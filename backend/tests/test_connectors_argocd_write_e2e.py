@@ -478,6 +478,155 @@ async def test_appproject_update_captures_before_after(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Park-time proposed_effect preview (G11.7 follow-up #1452)
+#
+# These drive the *un-approved* USER park path: the dispatch routes to the
+# approve-queue and the per-op preview builder (#1437 hook, wired in
+# ops_write_preview) must populate the durable ApprovalRequest.proposed_effect
+# from READ-ONLY calls only — no POST/PUT/DELETE may fire before approval.
+# ---------------------------------------------------------------------------
+
+
+async def _parked_proposed_effect(approval_request_id: str) -> dict[str, Any]:
+    """Read back the durable ApprovalRequest.proposed_effect for a parked op."""
+    from meho_backplane.operations.approval_queue import get_request
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        request = await get_request(
+            session,
+            tenant_id=_OPERATOR_TENANT_ID,
+            request_id=uuid.UUID(approval_request_id),
+        )
+        return dict(request.proposed_effect)
+
+
+def _assert_no_mutation_fired(mock: respx.MockRouter) -> None:
+    """Assert the park path issued only read GETs — no POST/PUT/DELETE."""
+    for call in mock.calls:
+        assert call.request.method == "GET", (
+            f"park-time preview must be read-only; saw {call.request.method} {call.request.url}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_park_app_set_populates_before_after_preview(
+    argocd_write_e2e: ArgoCdConnector,
+) -> None:
+    """A parked argocd.app.set has before_spec + after_spec before approval."""
+    with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        get_route = mock.get(f"/api/v1/applications/{_APP_NAME}").respond(
+            200, json=_APP_SPEC_BEFORE
+        )
+        put_route = mock.put(f"/api/v1/applications/{_APP_NAME}/spec").respond(
+            200, json=_APP_SPEC_AFTER
+        )
+        result = await _dispatch(
+            "argocd.app.set",
+            {"name": _APP_NAME, "spec": _APP_SPEC_AFTER},
+            approved=False,
+        )
+        assert result["status"] == "awaiting_approval", result
+        # Read-only: the spec PUT never fired; only the before-read GET did.
+        assert get_route.called, "park-time preview must read the live spec"
+        assert not put_route.called, "no mutation may fire before approval"
+        _assert_no_mutation_fired(mock)
+
+    request_id = result["extras"]["approval_request_id"]
+    effect = await _parked_proposed_effect(request_id)
+    # The hook wraps the builder output in {op_class, preview}.
+    assert effect["op_class"] == "other"
+    preview = effect["preview"]
+    assert preview["before_spec"]["source"]["targetRevision"] == "HEAD"
+    # after_spec at park time is the proposed spec the approved PUT would apply.
+    assert preview["after_spec"]["source"]["targetRevision"] == "v2.0.0"
+
+
+@pytest.mark.asyncio
+async def test_park_app_delete_populates_cascade_preview(
+    argocd_write_e2e: ArgoCdConnector,
+) -> None:
+    """A parked argocd.app.delete has the cascade_resources list before approval."""
+    with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        tree_route = mock.get(f"/api/v1/applications/{_APP_NAME}/resource-tree").respond(
+            200, json=_RESOURCE_TREE
+        )
+        delete_route = mock.delete(f"/api/v1/applications/{_APP_NAME}").respond(200, json={})
+        result = await _dispatch("argocd.app.delete", {"name": _APP_NAME}, approved=False)
+        assert result["status"] == "awaiting_approval", result
+        assert tree_route.called, "park-time preview must read the resource tree"
+        assert not delete_route.called, "no DELETE may fire before approval"
+        _assert_no_mutation_fired(mock)
+
+    request_id = result["extras"]["approval_request_id"]
+    effect = await _parked_proposed_effect(request_id)
+    assert effect["op_class"] == "write"
+    cascade = effect["preview"]["cascade_resources"]
+    assert {(r["kind"], r["name"]) for r in cascade} == {
+        ("Deployment", "guestbook-ui"),
+        ("Service", "guestbook-ui"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_park_appproject_update_populates_before_after_preview(
+    argocd_write_e2e: ArgoCdConnector,
+) -> None:
+    """A parked argocd.appproject.update has before_spec + after_spec before approval."""
+    with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        list_route = mock.get("/api/v1/projects").respond(200, json=_PROJECT_LIST)
+        put_route = mock.put("/api/v1/projects/team-a").respond(200, json=_PROJECT_AFTER)
+        result = await _dispatch(
+            "argocd.appproject.update",
+            {"project": _PROJECT_AFTER},
+            approved=False,
+        )
+        assert result["status"] == "awaiting_approval", result
+        assert list_route.called, "park-time preview must read the live project spec"
+        assert not put_route.called, "no mutation may fire before approval"
+        _assert_no_mutation_fired(mock)
+
+    request_id = result["extras"]["approval_request_id"]
+    effect = await _parked_proposed_effect(request_id)
+    assert effect["op_class"] == "write"
+    preview = effect["preview"]
+    assert len(preview["before_spec"]["sourceRepos"]) == 1
+    assert len(preview["after_spec"]["sourceRepos"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("op_id", "params"),
+    [
+        ("argocd.app.sync", {"name": _APP_NAME}),
+        ("argocd.app.rollback", {"name": _APP_NAME, "id": 7}),
+        ("argocd.app.refresh", {"name": _APP_NAME}),
+    ],
+)
+async def test_park_no_builder_ops_use_identifier_only_default(
+    argocd_write_e2e: ArgoCdConnector,
+    op_id: str,
+    params: dict[str, Any],
+) -> None:
+    """sync / rollback / refresh park with the identifier-only default — no preview.
+
+    They register no builder, so proposed_effect stays the bare
+    ``{op_id, connector_id, target_id}`` and no cluster call fires on the
+    park path (the handler is never reached, and no preview read is issued).
+    """
+    with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        result = await _dispatch(op_id, params, approved=False)
+        assert result["status"] == "awaiting_approval", result
+        assert not mock.calls, f"{op_id} must make no cluster call on the park path"
+
+    request_id = result["extras"]["approval_request_id"]
+    effect = await _parked_proposed_effect(request_id)
+    # Identifier-only default: no preview envelope, just the call identity.
+    assert "preview" not in effect
+    assert effect["op_id"] == op_id
+
+
 @pytest.mark.asyncio
 async def test_all_writes_carry_bearer_and_never_leak_secret(
     argocd_write_e2e: ArgoCdConnector,

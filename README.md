@@ -8,6 +8,9 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![OSS](https://img.shields.io/badge/OSS-public%20from%20day%201-success.svg)](./CONTRIBUTING.md#public-from-day-1-deliberately)
 
+**Status:** v0.9.0 released. The backplane image, Helm chart, and
+operator CLI are all shipped and cosign-signed.
+
 ## The problem
 
 AI agents are getting good enough to *do* infrastructure work — roll a
@@ -53,6 +56,46 @@ Every interaction through MEHO is:
   PostgreSQL, attributed to the calling principal.
 - **Tenant-scoped & version-aware** — every context lookup is scoped to
   the caller's tenant and aware of resource versions.
+
+## Why MEHO
+
+A governance seam in front of an MCP server is reproducible. What is not
+reproducible is **operating knowledge of the on-prem stack** the agent is
+acting on. MEHO's moat is the two together: a policy/credential/audit
+layer **and** connectors that encode how VCF, NSX, and vSphere are
+actually operated — not just thin API passthrough.
+
+The VMware/VCF surface is the clearest example. Under
+[`backend/src/meho_backplane/connectors/`](./backend/src/meho_backplane/connectors/)
+the connectors are not 1:1 HTTP wrappers:
+
+- **`vmware_rest` composites** encode real operational sequences as single
+  governed operations — `host.evacuate` (which orchestrates `vm.migrate`
+  under the hood), `cluster.drs_recommendations`, `vm.snapshot.revert`,
+  `host.detach_from_vds`, `cluster.patch` — each with pre-flight checks,
+  not a raw vCenter call the agent has to chain by hand.
+- **`nsx`** speaks the Policy API directly — Tier-0/Tier-1 gateways,
+  segments, and domain security-policies — the objects an NSX operator
+  reasons about, not bare REST paths.
+- **`vcf_operations`, `vcf_fleet`, `vcf_logs`, `vcf_automation`,
+  `sddc_manager`** cover the VCF management plane an operator lives in:
+  Operations alerts/symptoms/recommendations, SDDC Manager
+  domains/clusters/bundles, fleet and log surfaces.
+
+Public-cloud and Kubernetes connectors exist too, but they are
+commodity — many tools cover them. The defensible part is the deep VCF /
+on-prem operator fluency baked into the connectors, governed by the same
+policy + audit seam as everything else. That combination is the moat.
+
+### How MEHO compares
+
+| | MEHO | Teleport / StrongDM | Raw MCP gateway | `kubectl` / vCenter by hand |
+| --- | --- | --- | --- | --- |
+| **Built for AI agents acting on infra** | Yes — MCP-native, agent is the first-class caller | No — human-session access (SSH/DB/k8s) | Partial — transport only, no policy/audit semantics | No — human at a terminal |
+| **VCF / NSX / vSphere operator depth** | Yes — connectors encode operational sequences (host evacuation, DRS, NSX policy) | No — protocol-level access, no domain ops | No — passthrough to whatever the upstream MCP exposes | Only what the operator knows + types |
+| **Per-action policy gate + immutable audit** | Yes — every `tools/call` authorised + audited per principal | Session-level audit, not per-agent-action semantics | No — you build it | No structured audit by default |
+| **Just-in-time backend credentials** | Yes — Keycloak→Vault token exchange, agent never holds a secret | Yes (its own broker) | No — you wire your own secret handling | No — long-lived admin creds |
+| **Bring-your-own agent runtime** | Yes — governs any MCP client, runs no model | N/A | Yes | N/A |
 
 ## See it work
 
@@ -279,11 +322,11 @@ cosign verify-blob \
   meho_<version>_linux_amd64.tar.gz
 ```
 
-Full CLI install + verification recipe lives at
-[Verifying CLI release artefacts](#verifying-cli-release-artefacts);
-chart and image specifics live in
-[`cli/README.md`](./cli/README.md#verify-signatures) and
-[`docs/codebase/devops.md`](./docs/codebase/devops.md).
+That single block is the whole story for the common case. The full
+recipes — CLI tarball install + the two-step `SHA256SUMS` trust chain,
+plus chart and image specifics — live in
+[`cli/README.md`](./cli/README.md#verify-signatures) (CLI) and
+[`docs/codebase/devops.md`](./docs/codebase/devops.md) (chart + image).
 
 ## Container image
 
@@ -308,45 +351,6 @@ immutable `:sha-<...>` or `:v<x.y.z>` reference — `:main` is not a
 deploy target. Every image is cosign-signed using the same keyless flow
 described above.
 
-## Verifying CLI release artefacts
-
-Every CLI tarball published at <https://github.com/evoila/meho/releases>
-is signed via cosign keyless. The signature, the Fulcio-issued
-certificate, and the Rekor transparency-log inclusion proof are bundled
-into a single `.cosign.bundle` JSON file attached to the release
-alongside each `.tar.gz` and the combined `SHA256SUMS` file.
-
-```bash
-TAG=<version>   # e.g. v0.9.0 — the release tag you are verifying
-TARBALL=meho_${TAG#v}_linux_amd64.tar.gz
-BASE=https://github.com/evoila/meho/releases/download/${TAG}
-
-curl -LO ${BASE}/${TARBALL}
-curl -LO ${BASE}/${TARBALL}.cosign.bundle
-
-cosign verify-blob \
-  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$' \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  --bundle ${TARBALL}.cosign.bundle \
-  ${TARBALL}
-# Verified OK
-
-tar xzf ${TARBALL}
-sudo install meho /usr/local/bin/
-meho version
-```
-
-The identity-claim regex is anchored on `cli-release.yml` and
-`refs/tags/v` — same shape as `chart.yml` (chart signing) and
-`image.yml` (container image signing). A maliciously re-tagged workflow
-on a fork cannot produce a bundle that satisfies it.
-
-`SHA256SUMS` is signed the same way; verify it once, then
-`sha256sum -c SHA256SUMS` against any subset of tarballs the
-operator actually downloaded (two-step trust chain). The full
-recipe and signing rationale live in
-[`cli/README.md#verify-signatures`](./cli/README.md#verify-signatures).
-
 ## Helm chart values reference
 
 The deploy contract lives at [`deploy/charts/meho/`](./deploy/charts/meho/).
@@ -357,42 +361,15 @@ Schema draft-07) rejects empty required values at `helm install` /
 `helm upgrade` / `helm template` time with a clear path. Unknown keys at
 any level fail with `additional properties '<name>' not allowed`.
 
-Operator-required (MUST be set; the schema rejects empty defaults):
-
-| Path | Type | Notes |
-| --- | --- | --- |
-| `image.tag` | string | Immutable tag (`sha-<git-sha>` or `v<x.y.z>`); never `:latest`. |
-| `ingress.host` | string (`hostname`) | External hostname the chart publishes. Required only when `ingress.enabled: true` (default); skipped when ingress is disabled. |
-| `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
-| `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
-| `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. |
-| `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). |
-| `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. |
-| `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. |
-| `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. |
-| `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default). |
-| `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same. |
-| `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same. |
-
-Common operator overrides (safe defaults provided; tune as needed):
-
-| Path | Default | Notes |
-| --- | --- | --- |
-| `replicaCount` | `1` | Single-replica baseline. |
-| `image.repository` | `ghcr.io/evoila/meho` | OCI repo from the image pipeline. |
-| `image.pullPolicy` | `IfNotPresent` | `Always` \| `IfNotPresent` \| `Never`. |
-| `service.type` / `service.port` | `ClusterIP` / `8000` | Service shape. |
-| `ingress.className` | `""` | Cluster default IngressClass when empty. |
-| `probes.liveness.*` / `probes.readiness.*` | `/healthz` / `/ready` httpGet + tuned timings | Operator-tunable; never disabled. |
-| `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
-| `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
-| `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
-| `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
-| `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](./docs/architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
-
-See [`docs/codebase/devops.md`](./docs/codebase/devops.md) for the full
-chart contract, probe semantics, NetworkPolicy posture, install/upgrade
-flow, and verification commands.
+Install with the command shown under [Existing k8s](#existing-k8s-5-min-requires-vault--keycloak--postgres)
+above. **Required values** (must be set or the schema rejects the
+install): `image.tag`, `ingress.host`, `postgres.credentialsSecret`,
+`vault.address`, `keycloak.issuer`, the three `config.*` mirrors, and the
+three `networkPolicy.*CIDR` egress CIDRs — see the full
+[operator-required and common-override tables](./docs/codebase/devops.md#full-values-reference)
+in [`docs/codebase/devops.md`](./docs/codebase/devops.md), which also
+covers the chart contract, probe semantics, NetworkPolicy posture,
+install/upgrade flow, and verification commands.
 
 ## v0.2 upgrade prerequisites
 
@@ -422,6 +399,39 @@ Codebase walkthroughs:
 Architecture references live under
 [`docs/architecture/`](./docs/architecture/) — topology, the operations
 substrate, audit, MCP surface, and the connector catalog.
+
+## FAQ
+
+**Do I need Vault + Keycloak to try it?**
+Not to *look around*. The [local kind loop](#local-kind-5-min) runs the
+backplane against a Postgres mock with placeholder Vault + Keycloak URIs —
+enough to iterate on chart plumbing, the startup contract, and the CLI.
+But the federated-credential and OIDC-login features are MEHO's reason to
+exist, so any *real* use (working `meho login`, just-in-time backend
+credentials) needs a real Keycloak realm and a Vault with the `meho-mcp`
+OIDC role — the [existing-k8s path](#existing-k8s-5-min-requires-vault--keycloak--postgres).
+
+**Is the agent runtime included?**
+No — bring your own. MEHO governs what an agent is allowed to do; it does
+not run the model. Point any MCP client (Claude Code, Cursor, Cline,
+Continue, custom) at the backplane and operate under your own identity.
+
+**Does MEHO replace Teleport / StrongDM?**
+No. Those broker *human* sessions (SSH/DB/k8s). MEHO governs *agent*
+actions per-call over MCP, with VCF/NSX/vSphere operator depth in the
+connectors. See [How MEHO compares](#how-meho-compares).
+
+**Is there a hosted SaaS?**
+No — MEHO is self-hosted. You run the backplane, Postgres, Keycloak, and
+Vault, and your audit trail stays in systems you control.
+
+## Community
+
+Questions, ideas, and design discussion go to
+[GitHub Discussions](https://github.com/evoila/meho/discussions). Bugs
+and feature requests go to
+[Issues](https://github.com/evoila/meho/issues). All participation is
+governed by the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## Contributing
 

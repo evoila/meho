@@ -260,6 +260,22 @@ exist (patching a missing path fails). `patch` exposes no `cas` guard
 unlike `kv.put` — has no `cas` property and `additionalProperties=False`
 rejects a stray one.
 
+`kv.patch` is **add/overwrite-only at every depth**: its `data` schema
+constrains each value to a *recursive* non-null JSON subschema
+(`$defs/nonNullJsonValue`) — a scalar (`string`/`number`/`boolean`), or
+an `object` whose values recurse the same constraint, or an `array`
+whose items recurse it, but never `null` at any nesting level. This is
+deliberate. hvac's `secrets.kv.v2.patch` speaks JSON Merge Patch
+(RFC 7396), whose merge algorithm is **recursive**: a `null` value
+**deletes** its key whether it sits at the top level or nested inside a
+merged object. A top-level-only guard would still let
+`{"data": {"creds": {"old": null}}}` reach Vault and delete the nested
+`old` key, contradicting the additive contract — so the schema rejects a
+`null` at any depth at validation time (`invalid_params`) before it
+reaches Vault. Field removal is an explicit operation: use `kv.put` to
+replace the version wholesale (omitted keys drop) or `kv.delete` to
+soft-delete a version — never a side effect of `patch`.
+
 **Mount handling.** Every handler — including `vault.kv.read` —
 accepts an optional `mount` param (JSON Schema default `"secret"`,
 mirroring hvac's `mount_point` default) forwarded as hvac's

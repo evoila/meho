@@ -109,8 +109,18 @@ class _FakeUserpassAuth:
     users: dict[str, dict[str, Any]] = field(default_factory=dict)
     list_exc: Exception | None = None
     read_exc: Exception | None = None
+    # G3.15-T3 (#1411) write half. Per-verb call logs + exception knobs
+    # so the credential-lifecycle tests can target one op without
+    # disturbing the read ops. Defaults are benign so the pre-existing
+    # read-only suites that never touch these attributes keep passing.
+    write_exc: Exception | None = None
+    update_password_exc: Exception | None = None
+    delete_exc: Exception | None = None
     list_calls: list[dict[str, Any]] = field(default_factory=list)
     read_calls: list[dict[str, Any]] = field(default_factory=list)
+    write_calls: list[dict[str, Any]] = field(default_factory=list)
+    update_password_calls: list[dict[str, Any]] = field(default_factory=list)
+    delete_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def list_user(self, mount_point: str = "userpass") -> dict[str, Any]:
         self.list_calls.append({"mount_point": mount_point})
@@ -123,6 +133,43 @@ class _FakeUserpassAuth:
         if self.read_exc is not None:
             raise self.read_exc
         return {"data": self.users[username]}
+
+    def create_or_update_user(
+        self,
+        username: str,
+        password: str | None = None,
+        mount_point: str = "userpass",
+        **kwargs: Any,
+    ) -> Any:
+        self.write_calls.append(
+            {
+                "username": username,
+                "password": password,
+                "mount_point": mount_point,
+                **kwargs,
+            }
+        )
+        if self.write_exc is not None:
+            raise self.write_exc
+        self.users[username] = {"token_policies": list(kwargs.get("token_policies", []))}
+        return _DeleteResponse(status_code=204)
+
+    def update_password_on_user(
+        self, username: str, password: str, mount_point: str = "userpass"
+    ) -> Any:
+        self.update_password_calls.append(
+            {"username": username, "password": password, "mount_point": mount_point}
+        )
+        if self.update_password_exc is not None:
+            raise self.update_password_exc
+        return _DeleteResponse(status_code=204)
+
+    def delete_user(self, username: str, mount_point: str = "userpass") -> Any:
+        self.delete_calls.append({"username": username, "mount_point": mount_point})
+        if self.delete_exc is not None:
+            raise self.delete_exc
+        self.users.pop(username, None)
+        return _DeleteResponse(status_code=204)
 
 
 @dataclass
@@ -137,8 +184,21 @@ class _FakeAppRoleAuth:
     roles: dict[str, dict[str, Any]] = field(default_factory=dict)
     list_exc: Exception | None = None
     read_exc: Exception | None = None
+    # G3.15-T3 (#1411) write half. ``secret_id`` is the value the
+    # generate_secret_id fake mints into its response payload so the
+    # redaction tests can seed a distinctive sentinel and positively
+    # assert its absence from the serialised broadcast event.
+    write_exc: Exception | None = None
+    delete_exc: Exception | None = None
+    generate_secret_id_exc: Exception | None = None
+    secret_id: str = "fake-secret-id"
+    secret_id_accessor: str = "fake-secret-id-accessor"
+    secret_id_ttl: int = 600
     list_calls: list[dict[str, Any]] = field(default_factory=list)
     read_calls: list[dict[str, Any]] = field(default_factory=list)
+    write_calls: list[dict[str, Any]] = field(default_factory=list)
+    delete_calls: list[dict[str, Any]] = field(default_factory=list)
+    generate_secret_id_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def list_roles(self, mount_point: str = "approle") -> dict[str, Any]:
         self.list_calls.append({"mount_point": mount_point})
@@ -151,6 +211,38 @@ class _FakeAppRoleAuth:
         if self.read_exc is not None:
             raise self.read_exc
         return {"data": self.roles[role_name]}
+
+    def create_or_update_approle(
+        self, role_name: str, mount_point: str = "approle", **kwargs: Any
+    ) -> Any:
+        self.write_calls.append({"role_name": role_name, "mount_point": mount_point, **kwargs})
+        if self.write_exc is not None:
+            raise self.write_exc
+        self.roles[role_name] = dict(kwargs)
+        return _DeleteResponse(status_code=204)
+
+    def delete_role(self, role_name: str, mount_point: str = "approle") -> Any:
+        self.delete_calls.append({"role_name": role_name, "mount_point": mount_point})
+        if self.delete_exc is not None:
+            raise self.delete_exc
+        self.roles.pop(role_name, None)
+        return _DeleteResponse(status_code=204)
+
+    def generate_secret_id(
+        self, role_name: str, mount_point: str = "approle", **kwargs: Any
+    ) -> dict[str, Any]:
+        self.generate_secret_id_calls.append(
+            {"role_name": role_name, "mount_point": mount_point, **kwargs}
+        )
+        if self.generate_secret_id_exc is not None:
+            raise self.generate_secret_id_exc
+        return {
+            "data": {
+                "secret_id": self.secret_id,
+                "secret_id_accessor": self.secret_id_accessor,
+                "secret_id_ttl": self.secret_id_ttl,
+            }
+        }
 
 
 @dataclass

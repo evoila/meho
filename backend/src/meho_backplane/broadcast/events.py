@@ -151,6 +151,17 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     ".delete",
     ".patch",
     ".put",
+    # ``.write`` is the Vault mutating-write verb spelling for the auth
+    # and sys-policy surfaces (G3.15 #1410/#1411): ``vault.auth.approle.write``
+    # creates an AppRole (no secret in params → plain ``write``),
+    # ``vault.sys.policy.write`` writes a policy document. Without this
+    # suffix they fall through to ``other`` and broadcast their full
+    # params. The secret-bearing ``.write`` ops
+    # (``vault.auth.userpass.write`` / ``vault.auth.userpass.update_password``)
+    # are pinned in :data:`_CREDENTIAL_WRITE_OPS`, which ``classify_op``
+    # consults BEFORE this suffix branch, so this addition never downgrades
+    # a credential write to plain ``write``.
+    ".write",
     # bind9 record-write verbs (G3.4-T3 #589). The bind9 connector
     # uses ``.add`` / ``.remove`` rather than ``.create`` / ``.delete``
     # to match the consumer wrapper's verb shape (``--add-a-record``
@@ -310,7 +321,10 @@ def classify_op(op_id: str) -> str:
        map to ``write``. Checked before the dot-suffix branches since
        ingested ops carry no meho verb suffix.
     6. ``write`` — mutation suffixes (``.create`` / ``.update`` /
-       ``.delete`` / ``.patch``).
+       ``.delete`` / ``.patch`` / ``.put`` / ``.write``). The
+       secret-bearing ``.write`` ops (``vault.auth.userpass.write`` /
+       ``.update_password``) are pinned in step 3's allowlist, so they
+       never reach this branch.
     7. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
        ``.get`` / ``.about`` / ``.ls``).
     8. ``other`` — everything else. Falls through to full-detail

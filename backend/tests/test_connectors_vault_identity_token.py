@@ -526,6 +526,27 @@ async def test_entity_read_missing_surfaces_connector_error(
     assert result.extras["exception_class"] == "InvalidPath"
 
 
+async def test_group_read_missing_surfaces_connector_error(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """A missing group name surfaces as a connector_error naming InvalidPath.
+
+    Vault answers a read of an absent group with a 404, which hvac raises
+    as InvalidPath; vault.identity.group.read deliberately lets that
+    surface (mirrors the entity.read posture) rather than masking it as a
+    structured found:false result.
+    """
+    fake = install_fake_client(monkeypatch)
+    fake.secrets.identity.raise_on_read_group = hvac.exceptions.InvalidPath("gone")
+
+    result = await _dispatch_vault("vault.identity.group.read", {"name": "ghost-group"})
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["exception_class"] == "InvalidPath"
+
+
 async def test_token_create_failure_surfaces_connector_error(
     monkeypatch: pytest.MonkeyPatch,
     _registered_vault_typed_ops: None,

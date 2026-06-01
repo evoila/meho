@@ -1397,10 +1397,13 @@ async def test_identity_group_write_delete_list_against_dev_vault(
     )
     assert delete.status == "ok", delete.error
     assert delete.result == {"name": "e2e-group", "deleted": True}
-    # The group is gone — a read of it now fails.
-    assert not _root_client(addr).secrets.identity.read_group_by_name(
-        name="e2e-group", mount_point="identity"
-    )
+    # The group is gone — Vault answers a read of a missing group with a
+    # 404, which hvac surfaces as InvalidPath (the same not-found posture
+    # vault.identity.group.read documents for production callers).
+    with pytest.raises(hvac.exceptions.InvalidPath):
+        _root_client(addr).secrets.identity.read_group_by_name(
+            name="e2e-group", mount_point="identity"
+        )
 
 
 @pytest.mark.asyncio

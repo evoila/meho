@@ -449,6 +449,89 @@ async def test_keycloak_e2e_all_ops_use_admin_token_never_operator_jwt(
 
 
 # ---------------------------------------------------------------------------
+# Admin-token-refresh through the dispatch stack (G3.13-T3 #1395)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_keycloak_e2e_admin_token_refreshes_across_dispatch(
+    keycloak_e2e: KeycloakConnector,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The admin token is re-minted mid-stream when its TTL lapses between dispatches.
+
+    G3.13-T3 (#1395) calls out the **dispatch + admin-token-refresh
+    path** specifically: the token-refresh lifecycle observed through the
+    full ``call_operation`` stack (not just a direct ``auth_headers``
+    unit call). This drives two dispatched read ops with the connector's
+    monotonic clock advanced past the cached token's effective TTL
+    between them, and asserts:
+
+    * the token endpoint is hit **twice** (mint, then re-mint after expiry),
+    * both dispatched ops still return ``status="ok"`` (the re-mint is
+      transparent to the caller), and
+    * every admin REST GET still carries the admin Bearer, never the
+      operator JWT (the refresh does not leak the operator token onto the
+      Keycloak surface).
+
+    The token fixture returns ``expires_in=60``; with the connector's
+    30 s refresh margin the effective TTL is 30 s, so advancing the clock
+    by 31 s forces a re-mint on the second dispatch.
+    """
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(
+        "meho_backplane.connectors.keycloak.connector.time.monotonic",
+        lambda: clock["now"],
+    )
+
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        token_route = mock.post("/realms/master/protocol/openid-connect/token").respond(
+            # expires_in=60, refresh margin 30 -> effective TTL 30 s.
+            200,
+            json={"access_token": _ADMIN_TOKEN, "expires_in": 60},
+        )
+        mock.get("/admin/realms/evba").respond(200, json=_FIXTURE_REALM)
+        mock.get("/admin/realms/evba/clients").respond(200, json=_FIXTURE_CLIENTS)
+
+        first = await call_operation(
+            _OPERATOR,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.realm.get",
+                "target": {"name": _TARGET_NAME},
+                "params": {},
+            },
+        )
+        assert first["status"] == "ok", f"first dispatch failed: {first.get('error')}"
+        assert token_route.call_count == 1, "first dispatch should mint the admin token once"
+
+        # Advance the connector's monotonic clock past the 30 s effective
+        # TTL so the cached token is stale for the next dispatch.
+        clock["now"] = 1000.0 + 31.0
+
+        second = await call_operation(
+            _OPERATOR,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.client.list",
+                "target": {"name": _TARGET_NAME},
+                "params": {},
+            },
+        )
+        assert second["status"] == "ok", f"second dispatch failed: {second.get('error')}"
+        # The expired token forced a re-mint on the second dispatch.
+        assert token_route.call_count == 2, "expired token should be re-minted on the next dispatch"
+
+        # Neither dispatch leaked the operator JWT onto the Keycloak admin
+        # surface; the admin GETs carried the re-minted admin Bearer.
+        for call in mock.calls:
+            req = call.request
+            if req.url.path.startswith("/admin/"):
+                assert req.headers.get("authorization") == f"Bearer {_ADMIN_TOKEN}"
+            assert _OPERATOR.raw_jwt not in (req.headers.get("authorization") or "")
+
+
+# ---------------------------------------------------------------------------
 # search_operations visibility (acceptance criterion a)
 # ---------------------------------------------------------------------------
 

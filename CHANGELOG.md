@@ -90,6 +90,103 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-01
+
+The **connector write-surface** release: MEHO connectors graduate from
+read-only to **mutating operations gated behind a human approval
+queue**, two new connectors (ArgoCD, Keycloak) land at read +
+approval-gated write, write surfaces are added to the kubernetes /
+vault / VMware connectors, and the Runbooks operator console ships at
+`/ui/runbooks`.
+
+### Added
+
+- **Human approval queue for connector writes (G11.7).** Every mutating
+  connector operation is now parked for explicit human approval before
+  dispatch: a queue with a self-approval guard (the operator who
+  proposes a write cannot approve their own), write-op request/response
+  redaction, and a resume-target fix so an approved write resumes
+  against the intended call (#1422). A **dual-run soak harness** gates
+  write-op graduation through a five-stage check before an op is allowed
+  to dispatch for real (#1423).
+
+- **ArgoCD connector — L1-typed GitOps control (G3.12).** A new
+  `ArgoCdConnector` (`HttpConnector` subclass) authenticating with a
+  **bearer token loaded from Vault** and fingerprinted via
+  `GET /api/version`: skeleton + credential loader + dual registration
+  (#1440), a curated read core (`app.list/get/diff/resource_tree`) via
+  `register_typed_operation` (#1442), CLI/MCP verbs + recorded-fixture
+  E2E + onboarding doc (#1444), and **approval-gated write ops**
+  (`app.sync/rollback/set`) with CLI write verbs (#1446) wired to a
+  park-time `proposed_effect` preview (#1457).
+
+- **Keycloak connector — Admin-REST realm control (G3.13).** A new
+  `KeycloakConnector` authenticating with a **Keycloak admin
+  `client_credentials`** token, deliberately distinct from the
+  operator-OIDC path to avoid a bootstrap circular-auth dependency:
+  skeleton + admin credential loader (#1439), secret-redacted curated
+  read ops (#1441), CLI verbs + dispatch token-refresh E2E + onboarding
+  doc (#1443), and approval-gated write ops (realm / client / scope /
+  protocol-mapper) with CLI verbs (#1445).
+
+- **Approval-gated write/mutating ops on the kubernetes, vault, and
+  VMware connectors (G3.14 / G3.15 / G3.16).**
+  - **kubernetes:** single-call write ops (#1425) and `k8s.exec` —
+    bounded command-and-capture over a `WsApiClient` websocket
+    transport (#1424).
+  - **vault** (token auth): kv writes (`put` / `delete`) plus new
+    `kv.patch` (#1426); policy read/list (safe) + write/delete
+    (approval-gated) (#1428); auth credential lifecycle write ops with
+    request/response secret redaction (#1427); identity + token ops —
+    entity/group writes + token `create` / `revoke_accessor` /
+    `list_accessors` (#1430); sys bootstrap writes — auth/mount
+    enable + tune (#1429).
+  - **VMware (VCF) write activation:** reconcile the 8 vmware
+    write-composite L2 `op_id`s with ingest (#1431), verify the
+    composites preflight + dispatch behind the approval queue (#1432),
+    and wire `host.detach_from_vds` onto the dual-run soak harness
+    (#1433).
+
+- **Runbooks operator console at `/ui/runbooks` (G10.6).** A
+  server-rendered HTMX surface over the G12 runbook-templates API:
+  catalog browse + opacity-floor-aware detail (#1396), a tenant_admin
+  authoring editor (draft + edit) with a CodeMirror discriminated-union
+  step form (#1419), publish / deprecate / fork-on-edit lifecycle
+  controls (#1420), and surface docs + discoverability + an end-to-end
+  acceptance test (#1421).
+
+- **Production ingest LLM client wired at lifespan startup (G3.17,
+  #1418).** The grouping LLM client is now constructed at backplane
+  startup so `--catalog` ingest groups + enables L2 connector
+  operations on a deployed backplane (degrades gracefully when no key
+  is set) — the keystone that makes the typed/generic connector
+  surfaces above dispatchable on a real deploy.
+
+- **`proposed_effect` park-time previews (#1454).** A builder hook
+  auto-populates a `k8s.apply` dry-run preview at park time so an
+  approver sees the predicted effect before granting a write.
+
+### Changed
+
+- README reworked into a credible front door: restructure + residual
+  T1 fixes (#1456), positioning + relocated values tables and cosign
+  recipes (#1458), and corrected stale factual claims for v0.9.0
+  (#1453).
+- A README version-drift guard workflow was added (#1455) and made
+  tolerant of a badge-only version surface (#1460).
+- Migrated testcontainers `wait_for_logs(str)` →
+  `LogMessageWaitStrategy` (#1461).
+- Roadmap: slot v0.10 as the connector write-surface release (#1417).
+- G3.17-T2 operator runbook documenting the `ANTHROPIC_API_KEY`
+  dependency for ingest on a deployed backplane (#1438).
+
+### Fixed
+
+- Reject `null` in the `vault.kv.patch` data schema at every depth
+  (JSON-merge correctness) (#1462).
+- Strengthen the composite preflight test to assert dispatch did not
+  generically error (#1463).
+
 ## [0.9.0] - 2026-05-31
 
 ### Added

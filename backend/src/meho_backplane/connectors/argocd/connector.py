@@ -529,6 +529,106 @@ class ArgoCdConnector(HttpConnector):
         del params  # schema declares the param object empty
         return await self._get_json(target, "/api/v1/repositories", operator=operator)
 
+    # ------------------------------------------------------------------
+    # Write primitive + approval-gated write handlers (G3.12-T4 #1405)
+    #
+    # Every write op registers ``requires_approval=True`` so the dispatcher's
+    # policy gate routes a USER-principal dispatch to the human approve-queue
+    # (G11.7-T1 #1401) and floors an agent dispatch to needs-approval — the
+    # handlers below run only on the ``_approved=True`` resume path. The op
+    # metadata + handler bodies live in
+    # :mod:`meho_backplane.connectors.argocd.ops_write`; these are the
+    # bound-method shims the registrar resolves ``handler_attr`` against.
+    # ------------------------------------------------------------------
+
+    async def _write_json(
+        self,
+        target: ArgoCdTargetLike,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Issue a mutating (POST/PUT/DELETE) argocd-server request — never retried.
+
+        The base :meth:`HttpConnector._request_json` rejects non-idempotent
+        verbs to keep a side-effecting call from being silently re-fired on a
+        5xx; the write ops therefore go through this helper, which hits the
+        pooled client directly with the Vault-sourced bearer header. A
+        non-2xx raises :exc:`httpx.HTTPStatusError` (the dispatcher's
+        ``connector_error`` branch records it). A 204 / empty body parses to
+        ``{}`` so callers never index into ``None``.
+        """
+        verb = method.upper()
+        if verb not in {"POST", "PUT", "DELETE"}:
+            raise ValueError(f"_write_json only accepts POST/PUT/DELETE; got {verb!r}")
+        client = await self._http_client(target)
+        headers = await self.auth_headers(target, operator)
+        resp = await client.request(verb, path, params=params, json=json, headers=headers)
+        resp.raise_for_status()
+        if not resp.content:
+            return {}
+        parsed = resp.json()
+        return parsed if isinstance(parsed, dict) else {"result": parsed}
+
+    async def app_sync(
+        self, operator: Operator, target: ArgoCdTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``argocd.app.sync`` (G3.12-T4 #1405)."""
+        from meho_backplane.connectors.argocd.ops_write import argocd_app_sync
+
+        return await argocd_app_sync(self, operator, target, params)
+
+    async def app_rollback(
+        self, operator: Operator, target: ArgoCdTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``argocd.app.rollback`` (G3.12-T4 #1405)."""
+        from meho_backplane.connectors.argocd.ops_write import argocd_app_rollback
+
+        return await argocd_app_rollback(self, operator, target, params)
+
+    async def app_set(
+        self, operator: Operator, target: ArgoCdTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``argocd.app.set`` (G3.12-T4 #1405)."""
+        from meho_backplane.connectors.argocd.ops_write import argocd_app_set
+
+        return await argocd_app_set(self, operator, target, params)
+
+    async def app_refresh(
+        self, operator: Operator, target: ArgoCdTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``argocd.app.refresh`` (G3.12-T4 #1405)."""
+        from meho_backplane.connectors.argocd.ops_write import argocd_app_refresh
+
+        return await argocd_app_refresh(self, operator, target, params)
+
+    async def app_delete(
+        self, operator: Operator, target: ArgoCdTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``argocd.app.delete`` (G3.12-T4 #1405)."""
+        from meho_backplane.connectors.argocd.ops_write import argocd_app_delete
+
+        return await argocd_app_delete(self, operator, target, params)
+
+    async def appproject_create(
+        self, operator: Operator, target: ArgoCdTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``argocd.appproject.create`` (G3.12-T4 #1405)."""
+        from meho_backplane.connectors.argocd.ops_write import argocd_appproject_create
+
+        return await argocd_appproject_create(self, operator, target, params)
+
+    async def appproject_update(
+        self, operator: Operator, target: ArgoCdTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``argocd.appproject.update`` (G3.12-T4 #1405)."""
+        from meho_backplane.connectors.argocd.ops_write import argocd_appproject_update
+
+        return await argocd_appproject_update(self, operator, target, params)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`ARGOCD_OPS` into ``endpoint_descriptor``.
@@ -553,9 +653,21 @@ class ArgoCdConnector(HttpConnector):
             ARGOCD_OPS,
             ARGOCD_WHEN_TO_USE_BY_GROUP,
         )
+        from meho_backplane.connectors.argocd.ops_write import (
+            ARGOCD_WHEN_TO_USE_WRITE_BY_GROUP,
+            ARGOCD_WRITE_OPS,
+        )
         from meho_backplane.operations.typed_register import register_typed_operation
 
-        for op in ARGOCD_OPS:
+        # The read / write when_to_use maps are disjoint by group_key suffix
+        # (read groups are bare nouns; write groups carry a ``-write``
+        # suffix) so the merge never clobbers a read blurb with a write one.
+        when_to_use_by_group = {
+            **ARGOCD_WHEN_TO_USE_BY_GROUP,
+            **ARGOCD_WHEN_TO_USE_WRITE_BY_GROUP,
+        }
+
+        for op in (*ARGOCD_OPS, *ARGOCD_WRITE_OPS):
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:
                 raise AttributeError(
@@ -566,14 +678,14 @@ class ArgoCdConnector(HttpConnector):
             if op.group_key is None:
                 when_to_use = None
             else:
-                when_to_use = ARGOCD_WHEN_TO_USE_BY_GROUP.get(op.group_key)
+                when_to_use = when_to_use_by_group.get(op.group_key)
                 if when_to_use is None:
                     raise ValueError(
                         f"ArgoCdConnector op {op.op_id!r} declares "
                         f"group_key={op.group_key!r} but no curated when_to_use "
                         f"exists for that key. Add an entry to "
-                        f"ARGOCD_WHEN_TO_USE_BY_GROUP in "
-                        f"meho_backplane.connectors.argocd.ops."
+                        f"ARGOCD_WHEN_TO_USE_BY_GROUP (ops.py) or "
+                        f"ARGOCD_WHEN_TO_USE_WRITE_BY_GROUP (ops_write_schemas.py)."
                     )
             await register_typed_operation(
                 product=cls.product,
@@ -594,7 +706,9 @@ class ArgoCdConnector(HttpConnector):
             )
         _log.info(
             "argocd_operations_registered",
-            count=len(ARGOCD_OPS),
+            count=len(ARGOCD_OPS) + len(ARGOCD_WRITE_OPS),
+            read_count=len(ARGOCD_OPS),
+            write_count=len(ARGOCD_WRITE_OPS),
             product=cls.product,
             version=cls.version,
             impl_id=cls.impl_id,

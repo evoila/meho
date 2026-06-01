@@ -17,14 +17,22 @@ import (
 // (argocd.app.diff), and `resource-tree` (argocd.app.resource_tree).
 func newAppCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:          "app",
-		Short:        "ArgoCD Application sub-verbs (list, get, diff, resource-tree)",
+		Use: "app",
+		Short: "ArgoCD Application sub-verbs (list, get, diff, resource-tree; " +
+			"sync, rollback, set, refresh, delete)",
 		SilenceUsage: true,
 	}
+	// Read verbs (G3.12-T3 #1392).
 	cmd.AddCommand(newAppListCmd())
 	cmd.AddCommand(newAppGetCmd())
 	cmd.AddCommand(newAppDiffCmd())
 	cmd.AddCommand(newAppResourceTreeCmd())
+	// Approval-gated write verbs (G3.12-T4 #1405).
+	cmd.AddCommand(newAppSyncCmd())
+	cmd.AddCommand(newAppRollbackCmd())
+	cmd.AddCommand(newAppSetCmd())
+	cmd.AddCommand(newAppRefreshCmd())
+	cmd.AddCommand(newAppDeleteCmd())
 	return cmd
 }
 

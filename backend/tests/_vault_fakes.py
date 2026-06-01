@@ -85,12 +85,53 @@ class _FakeJWTAuth:
 class _FakeTokenAuth:
     revoke_calls: int = 0
     raise_on_revoke: Exception | None = None
+    # G3.15-T4 (#1412) token lifecycle ops. ``create`` mints into its
+    # response payload (the secret the credential_mint redaction must
+    # keep off audit/broadcast); ``revoke_accessor`` / ``list_accessors``
+    # record their calls and surface an injectable failure + payload.
+    minted_client_token: str = field(
+        default_factory=lambda: f"vault-fake-mint-{secrets.token_hex(8)}"
+    )
+    minted_accessor: str = field(default_factory=lambda: f"fake-accessor-{secrets.token_hex(8)}")
+    create_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_create: Exception | None = None
+    revoke_accessor_calls: list[str] = field(default_factory=list)
+    raise_on_revoke_accessor: Exception | None = None
+    accessors_payload: Any = None
+    raise_on_list_accessors: Exception | None = None
+    list_accessors_calls: int = 0
 
     def revoke_self(self, mount_point: str = "token") -> None:
         _ = mount_point
         self.revoke_calls += 1
         if self.raise_on_revoke is not None:
             raise self.raise_on_revoke
+
+    def create(self, **kwargs: Any) -> dict[str, Any]:
+        self.create_calls.append(dict(kwargs))
+        if self.raise_on_create is not None:
+            raise self.raise_on_create
+        return {
+            "auth": {
+                "client_token": self.minted_client_token,
+                "accessor": self.minted_accessor,
+                "policies": list(kwargs.get("policies", []) or []),
+            }
+        }
+
+    def revoke_accessor(self, accessor: str, mount_point: str = "token") -> Any:
+        _ = mount_point
+        self.revoke_accessor_calls.append(accessor)
+        if self.raise_on_revoke_accessor is not None:
+            raise self.raise_on_revoke_accessor
+        return _DeleteResponse()
+
+    def list_accessors(self, mount_point: str = "token") -> Any:
+        _ = mount_point
+        self.list_accessors_calls += 1
+        if self.raise_on_list_accessors is not None:
+            raise self.raise_on_list_accessors
+        return self.accessors_payload
 
 
 @dataclass
@@ -378,8 +419,94 @@ class _FakeKV:
 
 
 @dataclass
+class _FakeIdentity:
+    """Fake ``client.secrets.identity`` backend (G3.15-T4 #1412).
+
+    Models the entity/group/alias surface the identity ops drive. Writes
+    record their kwargs and return a ``{"data": {"id": ...}}`` envelope
+    (a create) by default — set ``minted_id=None`` to model an update's
+    204/no-body. Reads return an injectable payload or raise; ``list_*``
+    surface the ``keys`` envelope (or ``InvalidPath`` for an empty store).
+    """
+
+    minted_id: str | None = field(default_factory=lambda: f"fake-id-{secrets.token_hex(8)}")
+    entity_payload: Any = None
+    raise_on_read_entity: Exception | None = None
+    group_payload: Any = None
+    raise_on_read_group: Exception | None = None
+    groups_payload: Any = None
+    raise_on_list_groups: Exception | None = None
+    entities_payload: Any = None
+    raise_on_list_entities: Exception | None = None
+    entity_write_calls: list[dict[str, Any]] = field(default_factory=list)
+    entity_alias_write_calls: list[dict[str, Any]] = field(default_factory=list)
+    group_write_calls: list[dict[str, Any]] = field(default_factory=list)
+    group_delete_calls: list[str] = field(default_factory=list)
+    read_entity_calls: list[str] = field(default_factory=list)
+    read_group_calls: list[str] = field(default_factory=list)
+
+    def _mint_envelope(self) -> Any:
+        if self.minted_id is None:
+            return None
+        return {"data": {"id": self.minted_id}}
+
+    def create_or_update_entity(self, name: str, **kwargs: Any) -> Any:
+        self.entity_write_calls.append({"name": name, **kwargs})
+        return self._mint_envelope()
+
+    def create_or_update_entity_alias(
+        self, name: str, canonical_id: str, mount_accessor: str, **kwargs: Any
+    ) -> Any:
+        self.entity_alias_write_calls.append(
+            {
+                "name": name,
+                "canonical_id": canonical_id,
+                "mount_accessor": mount_accessor,
+                **kwargs,
+            }
+        )
+        return self._mint_envelope()
+
+    def create_or_update_group(self, name: str, **kwargs: Any) -> Any:
+        self.group_write_calls.append({"name": name, **kwargs})
+        return self._mint_envelope()
+
+    def delete_group_by_name(self, name: str, mount_point: str = "identity") -> _DeleteResponse:
+        _ = mount_point
+        self.group_delete_calls.append(name)
+        return _DeleteResponse()
+
+    def read_entity(self, entity_id: str, mount_point: str = "identity") -> Any:
+        _ = mount_point
+        self.read_entity_calls.append(entity_id)
+        if self.raise_on_read_entity is not None:
+            raise self.raise_on_read_entity
+        return self.entity_payload
+
+    def read_group_by_name(self, name: str, mount_point: str = "identity") -> Any:
+        _ = mount_point
+        self.read_group_calls.append(name)
+        if self.raise_on_read_group is not None:
+            raise self.raise_on_read_group
+        return self.group_payload
+
+    def list_groups(self, method: str = "LIST", mount_point: str = "identity") -> Any:
+        _ = (method, mount_point)
+        if self.raise_on_list_groups is not None:
+            raise self.raise_on_list_groups
+        return self.groups_payload
+
+    def list_entities(self, method: str = "LIST", mount_point: str = "identity") -> Any:
+        _ = (method, mount_point)
+        if self.raise_on_list_entities is not None:
+            raise self.raise_on_list_entities
+        return self.entities_payload
+
+
+@dataclass
 class _FakeSecrets:
     kv: _FakeKV
+    identity: _FakeIdentity
 
 
 @dataclass
@@ -510,7 +637,7 @@ def install_fake_vault(
         token=None,
         auth=_FakeAuth(jwt=jwt_auth, token=token_auth),
         sys=_FakeSysBackend(),
-        secrets=_FakeSecrets(kv=_FakeKV(v2=kv_v2)),
+        secrets=_FakeSecrets(kv=_FakeKV(v2=kv_v2), identity=_FakeIdentity()),
     )
     jwt_auth.parent = fake
 

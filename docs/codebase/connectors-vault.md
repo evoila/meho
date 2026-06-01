@@ -136,6 +136,59 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   `VaultAuthBackendNotMountedError` are reused from `ops_auth.py` so a
   404 from an unmounted backend surfaces the same error class as the
   read ops.
+- **`identity` op group** (`ops_identity.py` / `ops_identity_schemas.py`,
+  G3.15-T4 #1412) — entity / entity-alias / group lifecycle on the core
+  `identity/` engine, group key `identity`:
+
+  | op_id | hvac call | safety_level | approval | op_class |
+  |---|---|---|---|---|
+  | `vault.identity.entity.write` | `create_or_update_entity` | dangerous | True | `write` |
+  | `vault.identity.entity_alias.write` | `create_or_update_entity_alias` | dangerous | True | `write` |
+  | `vault.identity.group.write` | `create_or_update_group` | dangerous | True | `write` |
+  | `vault.identity.group.delete` | `delete_group_by_name` | dangerous | True | `write` |
+  | `vault.identity.entity.read` | `read_entity` | safe | False | `other` |
+  | `vault.identity.group.read` | `read_group_by_name` | safe | False | `other` |
+  | `vault.identity.list` | `list_groups` / `list_entities` | safe | False | `read` |
+
+  Entity/group policy bindings are privilege assignments and group
+  membership is privilege plumbing, so the four writes are approval-gated.
+  The read primitives are registered **safe** (not `caution`) even though
+  the lookups are HTTP POST/LIST, so a create-if-absent flow does not
+  stall on approval (the issue's explicit ask). `entity.read` /
+  `group.read` classify `other` (`.read` is deliberately not a
+  read-suffix, matching the `vault.auth.*.read` convention);
+  `list` classifies `read` via the `.list` suffix and normalises an
+  empty-store 404 to `{"keys": []}`. None of the identity objects carry
+  secret material.
+- **`token` op group** (`ops_token.py` / `ops_token_schemas.py`,
+  G3.15-T4 #1412) — token lifecycle on the core `token` backend, group
+  key `token`:
+
+  | op_id | hvac call | safety_level | approval | op_class |
+  |---|---|---|---|---|
+  | `vault.token.create` | `auth.token.create` | dangerous | True | `credential_mint` |
+  | `vault.token.revoke_accessor` | `auth.token.revoke_accessor` | dangerous | True | `other` |
+  | `vault.token.list_accessors` | `auth.token.list_accessors` | safe | False | `other` |
+
+  `token.create` mints a client token in its **response** →
+  `credential_mint` (aggregate-only broadcast; the token reaches only the
+  caller's `OperationResult`, never the audit row or feed). It is
+  **non-idempotent** (a fresh token per call). `revoke_accessor` is
+  **surgical** — it revokes exactly one token by accessor; there is
+  intentionally **no bulk-revoke op** (the vault skill's loudest
+  Don't-rule). Token accessors are non-secret reference handles, so they
+  are not redacted (`revoke_accessor` param / `list_accessors` response
+  classify `other`).
+
+  Both groups register from `ops_identity.py` / `ops_token.py` spec
+  tables, composed by the thin
+  `register_vault_identity_token_operations()` registrar
+  (`ops_identity_token.py`), which is queued from the package `__init__`
+  as its own lifespan registrar entry (independent of the KV / sys / auth
+  registrars). `identity/` and `token` are core backends (always
+  mounted), so there is no backend-not-mounted reclassification — a 404
+  means a missing entity/group/accessor and surfaces as the underlying
+  `hvac.exceptions.InvalidPath`.
 
 ## KV-v2 op group
 
@@ -272,6 +325,19 @@ parks as `awaiting_approval` before reaching Vault (proven in
 exercised by calling it directly in the unit suite. The policy reads
 (`policy.read` / `policy.list`) stay `requires_approval=False`.
 
+The identity write ops (`identity.entity.write` / `entity_alias.write` /
+`group.write` / `group.delete`) and the token write ops
+(`token.create` / `token.revoke_accessor`) (G3.15-T4 #1412) likewise
+register `requires_approval=True` — each is a privilege assignment,
+privilege-plumbing membership change, irreversible removal, or a secret
+mint. `requires_approval` / `safety_level` are carried per-op in the
+`IDENTITY_OP_SPECS` / `TOKEN_OP_SPECS` rows. The identity reads
+(`entity.read` / `group.read` / `list`) and `token.list_accessors` stay
+`requires_approval=False`, registered `safe` so create-if-absent flows
+do not stall. The integration tests drive the gated writes via the
+approvals-API resume path (`dispatch(..., _approved=True)`), the same
+path that runs once a human approves.
+
 ## JSONFlux result-handle path (`vault.kv.list`)
 
 `vault.kv.list` is the only set-shaped op on the v0.2 Vault surface
@@ -302,13 +368,16 @@ raw >50-key list once a handle is produced.
 
 1. Importing `connectors.vault` (package `__init__.py`) registers
    `VaultConnector` against the v2 registry synchronously and queues
-   two typed-op registrars (`register_vault_typed_operations`,
-   `register_vault_sys_typed_operations`) onto the lifespan-driven
+   three typed-op registrars (`register_vault_typed_operations`,
+   `register_vault_sys_typed_operations`,
+   `register_vault_identity_token_operations`) onto the lifespan-driven
    registrar list. `register_vault_typed_operations` registers the
-   KV-v2 group and then calls `register_vault_auth_operations` for the
-   `auth` group.
+   KV-v2 group and then calls `register_vault_auth_operations` (auth
+   read) + `register_vault_auth_write_operations` (auth write).
+   `register_vault_identity_token_operations` composes the `identity` +
+   `token` groups from their per-module spec tables.
 2. At FastAPI lifespan startup, `run_typed_op_registrars()` invokes
-   both registrars, which upsert the `endpoint_descriptor` rows. Upsert
+   all registrars, which upsert the `endpoint_descriptor` rows. Upsert
    is idempotent: a restart against unchanged descriptions is a no-op
    for the embedding pipeline (body-hash skip in
    `register_typed_operation`).
@@ -424,14 +493,18 @@ and a real Postgres audit store (reusing the integration conftest's
 - Initiative #366 (G3.3 vault-1.x typed op surface); Goal #214.
 - Tasks: #545 (G3.3-T1 KV-v2), #546 (G3.3-T2 sys read group),
   #547 (G3.3-T3 auth read group), #551 (G3.3-T7 dev-mode CI
-  integration harness).
+  integration harness), #1409 (G3.15-T1 KV writes), #1410 (G3.15-T2
+  policy ops), #1411 (G3.15-T3 auth credential lifecycle), #1412
+  (G3.15-T4 identity + token ops).
 - Vault dev mode: https://developer.hashicorp.com/vault/docs/concepts/dev-server
 - Substrate: #388 (G0.6 operation registry), #390 (Refactor-Vault).
 - Vault API: https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2
   (KV-v2), https://developer.hashicorp.com/vault/api-docs/system (sys),
   https://developer.hashicorp.com/vault/api-docs/auth/userpass
   (userpass), https://developer.hashicorp.com/vault/api-docs/auth/approle
-  (approle).
+  (approle), https://developer.hashicorp.com/vault/api-docs/secret/identity
+  (identity), https://developer.hashicorp.com/vault/api-docs/auth/token
+  (token).
 - Decision #3 PII redaction: `docs/planning/v0.2-decisions.md`.
 - CLAUDE.md postulates 1 (typed connectors first-class) and 7
   (synchronous append-only audit).

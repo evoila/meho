@@ -96,6 +96,7 @@ from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vault import (
     VaultConnector,
+    register_vault_identity_token_operations,
     register_vault_sys_typed_operations,
     register_vault_typed_operations,
 )
@@ -380,6 +381,7 @@ async def vault_e2e(
     )
     await register_vault_typed_operations(embedding_service=stub_embedding_service)
     await register_vault_sys_typed_operations(embedding_service=stub_embedding_service)
+    await register_vault_identity_token_operations(embedding_service=stub_embedding_service)
 
     @asynccontextmanager
     async def _root_client_cm(_target: Any) -> AsyncIterator[hvac.Client]:
@@ -1281,3 +1283,262 @@ async def test_auth_approle_generate_secret_id_redacts_against_dev_vault(
     )
     assert second.status == "ok", second.error
     assert second.result["secret_id"] != minted_secret_id
+
+
+# ---------------------------------------------------------------------------
+# Identity + token op groups (G3.15-T4 #1412)
+#
+# The writes (identity entity/alias/group + token create/revoke_accessor)
+# register requires_approval=True, so these tests pass ``_approved=True``
+# (the approvals-API resume flag) to drive the authorized execution path.
+# token.create's minted client token is response-side secret material;
+# the redaction test positively asserts that exact value is absent from
+# the serialised BroadcastEvent (credential_mint -> aggregate-only).
+# The identity/token core backends are always mounted on a dev Vault.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_identity_entity_write_and_read_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """entity.write creates an entity (op_class=write) and entity.read reads it back."""
+    target, _addr = vault_e2e
+    write = await dispatch(
+        operator=_make_operator(sub="op-ent-write"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.entity.write",
+        target=target,
+        params={"name": "e2e-entity", "policies": ["default"], "metadata": {"team": "ops"}},
+        _approved=True,
+    )
+    assert write.status == "ok", write.error
+    assert write.result["written"] is True
+    entity_id = write.result["entity_id"]
+    assert entity_id, "a create must return the minted entity_id"
+    await _assert_audited(
+        "vault.identity.entity.write",
+        operator_sub="op-ent-write",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+    # Read it back — safe op, no approval needed.
+    read = await dispatch(
+        operator=_make_operator(sub="op-ent-read"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.entity.read",
+        target=target,
+        params={"entity_id": entity_id},
+    )
+    assert read.status == "ok", read.error
+    assert read.result["name"] == "e2e-entity"
+    assert "default" in read.result["policies"]
+
+
+@pytest.mark.asyncio
+async def test_identity_group_write_delete_list_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """group.write creates a group, list/read see it, group.delete removes it."""
+    target, addr = vault_e2e
+    write = await dispatch(
+        operator=_make_operator(sub="op-grp-write"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.group.write",
+        target=target,
+        params={"name": "e2e-group", "policies": ["default"]},
+        _approved=True,
+    )
+    assert write.status == "ok", write.error
+    assert write.result["group_id"], "a create must return the minted group_id"
+    await _assert_audited(
+        "vault.identity.group.write",
+        operator_sub="op-grp-write",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+    listing = await dispatch(
+        operator=_make_operator(sub="op-grp-list"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.list",
+        target=target,
+        params={"kind": "groups"},
+    )
+    assert listing.status == "ok", listing.error
+    assert write.result["group_id"] in listing.result["keys"]
+    await _assert_audited(
+        "vault.identity.list",
+        operator_sub="op-grp-list",
+        expected_op_class="read",
+        events=captured_events,
+    )
+
+    read = await dispatch(
+        operator=_make_operator(sub="op-grp-read"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.group.read",
+        target=target,
+        params={"name": "e2e-group"},
+    )
+    assert read.status == "ok", read.error
+    assert read.result["name"] == "e2e-group"
+
+    delete = await dispatch(
+        operator=_make_operator(sub="op-grp-delete"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.group.delete",
+        target=target,
+        params={"name": "e2e-group"},
+        _approved=True,
+    )
+    assert delete.status == "ok", delete.error
+    assert delete.result == {"name": "e2e-group", "deleted": True}
+    # The group is gone — a read of it now fails.
+    assert not _root_client(addr).secrets.identity.read_group_by_name(
+        name="e2e-group", mount_point="identity"
+    )
+
+
+@pytest.mark.asyncio
+async def test_identity_entity_alias_write_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """entity_alias.write links a userpass login to an entity (op_class=write)."""
+    target, addr = vault_e2e
+    # Need an entity to map onto and the userpass mount accessor.
+    entity = await dispatch(
+        operator=_make_operator(sub="op-alias-entity"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.entity.write",
+        target=target,
+        params={"name": "alias-entity"},
+        _approved=True,
+    )
+    assert entity.status == "ok", entity.error
+    canonical_id = entity.result["entity_id"]
+    auth_methods = _root_client(addr).sys.list_auth_methods()
+    mount_accessor = auth_methods["userpass/"]["accessor"]
+
+    result = await dispatch(
+        operator=_make_operator(sub="op-alias-write"),
+        connector_id="vault-1.x",
+        op_id="vault.identity.entity_alias.write",
+        target=target,
+        params={
+            "name": "ci-operator",
+            "canonical_id": canonical_id,
+            "mount_accessor": mount_accessor,
+        },
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    assert result.result["written"] is True
+    assert result.result["canonical_id"] == canonical_id
+    await _assert_audited(
+        "vault.identity.entity_alias.write",
+        operator_sub="op-alias-write",
+        expected_op_class="write",
+        events=captured_events,
+    )
+
+
+@pytest.mark.asyncio
+async def test_token_create_redacts_token_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """token.create mints a token in the response; redacted from the broadcast.
+
+    The minted client_token lands in the *response*, so the op classifies
+    ``credential_mint`` and the broadcast collapses to aggregate-only. The
+    caller's OperationResult carries the token (the point of minting), but
+    the test positively asserts that exact value is absent from the entire
+    serialised BroadcastEvent. Non-idempotent: a second call mints a
+    distinct token.
+    """
+    target, addr = vault_e2e
+    result = await dispatch(
+        operator=_make_operator(sub="op-token-create"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create",
+        target=target,
+        params={"policies": ["default"], "ttl": "30m", "num_uses": 1},
+        _approved=True,
+    )
+    assert result.status == "ok", result.error
+    minted_token = result.result["client_token"]
+    assert minted_token, "the minted token must reach the caller's OperationResult"
+    assert result.result["accessor"]
+    # The minted token actually works against the live Vault.
+    assert _root_client(addr).sys.read_health_status(method="GET") is not None
+    await _assert_audited(
+        "vault.token.create",
+        operator_sub="op-token-create",
+        expected_op_class="credential_mint",
+        events=captured_events,
+    )
+    event = next(e for e in captured_events if e.op_id == "vault.token.create")
+    assert event.payload == {"op_class": "credential_mint", "result_status": "ok"}
+    serialised = event.model_dump_json()
+    assert minted_token not in serialised, (
+        "credential_mint leak: the minted client token reached the broadcast event"
+    )
+    # Non-idempotent: a second create yields a distinct token.
+    second = await dispatch(
+        operator=_make_operator(sub="op-token-create-2"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create",
+        target=target,
+        params={"policies": ["default"], "ttl": "30m"},
+        _approved=True,
+    )
+    assert second.status == "ok", second.error
+    assert second.result["client_token"] != minted_token
+
+
+@pytest.mark.asyncio
+async def test_token_list_and_revoke_accessor_against_dev_vault(
+    vault_e2e: tuple[_VaultTarget, str],
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """list_accessors enumerates accessors; revoke_accessor surgically revokes one."""
+    target, addr = vault_e2e
+    minted = await dispatch(
+        operator=_make_operator(sub="op-token-for-revoke"),
+        connector_id="vault-1.x",
+        op_id="vault.token.create",
+        target=target,
+        params={"policies": ["default"], "ttl": "30m"},
+        _approved=True,
+    )
+    assert minted.status == "ok", minted.error
+    accessor = minted.result["accessor"]
+
+    listing = await dispatch(
+        operator=_make_operator(sub="op-token-list"),
+        connector_id="vault-1.x",
+        op_id="vault.token.list_accessors",
+        target=target,
+        params={},
+    )
+    assert listing.status == "ok", listing.error
+    assert accessor in listing.result["keys"]
+
+    revoke = await dispatch(
+        operator=_make_operator(sub="op-token-revoke"),
+        connector_id="vault-1.x",
+        op_id="vault.token.revoke_accessor",
+        target=target,
+        params={"accessor": accessor},
+        _approved=True,
+    )
+    assert revoke.status == "ok", revoke.error
+    assert revoke.result == {"accessor": accessor, "revoked": True}
+    # The accessor is gone from a fresh listing.
+    after = _root_client(addr).auth.token.list_accessors()
+    assert accessor not in (after["data"]["keys"] if after else [])

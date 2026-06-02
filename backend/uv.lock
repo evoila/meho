@@ -1646,7 +1646,7 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "kubernetes-asyncio", specifier = ">=35.0.1,<36" },
-    { name = "markdown-it-py", extras = ["linkify"], specifier = ">=3.0" },
+    { name = "markdown-it-py", extras = ["linkify"], specifier = ">=4.2.0" },
     { name = "msgspec", specifier = ">=0.20.0" },
     { name = "packaging", specifier = ">=24.0" },
     { name = "pgvector", specifier = ">=0.3,<1.0" },

@@ -34,8 +34,21 @@ dispatcher's `connector_error` branch.
   reads `target.secret_ref` as a KV-v2 secret off the event loop
   (`asyncio.to_thread` — hvac is synchronous), structurally unwraps the
   nested `data["data"]`, and returns the requested fields as a flat
-  `{field: value}` dict. Values are coerced to `str` so a numeric secret
-  field round-trips as the string a vendor Basic-auth header expects.
+  `{field: value}` dict. Values run through `strip_credential_value` —
+  coerced to `str` so a numeric secret field round-trips as a string, and
+  surrounding-whitespace-stripped so a trailing newline never reaches a
+  vendor Basic-auth header verbatim.
+- **`strip_credential_value(value) -> str`** — `str(value).strip()`. The
+  one place credential whitespace is normalised. A trailing newline is the
+  single most common secret-storage artifact (`echo` without `-n`, `jq -r`,
+  an editor's final newline, `vault kv put k=-`); sent verbatim in an auth
+  header or token-request body it surfaces as an upstream
+  401/`unauthorized_client` that reads like a permissions/realm problem
+  (#1474). `_extract_fields` applies it to every field, so every
+  `load_basic_credentials` consumer is covered at once; the payload-shape
+  discriminators that use `load_vault_secret_data` (keycloak / gh-rest) call
+  it directly on the fields they pluck. Only surrounding whitespace is
+  trimmed — internal whitespace is preserved.
 - **`VaultCredentialsReadError`** — read-phase failure (empty JWT, unset
   `secret_ref`, malformed payload, missing field). Deliberately distinct
   from `auth.vault.VaultClientError` (login-phase: Vault unreachable,
@@ -86,7 +99,9 @@ dispatcher's `connector_error` branch.
    `KeyError`.
 6. **Extract fields.** For each name in `fields`, a missing key raises
    `VaultCredentialsReadError` naming the target + the missing field +
-   the `secret_ref`. Present values are coerced to `str`.
+   the `secret_ref`. Present values pass through `strip_credential_value`
+   (coerced to `str`, surrounding whitespace stripped) so a trailing
+   newline never rides into a vendor auth header / token body (#1474).
 7. **Log non-secret attribution only.** A single
    `vault_basic_credentials_loaded` structlog event carries `target` /
    `host` / the requested field *names* — never a value. The returned
@@ -153,6 +168,7 @@ dispatcher's `connector_error` branch.
 ## References
 
 - Task: https://github.com/evoila/meho/issues/941
+- Credential whitespace strip: https://github.com/evoila/meho/issues/1474
 - Shape guard: https://github.com/evoila/meho/issues/989
 - Parent Initiative: https://github.com/evoila/meho/issues/939
 - Parent Goal: https://github.com/evoila/meho/issues/214

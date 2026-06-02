@@ -161,6 +161,42 @@ async def test_non_string_field_is_coerced_to_str(
     assert creds == {"username": "u", "password": "12345"}
 
 
+async def test_credential_fields_are_whitespace_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trailing/leading whitespace on a credential value is stripped on load.
+
+    A trailing newline is the single most common secret-storage artifact
+    (`echo` without -n, `jq -r`, an editor's final newline). The connector
+    forwards the field verbatim into a Basic-auth header / token body, so a
+    stray ``\\n`` surfaces as an upstream 401 that looks like a permissions
+    problem. Stripping at the loader fixes it for every connector that goes
+    through ``load_basic_credentials`` (#1474).
+    """
+    install_fake_client(
+        monkeypatch,
+        secret={"username": "  svc-account\n", "password": "s3cret\n"},
+    )
+
+    creds = await load_basic_credentials(_Target(), _make_operator())
+
+    assert creds == {"username": "svc-account", "password": "s3cret"}
+
+
+async def test_strip_preserves_internal_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only surrounding whitespace is trimmed; internal whitespace survives."""
+    install_fake_client(
+        monkeypatch,
+        secret={"username": "u", "password": "  pass phrase with spaces \n"},
+    )
+
+    creds = await load_basic_credentials(_Target(), _make_operator())
+
+    assert creds == {"username": "u", "password": "pass phrase with spaces"}
+
+
 async def test_secret_ref_is_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
     """Whitespace around the secret_ref path does not slip into the read."""
     fake = install_fake_client(monkeypatch, secret={"username": "u", "password": "p"})

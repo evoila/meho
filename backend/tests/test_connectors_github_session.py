@@ -365,7 +365,11 @@ async def test_load_github_credentials_picks_app_path_on_app_payload(
     assert isinstance(creds, GitHubAppCredentials)
     assert creds.app_id == "3898656"
     assert creds.installation_id == "136396725"
-    assert creds.private_key_pem == _GH_PEM_FIXTURE
+    # The discriminator whitespace-strips every credential field (#1474); a
+    # PKCS8 PEM ends in a trailing ``\n`` which is harmless for RS256 signing
+    # (``load_pem_private_key`` tolerates its presence or absence), so the
+    # loaded value is the stripped PEM.
+    assert creds.private_key_pem == _GH_PEM_FIXTURE.strip()
 
 
 @pytest.mark.asyncio
@@ -374,6 +378,24 @@ async def test_load_github_credentials_picks_pat_path_on_pat_payload(
 ) -> None:
     """Vault payload carrying only ``token`` → PAT."""
     install_fake_client(monkeypatch, secret={"token": "ghp_fine_grained_pat_value"})
+
+    creds = await load_github_credentials_from_vault(_GhFakeTarget(name="t"), _operator())
+
+    assert isinstance(creds, GitHubPATCredentials)
+    assert creds.token == "ghp_fine_grained_pat_value"
+
+
+@pytest.mark.asyncio
+async def test_load_github_credentials_strips_pat_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``token`` stored with a trailing newline is stripped before use (#1474).
+
+    A trailing ``\\n`` (echo / jq -r / editor artifact) would otherwise ride
+    into the ``Authorization: token <pat>\\n`` header and 401 as if the PAT
+    were revoked. The discriminator strips it at load.
+    """
+    install_fake_client(monkeypatch, secret={"token": "ghp_fine_grained_pat_value\n"})
 
     creds = await load_github_credentials_from_vault(_GhFakeTarget(name="t"), _operator())
 

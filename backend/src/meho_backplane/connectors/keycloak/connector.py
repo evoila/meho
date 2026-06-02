@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing module size (>600 lines before
+# this change); #1474 adds a small token-error-detail helper for a bugfix, so
+# splitting the connector module is out of scope here.
 
 """KeycloakConnector -- HttpConnector subclass for the Keycloak 26.x Admin REST API.
 
@@ -167,7 +170,12 @@ class KeycloakAdminTokenError(RuntimeError):
     Raised when ``POST /realms/{admin_realm}/protocol/openid-connect/token``
     returns a non-2xx response or a body without a usable
     ``access_token``. The message names the target and the admin realm;
-    it never echoes a credential value. Chains the underlying
+    it never echoes a credential value. On a non-2xx with an OAuth2 error
+    body it also echoes Keycloak's ``{error, error_description}`` (the two
+    non-secret keys that name the failure class -- bad secret vs.
+    client-not-allowed-the-grant vs. wrong realm) via
+    :func:`_upstream_token_error_detail`, so the operator can tell those
+    apart without backplane logs. Chains the underlying
     :exc:`httpx.HTTPStatusError` when one is available so the operator
     can see the upstream status code.
     """
@@ -213,6 +221,72 @@ def _parse_token_response(payload: Any) -> tuple[str, float]:
     ttl = float(expires_in) if isinstance(expires_in, (int, float)) else _DEFAULT_TOKEN_TTL_SECONDS
     effective = max(1.0, ttl - _TOKEN_REFRESH_MARGIN_SECONDS)
     return token, effective
+
+
+#: Cap on the upstream ``error_description`` echoed into
+#: :exc:`KeycloakAdminTokenError`. Keycloak's descriptions are short
+#: human-readable strings; the cap guards against a pathological body
+#: bloating the exception message / log line.
+_MAX_ERROR_DESCRIPTION_CHARS: int = 200
+
+#: The RFC 6749 §5.2 token-endpoint error codes. ``_upstream_token_error_detail``
+#: echoes an ``error_description`` only when the body is an
+#: ``application/json`` object whose ``error`` is one of these -- i.e. an actual
+#: OAuth2 token error. ``error_description`` is non-secret *only under the OAuth2
+#: schema*, so an unrelated gateway/proxy JSON envelope that happens to carry an
+#: ``error`` key must not have its fields echoed (the no-secret-in-logs
+#: invariant). An unrecognised code degrades safely to the bare status message.
+_OAUTH2_TOKEN_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "invalid_request",
+        "invalid_client",
+        "invalid_grant",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_scope",
+    }
+)
+
+
+def _upstream_token_error_detail(response: httpx.Response) -> str:
+    """Render Keycloak's ``{error, error_description}`` as an operator hint.
+
+    Keycloak's token endpoint returns an OAuth2 error body (RFC 6749 §5.2)
+    on a 4xx -- e.g. ``{"error": "unauthorized_client", "error_description":
+    "Invalid client or Invalid client credentials"}``. Those two fields name
+    the *class* of failure (bad secret vs. client-not-allowed-the-grant vs.
+    wrong realm) and are **not** secret-bearing -- echoing them turns a bare
+    ``returned HTTP 401`` into a one-look diagnosis.
+
+    Returns a leading-space-prefixed ``" (error=..., error_description=...)"``
+    fragment ready to append to the message, or ``""`` unless the body is a
+    genuine OAuth2 token error: an ``application/json`` object whose ``error``
+    is one of :data:`_OAUTH2_TOKEN_ERROR_CODES`. That gate keeps a non-OAuth2
+    gateway/proxy envelope (whose ``error_description`` is *not* schema-bound to
+    be non-secret) from injecting noise or leaking a value -- the
+    no-secret-in-logs invariant. The ``error_description`` is length-capped; no
+    other body field is ever echoed, keeping the surface to OAuth2's two
+    well-known non-secret keys.
+    """
+    if "application/json" not in response.headers.get("content-type", "").lower():
+        return ""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    error = body.get("error")
+    if not isinstance(error, str) or error not in _OAUTH2_TOKEN_ERROR_CODES:
+        return ""
+    parts = [f"error={error!r}"]
+    description = body.get("error_description")
+    if isinstance(description, str) and description:
+        truncated = description[:_MAX_ERROR_DESCRIPTION_CHARS]
+        if len(description) > _MAX_ERROR_DESCRIPTION_CHARS:
+            truncated += "…"
+        parts.append(f"error_description={truncated!r}")
+    return f" ({', '.join(parts)})"
 
 
 class _CachedToken:
@@ -359,6 +433,7 @@ class KeycloakConnector(HttpConnector):
             raise KeycloakAdminTokenError(
                 f"admin token request for target {target.name!r} against admin realm "
                 f"{realms.admin_realm!r} returned HTTP {exc.response.status_code}"
+                f"{_upstream_token_error_detail(exc.response)}"
             ) from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise KeycloakAdminTokenError(

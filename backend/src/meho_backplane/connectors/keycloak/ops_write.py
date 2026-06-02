@@ -93,6 +93,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 import meho_backplane.auth.vault as _auth_vault
+from meho_backplane.connectors._shared.vault_creds import strip_credential_value
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 
 if TYPE_CHECKING:
@@ -177,7 +178,11 @@ async def _read_password_from_vault(operator: Operator, params: dict[str, Any]) 
         )
     secret_data = payload["data"]["data"]
     value = secret_data.get(key) if isinstance(secret_data, dict) else None
-    if not isinstance(value, str) or not value:
+    # Whitespace-strip as the connector's credential loaders do (a trailing
+    # newline would otherwise ride into the user's Keycloak password); check
+    # emptiness post-strip so a whitespace-only secret is rejected, not set.
+    stripped = strip_credential_value(value) if isinstance(value, str) else None
+    if not stripped:
         raise KeycloakPasswordSecretError(
             f"keycloak_password_secret: Vault secret at mount={mount!r} "
             f"path={secret_ref!r} carries no usable string value under key "
@@ -185,7 +190,7 @@ async def _read_password_from_vault(operator: Operator, params: dict[str, Any]) 
             f"password_secret_key) so the user write can source it without "
             f"the password ever appearing in op params."
         )
-    return value
+    return stripped
 
 
 def _temporary_flag(params: dict[str, Any]) -> bool:

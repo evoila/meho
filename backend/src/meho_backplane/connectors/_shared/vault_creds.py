@@ -85,6 +85,7 @@ __all__ = [
     "VaultCredentialsReadError",
     "load_basic_credentials",
     "load_vault_secret_data",
+    "strip_credential_value",
 ]
 
 #: KV-v2 mount the consumer convention addresses secrets under. Dev mode
@@ -98,6 +99,26 @@ DEFAULT_KV_MOUNT: str = "secret"
 #: needs. Kept as a module constant so connector loaders and tests share
 #: one source of truth.
 DEFAULT_BASIC_CREDENTIAL_FIELDS: tuple[str, ...] = ("username", "password")
+
+
+def strip_credential_value(value: object) -> str:
+    """Coerce a Vault secret field to the credential string sent upstream.
+
+    Coerces to ``str`` (a numeric secret field round-trips as the string a
+    vendor expects) and strips surrounding whitespace -- above all a trailing
+    newline, the single most common secret-storage artifact: ``echo`` without
+    ``-n``, ``jq -r``, a text editor's final newline, ``vault kv put k=@file``
+    on a file ending in ``\\n``, a ``k=-`` heredoc. A connector forwards the
+    field **verbatim** in a Basic-auth header, a Bearer token, or a
+    token-request body, so a stray ``\\n`` turns a valid secret into an
+    upstream 401/``unauthorized_client`` that reads like a permissions, realm,
+    or grant-config problem -- a multi-hour chase for a one-byte artifact. No
+    vendor credential legitimately carries leading or trailing whitespace, so
+    stripping is always safe and is applied to every credential field every
+    connector loads from Vault. Internal whitespace is preserved -- only the
+    surrounding artifact is removed.
+    """
+    return str(value).strip()
 
 
 @runtime_checkable
@@ -250,8 +271,11 @@ def _extract_fields(
 
     A missing field raises :class:`VaultCredentialsReadError` naming the
     target + field + ``secret_ref`` — never a bare ``KeyError``. Present
-    values are coerced to ``str`` so a numeric secret field round-trips as
-    the string a vendor Basic-auth header expects.
+    values run through :func:`strip_credential_value` (coerced to ``str``
+    and surrounding-whitespace-stripped) so a numeric secret field
+    round-trips as a string and a trailing newline — the most common
+    secret-storage artifact — never reaches a vendor Basic-auth header or
+    token-request body as a verbatim ``\n``.
     """
     credentials: dict[str, str] = {}
     for field in fields:
@@ -260,7 +284,7 @@ def _extract_fields(
                 f"vault secret for target {target_name!r} (secret_ref={secret_ref!r}) "
                 f"is missing required field {field!r}"
             )
-        credentials[field] = str(secret_data[field])
+        credentials[field] = strip_credential_value(secret_data[field])
     return credentials
 
 
@@ -303,9 +327,11 @@ async def load_basic_credentials(
     Returns
     -------
     dict[str, str]
-        ``{field: value}`` for every name in *fields*. Values are
-        coerced to ``str`` so a numeric secret field round-trips as the
-        string a vendor Basic-auth header expects.
+        ``{field: value}`` for every name in *fields*. Values are coerced
+        to ``str`` and surrounding-whitespace-stripped via
+        :func:`strip_credential_value` so a numeric secret field
+        round-trips as a string and a trailing newline never reaches a
+        vendor Basic-auth header verbatim.
 
     Raises
     ------

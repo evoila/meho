@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing module size (>600 lines before
+# this change); #1474 is an import-only credential-whitespace-strip bugfix, so
+# splitting the module is out of scope here.
 
 """GitHub App + PAT credential loaders for :class:`GitHubRestConnector`.
 
@@ -75,6 +78,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
     load_vault_secret_data,
+    strip_credential_value,
 )
 
 __all__ = [
@@ -496,14 +500,20 @@ async def load_github_credentials_from_vault(
     app_fields_present = all(field in present_fields for field in _GH_APP_FIELDS)
     pat_field_present = _GH_PAT_FIELD in present_fields
 
+    # Whitespace-strip every credential field via ``strip_credential_value``
+    # (mirrors the shared ``load_basic_credentials`` path the App/PAT loaders
+    # delegate to) so a trailing newline never reaches a GitHub bearer header
+    # or App-JWT signer verbatim. ``.strip()`` on the PEM only trims the
+    # surrounding whitespace; the key's internal newlines are preserved and
+    # ``load_pem_private_key`` tolerates trailing-newline presence or absence.
     if app_fields_present:
         return GitHubAppCredentials(
-            app_id=str(secret_data["app_id"]),
-            private_key_pem=str(secret_data["private_key"]),
-            installation_id=str(secret_data["installation_id"]),
+            app_id=strip_credential_value(secret_data["app_id"]),
+            private_key_pem=strip_credential_value(secret_data["private_key"]),
+            installation_id=strip_credential_value(secret_data["installation_id"]),
         )
     if pat_field_present:
-        return GitHubPATCredentials(token=str(secret_data[_GH_PAT_FIELD]))
+        return GitHubPATCredentials(token=strip_credential_value(secret_data[_GH_PAT_FIELD]))
 
     # Neither shape matches — fail closed with a structured error that
     # tells the operator exactly which fields to write into Vault.

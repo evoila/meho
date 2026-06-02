@@ -470,6 +470,181 @@ async def test_mint_admin_token_raises_on_missing_access_token() -> None:
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_token_error_surfaces_upstream_oauth_error_description() -> None:
+    """A 401 with an OAuth2 error body echoes Keycloak's error + error_description.
+
+    The whole point of #1474's second ask: ``returned HTTP 401`` alone can't
+    distinguish a bad secret from a client-not-allowed-the-grant from a wrong
+    realm. Keycloak's ``{error, error_description}`` (non-secret) is echoed so
+    the operator diagnoses it in one look.
+    """
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://keycloak-a.test.invalid") as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            401,
+            json={
+                "error": "unauthorized_client",
+                "error_description": "Invalid client or Invalid client credentials",
+            },
+        )
+        with pytest.raises(KeycloakAdminTokenError) as excinfo:
+            await connector.auth_headers(_TARGET, operator=_make_operator())
+
+    message = str(excinfo.value)
+    assert "returned HTTP 401" in message
+    assert "unauthorized_client" in message
+    assert "Invalid client or Invalid client credentials" in message
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_token_error_without_oauth_body_omits_detail() -> None:
+    """A non-OAuth2 error body (e.g. an HTML 502) injects no error fragment.
+
+    The detail helper returns ``""`` when the body is not a JSON object
+    carrying an ``error`` key, so the bare status-code message is preserved
+    rather than appending parse noise.
+    """
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://keycloak-a.test.invalid") as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            502, html="<html><body>Bad Gateway</body></html>"
+        )
+        with pytest.raises(KeycloakAdminTokenError) as excinfo:
+            await connector.auth_headers(_TARGET, operator=_make_operator())
+
+    message = str(excinfo.value)
+    assert "returned HTTP 502" in message
+    assert "error=" not in message
+
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Admin-credential discriminator loader — Vault-payload whitespace stripping
+# (the #1474 root cause: a client_secret with a trailing \n)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _kc_loader_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the chassis env vars the live Vault read path reads at construction.
+
+    ``load_admin_credentials_from_vault`` → ``load_vault_secret_data`` →
+    ``vault_client_for_operator`` eagerly reads ``KEYCLOAK_*`` / ``VAULT_*``
+    via ``get_settings``; pin before the cache is built and clear after.
+    """
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_kc_loader_settings_env")
+async def test_admin_loader_strips_client_secret_trailing_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact #1474 bug: a client_secret stored with a trailing \\n.
+
+    The connector reads the field verbatim and would send
+    ``client_secret=<32 chars>\\n`` to Keycloak → ``unauthorized_client``.
+    The discriminator loader strips it at load time.
+    """
+    from meho_backplane.connectors.keycloak.session import load_admin_credentials_from_vault
+    from tests._vault_fakes import install_fake_client
+
+    install_fake_client(
+        monkeypatch,
+        secret={"client_id": "  meho-admin\n", "client_secret": "32-char-secret-value\n"},
+    )
+
+    creds = await load_admin_credentials_from_vault(_TARGET, _make_operator())
+
+    assert isinstance(creds, KeycloakClientCredentials)
+    assert creds.client_id == "meho-admin"
+    assert creds.client_secret == "32-char-secret-value"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_kc_loader_settings_env")
+async def test_admin_loader_strips_password_shape_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The password break-glass shape is stripped the same way."""
+    from meho_backplane.connectors.keycloak.session import load_admin_credentials_from_vault
+    from tests._vault_fakes import install_fake_client
+
+    install_fake_client(
+        monkeypatch,
+        secret={"username": "admin\n", "password": "pw\n", "client_id": "custom-cli\n"},
+    )
+
+    creds = await load_admin_credentials_from_vault(_TARGET, _make_operator())
+
+    assert isinstance(creds, KeycloakPasswordCredentials)
+    assert creds.username == "admin"
+    assert creds.password == "pw"
+    assert creds.client_id == "custom-cli"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_kc_loader_settings_env")
+async def test_user_write_password_reader_strips_trailing_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Vault-sourced user password is stripped before it is set on Keycloak.
+
+    Same artifact, different surface: a trailing ``\\n`` on the password the
+    user-write op sources from Vault would otherwise be written into Keycloak
+    as part of the password, yielding an account that can never authenticate.
+    """
+    from meho_backplane.connectors.keycloak.ops_write import _read_password_from_vault
+    from tests._vault_fakes import install_fake_client
+
+    install_fake_client(monkeypatch, secret={"password": "hunter2\n"})
+
+    value = await _read_password_from_vault(
+        _make_operator(),
+        {"password_secret_ref": "rdc/keycloak/user-pw"},
+    )
+
+    assert value == "hunter2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_kc_loader_settings_env")
+async def test_user_write_password_reader_rejects_whitespace_only_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only secret is rejected post-strip, not set as empty."""
+    from meho_backplane.connectors.keycloak.ops_write import (
+        KeycloakPasswordSecretError,
+        _read_password_from_vault,
+    )
+    from tests._vault_fakes import install_fake_client
+
+    install_fake_client(monkeypatch, secret={"password": "   \n"})
+
+    with pytest.raises(KeycloakPasswordSecretError):
+        await _read_password_from_vault(
+            _make_operator(),
+            {"password_secret_ref": "rdc/keycloak/user-pw"},
+        )
+
+
 # ---------------------------------------------------------------------------
 # Registrar seam -- T2 (#1394) fills the read-op walk
 # ---------------------------------------------------------------------------

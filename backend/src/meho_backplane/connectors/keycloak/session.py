@@ -76,7 +76,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.vault_creds import load_vault_secret_data
+from meho_backplane.connectors._shared.vault_creds import (
+    load_vault_secret_data,
+    strip_credential_value,
+)
 
 __all__ = [
     "DEFAULT_ADMIN_REALM",
@@ -260,20 +263,26 @@ async def load_admin_credentials_from_vault(
     secret_data = await load_vault_secret_data(target, operator)
     present = set(secret_data.keys())
 
+    # Every credential field is whitespace-stripped via
+    # ``strip_credential_value`` so a trailing newline (the #1 secret-storage
+    # artifact) never reaches Keycloak's token endpoint verbatim — a stray
+    # ``\n`` on client_secret surfaces as ``unauthorized_client`` that reads
+    # like a permissions/realm problem rather than a storage artifact.
     if all(field in present for field in _CLIENT_FIELDS):
         return KeycloakClientCredentials(
-            client_id=str(secret_data["client_id"]),
-            client_secret=str(secret_data["client_secret"]),
+            client_id=strip_credential_value(secret_data["client_id"]),
+            client_secret=strip_credential_value(secret_data["client_secret"]),
         )
     if all(field in present for field in _PASSWORD_FIELDS):
         # ``client_id`` is optional in the password shape — Keycloak's
         # direct-access-grant flow defaults to the ``admin-cli`` public
         # client when the operator didn't store an explicit one.
         client_id = secret_data.get("client_id")
+        stripped_client_id = strip_credential_value(client_id) if isinstance(client_id, str) else ""
         return KeycloakPasswordCredentials(
-            username=str(secret_data["username"]),
-            password=str(secret_data["password"]),
-            client_id=str(client_id) if isinstance(client_id, str) and client_id else "admin-cli",
+            username=strip_credential_value(secret_data["username"]),
+            password=strip_credential_value(secret_data["password"]),
+            client_id=stripped_client_id or "admin-cli",
         )
 
     raise KeycloakAmbiguousVaultPayloadError(

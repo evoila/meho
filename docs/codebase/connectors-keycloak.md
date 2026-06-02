@@ -59,7 +59,11 @@ fresh target with no asserted version still resolves.
   REST-target shape.
 - `RealmConfig` — the resolved `(admin_realm, managed_realm)` pair.
 - `KeycloakAdminTokenError` — raised when the token-endpoint round-trip
-  fails or returns no usable `access_token`.
+  fails or returns no usable `access_token`. On a non-2xx with an OAuth2
+  error body it echoes Keycloak's `{error, error_description}` (RFC 6749
+  §5.2 — both non-secret) so a bad secret, a client not allowed the grant,
+  and a wrong realm are distinguishable from the error string alone, no
+  backplane logs needed (#1474). A non-OAuth2 body adds no detail.
 - `KeycloakAmbiguousVaultPayloadError` — raised when the admin Vault
   secret carries neither credential shape.
 
@@ -101,6 +105,13 @@ connector uses for App-vs-PAT):
 
 The password shape accepts an optional `client_id` field (default
 `admin-cli`, Keycloak's public direct-access-grant client).
+
+Every field the discriminator plucks is whitespace-stripped via
+`strip_credential_value` before use — a `client_secret` stored with a
+trailing newline would otherwise be sent verbatim and rejected as
+`unauthorized_client` (#1474). The same strip guards the Vault-sourced
+password the user-write op sets (`_read_password_from_vault`), which also
+rejects a whitespace-only secret rather than setting an empty password.
 
 ## Control flow
 
@@ -249,9 +260,12 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 ## References
 
 - Issue: https://github.com/evoila/meho/issues/1393
+- Credential whitespace strip + token error_description: https://github.com/evoila/meho/issues/1474
 - Parent initiative: https://github.com/evoila/meho/issues/1388
 - Keycloak token endpoint + client_credentials grant:
   https://www.keycloak.org/securing-apps/oidc-layers
+- OAuth 2.0 token-endpoint error response (RFC 6749 §5.2):
+  https://datatracker.ietf.org/doc/html/rfc6749#section-5.2
 - RealmRepresentation:
   https://www.keycloak.org/docs-api/latest/javadocs/org/keycloak/representations/idm/RealmRepresentation.html
 - ServerInfoRepresentation:

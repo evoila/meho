@@ -44,7 +44,7 @@ dependencies = [
     # resolver shape can route to OpenAI SaaS / vLLM / Ollama via
     # ``OpenAIProvider(base_url=...)``. All three extras live on the
     # same pin so the version sweep stays monotonic.
-    "pydantic-ai-slim[anthropic,bedrock,openai]>=1.102.0",
+    "pydantic-ai-slim[anthropic,bedrock,openai]>=1.104.0",
     "croniter>=6.2.2",
     "markdown-it-py[linkify]>=3.0",
     "pygments>=2.18",

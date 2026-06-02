@@ -59,11 +59,15 @@ fresh target with no asserted version still resolves.
   REST-target shape.
 - `RealmConfig` — the resolved `(admin_realm, managed_realm)` pair.
 - `KeycloakAdminTokenError` — raised when the token-endpoint round-trip
-  fails or returns no usable `access_token`. On a non-2xx with an OAuth2
-  error body it echoes Keycloak's `{error, error_description}` (RFC 6749
-  §5.2 — both non-secret) so a bad secret, a client not allowed the grant,
-  and a wrong realm are distinguishable from the error string alone, no
-  backplane logs needed (#1474). A non-OAuth2 body adds no detail.
+  fails or returns no usable `access_token`. On a non-2xx it echoes
+  Keycloak's `{error, error_description}` (RFC 6749 §5.2 — both non-secret)
+  so a bad secret, a client not allowed the grant, and a wrong realm are
+  distinguishable from the error string alone, no backplane logs needed
+  (#1474). The detail is echoed **only** for a genuine OAuth2 token error —
+  an `application/json` body whose `error` is one of the six RFC 6749 §5.2
+  codes — so an unrelated gateway/proxy JSON envelope (whose
+  `error_description` is not schema-bound to be non-secret) never injects
+  noise or leaks a value. Any other body adds no detail.
 - `KeycloakAmbiguousVaultPayloadError` — raised when the admin Vault
   secret carries neither credential shape.
 

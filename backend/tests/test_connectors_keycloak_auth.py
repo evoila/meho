@@ -524,6 +524,33 @@ async def test_token_error_without_oauth_body_omits_detail() -> None:
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_token_error_ignores_non_oauth2_json_envelope() -> None:
+    """A JSON envelope whose ``error`` is not an RFC 6749 §5.2 code is ignored.
+
+    A gateway/proxy can return ``application/json`` carrying an ``error`` key
+    that is *not* an OAuth2 token error; its ``error_description`` is not
+    schema-bound to be non-secret. The helper gates on the standard code set,
+    so such a body degrades to the bare status message — no fragment, no leak.
+    """
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://keycloak-a.test.invalid") as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            502,
+            json={"error": "bad_gateway", "error_description": "upstream-detail-DO-NOT-ECHO"},
+        )
+        with pytest.raises(KeycloakAdminTokenError) as excinfo:
+            await connector.auth_headers(_TARGET, operator=_make_operator())
+
+    message = str(excinfo.value)
+    assert "returned HTTP 502" in message
+    assert "error=" not in message
+    assert "upstream-detail-DO-NOT-ECHO" not in message
+
+    await connector.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Admin-credential discriminator loader — Vault-payload whitespace stripping
 # (the #1474 root cause: a client_secret with a trailing \n)

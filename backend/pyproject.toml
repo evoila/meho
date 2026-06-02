@@ -65,7 +65,7 @@ dependencies = [
     # the extra makes the runtime requirement explicit at install time
     # so a slim wheel install doesn't fail at first ``encode`` call).
     # No stdlib alternative exists for RS256 signing.
-    "pyjwt[crypto]>=2.10.0,<3",
+    "pyjwt[crypto]>=2.13.0,<3",
 ]
 
 [dependency-groups]

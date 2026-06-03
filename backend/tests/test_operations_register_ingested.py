@@ -46,10 +46,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+import respx
 import structlog.testing
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -692,7 +695,29 @@ async def test_end_to_end_with_real_parsed_spec(
     :func:`parse_openapi` without any shape massaging at the call
     site.
     """
-    operations = parse_openapi("tests/fixtures/openapi/petstore_30.yaml")
+    import socket
+    from unittest.mock import patch
+
+    _fixtures = Path(__file__).parent / "fixtures" / "openapi"
+    _petstore_30_bytes = (_fixtures / "petstore_30.yaml").read_bytes()
+    _petstore_url = "https://specs.example.test/petstore_30.yaml"
+    # Patch getaddrinfo so the SSRF guard resolves specs.example.test to a
+    # public IP without a real DNS lookup; then mock the HTTP fetch via respx.
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 443))],
+        ),
+        respx.mock(assert_all_called=False) as _router,
+    ):
+        _router.get(_petstore_url).mock(
+            return_value=httpx.Response(
+                200,
+                content=_petstore_30_bytes,
+                headers={"content-type": "application/yaml"},
+            )
+        )
+        operations = parse_openapi(_petstore_url)
 
     result = await register_ingested_operations(
         product="petstore",

@@ -6,12 +6,20 @@
 Fixture specs live next to this file at ``tests/fixtures/openapi/``.
 Each fixture exercises one or two parser concerns so the failures
 point at a specific contract violation rather than a soup of issues.
+
+Since G0.16-T8 (#95) the spec fetcher only accepts ``https://`` URIs
+on the network-facing path. Tests that formerly exercised the parser
+via local file paths now serve fixture content through respx-mocked
+HTTPS endpoints so the same parsing assertions remain valid.
 """
 
 from __future__ import annotations
 
 import json
+import socket
+from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -29,6 +37,7 @@ from meho_backplane.operations.ingest import (
     parse_openapi,
     read_spec_info_version,
 )
+from meho_backplane.operations.ingest.openapi import _assert_fetchable_remote_url
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
 PETSTORE_30 = FIXTURES / "petstore_30.yaml"
@@ -39,9 +48,96 @@ RESPONSE_REFS_30 = FIXTURES / "response_refs_30.yaml"
 REQUEST_BODY_REFS_30 = FIXTURES / "request_body_refs_30.yaml"
 HANDAUTHORED_MINIMAL_30 = FIXTURES / "handauthored_minimal_30.yaml"
 
+# Stable HTTPS URL prefix used by tests that serve fixture content through
+# respx. Using a dedicated subdomain makes it easy to route all fixture
+# fetches in a single mock block when tests need multiple specs.
+_FIXTURE_HOST = "https://specs.example.test"
+
+# A stable public IP returned by the ``getaddrinfo`` patch for every test
+# domain used in this module. ``93.184.216.34`` is IANA's example.com
+# address — public and non-special per RFC 5737 / the ipaddress module.
+_PUBLIC_TEST_IP = "93.184.216.34"
+
+# Hostnames that appear in test HTTPS URLs and need a mocked getaddrinfo
+# response so the SSRF destination guard passes without real DNS lookups.
+_TEST_HOSTS = frozenset(
+    {
+        "specs.example.test",
+        "example.test",
+        "developer.broadcom.com",
+        "public.example.test",
+        "cdn.example.test",
+        "public-looking.example.test",
+    }
+)
+
+
+def _getaddrinfo_for_tests(
+    host: str, port: object, **kwargs: object
+) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+    """Mock ``socket.getaddrinfo`` for the SSRF guard used in test calls.
+
+    Returns a public IP for all known test hostnames so the destination
+    guard passes; delegates to the real ``getaddrinfo`` for everything
+    else (private/metadata IPs tested via their own per-test patches).
+    """
+    if host in _TEST_HOSTS:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (_PUBLIC_TEST_IP, 443))]
+    return socket.getaddrinfo(host, port, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.fixture(autouse=True)
+def _mock_getaddrinfo_for_test_hosts() -> Generator[None, None, None]:
+    """Patch ``socket.getaddrinfo`` for the SSRF guard so test HTTPS URLs
+    resolve to a public IP without real DNS, and the guard passes.
+
+    Tests that need specific IP outcomes (private/metadata ranges) apply
+    their own ``patch`` context inside the test body, which overrides
+    this fixture's patch for that block.
+    """
+    with patch(
+        "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+        side_effect=_getaddrinfo_for_tests,
+    ):
+        yield
+
 
 def _by_op_id(rows: list[EndpointDescriptorProto]) -> dict[str, EndpointDescriptorProto]:
     return {r.op_id: r for r in rows}
+
+
+def _mock_yaml_spec(
+    router: respx.MockRouter,
+    path: str,
+    content: bytes,
+) -> str:
+    """Register ``content`` at ``_FIXTURE_HOST/<path>`` and return the URL."""
+    url = f"{_FIXTURE_HOST}/{path}"
+    router.get(url).mock(
+        return_value=httpx.Response(
+            200,
+            content=content,
+            headers={"content-type": "application/yaml"},
+        )
+    )
+    return url
+
+
+def _mock_json_spec(
+    router: respx.MockRouter,
+    path: str,
+    content: bytes,
+) -> str:
+    """Register ``content`` at ``_FIXTURE_HOST/<path>`` and return the URL."""
+    url = f"{_FIXTURE_HOST}/{path}"
+    router.get(url).mock(
+        return_value=httpx.Response(
+            200,
+            content=content,
+            headers={"content-type": "application/json"},
+        )
+    )
+    return url
 
 
 # -- detect_spec_format -----------------------------------------------------
@@ -68,7 +164,9 @@ def test_detect_spec_format(content: bytes, expected: str) -> None:
 
 
 def test_parse_petstore_30_yields_expected_ops() -> None:
-    rows = parse_openapi(str(PETSTORE_30), spec_source="spec:petstore_30.yaml")
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url, spec_source="spec:petstore_30.yaml")
     ops = _by_op_id(rows)
     expected_ids = {
         "GET:/pets",
@@ -82,7 +180,9 @@ def test_parse_petstore_30_yields_expected_ops() -> None:
 
 
 def test_parse_petstore_30_safety_heuristic() -> None:
-    rows = parse_openapi(str(PETSTORE_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
     ops = _by_op_id(rows)
     assert ops["GET:/pets"].safety_level == "safe"
     assert ops["POST:/pets"].safety_level == "caution"
@@ -92,7 +192,9 @@ def test_parse_petstore_30_safety_heuristic() -> None:
 
 
 def test_parse_petstore_30_path_and_query_param_locations() -> None:
-    rows = parse_openapi(str(PETSTORE_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
     list_pets = _by_op_id(rows)["GET:/pets"]
     props = list_pets.parameter_schema["properties"]
     assert isinstance(props, dict)
@@ -109,7 +211,9 @@ def test_parse_petstore_30_path_and_query_param_locations() -> None:
 
 
 def test_parse_petstore_30_path_param_is_required() -> None:
-    rows = parse_openapi(str(PETSTORE_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
     get_pet = _by_op_id(rows)["GET:/pets/{petId}"]
     props = get_pet.parameter_schema["properties"]
     assert props["petId"]["x-meho-param-loc"] == "path"
@@ -117,7 +221,9 @@ def test_parse_petstore_30_path_param_is_required() -> None:
 
 
 def test_parse_petstore_30_request_body_inlined_with_param_loc() -> None:
-    rows = parse_openapi(str(PETSTORE_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
     post = _by_op_id(rows)["POST:/pets"]
     props = post.parameter_schema["properties"]
     body = props["body"]
@@ -132,7 +238,9 @@ def test_parse_petstore_30_request_body_inlined_with_param_loc() -> None:
 
 
 def test_parse_petstore_30_optional_body_not_required() -> None:
-    rows = parse_openapi(str(PETSTORE_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
     put = _by_op_id(rows)["PUT:/pets/{petId}/photos"]
     assert put.parameter_schema["properties"]["body"]["x-meho-param-loc"] == "body"
     # requestBody.required omitted → not required.
@@ -140,7 +248,9 @@ def test_parse_petstore_30_optional_body_not_required() -> None:
 
 
 def test_parse_petstore_30_response_schema_extracted() -> None:
-    rows = parse_openapi(str(PETSTORE_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
     list_pets = _by_op_id(rows)["GET:/pets"]
     # PetPage was inlined; nested $ref to Pet preserved.
     assert list_pets.response_schema is not None
@@ -150,20 +260,26 @@ def test_parse_petstore_30_response_schema_extracted() -> None:
 
 
 def test_parse_petstore_30_204_response_yields_none() -> None:
-    rows = parse_openapi(str(PETSTORE_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
     delete = _by_op_id(rows)["DELETE:/pets/{petId}"]
     assert delete.response_schema is None
 
 
 def test_parse_petstore_30_tags_include_spec_source() -> None:
-    rows = parse_openapi(str(PETSTORE_30), spec_source="spec:petstore_30.yaml")
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url, spec_source="spec:petstore_30.yaml")
     list_pets = _by_op_id(rows)["GET:/pets"]
     assert "pets" in list_pets.tags
     assert "spec:petstore_30.yaml" in list_pets.tags
 
 
 def test_parse_petstore_30_without_spec_source_omits_tag() -> None:
-    rows = parse_openapi(str(PETSTORE_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
     list_pets = _by_op_id(rows)["GET:/pets"]
     assert list_pets.tags == ["pets"]
     # No accidental injection of an empty string or None.
@@ -171,7 +287,9 @@ def test_parse_petstore_30_without_spec_source_omits_tag() -> None:
 
 
 def test_parse_petstore_31_yaml_wildcard_2xx_response() -> None:
-    rows = parse_openapi(str(PETSTORE_31_YAML))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_31.yaml", PETSTORE_31_YAML.read_bytes())
+        rows = parse_openapi(url)
     ops = _by_op_id(rows)
     list_vets = ops["GET:/vets"]
     assert list_vets.response_schema is not None
@@ -180,7 +298,9 @@ def test_parse_petstore_31_yaml_wildcard_2xx_response() -> None:
 
 
 def test_parse_petstore_31_json_route() -> None:
-    rows = parse_openapi(str(PETSTORE_31_JSON))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_json_spec(router, "petstore_31.json", PETSTORE_31_JSON.read_bytes())
+        rows = parse_openapi(url)
     assert {r.op_id for r in rows} == {"GET:/zoos"}
     assert rows[0].response_schema == {"type": "array", "items": {"type": "string"}}
 
@@ -232,11 +352,14 @@ def test_parse_handauthored_minimal_spec_via_file_uri() -> None:
 # -- spec_source merging ---------------------------------------------------
 
 
-def test_spec_source_threads_distinctly_across_two_specs(tmp_path: Path) -> None:
+def test_spec_source_threads_distinctly_across_two_specs() -> None:
     """vCenter ingests vcenter.yaml + vi-json.yaml under one connector;
     rows from each spec must carry distinguishable ``spec:<source>`` tags."""
-    rows_a = parse_openapi(str(PETSTORE_30), spec_source="spec:vcenter.yaml")
-    rows_b = parse_openapi(str(PETSTORE_31_YAML), spec_source="spec:vi-json.yaml")
+    with respx.mock(assert_all_called=False) as router:
+        url_a = _mock_yaml_spec(router, "vcenter.yaml", PETSTORE_30.read_bytes())
+        url_b = _mock_yaml_spec(router, "vi-json.yaml", PETSTORE_31_YAML.read_bytes())
+        rows_a = parse_openapi(url_a, spec_source="spec:vcenter.yaml")
+        rows_b = parse_openapi(url_b, spec_source="spec:vi-json.yaml")
     all_tags_a = {tag for row in rows_a for tag in row.tags}
     all_tags_b = {tag for row in rows_b for tag in row.tags}
     assert "spec:vcenter.yaml" in all_tags_a
@@ -247,51 +370,63 @@ def test_spec_source_threads_distinctly_across_two_specs(tmp_path: Path) -> None
 # -- failure modes ---------------------------------------------------------
 
 
-def test_unsupported_swagger_2_raises(tmp_path: Path) -> None:
-    spec = tmp_path / "swagger.yaml"
-    spec.write_text("swagger: '2.0'\ninfo: {title: x, version: '1'}\npaths: {}\n")
-    with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0") as excinfo:
-        parse_openapi(str(spec))
-    # The rejection must be *actionable* — it names the conversion path
-    # (swagger2openapi / converter.swagger.io) so a 2.0-only surface
-    # such as Harbor 2.x can be onboarded without an opaque dead end
-    # (#1532). The detected version is echoed back verbatim.
+def test_unsupported_swagger_2_raises() -> None:
+    content = b"swagger: '2.0'\ninfo: {title: x, version: '1'}\npaths: {}\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "swagger.yaml", content)
+        with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0") as excinfo:
+            parse_openapi(url)
+    # The rejection must be *actionable* -- it names the conversion path
+    # (swagger2openapi / converter.swagger.io) so a 2.0-only surface such
+    # as Harbor 2.x can be onboarded without an opaque dead end (#1532).
     message = str(excinfo.value)
     assert "swagger2openapi" in message
     assert "converter.swagger.io" in message
     assert "'2.0'" in message
 
 
-def test_unsupported_openapi_4_raises(tmp_path: Path) -> None:
-    spec = tmp_path / "v4.yaml"
-    spec.write_text("openapi: '4.0.0'\ninfo: {title: x, version: '1'}\npaths: {}\n")
-    with pytest.raises(UnsupportedSpecError, match=r"4\.0\.0"):
-        parse_openapi(str(spec))
+def test_unsupported_openapi_4_raises() -> None:
+    content = b"openapi: '4.0.0'\ninfo: {title: x, version: '1'}\npaths: {}\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "v4.yaml", content)
+        with pytest.raises(UnsupportedSpecError, match=r"4\.0\.0"):
+            parse_openapi(url)
 
 
-def test_invalid_spec_missing_paths_raises(tmp_path: Path) -> None:
-    spec = tmp_path / "broken.yaml"
-    spec.write_text("openapi: '3.1.0'\ninfo: {title: x, version: '1'}\n")
-    with pytest.raises(InvalidSpecError, match="no 'paths' key"):
-        parse_openapi(str(spec))
+def test_invalid_spec_missing_paths_raises() -> None:
+    content = b"openapi: '3.1.0'\ninfo: {title: x, version: '1'}\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "broken.yaml", content)
+        with pytest.raises(InvalidSpecError, match="no 'paths' key"):
+            parse_openapi(url)
 
 
-def test_invalid_spec_non_mapping_root_raises(tmp_path: Path) -> None:
-    spec = tmp_path / "list.yaml"
-    spec.write_text("- not\n- a\n- mapping\n")
-    with pytest.raises(InvalidSpecError, match="must parse to a mapping"):
-        parse_openapi(str(spec))
+def test_invalid_spec_non_mapping_root_raises() -> None:
+    content = b"- not\n- a\n- mapping\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "list.yaml", content)
+        with pytest.raises(InvalidSpecError, match="must parse to a mapping"):
+            parse_openapi(url)
 
 
-def test_missing_local_file_raises_invalid_spec(tmp_path: Path) -> None:
-    missing = tmp_path / "nope.yaml"
-    with pytest.raises(InvalidSpecError, match="could not read spec"):
-        parse_openapi(str(missing))
+def test_non_https_scheme_raises_invalid_spec() -> None:
+    """Any non-https scheme (http, file://, bare path) raises InvalidSpecError.
+
+    This is the top-level smoke test for the G0.16-T8 (#95) SSRF guard:
+    even a scheme that looks harmless (``http``) is rejected because the
+    guard cannot protect the transport and ``http`` is indistinguishable
+    from a redirect-bypass target after a single 30x hop.
+    """
+    with pytest.raises(InvalidSpecError, match="https"):
+        parse_openapi("http://example.test/spec.yaml")
 
 
-def test_directory_path_raises_invalid_spec(tmp_path: Path) -> None:
-    with pytest.raises(InvalidSpecError, match="could not read spec"):
-        parse_openapi(str(tmp_path))
+def test_malformed_yaml_bubbles_up() -> None:
+    content = b"openapi: '3.0.3'\npaths:\n  /x:\n   get:\n   summary: oops\n  : bad\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "bad.yaml", content)
+        with pytest.raises(yaml.YAMLError):
+            parse_openapi(url)
 
 
 def test_docs_scheme_rejected_unsupported_naming_scheme() -> None:
@@ -314,36 +449,16 @@ def test_docs_scheme_rejected_unsupported_naming_scheme() -> None:
     assert "could not read spec" not in str(excinfo.value)
 
 
-def test_file_uri_unaffected_regression(tmp_path: Path) -> None:
-    """Regression check for #1535: adding the ``docs:`` branch must not
-    perturb the ``file://`` path. An absolute ``file://`` URI to a valid
-    spec still parses end-to-end.
-    """
-    spec = tmp_path / "spec.yaml"
-    spec.write_text(PETSTORE_30.read_text())
-    protos = parse_openapi(spec.resolve().as_uri())
-    assert protos, "file:// spec should yield at least one operation proto"
+def test_malformed_json_bubbles_up() -> None:
+    content = b'{"openapi": "3.0.3", broken'
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_json_spec(router, "bad.json", content)
+        with pytest.raises(json.JSONDecodeError):
+            parse_openapi(url)
 
 
-def test_malformed_yaml_bubbles_up(tmp_path: Path) -> None:
-    spec = tmp_path / "bad.yaml"
-    spec.write_text("openapi: '3.0.3'\npaths:\n  /x:\n   get:\n   summary: oops\n  : bad\n")
-    with pytest.raises(yaml.YAMLError):
-        parse_openapi(str(spec))
-
-
-def test_malformed_json_bubbles_up(tmp_path: Path) -> None:
-    spec = tmp_path / "bad.json"
-    spec.write_text('{"openapi": "3.0.3", broken')
-    with pytest.raises(json.JSONDecodeError):
-        parse_openapi(str(spec))
-
-
-def test_external_ref_raises(tmp_path: Path) -> None:
-    spec = tmp_path / "ext.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+def test_external_ref_raises() -> None:
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -353,13 +468,14 @@ paths:
       responses:
         "200":
           description: ok
-        """.lstrip()
-    )
-    with pytest.raises(UnsupportedSpecError, match="cross-document"):
-        parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "ext.yaml", content)
+        with pytest.raises(UnsupportedSpecError, match="cross-document"):
+            parse_openapi(url)
 
 
-def test_component_parameter_ref_resolves(tmp_path: Path) -> None:
+def test_component_parameter_ref_resolves() -> None:
     """``$ref: '#/components/parameters/<name>'`` resolves to the shared parameter.
 
     The pre-T11 contract rejected this with ``UnsupportedSpecError`` —
@@ -367,10 +483,7 @@ def test_component_parameter_ref_resolves(tmp_path: Path) -> None:
     blocked the entire ~2,195-op spec. The new contract inlines the
     referenced parameter the same way it inlines schema refs.
     """
-    spec = tmp_path / "param_ref.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -388,9 +501,10 @@ components:
       required: true
       schema:
         type: string
-        """.lstrip()
-    )
-    rows = parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "param_ref.yaml", content)
+        rows = parse_openapi(url)
     assert len(rows) == 1
     properties = rows[0].parameter_schema["properties"]
     assert isinstance(properties, dict)
@@ -400,17 +514,14 @@ components:
     assert rows[0].parameter_schema["required"] == ["shared"]
 
 
-def test_component_parameter_ref_missing_name_raises(tmp_path: Path) -> None:
+def test_component_parameter_ref_missing_name_raises() -> None:
     """A ref to an unknown parameter component raises ``InvalidSchemaError``.
 
     Mirrors the existing schema-bucket missing-component behaviour;
     the symmetry keeps the parser failure mode predictable across
     both component kinds.
     """
-    spec = tmp_path / "param_ref_dangling.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -427,22 +538,20 @@ components:
       in: query
       schema:
         type: string
-        """.lstrip()
-    )
-    with pytest.raises(InvalidSchemaError, match="missing component"):
-        parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "param_ref_dangling.yaml", content)
+        with pytest.raises(InvalidSchemaError, match="missing component"):
+            parse_openapi(url)
 
 
-def test_component_parameter_ref_drilldown_raises(tmp_path: Path) -> None:
+def test_component_parameter_ref_drilldown_raises() -> None:
     """A ref into a parameter component's subpath raises ``InvalidSchemaError``.
 
     Symmetric with the schema-bucket drill-down rejection. The
     OpenAPI spec only declares fragment refs to *named* components.
     """
-    spec = tmp_path / "param_ref_drilldown.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -459,13 +568,14 @@ components:
       in: query
       schema:
         type: string
-        """.lstrip()
-    )
-    with pytest.raises(InvalidSchemaError, match="drill-down"):
-        parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "param_ref_drilldown.yaml", content)
+        with pytest.raises(InvalidSchemaError, match="drill-down"):
+            parse_openapi(url)
 
 
-def test_unsupported_component_bucket_ref_raises(tmp_path: Path) -> None:
+def test_unsupported_component_bucket_ref_raises() -> None:
     """Refs to component buckets the parser doesn't inline stay rejected.
 
     Headers refs are the canonical example: OpenAPI 3.x defines them
@@ -479,10 +589,7 @@ def test_unsupported_component_bucket_ref_raises(tmp_path: Path) -> None:
     residual ``UnsupportedSpecError`` envelope. The envelope shape is
     asserted here so future bucket gaps stay diagnosable.
     """
-    spec = tmp_path / "headers_ref.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -495,10 +602,11 @@ components:
     X-Rate-Limit:
       schema:
         type: integer
-        """.lstrip()
-    )
-    with pytest.raises(UnsupportedSpecError, match="unsupported component bucket"):
-        parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "headers_ref.yaml", content)
+        with pytest.raises(UnsupportedSpecError, match="unsupported component bucket"):
+            parse_openapi(url)
 
 
 def test_resolve_shallow_ref_parameter_ref_opt_in() -> None:
@@ -531,7 +639,9 @@ def test_parse_parameter_refs_30_fixture() -> None:
     time, including ``x-meho-param-loc="path"`` and required-by-default
     path-parameter semantics.
     """
-    rows = parse_openapi(str(PARAMETER_REFS_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "parameter_refs_30.yaml", PARAMETER_REFS_30.read_bytes())
+        rows = parse_openapi(url)
     op_ids = {row.op_id for row in rows}
     assert op_ids == {
         "POST:/vm/{moId}/PowerOn_Task",
@@ -609,7 +719,9 @@ def test_parse_response_refs_30_fixture() -> None:
     transparently, the rest of the parser sees the resolved
     Response Object.
     """
-    rows = parse_openapi(str(RESPONSE_REFS_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "response_refs_30.yaml", RESPONSE_REFS_30.read_bytes())
+        rows = parse_openapi(url)
     by_op = _by_op_id(rows)
     assert set(by_op) == {"GET:/widgets", "GET:/widgets/{id}"}
 
@@ -644,7 +756,11 @@ def test_parse_request_body_refs_30_fixture() -> None:
     ``required=True`` because the resolved Request Body Object's
     ``required`` field is ``True``.
     """
-    rows = parse_openapi(str(REQUEST_BODY_REFS_30))
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(
+            router, "request_body_refs_30.yaml", REQUEST_BODY_REFS_30.read_bytes()
+        )
+        rows = parse_openapi(url)
     by_op = _by_op_id(rows)
     assert set(by_op) == {"POST:/widgets", "PUT:/widgets/{id}"}
 
@@ -662,7 +778,7 @@ def test_parse_request_body_refs_30_fixture() -> None:
         assert "body" in required, f"{op_id}: body must be required (requestBody.required=True)"
 
 
-def test_parse_github_shaped_response_ref_with_inline_schema(tmp_path: Path) -> None:
+def test_parse_github_shaped_response_ref_with_inline_schema() -> None:
     """Tightest reproduction of the GitHub spec's `responses/accepted` shape.
 
     GitHub's spec defines ``components.responses.accepted`` with a
@@ -670,10 +786,7 @@ def test_parse_github_shaped_response_ref_with_inline_schema(tmp_path: Path) -> 
     — no nested ``$ref``. Locks the simplest case so future
     refactors don't lose it.
     """
-    spec = tmp_path / "gh_accepted.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /op:
@@ -690,19 +803,17 @@ components:
         application/json:
           schema:
             type: object
-        """.lstrip()
-    )
-    rows = parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "gh_accepted.yaml", content)
+        rows = parse_openapi(url)
     assert len(rows) == 1
     assert rows[0].response_schema == {"type": "object"}
 
 
-def test_missing_response_ref_raises(tmp_path: Path) -> None:
+def test_missing_response_ref_raises() -> None:
     """A ref to an unknown response component raises ``InvalidSchemaError``."""
-    spec = tmp_path / "dangling_response.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -718,18 +829,16 @@ components:
         application/json:
           schema:
             type: string
-        """.lstrip()
-    )
-    with pytest.raises(InvalidSchemaError, match="missing component"):
-        parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "dangling_response.yaml", content)
+        with pytest.raises(InvalidSchemaError, match="missing component"):
+            parse_openapi(url)
 
 
-def test_missing_request_body_ref_raises(tmp_path: Path) -> None:
+def test_missing_request_body_ref_raises() -> None:
     """A ref to an unknown requestBody component raises ``InvalidSchemaError``."""
-    spec = tmp_path / "dangling_requestbody.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -746,17 +855,15 @@ components:
         application/json:
           schema:
             type: string
-        """.lstrip()
-    )
-    with pytest.raises(InvalidSchemaError, match="missing component"):
-        parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "dangling_requestbody.yaml", content)
+        with pytest.raises(InvalidSchemaError, match="missing component"):
+            parse_openapi(url)
 
 
-def test_missing_schema_ref_raises(tmp_path: Path) -> None:
-    spec = tmp_path / "dangling.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+def test_missing_schema_ref_raises() -> None:
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -769,18 +876,16 @@ paths:
       responses:
         "200":
           description: ok
-        """.lstrip()
-    )
-    with pytest.raises(InvalidSchemaError, match="missing component"):
-        parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "dangling.yaml", content)
+        with pytest.raises(InvalidSchemaError, match="missing component"):
+            parse_openapi(url)
 
 
-def test_non_list_tags_raises(tmp_path: Path) -> None:
+def test_non_list_tags_raises() -> None:
     """A spec with ``tags: "admin"`` would otherwise iterate as characters."""
-    spec = tmp_path / "bad_tags.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -789,18 +894,16 @@ paths:
       responses:
         "200":
           description: ok
-        """.lstrip()
-    )
-    with pytest.raises(InvalidSchemaError, match=r"tags must be a list"):
-        parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "bad_tags.yaml", content)
+        with pytest.raises(InvalidSchemaError, match=r"tags must be a list"):
+            parse_openapi(url)
 
 
-def test_openapi_31_boolean_parameter_schema(tmp_path: Path) -> None:
+def test_openapi_31_boolean_parameter_schema() -> None:
     """OpenAPI 3.1 allows ``schema: true`` / ``schema: false`` on parameters."""
-    spec = tmp_path / "bool_param.yaml"
-    spec.write_text(
-        """
-openapi: '3.1.0'
+    content = b"""openapi: '3.1.0'
 info: {title: x, version: '1'}
 paths:
   /any:
@@ -811,9 +914,10 @@ paths:
       responses:
         "200":
           description: ok
-        """.lstrip()
-    )
-    rows = parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "bool_param.yaml", content)
+        rows = parse_openapi(url)
     props = rows[0].parameter_schema["properties"]
     assert isinstance(props, dict)
     # true → {} (matches anything)
@@ -822,12 +926,9 @@ paths:
     assert props["nothing"] == {"not": {}, "x-meho-param-loc": "query"}
 
 
-def test_openapi_31_boolean_body_and_response_schema(tmp_path: Path) -> None:
+def test_openapi_31_boolean_body_and_response_schema() -> None:
     """Boolean body / response schemas survive the parser pipeline."""
-    spec = tmp_path / "bool_body.yaml"
-    spec.write_text(
-        """
-openapi: '3.1.0'
+    content = b"""openapi: '3.1.0'
 info: {title: x, version: '1'}
 paths:
   /any:
@@ -843,19 +944,17 @@ paths:
           content:
             application/json:
               schema: false
-        """.lstrip()
-    )
-    rows = parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "bool_body.yaml", content)
+        rows = parse_openapi(url)
     body = rows[0].parameter_schema["properties"]["body"]
     assert body == {"x-meho-param-loc": "body"}  # true → {} merged with loc keyword
     assert rows[0].response_schema == {"not": {}}  # false → {"not": {}}
 
 
-def test_drilldown_schema_ref_raises(tmp_path: Path) -> None:
-    spec = tmp_path / "drilldown.yaml"
-    spec.write_text(
-        """
-openapi: '3.0.3'
+def test_drilldown_schema_ref_raises() -> None:
+    content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
   /x:
@@ -874,10 +973,11 @@ components:
       type: object
       properties:
         y: {type: string}
-        """.lstrip()
-    )
-    with pytest.raises(InvalidSchemaError, match="drill-down"):
-        parse_openapi(str(spec))
+"""
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "drilldown.yaml", content)
+        with pytest.raises(InvalidSchemaError, match="drill-down"):
+            parse_openapi(url)
 
 
 # -- model behaviour -------------------------------------------------------
@@ -903,7 +1003,7 @@ def test_proto_safety_level_literal_rejects_garbage() -> None:
 
 
 def test_http_fetch_round_trip() -> None:
-    """``http(s)://`` URLs are fetched via httpx."""
+    """``https://`` URLs are fetched via httpx."""
     with respx.mock(assert_all_called=False) as mock_router:
         mock_router.get("https://example.test/spec.yaml").mock(
             return_value=httpx.Response(
@@ -973,9 +1073,7 @@ def test_http_fetch_missing_content_type_raises_upstream_not_spec() -> None:
     assert exc_info.value.content_type is None
 
 
-def test_http_fetch_application_yaml_content_type_accepted(
-    tmp_path: Path,
-) -> None:
+def test_http_fetch_application_yaml_content_type_accepted() -> None:
     """G0.15-T2 (#1211): a 2xx response with ``application/yaml`` proceeds
     through the parser unchanged.
 
@@ -1032,59 +1130,293 @@ def test_http_fetch_accepted_content_types_proceed(content_type: str) -> None:
     assert rows
 
 
+# -- SSRF / local-file guard (G0.16-T8, #95) --------------------------------
+
+
+def test_ssrf_file_uri_rejected_before_any_read() -> None:
+    """AC-3: ``file:///etc/passwd`` raises ``InvalidSpecError`` before any file read.
+
+    The guard fires at the scheme check in ``_assert_fetchable_remote_url``
+    before any network or filesystem activity. The exception message must
+    not contain the path string so the response is not a filesystem oracle.
+    """
+    with pytest.raises(InvalidSpecError) as exc_info:
+        parse_openapi("file:///etc/passwd")
+    msg = str(exc_info.value)
+    assert "/etc/passwd" not in msg
+    assert "OSError" not in msg and "FileNotFoundError" not in msg
+
+
+def test_ssrf_file_uri_rejected_via_read_spec_info_version() -> None:
+    """AC-3 end-to-end: same guard fires through ``read_spec_info_version``."""
+    with pytest.raises(InvalidSpecError) as exc_info:
+        read_spec_info_version("file:///etc/passwd")
+    msg = str(exc_info.value)
+    assert "/etc/passwd" not in msg
+
+
+def test_ssrf_bare_path_rejected() -> None:
+    """A bare filesystem path (no scheme) is rejected as non-https."""
+    with pytest.raises(InvalidSpecError, match="https"):
+        parse_openapi("/etc/passwd")
+
+
+def test_ssrf_http_scheme_rejected() -> None:
+    """``http://`` is rejected; only ``https://`` is permitted on the ingest path."""
+    with pytest.raises(InvalidSpecError, match="https"):
+        parse_openapi("http://example.com/spec.yaml")
+
+
+def test_ssrf_metadata_ip_rejected_before_connect() -> None:
+    """AC-4: ``http://169.254.169.254/...`` is rejected before any socket connect.
+
+    The guard resolves the hostname and checks every returned address
+    against the private/link-local/reserved ranges before opening a
+    connection. With the scheme check firing first (``http`` is not
+    ``https``), the rejection happens even before DNS is attempted.
+    This test also exercises the HTTPS variant by patching ``getaddrinfo``
+    to return the metadata IP directly, proving the IP check fires.
+    """
+    # Scheme check fires first for ``http``.
+    with pytest.raises(InvalidSpecError, match="https"):
+        parse_openapi("http://169.254.169.254/latest/meta-data/")
+
+    # For the HTTPS variant, mock getaddrinfo to return the metadata IP
+    # so the IP-range check fires without a real DNS lookup.
+    import socket
+
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("169.254.169.254", 443))],
+        ),
+        respx.mock(assert_all_called=False) as router,
+    ):
+        # Register a route but assert it is never called — the guard
+        # must fire before the transport opens a connection.
+        router.get("https://169.254.169.254/latest/meta-data/").mock(
+            return_value=httpx.Response(200, content=b"", headers={"content-type": "text/plain"})
+        )
+        with pytest.raises(InvalidSpecError, match="non-public"):
+            parse_openapi("https://169.254.169.254/latest/meta-data/")
+        assert router.calls.call_count == 0
+
+
+def test_ssrf_private_ip_rejected_before_connect() -> None:
+    """AC-4 variant: RFC-1918 private IPs are rejected before any socket connect.
+
+    Patches ``getaddrinfo`` to return a 10.x.x.x address so the IP
+    check fires even for a hostname that looks public in the URL.
+    """
+    import socket
+
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.5", 443))],
+        ),
+        respx.mock(assert_all_called=False) as router,
+    ):
+        router.get("https://public-looking.example.test/spec.yaml").mock(
+            return_value=httpx.Response(200, content=b"", headers={"content-type": "text/plain"})
+        )
+        with pytest.raises(InvalidSpecError, match="non-public"):
+            parse_openapi("https://public-looking.example.test/spec.yaml")
+        assert router.calls.call_count == 0
+
+
+def test_ssrf_redirect_to_private_ip_rejected() -> None:
+    """AC-5: a 30x redirect from an allowlisted public host to a private IP is rejected.
+
+    The guard re-validates every redirect hop before following it.
+    The private-target route must never be called.
+    """
+    import socket
+
+    public_url = "https://public.example.test/spec.yaml"
+    private_redirect_url = "https://10.0.0.5/spec.yaml"
+
+    # First call (public host) resolves to a real public IP.
+    public_addrs = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 443))]
+    # Second call (private redirect target) returns a private IP.
+    private_addrs = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.5", 443))]
+
+    call_count = 0
+
+    def _mock_getaddrinfo(hostname: str, port: object, **kwargs: object) -> list:
+        nonlocal call_count
+        call_count += 1
+        if hostname == "public.example.test":
+            return public_addrs
+        return private_addrs
+
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            side_effect=_mock_getaddrinfo,
+        ),
+        respx.mock(assert_all_called=False) as router,
+    ):
+        router.get(public_url).mock(
+            return_value=httpx.Response(302, headers={"location": private_redirect_url})
+        )
+        private_route = router.get(private_redirect_url).mock(
+            return_value=httpx.Response(
+                200,
+                content=PETSTORE_31_YAML.read_bytes(),
+                headers={"content-type": "application/yaml"},
+            )
+        )
+        with pytest.raises(InvalidSpecError, match="non-public"):
+            parse_openapi(public_url)
+        # The private-target route must not have been called.
+        assert not private_route.called
+
+
+def test_ssrf_public_https_spec_fetch_succeeds() -> None:
+    """AC-6: a ``https`` URL resolving to a public IP returns spec bytes unchanged.
+
+    Proves the guard does not block legitimate catalog/CDN fetches.
+    Patches ``getaddrinfo`` to return a stable public IP so the test
+    is not sensitive to external DNS.
+    """
+    import socket
+
+    url = "https://cdn.example.test/spec.yaml"
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 443))],
+        ),
+        respx.mock(assert_all_called=False) as router,
+    ):
+        router.get(url).mock(
+            return_value=httpx.Response(
+                200,
+                content=PETSTORE_31_YAML.read_bytes(),
+                headers={"content-type": "application/yaml"},
+            )
+        )
+        rows = parse_openapi(url)
+    assert rows  # guard did not block; parsing succeeded
+
+
+# -- _assert_fetchable_remote_url unit tests --------------------------------
+
+
+def test_assert_fetchable_remote_url_rejects_http_scheme() -> None:
+    with pytest.raises(InvalidSpecError, match="https"):
+        _assert_fetchable_remote_url("http://example.com/spec.yaml")
+
+
+def test_assert_fetchable_remote_url_rejects_file_scheme() -> None:
+    with pytest.raises(InvalidSpecError, match="https"):
+        _assert_fetchable_remote_url("file:///etc/passwd")
+
+
+def test_assert_fetchable_remote_url_rejects_missing_hostname() -> None:
+    with pytest.raises(InvalidSpecError, match="hostname"):
+        _assert_fetchable_remote_url("https:///no-host/spec.yaml")
+
+
+@pytest.mark.parametrize(
+    "private_ip",
+    [
+        "127.0.0.1",  # loopback
+        "10.0.0.1",  # RFC-1918
+        "172.16.0.1",  # RFC-1918
+        "192.168.1.1",  # RFC-1918
+        "169.254.169.254",  # cloud metadata (link-local)
+        "::1",  # IPv6 loopback
+        "fc00::1",  # ULA (unique local)
+        "fe80::1",  # IPv6 link-local
+    ],
+)
+def test_assert_fetchable_remote_url_rejects_private_ips(private_ip: str) -> None:
+    """Every address family in the private/reserved ranges is blocked."""
+    import socket
+
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", (private_ip, 443))],
+        ),
+        pytest.raises(InvalidSpecError, match="non-public"),
+    ):
+        _assert_fetchable_remote_url("https://any.example.test/spec.yaml")
+
+
+def test_assert_fetchable_remote_url_accepts_public_ip() -> None:
+    """A hostname resolving to a public IP passes the guard without error."""
+    import socket
+
+    with patch(
+        "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 443))],
+    ):
+        # Should not raise.
+        _assert_fetchable_remote_url("https://example.com/spec.yaml")
+
+
 # -- read_spec_info_version ------------------------------------------------
 
 
-def test_read_spec_info_version_returns_string(tmp_path: Path) -> None:
+def test_read_spec_info_version_returns_string() -> None:
     """Happy path — the spec's ``info.version`` is returned verbatim."""
-    spec = tmp_path / "spec.yaml"
-    spec.write_text("openapi: '3.0.3'\ninfo: {title: t, version: '9.0.3'}\npaths: {}\n")
-    assert read_spec_info_version(str(spec)) == "9.0.3"
+    content = b"openapi: '3.0.3'\ninfo: {title: t, version: '9.0.3'}\npaths: {}\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "spec.yaml", content)
+        assert read_spec_info_version(url) == "9.0.3"
 
 
-def test_read_spec_info_version_missing_info_returns_none(tmp_path: Path) -> None:
+def test_read_spec_info_version_missing_info_returns_none() -> None:
     """Specs without an ``info`` block return ``None`` — the cross-check skips."""
-    spec = tmp_path / "spec.yaml"
-    spec.write_text("openapi: '3.0.3'\npaths: {}\n")
-    assert read_spec_info_version(str(spec)) is None
+    content = b"openapi: '3.0.3'\npaths: {}\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "spec.yaml", content)
+        assert read_spec_info_version(url) is None
 
 
-def test_read_spec_info_version_missing_version_field_returns_none(tmp_path: Path) -> None:
+def test_read_spec_info_version_missing_version_field_returns_none() -> None:
     """``info`` present but no ``version`` field → ``None``."""
-    spec = tmp_path / "spec.yaml"
-    spec.write_text("openapi: '3.0.3'\ninfo: {title: t}\npaths: {}\n")
-    assert read_spec_info_version(str(spec)) is None
+    content = b"openapi: '3.0.3'\ninfo: {title: t}\npaths: {}\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "spec.yaml", content)
+        assert read_spec_info_version(url) is None
 
 
-def test_read_spec_info_version_non_string_version_returns_none(tmp_path: Path) -> None:
+def test_read_spec_info_version_non_string_version_returns_none() -> None:
     """A non-string ``info.version`` (e.g. an integer) → ``None``."""
-    spec = tmp_path / "spec.yaml"
-    spec.write_text("openapi: '3.0.3'\ninfo: {title: t, version: 1}\npaths: {}\n")
-    assert read_spec_info_version(str(spec)) is None
+    content = b"openapi: '3.0.3'\ninfo: {title: t, version: 1}\npaths: {}\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "spec.yaml", content)
+        assert read_spec_info_version(url) is None
 
 
-def test_read_spec_info_version_empty_version_returns_none(tmp_path: Path) -> None:
+def test_read_spec_info_version_empty_version_returns_none() -> None:
     """An empty ``info.version`` string is treated as missing."""
-    spec = tmp_path / "spec.yaml"
-    spec.write_text("openapi: '3.0.3'\ninfo: {title: t, version: ''}\npaths: {}\n")
-    assert read_spec_info_version(str(spec)) is None
+    content = b"openapi: '3.0.3'\ninfo: {title: t, version: ''}\npaths: {}\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "spec.yaml", content)
+        assert read_spec_info_version(url) is None
 
 
-def test_read_spec_info_version_rejects_swagger_2(tmp_path: Path) -> None:
+def test_read_spec_info_version_rejects_swagger_2() -> None:
     """Swagger 2.0 specs surface the same gate :func:`parse_openapi` enforces.
 
     The cross-check helper shares ``_validate_openapi_version`` with the
     parser, so the same actionable conversion-path remedy reaches the
     operator on the spec-vs-label fast path (#1532).
     """
-    spec = tmp_path / "spec.yaml"
-    spec.write_text("swagger: '2.0'\ninfo: {title: t, version: '9.0.3'}\npaths: {}\n")
-    with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0") as excinfo:
-        read_spec_info_version(str(spec))
+    content = b"swagger: '2.0'\ninfo: {title: t, version: '9.0.3'}\npaths: {}\n"
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "spec.yaml", content)
+        with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0") as excinfo:
+            read_spec_info_version(url)
     assert "swagger2openapi" in str(excinfo.value)
 
 
-def test_read_spec_info_version_missing_file_raises_invalid_spec(tmp_path: Path) -> None:
-    missing = tmp_path / "nope.yaml"
-    with pytest.raises(InvalidSpecError, match="could not read spec"):
-        read_spec_info_version(str(missing))
+def test_read_spec_info_version_non_https_scheme_raises_invalid_spec() -> None:
+    """Non-https schemes raise ``InvalidSpecError`` from read_spec_info_version too."""
+    with pytest.raises(InvalidSpecError, match="https"):
+        read_spec_info_version("file:///tmp/nope.yaml")

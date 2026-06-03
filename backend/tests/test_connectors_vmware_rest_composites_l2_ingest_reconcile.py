@@ -47,11 +47,26 @@ the ingest pipeline cannot emit, this test goes red.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import socket
 from typing import Any
+from unittest.mock import patch
+
+import httpx
+import respx
 
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.operations.ingest import parse_openapi
+
+# Public IP returned by the mock getaddrinfo for specs.example.test.
+_PUBLIC_TEST_IP = "93.184.216.34"
+
+# Patch used by both reconciliation tests to satisfy the SSRF guard without
+# real DNS lookups. The guard is a correctness property, not a test concern;
+# this fixture keeps the mock in one place.
+_GETADDRINFO_PATCH = patch(
+    "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+    return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", (_PUBLIC_TEST_IP, 443))],
+)
 
 # ---------------------------------------------------------------------------
 # Derive the composites' required L2 sub-op_ids from the live constants.
@@ -136,9 +151,7 @@ def _build_vcenter_fixture(required_op_ids: set[str]) -> dict[str, Any]:
     }
 
 
-def test_every_write_composite_sub_op_resolves_to_an_ingested_op_id(
-    tmp_path: Path,
-) -> None:
+def test_every_write_composite_sub_op_resolves_to_an_ingested_op_id() -> None:
     """The ingest pipeline emits an op_id for every composite sub-op.
 
     This is the in-code proxy for #1414 acceptance criterion 2 ("every
@@ -152,10 +165,18 @@ def test_every_write_composite_sub_op_resolves_to_an_ingested_op_id(
     assert required, "introspection found no raw sub-op_ids -- wiring broke"
 
     spec = _build_vcenter_fixture(required)
-    spec_path = tmp_path / "vcenter.yaml"
-    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vcenter.yaml"
 
-    rows = parse_openapi(str(spec_path), spec_source="spec:vcenter.yaml")
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200,
+                content=spec_bytes,
+                headers={"content-type": "application/json"},
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vcenter.yaml")
     ingested_op_ids = {row.op_id for row in rows}
 
     missing = required - ingested_op_ids
@@ -167,9 +188,7 @@ def test_every_write_composite_sub_op_resolves_to_an_ingested_op_id(
     )
 
 
-def test_action_discriminated_sub_ops_keep_query_suffix_through_ingest(
-    tmp_path: Path,
-) -> None:
+def test_action_discriminated_sub_ops_keep_query_suffix_through_ingest() -> None:
     """Action verbs in the path key survive ``op_id = f'{method}:{path}'``.
 
     The reconciliation hinge: ``?action=<verb>`` is part of the path key
@@ -189,10 +208,18 @@ def test_action_discriminated_sub_ops_keep_query_suffix_through_ingest(
     } <= action_op_ids
 
     spec = _build_vcenter_fixture(action_op_ids)
-    spec_path = tmp_path / "vcenter.yaml"
-    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vcenter-action.yaml"
 
-    rows = parse_openapi(str(spec_path), spec_source="spec:vcenter.yaml")
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200,
+                content=spec_bytes,
+                headers={"content-type": "application/json"},
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vcenter.yaml")
     ingested_op_ids = {row.op_id for row in rows}
 
     # Every action op_id round-trips with its ``?action=`` suffix intact.

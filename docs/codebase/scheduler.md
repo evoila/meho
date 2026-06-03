@@ -34,9 +34,11 @@ DBOS rebase swaps only the loop module.
 - `ScheduledTrigger` ([db/models.py](../../backend/src/meho_backplane/db/models.py))
   — the durable row. One per trigger. Columns:
   - `id`, `tenant_id` (real FK), `agent_definition_id` (real FK to
-    `agent_definition` — `ondelete` is the default NO ACTION, so a
-    definition cannot be removed while triggers reference it),
-    `identity_sub`, `created_by_sub`.
+    `agent_definition` with `ON DELETE CASCADE` — migration `0035`,
+    #1480 — so deleting a definition cascade-deletes its trigger rows,
+    including a cancelled one retained for audit; before 0035 the
+    default `NO ACTION` made a once-scheduled definition undeletable via
+    the API), `identity_sub`, `created_by_sub`.
   - `kind` (closed enum: `cron`/`one_off`), `cron_expr` (NULL for
     one-off), `fire_at` (one-off scheduled instant, NULL for cron),
     `timezone` (IANA name, default `UTC`).

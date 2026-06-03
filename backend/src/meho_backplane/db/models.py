@@ -3479,11 +3479,16 @@ class ScheduledTrigger(Base):
       replayed tenant id surfaces as :class:`IntegrityError` at insert.
 
     * ``agent_definition_id`` -- UUID NOT NULL with a real
-      ``REFERENCES agent_definition(id)`` FK. The parent table already
-      exists at HEAD (``0016`` shipped ahead of this work), so the FK is
-      tightened here -- the sibling :class:`AgentRun` (``0017``) had to
-      use a soft-FK only because its migration landed in parallel with
-      ``0016``. A trigger cannot point at a deleted definition.
+      ``REFERENCES agent_definition(id) ON DELETE CASCADE`` FK. The
+      parent table already exists at HEAD (``0016`` shipped ahead of this
+      work), so the FK is tightened here -- the sibling
+      :class:`AgentRun` (``0017``) had to use a soft-FK only because its
+      migration landed in parallel with ``0016``. A trigger cannot point
+      at a definition that no longer exists: deleting the definition
+      cascade-deletes its triggers (``ondelete='CASCADE'`` added by
+      migration ``0035`` / #1480), so a once-scheduled definition stays
+      deletable instead of being pinned by an audit-retained cancelled
+      trigger.
 
     * ``kind`` -- Text NOT NULL with a DB-layer ``CHECK kind IN (...)``
       constraint enforcing the closed
@@ -3570,9 +3575,15 @@ class ScheduledTrigger(Base):
     )
     # Real REFERENCES agent_definition(id) FK -- the parent table exists
     # at HEAD (0016) so this Task tightens the FK 0017 had to leave soft.
+    # ``ondelete='CASCADE'`` (migration 0035, #1480): deleting a
+    # definition removes its dependent trigger rows -- including a
+    # cancelled one cancel() retains for audit -- so a once-scheduled
+    # definition is still deletable. The cascade must be the DB-level FK
+    # clause, not an ORM ``cascade=`` relationship: the delete path issues
+    # a bulk Core ``DELETE`` that bypasses unit-of-work cascades.
     agent_definition_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),
-        ForeignKey("agent_definition.id"),
+        ForeignKey("agent_definition.id", ondelete="CASCADE"),
         nullable=False,
     )
     kind: Mapped[str] = mapped_column(Text, nullable=False)

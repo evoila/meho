@@ -111,6 +111,17 @@ connector-related release-notes line.
   previously this field read a nonexistent `Operator.identity_act` and
   was always null. Direct human approvals keep `principal_act=NULL`
   (#1481).
+- JSONFlux: a large list response reduced to a `ResultHandle` (e.g.
+  `k8s.logs`) now previews the **most-recent** rows inline instead of
+  the oldest. Connectors whose op returns a chronologically-ordered
+  collection declare `llm_instructions.result_ordering = {"sample":
+  "tail"}`; the reducer samples the tail of the set (the bottom of a
+  `kubectl logs` window) rather than a bare `LIMIT`. Connector
+  agent-facing strings that pointed at a `result_query` /
+  `result_describe` / `HandleStore` read-back surface that does not
+  exist were corrected to the truthful guidance (re-call with narrower
+  params / native pagination); string-shaped outputs such as `k8s.exec`
+  are unaffected (#1479).
 
 ## [0.10.0] - 2026-06-01
 

@@ -414,8 +414,9 @@ FLEET_CORE_OPS: Final[tuple[FleetCoreOp, ...]] = (
                 "wrapper-verified reachability probe (guaranteed to "
                 "respond in VCF 9.0 even when /about is broken). "
                 "Supports no query parameters; small lists return "
-                "inline, large ones return a JSONFlux handle through "
-                "the shared HandleStore."
+                "inline, large ones are reduced to a JSONFlux handle "
+                "carrying a bounded inline sample plus a ``fetch_more`` "
+                "envelope (no handle read-back tool exists in this version)."
             ),
             output_shape=(
                 "Array of Datacenter objects; each carries vmid "
@@ -474,8 +475,8 @@ FLEET_CORE_OPS: Final[tuple[FleetCoreOp, ...]] = (
                 "vRA + vIDM + Postgres nodes). The primary entry point "
                 "for any Fleet inventory workflow. Large appliances "
                 "managing many environments return a JSONFlux handle "
-                "through the shared HandleStore; use result_describe + "
-                "result_query to navigate the full set."
+                "carrying a bounded inline sample plus a ``fetch_more`` "
+                "envelope (no handle read-back tool exists in this version)."
             ),
             output_shape=(
                 "Array of Environment objects; each carries "
@@ -560,9 +561,11 @@ FLEET_CORE_OPS: Final[tuple[FleetCoreOp, ...]] = (
                 "Returns the most recent requests by createdOn; "
                 "operators on busy appliances commonly see thousands "
                 "of historical entries, so the call returns a JSONFlux "
-                "handle through the shared HandleStore — use "
-                "result_describe + result_query to filter by state or "
-                "requestType. Use to answer 'what workflows is Fleet "
+                "handle carrying a bounded inline sample plus a "
+                "``fetch_more`` envelope. Re-call with a narrower filter "
+                "(state or requestType) to scope the set down rather than "
+                "expecting a handle read-back tool. Use to answer 'what "
+                "workflows is Fleet "
                 "currently running' or 'what was the last upgrade'."
             ),
             output_shape=(

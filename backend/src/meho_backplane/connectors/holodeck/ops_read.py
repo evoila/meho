@@ -987,9 +987,10 @@ READ_OPS: tuple[HolodeckOp, ...] = (
             "the pwsh-over-SSH transport and returns one row per active "
             "nested pod. Each row carries the pod ID, name, state, "
             "primary network, and embedded VM count. Returns a "
-            "``{rows, total}`` envelope; future JSONFlux reducer will "
-            "spill large pod lists to the HandleStore via the standard "
-            "``result_describe`` / ``result_query`` flow. No params; "
+            "``{rows, total}`` envelope; the dispatcher's JSONFlux reducer "
+            "wraps a large pod list in a ResultHandle carrying a bounded "
+            "inline sample plus a ``fetch_more`` envelope (no handle "
+            "read-back tool exists in this version). No params; "
             "safe to call on any healthy HoloRouter target."
         ),
         parameter_schema=_EMPTY_PARAMS,
@@ -1016,9 +1017,10 @@ READ_OPS: tuple[HolodeckOp, ...] = (
             "parameter_hints": {},
             "output_shape": (
                 "``{rows: [{...pod fields...}], total: N}``. Rows are "
-                "returned inline; future JSONFlux reducer paths large "
-                "pod lists through ``result_describe`` / ``result_query`` "
-                "via the HandleStore. ``error`` is set when the cmdlet "
+                "returned inline; a large pod list is reduced to a "
+                "JSONFlux ResultHandle carrying a bounded inline sample "
+                "plus a ``fetch_more`` envelope (no handle read-back tool "
+                "exists in this version). ``error`` is set when the cmdlet "
                 "failed."
             ),
         },

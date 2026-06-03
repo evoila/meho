@@ -386,10 +386,10 @@ VROPS_CORE_OPS: Final[tuple[VropsCoreOp, ...]] = (
                 "resourceKind (e.g. 'VirtualMachine', 'HostSystem', "
                 "'Datastore'), adapterKind (e.g. 'VMWARE'), and name "
                 "query parameters to narrow large fleets; supports "
-                "pagination via page + pageSize. Large lists return a "
-                "JSONFlux handle through the shared HandleStore — use "
-                "result_describe + result_query to navigate the full "
-                "set."
+                "pagination via page + pageSize. A large list is reduced "
+                "to a JSONFlux handle with a bounded inline sample plus a "
+                "``fetch_more`` envelope; page through with page + pageSize "
+                "to read beyond the sample."
             ),
             output_shape=(
                 "Object with resourceList[]; each entry carries identifier "

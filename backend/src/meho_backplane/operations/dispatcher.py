@@ -732,6 +732,31 @@ def _pagination_hint_from_descriptor(descriptor: EndpointDescriptor) -> dict[str
     return None
 
 
+def _result_ordering_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``result_ordering`` from a descriptor's ``llm_instructions``.
+
+    G0.19-T1 (#1479). Connectors whose op returns a chronologically-ordered
+    collection (``k8s.logs`` emits oldest-first log lines) attach
+    ``{"sample": "tail"}`` under ``llm_instructions.result_ordering``; the
+    reducer reads it via the dispatcher-supplied context and samples the
+    *most-recent* rows for the inline preview instead of the oldest. Mirrors
+    :func:`_pagination_hint_from_descriptor` exactly -- a plain dict is
+    returned (not a validated model) so this layer stays free of a
+    connectors-schema import; the reducer interprets it.
+
+    ``None`` outcomes (op didn't register the hint, ``llm_instructions`` is
+    ``None``, or the slot's value is not a dict) all flow to the reducer as
+    "no ordering hint" -- it keeps the head-first default.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_ordering")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _reduce_or_error(
     *,
     op_id: str,
@@ -788,6 +813,16 @@ async def _reduce_or_error(
     pagination_hint = _pagination_hint_from_descriptor(descriptor)
     if pagination_hint is not None:
         reducer_context["pagination_hint"] = pagination_hint
+    # G0.19-T1 (#1479): forward the op's result-ordering hint (when the
+    # connector author registered one via ``llm_instructions``) so the
+    # reducer samples the *most-recent* rows of a chronologically-ordered
+    # collection (``k8s.logs``) instead of the oldest. ``None`` on ops
+    # without a hint -- the reducer keeps the head-first default. Pulled
+    # here (vs. in the reducer) for the same decoupling reason as the
+    # pagination hint: the reducer stays free of :class:`EndpointDescriptor`.
+    result_ordering = _result_ordering_from_descriptor(descriptor)
+    if result_ordering is not None:
+        reducer_context["result_ordering"] = result_ordering
     try:
         return await _DEFAULT_REDUCER.reduce(
             raw,

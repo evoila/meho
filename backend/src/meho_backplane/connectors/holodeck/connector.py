@@ -480,10 +480,11 @@ class HolodeckConnector(SshConnector):
 
         Delegates to
         :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_pod_list`.
-        Large pod lists are paged via the future JSONFlux reducer
-        (HandleStore key ``holodeck_pod_list``); the handler emits the
-        ``{rows, total}`` envelope today so the reducer can switch
-        without a connector change.
+        A large pod list is reduced by the dispatcher's default
+        JsonFluxReducer into a ResultHandle (bounded inline sample plus a
+        ``fetch_more`` envelope); the handler emits the ``{rows, total}``
+        envelope so the reducer detects the collection without a connector
+        change.
         """
         from meho_backplane.connectors.holodeck.ops_read import (
             holodeck_pod_list as _holodeck_pod_list,

@@ -443,8 +443,10 @@ HARBOR_CORE_OPS: Final[tuple[HarborCoreOp, ...]] = (
                 "Call to list repositories (image names) within a Harbor project. "
                 "Requires project_name from harbor.project.list. Supports "
                 "pagination via 'page' and 'page_size'; large projects may "
-                "return many repositories. Large lists return a JSONFlux "
-                "handle through the shared HandleStore."
+                "return many repositories. A large list is reduced to a "
+                "JSONFlux handle with a bounded inline sample plus a "
+                "``fetch_more`` envelope; page through with 'page' / "
+                "'page_size' to read beyond the sample."
             ),
             output_shape=(
                 "Array of Repository objects; each carries id, name "
@@ -489,8 +491,9 @@ HARBOR_CORE_OPS: Final[tuple[HarborCoreOp, ...]] = (
                 "tags associated with each digest, the digest itself, push "
                 "time, SBOM accessor presence, and signature status. Requires "
                 "project_name and repository_name from prior list calls. "
-                "Large repositories return a JSONFlux handle; use "
-                "result_describe + result_query to navigate the full set."
+                "A large repository is reduced to a JSONFlux handle with a "
+                "bounded inline sample plus a ``fetch_more`` envelope; page "
+                "through with 'page' / 'page_size' to read beyond the sample."
             ),
             output_shape=(
                 "Array of Artifact objects; each carries digest (sha256:…), "

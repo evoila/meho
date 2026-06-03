@@ -55,13 +55,18 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.jsonflux.query.engine import QueryEngine
 from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
     reset_dispatcher_caches,
 )
 from meho_backplane.operations.dispatcher import set_default_reducer
-from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.jsonflux_reducer import (
+    JsonFluxReducer,
+    _query_sample,
+    _sample_from_tail,
+)
 from meho_backplane.operations.reducer import PassThroughReducer, Reducer
 from meho_backplane.settings import get_settings
 
@@ -195,6 +200,173 @@ async def test_materialize_handle_for_under_row_over_byte_threshold() -> None:
     assert isinstance(reduced, dict)
     assert reduced["row_count"] == 5
     assert "value" not in reduced
+
+
+# ---------------------------------------------------------------------------
+# Sample ordering — head (default) vs tail (G0.19-T1 #1479)
+# ---------------------------------------------------------------------------
+
+
+def _register_ordered_table(engine: QueryEngine, n: int) -> None:
+    """Register an ``n``-row table whose ``seq`` column is the row order.
+
+    ``seq`` ascends with registration order so an assertion can name the
+    expected head / tail rows without depending on DuckDB's (unguaranteed)
+    scan order for a bare ``SELECT``.
+    """
+    engine.register(
+        "result",
+        [{"seq": i, "line": f"line-{i}"} for i in range(n)],
+        unwrap="auto",
+    )
+
+
+def test_query_sample_default_returns_head() -> None:
+    """``_query_sample`` without ``from_tail`` returns the first N rows.
+
+    The order-agnostic default: a Vault key list or topology set has no
+    "more recent" end, so the head sample is the right preview. Pins the
+    pre-#1479 behaviour so the tail path is strictly additive.
+    """
+    engine = QueryEngine()
+    try:
+        _register_ordered_table(engine, 20)
+        sample = _query_sample(engine, 5)
+    finally:
+        engine.close()
+
+    assert [row["seq"] for row in sample] == [0, 1, 2, 3, 4]
+
+
+def test_query_sample_from_tail_returns_most_recent_in_chronological_order() -> None:
+    """``_query_sample(from_tail=True)`` returns the LAST N rows, oldest-first.
+
+    The #1479 fix: a ``k8s.logs(tail=500)`` reduce must preview the
+    most-recent lines (the bottom of the window), not the oldest five
+    (health-probe noise). The slice is the tail of the collection,
+    re-sorted ascending so it reads like the bottom of a ``kubectl logs``
+    window rather than reversed.
+    """
+    engine = QueryEngine()
+    try:
+        _register_ordered_table(engine, 20)
+        sample = _query_sample(engine, 5, from_tail=True)
+    finally:
+        engine.close()
+
+    # The five most-recent rows (16..19 plus 15), in chronological order.
+    assert [row["seq"] for row in sample] == [15, 16, 17, 18, 19]
+
+
+def test_query_sample_zero_size_returns_empty_in_both_modes() -> None:
+    """``sample_size <= 0`` short-circuits to ``[]`` regardless of ``from_tail``."""
+    engine = QueryEngine()
+    try:
+        _register_ordered_table(engine, 10)
+        assert _query_sample(engine, 0) == []
+        assert _query_sample(engine, 0, from_tail=True) == []
+    finally:
+        engine.close()
+
+
+def test_sample_from_tail_resolves_only_the_tail_ordering() -> None:
+    """``_sample_from_tail`` is True only for ``{"sample": "tail"}``.
+
+    Every other shape — no context, no hint, a non-dict value, a dict
+    without ``sample``, or a different ``sample`` value — resolves to the
+    head-first default. The hint is purely additive.
+    """
+    assert _sample_from_tail({"result_ordering": {"sample": "tail"}}) is True
+
+    assert _sample_from_tail(None) is False
+    assert _sample_from_tail({}) is False
+    assert _sample_from_tail({"result_ordering": None}) is False
+    assert _sample_from_tail({"result_ordering": {"sample": "head"}}) is False
+    assert _sample_from_tail({"result_ordering": {}}) is False
+    # Malformed (non-dict) value must not raise — falls back to head.
+    assert _sample_from_tail({"op_id": "x", "result_ordering": "tail"}) is False
+
+
+async def test_reduce_tail_op_samples_most_recent_lines() -> None:
+    """A tail-ordered op's reduce surfaces the most-recent rows inline.
+
+    The agent-facing acceptance path for a ``k8s.logs``-shaped response:
+    the reducer materializes the >threshold ``lines`` collection and the
+    inline ``sample`` carries the **most-recent** lines (the requested
+    tail) rather than the oldest. This is the inline "obtain the requested
+    tail" reachability the #1479 DoD requires for log-shaped ops.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    # Oldest-first, like k8s.logs ``lines``: line-0 is the oldest.
+    lines = [f"line-{i:03d}" for i in range(495)]
+    payload = {"lines": lines}
+    context = {"op_id": "k8s.logs", "result_ordering": {"sample": "tail"}}
+
+    reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None
+    assert handle.total_rows == 495
+    # The inline sample is the five MOST-RECENT lines, chronological.
+    sample_values = [row["value"] for row in reduced["sample"]]
+    assert sample_values == [
+        "line-490",
+        "line-491",
+        "line-492",
+        "line-493",
+        "line-494",
+    ]
+    # The handle's sample_rows preview agrees with the inlined summary.
+    assert handle.sample_rows is not None
+    assert [dict(row)["value"] for row in handle.sample_rows] == sample_values
+
+
+async def test_reduce_without_ordering_hint_keeps_oldest_first_sample() -> None:
+    """No ``result_ordering`` hint → the sample stays head-first (oldest).
+
+    Backwards-compat guard: an op that never declared the hint behaves
+    exactly as it did before #1479 — the first N rows of the collection.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    lines = [f"line-{i:03d}" for i in range(495)]
+    payload = {"lines": lines}
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "k8s.logs"})
+
+    assert handle is not None
+    sample_values = [row["value"] for row in reduced["sample"]]
+    assert sample_values == [
+        "line-000",
+        "line-001",
+        "line-002",
+        "line-003",
+        "line-004",
+    ]
+
+
+async def test_reduce_leaves_string_shaped_payload_untouched() -> None:
+    """A string-shaped op output (e.g. ``k8s.exec``) is not reduced.
+
+    Regression guard (#1479 AC4): ``k8s.exec`` returns
+    ``{stdout: str, stderr: str, exit_code, ...}`` — no list-shaped
+    collection — so ``_detect_collection`` finds nothing and the reducer
+    passes the payload through verbatim with ``handle is None``. The tail-
+    ordering work must not start reducing string-shaped streams (whose
+    per-stream byte cap is a separate concern enforced in the handler).
+    """
+    reducer = JsonFluxReducer(row_threshold=0)  # force-reduce any collection
+    # A huge stdout string must still pass through: it is not a list.
+    payload = {
+        "stdout": "x" * 200_000,
+        "stderr": "",
+        "exit_code": 0,
+        "timed_out": False,
+        "truncated": False,
+    }
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "k8s.exec"})
+
+    assert handle is None, "string-shaped exec output must not materialize a handle"
+    assert reduced is payload, "pass-through must return the exact input payload object"
 
 
 # ---------------------------------------------------------------------------
@@ -600,3 +772,85 @@ async def test_reducing_dispatch_writes_handle_metadata_into_audit_payload(
     # The broadcast event also fired.
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "ok"
+
+
+async def _tail_log_handler(
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Module-level handler returning a 200-line oldest-first ``lines`` set.
+
+    Mirrors ``k8s.logs``' output: ``lines`` is chronological (line-000 is
+    the oldest, line-199 the most recent). 200 lines clears the 50-row
+    materialization threshold so the dispatch path reduces it.
+    """
+    del target, params
+    return {"lines": [f"line-{i:03d}" for i in range(200)]}
+
+
+@pytest.fixture
+async def _registered_tail_ordered_op(
+    stub_embedding_service: AsyncMock,
+) -> AsyncIterator[None]:
+    """Register a typed op carrying ``llm_instructions.result_ordering = tail``.
+
+    Exercises the dispatcher → reducer ordering wiring end to end: the
+    descriptor's ``llm_instructions`` slot is what
+    ``_result_ordering_from_descriptor`` lifts into the reducer context.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="k8s.logs.like",
+        handler=_tail_log_handler,
+        summary="Fetch many log lines.",
+        description="Fetch many log lines.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        llm_instructions={"result_ordering": {"sample": "tail"}},
+        embedding_service=stub_embedding_service,
+    )
+    yield
+
+
+async def test_reducing_dispatch_honours_result_ordering_tail_hint(
+    _registered_tail_ordered_op: None,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A tail-ordered op dispatched end-to-end samples the most-recent lines.
+
+    G0.19-T1 (#1479). The descriptor's
+    ``llm_instructions["result_ordering"] = {"sample": "tail"}`` is lifted
+    by ``dispatcher._result_ordering_from_descriptor`` into
+    ``reducer_context["result_ordering"]``; ``JsonFluxReducer`` then samples
+    the tail. This proves the whole wire — not just the reducer in
+    isolation — surfaces the requested tail to the agent.
+    """
+    set_default_reducer(JsonFluxReducer(sample_size=5))
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="k8s.logs.like",
+            target=_FakeTarget(),
+            params={},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok", (
+        f"expected ok; got status={result.status!r} error={result.error!r}"
+    )
+    assert result.handle is not None, "a 200-line response must materialize a handle"
+    assert result.handle.total_rows == 200
+    assert result.handle.sample_rows is not None
+    sample_values = [dict(row)["value"] for row in result.handle.sample_rows]
+    assert sample_values == [
+        "line-195",
+        "line-196",
+        "line-197",
+        "line-198",
+        "line-199",
+    ], "the dispatched tail-ordered op must surface the most-recent lines inline"

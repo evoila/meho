@@ -4,8 +4,11 @@ The `JsonFluxReducer` is MEHO's production answer to CLAUDE.md postulate 6
 and v0.1-spec §4: no agent ever sees a 4 MB raw API response. Any
 operation returning a set-shaped payload above threshold is materialized
 into an in-memory DuckDB table, summarized, and replaced with a
-[`ResultHandle`](operations-substrate.md#jsonflux-integration); agents
-drill in via the `result_*` meta-tools.
+[`ResultHandle`](operations-substrate.md#jsonflux-integration) carrying a
+bounded inline `sample` plus a self-documenting `fetch_more` envelope. No
+handle read-back meta-tool (`result_query` / `result_describe`) exists in
+this version — the `fetch_more` envelope tells the agent how to act on more
+than the sample (re-call with narrower params / native pagination).
 
 The reduction engine is **vendored** — copied into this repo rather than
 pulled as a PyPI dependency — because the upstream is a single
@@ -300,6 +303,48 @@ hint doesn't break the operator's read at runtime. Returning a
 plain dict from the dispatcher helper keeps the dispatcher layer
 free of a Pydantic-import dependency on the connectors schema;
 the reducer owns the validation boundary.
+
+### Sample ordering — head vs tail (G0.19-T1, #1479)
+
+The inline `sample` is the first `sample_size` rows of the materialized
+table (registration order) **by default**. That is correct for
+order-agnostic sets — a Vault key list, a topology row set — where
+neither end is more salient.
+
+It is *wrong* for a chronologically-ordered collection. `k8s.logs`
+returns its `lines` oldest-first (kubectl/k8s API order), so a bare
+`SELECT … LIMIT 5` surfaces the **oldest** five lines — typically
+health-probe noise — when a log-triage reader wants the **most-recent**
+five. (DuckDB applies no implicit ordering: without an explicit
+`ORDER BY`, `LIMIT` returns an implementation-ordered subset.)
+
+Connectors whose op returns an oldest-first collection declare a
+`result_ordering` hint under `llm_instructions`:
+
+```python
+register_typed_operation(
+    op_id="k8s.logs",
+    ...,
+    llm_instructions={
+        "result_ordering": {"sample": "tail"},
+        # ...other llm_instructions slots...
+    },
+)
+```
+
+`dispatcher._result_ordering_from_descriptor(descriptor)` lifts the raw
+dict from `descriptor.llm_instructions["result_ordering"]` and threads it
+through `reducer_context["result_ordering"]` — the exact sibling of the
+`pagination_hint` path. `JsonFluxReducer._sample_from_tail` reads it; on
+`{"sample": "tail"}` the reducer's `_query_sample` numbers the scan with
+`row_number() OVER ()`, keeps the highest-ordinal (most-recent)
+`sample_size` rows, and re-sorts ascending so the returned slice stays
+chronological (reads like the bottom of a `kubectl logs` window). A
+missing / malformed / any-other value keeps the head-first default —
+the hint is purely additive, so an op without it is unchanged. A
+non-dict value is logged once (actionable for the connector author) and
+treated as "no tail ordering" rather than raised, matching the
+never-raise discipline the pagination-hint path follows.
 
 For the wire shape of `fetch_more` on a serialized `ResultHandle`,
 see [`operations-substrate.md` § `ResultHandle` shape](operations-substrate.md#resulthandle-shape-future-facing).

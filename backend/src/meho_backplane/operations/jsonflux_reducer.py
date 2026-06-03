@@ -99,6 +99,30 @@ _ENVELOPE_KEYS = ("value", "results", "elements", "keys", "items", "data")
 #: Column name used when a list-of-scalars is normalized into row dicts.
 _SCALAR_COLUMN = "value"
 
+#: ``context`` key carrying the op's result-ordering hint (a plain dict the
+#: dispatcher lifts from ``llm_instructions``). Mirrors the
+#: ``pagination_hint`` threading: connector authors declare it at op
+#: registration, the dispatcher forwards it verbatim, the reducer reads it
+#: here. Recognised value: ``{"sample": "tail"}`` -- the op's collection is
+#: chronologically ordered oldest-first (k8s/kubectl log line order) and the
+#: meaningful inline preview is the *most-recent* rows, not the oldest.
+_ORDERING_CONTEXT_KEY = "result_ordering"
+
+#: The one ``sample`` ordering that changes the sample query: take the rows
+#: from the tail of the collection (the most-recent N) rather than the head.
+#: Any other / absent value keeps the head-first default, which is correct
+#: for order-agnostic sets (Vault key lists, topology rows) where neither
+#: end is "more recent".
+_SAMPLE_TAIL = "tail"
+
+#: Positional row-ordinal column the tail-sample query assigns via
+#: ``row_number() OVER ()``. DuckDB does not guarantee the order of a bare
+#: ``SELECT``; numbering the registered (Arrow-backed, insertion-ordered)
+#: scan gives a deterministic ordinal we can sort on to pick the tail. The
+#: name is leading-underscored so it can't collide with a real payload
+#: column and is excluded from the returned rows.
+_ROWNUM_COLUMN = "_jsonflux_rownum"
+
 #: Map a DuckDB type's leading token to a JSON Schema ``type``. DuckDB
 #: reports composite types as ``BIGINT[]`` (array) and ``STRUCT(...)``
 #: (object); the prefix match below covers those without enumerating
@@ -233,13 +257,14 @@ class JsonFluxReducer:
         without breaking the contract).
         """
         table_rows = _normalize_rows(rows)
+        sample_from_tail = _sample_from_tail(context)
         engine = QueryEngine()
         try:
             engine.register(_TABLE, table_rows, unwrap="auto")
             total_rows = engine.tables[_TABLE]["row_count"]
             schema_ = _build_json_schema(engine)
             summary_md = engine.describe_tables(samples=self._sample_size)
-            sample_rows = _query_sample(engine, self._sample_size)
+            sample_rows = _query_sample(engine, self._sample_size, from_tail=sample_from_tail)
         finally:
             engine.close()
 
@@ -334,13 +359,73 @@ def _build_json_schema(engine: QueryEngine) -> dict[str, Any]:
     }
 
 
-def _query_sample(engine: QueryEngine, sample_size: int) -> list[dict[str, Any]]:
-    """Return the first *sample_size* rows of the table as plain dicts."""
+def _query_sample(
+    engine: QueryEngine, sample_size: int, *, from_tail: bool = False
+) -> list[dict[str, Any]]:
+    """Return *sample_size* rows of the table as plain dicts.
+
+    Default (``from_tail=False``): the **head** -- the first ``sample_size``
+    rows in registration order. Correct for order-agnostic sets (Vault key
+    lists, topology rows) where neither end is more salient.
+
+    ``from_tail=True``: the **tail** -- the *most-recent* ``sample_size``
+    rows, returned in chronological (oldest-first) order so the inline
+    preview reads like the bottom of a ``kubectl logs`` window. This is the
+    fix for the v0.10.0 dogfood defect where a ``k8s.logs(tail=500)`` reduce
+    surfaced the oldest 5 lines (health-probe noise) instead of the 5 most
+    recent. A bare ``SELECT ... LIMIT`` has no ``ORDER BY`` and so returns
+    an implementation-ordered subset (DuckDB docs: order is uncontrolled
+    without ``ORDER BY``); numbering the scan with ``row_number() OVER ()``
+    and selecting the tail makes the choice deterministic.
+    """
     if sample_size <= 0:
         return []
-    # Safe (sqlalchemy-execute-raw-query): DuckDB in-memory SELECT; the
-    # table name is the fixed module constant and the limit is an int.
-    return engine.query(f"SELECT * FROM {_TABLE} LIMIT {int(sample_size)}")
+    limit = int(sample_size)
+    if not from_tail:
+        # Safe (sqlalchemy-execute-raw-query): DuckDB in-memory SELECT; the
+        # table name is the fixed module constant and the limit is an int.
+        return engine.query(f"SELECT * FROM {_TABLE} LIMIT {limit}")
+    # Tail: assign a positional ordinal over the registered scan, keep the
+    # highest-ordinal (most-recent) ``limit`` rows, and re-sort ascending so
+    # the returned slice stays chronological. ``EXCLUDE`` drops the helper
+    # ordinal so callers never see it.
+    # Safe (sqlalchemy-execute-raw-query): DuckDB in-memory SELECT; the table
+    # name + ordinal column are fixed module constants and the limit is an int.
+    sql = (
+        f"SELECT * EXCLUDE ({_ROWNUM_COLUMN}) FROM ("
+        f"SELECT *, row_number() OVER () AS {_ROWNUM_COLUMN} FROM {_TABLE} "
+        f"ORDER BY {_ROWNUM_COLUMN} DESC LIMIT {limit}"
+        f") ORDER BY {_ROWNUM_COLUMN} ASC"
+    )
+    return engine.query(sql)
+
+
+def _sample_from_tail(context: dict[str, Any] | None) -> bool:
+    """True when the op declared a tail/newest-last result ordering.
+
+    The connector author registers ``llm_instructions["result_ordering"] =
+    {"sample": "tail"}`` on a chronologically-ordered op (``k8s.logs``); the
+    dispatcher forwards that dict verbatim under
+    ``context[_ORDERING_CONTEXT_KEY]``. Absent / malformed / any other value
+    keeps the head-first default -- the hint is purely additive, so an op
+    without it behaves exactly as before. A non-dict or unexpected value is
+    logged once (actionable for the connector author) and treated as "no
+    tail ordering" rather than raised, matching the never-raise discipline
+    the sibling pagination-hint path follows.
+    """
+    if not context:
+        return False
+    raw = context.get(_ORDERING_CONTEXT_KEY)
+    if raw is None:
+        return False
+    if not isinstance(raw, dict):
+        _log.warning(
+            "jsonflux_result_ordering_invalid_shape",
+            op_id=context.get("op_id"),
+            received_type=type(raw).__name__,
+        )
+        return False
+    return raw.get("sample") == _SAMPLE_TAIL
 
 
 def _serialize(payload: Any) -> bytes:

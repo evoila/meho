@@ -660,9 +660,10 @@ _WHEN_TO_USE_FIREWALL = (
     "the operator wants to audit the ruleset; call "
     "``pfsense.firewall.state`` when the operator wants to inspect active "
     "connections. The state table can be large on busy firewalls; rows "
-    "are returned inline as ``{rows, total}``. When the JSONFlux handle "
-    "pattern is supported, large state lists will be available for "
-    "paging via result_describe/result_query."
+    "are returned inline as ``{rows, total}``. A large state list is "
+    "reduced to a JSONFlux handle carrying a bounded inline sample plus a "
+    "``fetch_more`` envelope; to act on more than the sample, re-call with "
+    "a narrower filter rather than expecting a handle read-back tool."
 )
 
 #: Curated ``when_to_use`` for the ``nat`` group.
@@ -834,9 +835,10 @@ READ_OPS: tuple[PfSenseOp, ...] = (
             "output_shape": (
                 "``{rows: [{proto, iface, src, direction, dst, state}], "
                 "total: N}``. Rows are returned inline; ``total`` can be "
-                "in the thousands on busy firewalls. When the JSONFlux "
-                "handle pattern is supported, large state lists will be "
-                "available for paging via result_describe/result_query."
+                "in the thousands on busy firewalls. A large state list is "
+                "reduced to a JSONFlux handle with a bounded inline sample "
+                "plus a ``fetch_more`` envelope; re-call with a narrower "
+                "filter to act on more than the sample."
             ),
         },
     ),

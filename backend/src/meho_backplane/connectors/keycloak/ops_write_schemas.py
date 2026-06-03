@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
+from meho_backplane.connectors.keycloak.ops_read import _UUID_PATTERN, KeycloakOp
 
 __all__ = ["WHEN_TO_USE_WRITE_BY_GROUP", "WRITE_OPS"]
 
@@ -254,7 +254,11 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
             "type": "object",
             "properties": {
                 "representation": _REPRESENTATION_PROP,
-                "id": {"type": "string", "description": "Client internal UUID."},
+                "id": {
+                    "type": "string",
+                    "pattern": _UUID_PATTERN,
+                    "description": "Client internal UUID.",
+                },
                 "client_id": {
                     "type": "string",
                     "description": "Human clientId (resolved to UUID if id absent).",
@@ -324,7 +328,11 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
             "type": "object",
             "properties": {
                 "representation": _REPRESENTATION_PROP,
-                "id": {"type": "string", "description": "Client internal UUID."},
+                "id": {
+                    "type": "string",
+                    "pattern": _UUID_PATTERN,
+                    "description": "Client internal UUID.",
+                },
                 "client_id": {
                     "type": "string",
                     "description": "Human clientId (resolved to UUID if id absent).",
@@ -400,7 +408,11 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         parameter_schema={
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "User internal UUID."},
+                "id": {
+                    "type": "string",
+                    "pattern": _UUID_PATTERN,
+                    "description": "User internal UUID.",
+                },
                 "username": {
                     "type": "string",
                     "description": "Username (resolved to UUID if id absent).",
@@ -439,7 +451,11 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         parameter_schema={
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "User internal UUID."},
+                "id": {
+                    "type": "string",
+                    "pattern": _UUID_PATTERN,
+                    "description": "User internal UUID.",
+                },
                 "username": {
                     "type": "string",
                     "description": "Username (resolved to UUID if id absent).",

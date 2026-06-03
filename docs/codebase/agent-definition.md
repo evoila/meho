@@ -141,6 +141,17 @@ existence is not leaked across the tenant boundary.
 cross-tenant returns `False` → 404. The CLI `delete` verb prompts for
 confirmation unless `--confirm` is passed.
 
+The delete is a **bulk Core** `DELETE`, so a definition's dependent
+`scheduled_trigger` rows are removed by the DB-level
+`ON DELETE CASCADE` on `scheduled_trigger.agent_definition_id`
+(migration `0035`, #1480), not by an ORM relationship cascade (which a
+bulk delete bypasses). This covers a cancelled trigger the scheduler
+retains for audit too — before 0035 such a row left an FK violation
+that surfaced as an opaque `-32603 "internal error: IntegrityError"`
+(MCP) / unhandled 500 (REST), making a once-scheduled definition
+undeletable via the API. `agent_run` history is a nullable soft-FK with
+no `ForeignKey` clause, so runs never block deletion and survive it.
+
 ## RBAC
 
 Reads (`list` / `show`) require `operator`; writes (`create` / `edit` /
@@ -208,3 +219,7 @@ event regardless of transport (REST vs MCP).
   `kb/service.py`.
 - Migration FK + dialect-portability discipline:
   `alembic/versions/0008_create_broadcast_override.py`.
+- Delete cascade onto `scheduled_trigger` (#1480):
+  `alembic/versions/0035_scheduled_trigger_fk_cascade.py` — dialect-split
+  FK rebuild (PG online `ALTER`, SQLite `batch_alter_table` table
+  recreate with a `naming_convention`).

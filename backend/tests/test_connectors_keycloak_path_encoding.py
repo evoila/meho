@@ -57,7 +57,7 @@ _CLIENT_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _USER_UUID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 _TRAVERSAL_ID = "../../../../realms/master/clients"
-_TRAVERSAL_ENCODED = "..%2F..%2F..%2F..%2Frealms%2Fmaster%2Fclients"
+_TRAVERSAL_ENCODED = "%2E%2E%2F%2E%2E%2F%2E%2E%2F%2E%2E%2Frealms%2Fmaster%2Fclients"
 
 _OPERATOR_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000096")
 _OPERATOR = Operator(
@@ -75,11 +75,18 @@ _OPERATOR = Operator(
 # ---------------------------------------------------------------------------
 
 
-def test_quote_segment_encodes_slash() -> None:
-    """quote_segment encodes '/' so path traversal segments cannot form."""
+def test_quote_segment_encodes_slash_and_dot() -> None:
+    """quote_segment encodes '/' and '.' so neither slash nor dot-segment traversal can form."""
     encoded = quote_segment("../../../../realms/master/clients")
     assert "/" not in encoded
-    assert encoded == "..%2F..%2F..%2F..%2Frealms%2Fmaster%2Fclients"
+    assert "." not in encoded
+    assert encoded == "%2E%2E%2F%2E%2E%2F%2E%2E%2F%2E%2E%2Frealms%2Fmaster%2Fclients"
+
+
+def test_quote_segment_encodes_bare_dot_segment() -> None:
+    """A bare '..' id is encoded to '%2E%2E' and cannot be normalised by httpx."""
+    assert quote_segment("..") == "%2E%2E"
+    assert quote_segment(".") == "%2E"
 
 
 def test_quote_segment_leaves_normal_uuid_unchanged() -> None:
@@ -93,18 +100,33 @@ def test_quote_segment_accepts_any_type_via_str_coercion() -> None:
     assert quote_segment(42) == "42"
 
 
-def test_quote_segment_matches_argocd_precedent() -> None:
-    """quote_segment(v) == quote(str(v), safe='') — identical to ArgoCD _quote_name."""
+def test_quote_segment_extends_argocd_precedent_with_dot_encoding() -> None:
+    """quote_segment extends the ArgoCD _quote_name pattern by also encoding '.'.
+
+    ArgoCD _quote_name uses ``quote(str(v), safe="")``, which leaves '.' unencoded
+    because RFC 3986 lists it as an unreserved character.  The Keycloak connector
+    tightens this by additionally encoding '.' so that bare '..' dot-segments cannot
+    be normalised away by httpx at request-build time.
+
+    Inputs without '.' still match the ArgoCD output exactly; inputs with '.' differ
+    in that every '.' is replaced with '%2E'.
+    """
     from urllib.parse import quote
 
-    test_cases = [
-        "../../../../realms/master",
+    # Values without dots: output must match the ArgoCD primitive.
+    no_dot_cases = [
         "valid-uuid-1234",
         "name with spaces",
         "name/with/slashes",
     ]
-    for val in test_cases:
+    for val in no_dot_cases:
         assert quote_segment(val) == quote(str(val), safe=""), f"mismatch for {val!r}"
+
+    # Values with dots: quote_segment encodes '.' while ArgoCD does not.
+    assert quote_segment("..") == "%2E%2E"
+    assert quote_segment("../../../../realms/master") == (
+        quote("../../../../realms/master", safe="").replace(".", "%2E")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -405,23 +427,32 @@ def test_quote_segment_imported_and_called_in_both_handler_modules() -> None:
     This is the programmatic equivalent of acceptance criterion 2's grep:
     ``grep -rn 'quote' backend/src/meho_backplane/connectors/keycloak/``
 
-    Checks that ``quote_segment`` is imported and called at least twice in
-    both ops_read and ops_write (each module has at least 2 id/uuid path sites).
+    Uses exact call-site counts (not >=) so that any future addition or removal
+    of a call site triggers an explicit review.  Current counts:
+
+    * ops_read: 2 sites — ``keycloak_client_get`` + ``keycloak_role_mapping_get``.
+    * ops_write: 4 sites — ``keycloak_client_update``, ``keycloak_protocol_mapper_create``,
+      ``keycloak_user_password_reset``, ``keycloak_role_mapping_add``.
     """
     import inspect
 
     import meho_backplane.connectors.keycloak.ops_read as ops_read_mod
     import meho_backplane.connectors.keycloak.ops_write as ops_write_mod
 
-    for mod in (ops_read_mod, ops_write_mod):
+    expected_counts = {
+        ops_read_mod: 2,
+        ops_write_mod: 4,
+    }
+    for mod, expected in expected_counts.items():
         source = inspect.getsource(mod)
         # quote_segment must be imported.
         assert "quote_segment" in source, (
             f"quote_segment not found in {mod.__name__} — path-segment encoding is missing"
         )
-        # quote_segment must be called at least twice — each module has ≥2 path sites.
+        # Exact call-site count — regression guard against silently adding/removing sites.
         call_count = source.count("quote_segment(")
-        assert call_count >= 2, (
-            f"quote_segment() called only {call_count} time(s) in {mod.__name__} — "
-            "expected at least 2 (one per id/uuid path site)"
+        assert call_count == expected, (
+            f"quote_segment() called {call_count} time(s) in {mod.__name__}, "
+            f"expected exactly {expected}. Update this assertion if a new call site "
+            "is intentionally added or removed."
         )

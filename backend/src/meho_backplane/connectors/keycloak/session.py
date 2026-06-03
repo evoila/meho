@@ -117,16 +117,22 @@ _PASSWORD_FIELDS: tuple[str, str] = ("username", "password")
 def quote_segment(value: Any) -> str:
     """Percent-encode a caller-supplied id/uuid for a URL path segment.
 
-    Encodes ``/`` (``safe=""``), so a traversal-shaped id such as
-    ``../../../../realms/master/clients`` becomes
-    ``..%2F..%2F..%2F..%2Frealms%2Fmaster%2Fclients`` and cannot alter
-    the request path structure. Mirrors the ArgoCD connector's
+    Encodes ``/`` (``safe=""``) and ``.`` so that neither slash-based nor
+    dot-segment path traversal (``..``) can alter the request path structure.
+    A traversal-shaped id such as ``../../../../realms/master/clients``
+    becomes ``%2E%2E%2F%2E%2E%2F%2E%2E%2F%2E%2E%2Frealms%2Fmaster%2Fclients``
+    and cannot climb out of the realm sub-tree.  A bare ``..`` id becomes
+    ``%2E%2E`` and is not normalised by httpx.  Mirrors the ArgoCD connector's
     ``_quote_name`` (``argocd/ops_write.py:130-132``).
 
     Applied at every site where a caller-supplied id/uuid is interpolated
     into a Keycloak Admin REST path — both read and write ops.
+
+    Note: In production every id/uuid is additionally validated against the
+    UUID pattern gate before the handler runs, but this function is a safe
+    standalone primitive that does not rely on that upstream gate.
     """
-    return quote(str(value), safe="")
+    return quote(str(value), safe="").replace(".", "%2E")
 
 
 @runtime_checkable

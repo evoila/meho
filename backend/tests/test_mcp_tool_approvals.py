@@ -39,7 +39,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -113,3 +113,48 @@ def test_read_only_tools_call_approval_is_rejected_with_forbidden(
     assert "error" in body, body
     assert body["error"]["code"] == INVALID_PARAMS
     assert "forbidden" in body["error"]["message"].lower(), body
+
+
+# ---------------------------------------------------------------------------
+# T6 (#1483) — self_approval_forbidden MCP error must carry the
+# APPROVAL_ALLOW_SELF_APPROVAL break-glass hint the exception constructs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_self_approval_forbidden_message_carries_break_glass_hint(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``meho.approvals.approve`` self-approval error names ``APPROVAL_ALLOW_SELF_APPROVAL``.
+
+    The role gate passes for ``operator``; the handler then raises
+    :class:`SelfApprovalForbiddenError`, whose message already names the
+    break-glass flag. The MCP ``INVALID_PARAMS`` envelope must keep the
+    ``self_approval_forbidden`` token prefix **and** carry the env-var
+    hint so an agent/operator sees the escape hatch rather than a bare
+    token (#1483).
+    """
+    import uuid
+
+    from meho_backplane.mcp.tools import approvals as approvals_tool
+    from meho_backplane.operations.approval_queue import SelfApprovalForbiddenError
+
+    request_id = uuid.UUID("66666666-6666-6666-6666-666666666666")
+
+    async def _raise_self_approval(*_a: object, **_kw: object) -> None:
+        raise SelfApprovalForbiddenError(request_id, principal_sub="op-test")
+
+    monkeypatch.setattr(approvals_tool, "approve_request", _raise_self_approval)
+
+    client, _op = client_with_operator
+    resp = post_mcp(
+        client,
+        _tools_call("meho.approvals.approve", {"approval_request_id": str(request_id)}),
+    )
+    body = resp.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == INVALID_PARAMS
+    message = body["error"]["message"]
+    assert message.startswith("self_approval_forbidden"), message
+    assert "APPROVAL_ALLOW_SELF_APPROVAL" in message, message

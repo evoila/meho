@@ -368,10 +368,11 @@ async def _approve_handler(
         except SelfApprovalForbiddenError as exc:
             # G11.7-T1 #1401: requester != approver. Surfaced as an
             # invalid-params error so the operator sees the refusal
-            # reason rather than a generic role failure.
-            raise McpInvalidParamsError(
-                "self_approval_forbidden: requester and approver must differ"
-            ) from exc
+            # reason rather than a generic role failure. Append
+            # ``str(exc)`` so the message also carries the
+            # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` break-glass hint the
+            # exception already constructs (#1483).
+            raise McpInvalidParamsError(f"self_approval_forbidden: {exc}") from exc
         except UnauthorizedApprovalError as exc:
             raise McpInvalidParamsError(
                 f"approval_unauthorized: role {exc.role!r} cannot approve"

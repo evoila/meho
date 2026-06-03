@@ -28,10 +28,12 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 
 __all__ = [
+    "connector_class_registered",
     "connector_exists",
     "count_known_ops",
     "lookup_descriptor",
@@ -220,3 +222,57 @@ async def connector_exists(
             .limit(1)
         )
         return group_hit.first() is not None
+
+
+def connector_class_registered(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> bool:
+    """Return whether a v2 connector *class* is registered for the parsed triple.
+
+    The discriminator behind the "registered but not ingested" signal.
+    :func:`connector_exists` probes only DB rows (``endpoint_descriptor`` /
+    ``operation_group``); a connector whose class is registered via
+    :func:`~meho_backplane.connectors.registry.register_connector_v2` but
+    has not yet had operations ingested / typed-registered has *zero* DB
+    rows, so ``connector_exists`` returns ``False`` for it. That case is
+    not "unknown connector" — it is "known class, awaiting ingest". This
+    helper tells the two apart so the meta-tools can return an
+    operator-actionable ``connector_not_ingested`` hint instead of an
+    opaque unknown-connector error.
+
+    *(product, version, impl_id)* is the triple
+    :func:`parse_connector_id` derived from the caller's ``connector_id``.
+    The v2 registry is keyed on the *registration* triple, which for most
+    connectors equals the parsed triple but for SDDC differs (registry
+    ``product="sddc-manager"`` vs parsed ``product="sddc"``). To match the
+    exact rows ``GET /api/v1/connectors`` labels ``state="registered"``
+    (see :func:`~meho_backplane.operations.ingest.list_connectors._class_side_only_items`),
+    each registry entry is rendered to its ``connector_id`` and re-parsed;
+    a registry entry counts as a hit only when its re-parsed triple equals
+    the caller's. This mirrors the listing's lossless-round-trip contract
+    (#773) so a ``connector_not_ingested`` answer here implies a
+    ``state="registered"`` row there, and vice versa.
+
+    v1-compat shim entries (the registry's ``(product, "", "")`` rows the
+    v1 :func:`~meho_backplane.connectors.registry.register_connector`
+    writes) are skipped: an empty ``version`` / ``impl_id`` is a
+    resolver-internal compatibility detail, never a separately registered
+    connector, and never the source of a ``state="registered"`` listing
+    row.
+
+    Registry-only (in-memory, process-local), so no DB round-trip — the
+    caller has already established (via :func:`connector_exists`) that the
+    DB has no rows for the triple.
+    """
+    for _reg_product, reg_version, reg_impl_id in all_connectors_v2():
+        if not reg_version or not reg_impl_id:
+            # v1-compat shim (product, "", "") — not a registered connector.
+            continue
+        connector_id = f"{reg_impl_id}-{reg_version}"
+        parsed_product, parsed_version, parsed_impl_id = parse_connector_id(connector_id)
+        if (parsed_product, parsed_version, parsed_impl_id) == (product, version, impl_id):
+            return True
+    return False

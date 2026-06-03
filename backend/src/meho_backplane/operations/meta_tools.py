@@ -80,14 +80,20 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations._lookup import connector_exists, parse_connector_id
+from meho_backplane.operations._lookup import (
+    connector_class_registered,
+    connector_exists,
+    parse_connector_id,
+)
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
 from meho_backplane.operations.dispatcher import dispatch
+from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
 from meho_backplane.targets.resolver import resolve_target
 
 __all__ = [
     "SEARCH_LIMIT_MAX",
     "CallOperationBody",
+    "ConnectorNotIngestedError",
     "OperationDescriptor",
     "OperationGroupSummary",
     "OperationSearchHit",
@@ -109,12 +115,73 @@ class UnknownConnectorError(ValueError):
     ``except Exception`` would otherwise mistranslate a clean
     "unknown connector" into a JSON-RPC ``INTERNAL_ERROR`` (a worse
     trap than the empty-200 this task removes). The REST route maps
-    this to ``404`` explicitly; the MCP/CLI surfaces let it propagate
-    as the structured handler error they already render. Subclasses
+    this to ``404`` explicitly; the MCP transport maps it to
+    ``INVALID_PARAMS`` (``-32602``) with a typed ``data`` payload (see
+    :mod:`meho_backplane.mcp.tools.operations`). Subclasses
     :class:`ValueError` to stay consistent with the other meta-tool
     domain exceptions (e.g. the missing-target ``ValueError`` mapped
     to ``400`` in :mod:`meho_backplane.api.v1.operations`).
+
+    Carries :attr:`connector_id` (the id the caller passed) so the MCP
+    transport can thread it onto the ``error.data`` discriminator
+    alongside its :class:`ConnectorNotIngestedError` sibling.
     """
+
+    def __init__(self, message: str, *, connector_id: str) -> None:
+        super().__init__(message)
+        self.connector_id = connector_id
+
+
+class ConnectorNotIngestedError(ValueError):
+    """Raised when a ``connector_id`` names a *registered-but-not-ingested* connector.
+
+    The connector's class is registered in the v2 registry (via
+    :func:`~meho_backplane.connectors.registry.register_connector_v2`) but
+    has no ``endpoint_descriptor`` / ``operation_group`` rows yet — the
+    "State 0.5" the ``GET /api/v1/connectors`` listing already surfaces as
+    ``state="registered"`` with a ``next_step`` ingest hint. The meta-tools
+    raise this *instead of* :class:`UnknownConnectorError` so the caller can
+    tell "exists, run ingest" apart from "no such connector" rather than
+    receiving an opaque ``-32603 UnknownConnectorError`` over MCP (#1482).
+
+    Carries the structured detail the surfaces self-correct against:
+
+    * :attr:`connector_id` — the id the caller passed.
+    * :attr:`next_step` — the ``{"verb", "rationale"}`` ingest hint built
+      from the same connector-spec-catalog lookup the listing uses
+      (:func:`~meho_backplane.operations.ingest.list_connectors._next_step_for_registered`),
+      or ``None`` when the catalog/registry could not produce one.
+
+    Subclasses :class:`ValueError` like its sibling so existing
+    ``except ValueError`` call sites keep their behaviour; the MCP handler
+    threads :attr:`as_error_data` onto the JSON-RPC ``error.data`` member
+    and the REST route maps it to ``404`` with the hint in ``detail``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        connector_id: str,
+        next_step: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.connector_id = connector_id
+        self.next_step = next_step
+
+    def as_error_data(self) -> dict[str, Any]:
+        """Render the structured ``error.data`` payload for the MCP surface.
+
+        Shape: ``{"reason": "connector_not_ingested", "connector_id": ...,
+        "next_step": {"verb", "rationale"} | None}``. ``reason`` is the
+        machine-readable discriminator an agent keys on to self-correct to
+        the ``next_step.verb`` ingest command.
+        """
+        return {
+            "reason": "connector_not_ingested",
+            "connector_id": self.connector_id,
+            "next_step": self.next_step,
+        }
 
 
 _log = structlog.get_logger(__name__)
@@ -375,8 +442,66 @@ def _raise_unknown_connector(connector_id: str) -> None:
         f"(e.g. 'vmware-rest-9.0', 'vault-1.x'). If this id appeared in "
         f"GET /api/v1/connectors, the listing is inconsistent with the "
         f"dispatcher's resolve path — please file a bug report; otherwise "
-        f"the id is mistyped or the connector is not registered on this deploy"
+        f"the id is mistyped or the connector is not registered on this deploy",
+        connector_id=connector_id,
     )
+
+
+async def _require_dispatchable_connector(
+    *,
+    operator: Operator,
+    connector_id: str,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> None:
+    """Gate the discovery meta-tools on a *dispatchable* connector.
+
+    Shared by :func:`list_operation_groups` and :func:`search_operations`
+    so the two enforce the identical unknown / not-ingested / known
+    taxonomy. Three outcomes for the parsed *(product, version, impl_id)*
+    triple:
+
+    * **DB rows exist** (:func:`connector_exists` ``True``) — the connector
+      is ingested; return so the caller proceeds to its (possibly empty)
+      data query. An ingested connector with zero *enabled* groups still
+      falls here and yields the operationally-meaningful empty list — the
+      existence gate is enable-agnostic.
+    * **No DB rows, class registered** (:func:`connector_class_registered`
+      ``True``) — "State 0.5": the connector is v2-registered but awaiting
+      ingest. Raise :class:`ConnectorNotIngestedError` carrying the same
+      ``next_step`` ingest hint ``GET /api/v1/connectors`` renders on the
+      ``state="registered"`` row, so the agent can self-correct to the
+      ``meho connector ingest …`` verb instead of receiving an opaque
+      unknown-connector error (#1482).
+    * **No DB rows, no class** — genuinely unknown. Raise
+      :class:`UnknownConnectorError` (the long-form mistyped-id recovery
+      hint).
+    """
+    if await connector_exists(
+        tenant_id=operator.tenant_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    ):
+        return
+    if connector_class_registered(product=product, version=version, impl_id=impl_id):
+        next_step = next_step_for_registered_connector(
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        )
+        verb = next_step.verb if next_step is not None else "meho connector ingest …"
+        raise ConnectorNotIngestedError(
+            f"connector {connector_id!r} is registered but not yet ingested "
+            f"(no operations available). Run `{verb}` to populate its "
+            f"operations, then retry. This is distinct from an unknown "
+            f"connector_id: the connector exists, it just has nothing to "
+            f"dispatch yet.",
+            connector_id=connector_id,
+            next_step=next_step.model_dump(mode="json") if next_step is not None else None,
+        )
+    _raise_unknown_connector(connector_id)
 
 
 async def list_operation_groups(
@@ -393,14 +518,23 @@ async def list_operation_groups(
     union of built-in (``tenant_id IS NULL``) and tenant-curated
     (``tenant_id == operator.tenant_id``) rows.
 
-    An *unknown* ``connector_id`` (no descriptors or groups registered
-    for the parsed ``(product, version, impl_id)`` triple) raises
-    :class:`UnknownConnectorError` — the REST route maps that to a
-    ``404``. A *known* connector with zero enabled groups still returns
-    an empty ``groups`` list (``200 []``): that empty is operationally
-    meaningful (the connector exists; nothing is enabled yet). The
-    distinction ends the "empty catalog" trap where a mis-shaped
-    ``connector_id`` looked indistinguishable from an empty connector.
+    Three connector-existence outcomes (gated by
+    :func:`_require_dispatchable_connector`):
+
+    * *Unknown* ``connector_id`` (no DB rows AND no registered class for
+      the parsed ``(product, version, impl_id)`` triple) raises
+      :class:`UnknownConnectorError` — the REST route maps that to a
+      ``404``, the MCP transport to ``-32602``.
+    * *Registered but not ingested* (the class is in the v2 registry but
+      has zero DB rows — "State 0.5") raises
+      :class:`ConnectorNotIngestedError` carrying the ``meho connector
+      ingest …`` ``next_step`` hint, so the caller self-corrects rather
+      than treating it as unknown (#1482).
+    * *Known/ingested* connector with zero enabled groups still returns
+      an empty ``groups`` list (``200 []``): that empty is operationally
+      meaningful (the connector exists; nothing is enabled yet). The
+      distinction ends the "empty catalog" trap where a mis-shaped
+      ``connector_id`` looked indistinguishable from an empty connector.
 
     Pagination (G0.18-T5 #1358)
     ---------------------------
@@ -418,13 +552,13 @@ async def list_operation_groups(
     connector_id = arguments["connector_id"]
     limit, cursor = _coerce_list_operation_groups_pagination(arguments)
     product, version, impl_id = parse_connector_id(connector_id)
-    if not await connector_exists(
-        tenant_id=operator.tenant_id,
+    await _require_dispatchable_connector(
+        operator=operator,
+        connector_id=connector_id,
         product=product,
         version=version,
         impl_id=impl_id,
-    ):
-        _raise_unknown_connector(connector_id)
+    )
     sessionmaker = get_sessionmaker()
     group_stmt = _build_operation_groups_query(
         product=product,
@@ -489,11 +623,13 @@ async def search_operations(
     debugging) can see whether a hit came from lexical match, semantic
     match, or both.
 
-    Like :func:`list_operation_groups`, an *unknown* ``connector_id``
-    raises :class:`UnknownConnectorError` (REST → ``404``) while a
-    *known* connector with no matching ops still returns an empty
-    ``hits`` list (``200 []``) — identical unknown-vs-known-empty
-    semantics across both meta-tools.
+    Shares :func:`list_operation_groups`'s connector-existence taxonomy
+    via :func:`_require_dispatchable_connector`: an *unknown*
+    ``connector_id`` raises :class:`UnknownConnectorError` (REST →
+    ``404``); a *registered-but-not-ingested* connector raises
+    :class:`ConnectorNotIngestedError` with the ingest ``next_step`` hint
+    (#1482); a *known* connector with no matching ops still returns an
+    empty ``hits`` list (``200 []``).
     """
     connector_id = arguments["connector_id"]
     query = arguments["query"]
@@ -505,19 +641,13 @@ async def search_operations(
         limit = SEARCH_LIMIT_MAX
 
     product, version, impl_id = parse_connector_id(connector_id)
-    if not await connector_exists(
-        tenant_id=operator.tenant_id,
+    await _require_dispatchable_connector(
+        operator=operator,
+        connector_id=connector_id,
         product=product,
         version=version,
         impl_id=impl_id,
-    ):
-        raise UnknownConnectorError(
-            f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
-            f"(e.g. 'vmware-rest-9.0', 'vault-1.x'). If this id appeared in "
-            f"GET /api/v1/connectors, the listing is inconsistent with the "
-            f"dispatcher's resolve path — please file a bug report; otherwise "
-            f"the id is mistyped or the connector is not registered on this deploy"
-        )
+    )
     started = time.monotonic()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

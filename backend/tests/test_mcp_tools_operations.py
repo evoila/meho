@@ -23,11 +23,14 @@ operator-or-above to pass the registry's RBAC list-time filter.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -316,3 +319,136 @@ def test_tools_call_call_operation_accepts_bare_string_target(
         # are fine here; the contract under test is "the schema did not
         # reject pre-handler with INVALID_PARAMS".
         assert body["error"]["code"] != INVALID_PARAMS, body
+
+
+# ---------------------------------------------------------------------------
+# #1482 — registered-but-not-ingested connector surfaces a typed -32602
+# ---------------------------------------------------------------------------
+
+
+class _GhostConnector(Connector):
+    """v2-registered class whose ``connector_id`` round-trips losslessly.
+
+    ``ghost-rest-9.0`` parses back to ``(product="ghost", version="9.0",
+    impl_id="ghost-rest")`` — the listing's lossless-round-trip contract.
+    No DB rows are seeded, so it is the State-0.5 registered-but-not-
+    ingested case the meta-tool gate must classify as
+    ``connector_not_ingested`` rather than an opaque ``-32603``.
+    """
+
+    product = "ghost"
+    version = "9.0"
+    impl_id = "ghost-rest"
+
+    async def fingerprint(self, target, operator=None):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    async def probe(self, target):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+    async def execute(self, target, op_id, params):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+
+@pytest.fixture
+def _ghost_class_registered() -> Iterator[None]:
+    """Register the State-0.5 ghost connector class for the test, then remove it.
+
+    The connector registry is process-global and is NOT reset by the MCP
+    fixtures (which reset only the tool registry), so the registration is
+    torn down explicitly to keep cross-test isolation.
+    """
+    register_connector_v2(
+        product="ghost",
+        version="9.0",
+        impl_id="ghost-rest",
+        cls=_GhostConnector,
+    )
+    try:
+        yield
+    finally:
+        all_connectors_v2().pop(("ghost", "9.0", "ghost-rest"), None)
+        # ``all_connectors_v2`` returns a copy; mutate the live table.
+        from meho_backplane.connectors import registry as _registry
+
+        _registry._REGISTRY_V2.pop(("ghost", "9.0", "ghost-rest"), None)
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_list_operation_groups_not_ingested_is_typed_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    _ghost_class_registered: None,
+) -> None:
+    """#1482: a registered-but-0-row connector returns -32602, not -32603.
+
+    The headline acceptance: ``list_operation_groups`` over MCP for a
+    v2-registered, zero-DB-row connector surfaces a typed
+    ``connector_not_ingested`` hint (``-32602`` + structured
+    ``error.data``), not the opaque ``-32603 internal error:
+    UnknownConnectorError`` the generic ``except Exception`` produced.
+    """
+    from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
+
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/call",
+            "params": {
+                "name": "list_operation_groups",
+                "arguments": {"connector_id": "ghost-rest-9.0"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["code"] != INTERNAL_ERROR
+    data = body["error"]["data"]
+    assert data["reason"] == "connector_not_ingested"
+    assert data["connector_id"] == "ghost-rest-9.0"
+    assert data["next_step"] is not None
+    assert "ingest" in data["next_step"]["verb"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_list_operation_groups_unknown_is_distinct_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    _ghost_class_registered: None,
+) -> None:
+    """#1482 AC3: a genuinely-unknown connector_id is distinguishable.
+
+    It also surfaces ``-32602`` (no longer ``-32603``), but with
+    ``data.reason="unknown_connector"`` — the agent can tell the two
+    cases apart from the structured payload alone.
+    """
+    from meho_backplane.mcp.schemas import INVALID_PARAMS
+
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "name": "list_operation_groups",
+                "arguments": {"connector_id": "nonsuch-9.9"},
+            },
+        },
+    )
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"]["reason"] == "unknown_connector"
+    assert body["error"]["data"]["connector_id"] == "nonsuch-9.9"

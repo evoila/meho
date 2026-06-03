@@ -68,6 +68,10 @@ from meho_backplane.auth.keycloak_admin import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPrincipal
+from meho_backplane.scheduler.vault_credentials import (
+    SchedulerVaultNotConfiguredError,
+    write_agent_secret,
+)
 
 __all__ = [
     "AgentPrincipalCreate",
@@ -156,20 +160,25 @@ class AgentPrincipalService:
     ) -> AgentPrincipalRead:
         """Register a new agent principal.
 
-        Creates the Keycloak client first; on success inserts the DB row.
-        If the Keycloak creation fails the DB row is never written.
+        Creates the Keycloak client first, captures its generated
+        ``client_credentials`` secret, and persists that secret to Vault
+        via :meth:`_persist_secret_to_vault` (so the operator-less
+        scheduler can read it back — G0.19-T2 #1478); on success inserts
+        the DB row. If any step fails the Keycloak client is rolled back
+        and the DB row is never written.
 
         Raises
         ------
         ValueError
             When *name* contains characters outside the safe alphabet.
         AgentPrincipalExistsError
-            When a principal with the same name already exists in this
-            tenant (unique-index violation on DB or Keycloak 409).
-        KeycloakAdminNotConfiguredError
-            When Keycloak admin credentials are not configured.
-        KeycloakAdminError
-            On any Keycloak Admin API failure.
+            Duplicate ``(tenant_id, name)`` (DB unique-index or Keycloak 409).
+        KeycloakAdminNotConfiguredError / KeycloakAdminError
+            Keycloak admin unconfigured / any Admin API failure.
+        SchedulerVaultBrokerError
+            Vault configured but the secret write failed — see
+            :meth:`_persist_secret_to_vault` (an *unset* token is a
+            skip-with-warning, not a raise).
         """
         if not _NAME_PATTERN.fullmatch(payload.name):
             raise ValueError(
@@ -180,7 +189,10 @@ class AgentPrincipalService:
         owner = payload.owner_sub or created_by_sub
         client_id = _keycloak_client_id(payload.name)
 
-        # Phase 1: create Keycloak client (fail before DB on error).
+        # Phase 1: create Keycloak client + capture its generated secret
+        # in the same admin session (create_client returns only the
+        # internal UUID; Keycloak never echoes the generated secret on
+        # create). Fail before any DB write on error.
         kc_client = KeycloakAdminClient.from_settings()
         try:
             async with kc_client:
@@ -190,14 +202,21 @@ class AgentPrincipalService:
                     tenant_id=str(tenant_id),
                     owner_sub=owner,
                 )
+                client_secret = await kc_client.get_client_secret(internal_id)
         except KeycloakClientConflictError as exc:
             raise AgentPrincipalExistsError(payload.name) from exc
 
-        # Phase 2: insert the DB row. If anything fails after the Keycloak
-        # client was created, delete that client before surfacing the error:
-        # a created client with no MEHO row is an orphaned, token-issuing
-        # identity that can never be listed or revoked through MEHO — exactly
-        # the unreachable-kill-switch failure this lifecycle exists to prevent.
+        # Phase 1b: persist the captured secret to Vault for the scheduler.
+        await self._persist_secret_to_vault(
+            client_id,
+            client_secret,
+            internal_id=internal_id,
+            tenant_id=tenant_id,
+            name=payload.name,
+        )
+
+        # Phase 2: insert the DB row (rolls back the Keycloak client on
+        # any failure — see _insert_row).
         row = AgentPrincipal(
             tenant_id=tenant_id,
             name=payload.name,
@@ -207,6 +226,31 @@ class AgentPrincipalService:
             revoked=False,
             created_by_sub=created_by_sub,
         )
+        entry = await self._insert_row(row, internal_id=internal_id, name=payload.name)
+        self._log.info(
+            "agent_principal_register",
+            tenant_id=str(tenant_id),
+            name=payload.name,
+            keycloak_client_id=client_id,
+            created_by_sub=created_by_sub,
+        )
+        return entry
+
+    async def _insert_row(
+        self,
+        row: AgentPrincipal,
+        *,
+        internal_id: str,
+        name: str,
+    ) -> AgentPrincipalRead:
+        """Insert the agent-principal DB row; roll back the KC client on failure.
+
+        If anything fails after the Keycloak client was created, delete
+        that client before surfacing the error: a created client with no
+        MEHO row is an orphaned, token-issuing identity that can never be
+        listed or revoked through MEHO — exactly the unreachable-kill-switch
+        failure this lifecycle exists to prevent.
+        """
         sessionmaker = get_sessionmaker()
         try:
             async with sessionmaker() as session:
@@ -216,24 +260,57 @@ class AgentPrincipalService:
                 except IntegrityError as exc:
                     await session.rollback()
                     if _is_unique_violation(exc):
-                        raise AgentPrincipalExistsError(payload.name) from exc
+                        raise AgentPrincipalExistsError(name) from exc
                     raise
                 await session.refresh(row)
                 entry = AgentPrincipalRead.model_validate(row)
                 await session.commit()
         except BaseException as exc:
             await self._rollback_orphan_client(
-                internal_id, tenant_id=tenant_id, name=payload.name, cause=exc
+                internal_id, tenant_id=row.tenant_id, name=name, cause=exc
             )
             raise
-        self._log.info(
-            "agent_principal_register",
-            tenant_id=str(tenant_id),
-            name=payload.name,
-            keycloak_client_id=client_id,
-            created_by_sub=created_by_sub,
-        )
         return entry
+
+    async def _persist_secret_to_vault(
+        self,
+        client_id: str,
+        client_secret: str,
+        *,
+        internal_id: str,
+        tenant_id: uuid.UUID,
+        name: str,
+    ) -> None:
+        """Persist the captured Keycloak secret to Vault (G0.19-T2 #1478).
+
+        Two failure postures:
+
+        * **Vault not configured** (``VAULT_SCHEDULER_TOKEN`` unset) — skip
+          the write with a WARN and continue. The deployment has opted out
+          of the Vault path; the agent stays schedulable via the env-var
+          fallback (the documented break-glass). Keeps registration
+          backward-compatible with env-var-only deployments rather than
+          hard-failing them on the new requirement.
+        * **Vault configured but the write failed** (unreachable / denied)
+          — roll back the just-created Keycloak client and surface the
+          error. A client whose secret was *meant* to reach Vault but
+          didn't would be unschedulable with no signal, so we fail closed,
+          same posture as a Phase-2 DB failure.
+        """
+        try:
+            await write_agent_secret(client_id, client_secret)
+        except SchedulerVaultNotConfiguredError:
+            self._log.warning(
+                "agent_principal_register_vault_skip",
+                tenant_id=str(tenant_id),
+                name=name,
+                reason="scheduler_vault_not_configured",
+            )
+        except BaseException as exc:
+            await self._rollback_orphan_client(
+                internal_id, tenant_id=tenant_id, name=name, cause=exc
+            )
+            raise
 
     async def _rollback_orphan_client(
         self,

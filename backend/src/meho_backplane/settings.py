@@ -161,6 +161,22 @@ class Settings(BaseModel):
         fail-closed quickly rather than starve request capacity. The
         v0.1 dogfood load is per-request login, so the timeout governs
         worst-case request latency directly.
+    vault_scheduler_token:
+        Static Vault token the **scheduler** authenticates with to read
+        agent ``client_credentials`` secrets (G0.19-T2 #1478). The
+        scheduler is operator-less — it has no Keycloak JWT to forward to
+        Vault's JWT/OIDC auth method — so it reads under its own service
+        identity instead. A token bound to a narrow policy that grants
+        read on ``scheduler_agent_vault_path_pattern`` (default
+        ``secret/data/agents/*/credentials``) is the lowest-friction
+        service identity: it reuses the ``hvac.Client(token=…)`` primitive
+        with no AppRole ``secret_id`` bootstrap. Default ``""`` (unset)
+        leaves Vault-sourced scheduling inoperative; the scheduler then
+        falls back to the env-var path
+        (:attr:`scheduler_agent_secret_env_pattern`). Never logged; never
+        surfaced in API responses. Operators wanting AppRole instead of a
+        static token can wrap a Vault Agent sidecar that writes the token
+        to this env var — additive, no code change.
     database_url:
         SQLAlchemy URL for the PostgreSQL database, e.g.
         ``postgresql+asyncpg://meho:<password>@<host>:5432/meho``.
@@ -774,6 +790,7 @@ class Settings(BaseModel):
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
+    vault_scheduler_token: str = Field(default="", repr=False)
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -959,28 +976,38 @@ class Settings(BaseModel):
     # shape so operators using an external scheduler can opt out.
     scheduler_tick_interval_seconds: int = Field(default=30, ge=1, le=3600)
     scheduler_enabled: bool = True
-    # G11.3-T2 #823 — autonomous-agent credential sourcing for the
-    # scheduler. ``run_scheduled`` (G11.2-T2 #1096) wants
-    # ``(client_id, client_secret)``; the scheduler resolves
+    # G11.3-T2 #823 / G0.19-T2 #1478 — autonomous-agent credential
+    # sourcing for the scheduler. ``run_scheduled`` (G11.2-T2 #1096)
+    # wants ``(client_id, client_secret)``; the scheduler resolves
     # ``client_id`` from the trigger's :class:`AgentDefinition.identity_ref`
-    # and reads the matching secret from an environment variable whose
-    # name is derived from this pattern. ``{client_id}`` is substituted
-    # at fire time and the result is uppercased + non-alphanumeric chars
-    # replaced with underscores so an ``identity_ref`` like ``agent:reporter``
-    # resolves to ``MEHO_AGENT_SECRET_AGENT_REPORTER``.
+    # and resolves the secret **Vault-first** (see
+    # :func:`meho_backplane.scheduler.credentials.resolve_agent_credentials`):
+    # it reads the agent's secret from Vault at
+    # ``scheduler_agent_vault_path_pattern`` under the scheduler's static
+    # service token (:attr:`vault_scheduler_token`), and falls back to an
+    # environment variable derived from this pattern only when the Vault
+    # read yields nothing. ``{client_id}`` is substituted at fire time and
+    # the result is uppercased + non-alphanumeric chars replaced with
+    # underscores so an ``identity_ref`` like ``agent:reporter`` resolves
+    # to ``MEHO_AGENT_SECRET_AGENT_REPORTER``.
     #
-    # Why env-var sourcing rather than Vault: ``vault_client_for_operator``
-    # is JWT/OIDC-bound and the scheduler is operator-less. Until a
-    # scheduler-service-token Vault auth path lands (G11.2 follow-up),
-    # operators wire agent secrets into the backplane pod's env (Helm
+    # The env-var path is the documented **fallback / break-glass**: an
+    # operator can wire an agent secret into the backplane pod's env (Helm
     # secret / external-secrets / sealed-secret) the same way
-    # ``ANTHROPIC_API_KEY`` is wired today. The
-    # ``scheduler_agent_vault_path_pattern`` setting below is reserved
-    # for the future Vault path; it ships configured but unused so the
-    # transition is a code swap, not an env-var rename.
+    # ``ANTHROPIC_API_KEY`` is wired when Vault is unavailable. The
+    # Vault-first path is what makes an API-registered agent schedulable
+    # with no pod env var + no redeploy: registration persists the
+    # Keycloak secret to Vault at ``scheduler_agent_vault_path_pattern``
+    # (see :meth:`AgentPrincipalService.register`) and the scheduler reads
+    # it straight back.
     scheduler_agent_secret_env_pattern: str = Field(default="MEHO_AGENT_SECRET_{client_id}")
-    # Forward-compat: the Vault KVv2 path the scheduler will read once
-    # service-token auth lands. Configured but unused in v0.2.
+    # The Vault KV-v2 *API* path (mount + ``data/`` infix + logical path)
+    # where agent ``client_credentials`` secrets live. Registration writes
+    # here; the scheduler reads here. ``{client_id}`` is substituted with
+    # the sanitised identity_ref. The default addresses the ``secret/``
+    # KV-v2 mount; the leading ``secret/data/`` is the raw API path Vault's
+    # HTTP surface uses, which the read/write helpers split into hvac's
+    # ``(mount_point, logical_path)`` form.
     scheduler_agent_vault_path_pattern: str = Field(
         default="secret/data/agents/{client_id}/credentials"
     )
@@ -1182,6 +1209,7 @@ def get_settings() -> Settings:
         vault_timeout_seconds=float(
             os.environ.get("VAULT_TIMEOUT_SECONDS", "10.0"),
         ),
+        vault_scheduler_token=os.environ.get("VAULT_SCHEDULER_TOKEN", "").strip(),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(

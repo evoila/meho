@@ -66,6 +66,7 @@ from meho_backplane.auth.keycloak_admin import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
 
 __all__ = ["router"]
 
@@ -200,6 +201,16 @@ async def register_agent_principal(
         ) from exc
     except KeycloakAdminError as exc:
         raise _handle_admin_error(exc) from exc
+    except SchedulerVaultBrokerError as exc:
+        # ``VAULT_SCHEDULER_TOKEN`` is set but the Vault write failed
+        # (unreachable / denied). 502 upstream failure; the just-created
+        # Keycloak client is already rolled back. (An *unset* token is not
+        # an error — the service skips the write and the agent uses the
+        # env-var fallback.)
+        raise HTTPException(
+            status_code=http_status.HTTP_502_BAD_GATEWAY,
+            detail="scheduler_vault_write_error",
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,

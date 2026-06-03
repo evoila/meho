@@ -8,19 +8,33 @@ The scheduler fires agent runs via
 (G11.2-T2 #1096) which expects ``(agent_client_id, agent_client_secret)``
 for the Keycloak ``client_credentials`` grant. The scheduler is
 operator-less (no JWT to hand to
-:func:`~meho_backplane.auth.vault.vault_client_for_operator`), so the
-v0.2 credential source is the backplane pod's environment variable
-matrix. Operators wire agent secrets into the pod the same way
-``ANTHROPIC_API_KEY`` is wired today (Helm chart secret /
-external-secrets / sealed-secret); the env-var name is derived from the
-agent's ``identity_ref`` via the
-:attr:`Settings.scheduler_agent_secret_env_pattern` pattern.
+:func:`~meho_backplane.auth.vault.vault_client_for_operator`), so it
+sources the secret under its own **static service token** rather than a
+per-operator Keycloak JWT.
 
-The forward-compat Vault path
-(:attr:`Settings.scheduler_agent_vault_path_pattern`) is shipped but
-unused -- a future G11.2 follow-up will swap this module's
-:func:`resolve_agent_credentials` over to a scheduler-service-token
-Vault read without changing the call site.
+Resolution order (G0.19-T2 #1478)
+---------------------------------
+
+:func:`resolve_agent_credentials` is **Vault-first**:
+
+1. **Vault** — read the agent's secret from
+   :attr:`Settings.scheduler_agent_vault_path_pattern` under
+   :attr:`Settings.vault_scheduler_token`
+   (:func:`meho_backplane.scheduler.vault_credentials.read_agent_secret`).
+   This is the path registration writes to
+   (:meth:`~meho_backplane.auth.agent_principals.AgentPrincipalService.register`),
+   so an agent registered + defined purely over the API is schedulable
+   with **no pod env var and no redeploy**.
+2. **Env var (fallback / break-glass)** — when Vault yields nothing (not
+   configured, secret absent), read the secret from the env var derived
+   from :attr:`Settings.scheduler_agent_secret_env_pattern`. Operators
+   wire agent secrets into the pod the same way ``ANTHROPIC_API_KEY`` is
+   wired when Vault is unavailable.
+
+When **neither** source yields a secret, the resolver raises
+:class:`AgentCredentialsUnresolvedError` (loud, trigger-preserving — the
+loop logs ``scheduler_credentials_unresolved`` and leaves the trigger
+``active`` for the next tick).
 
 Identity-ref -> client-id derivation
 ------------------------------------
@@ -44,9 +58,10 @@ sanitised identity_ref:
 * Default pattern ``MEHO_AGENT_SECRET_{client_id}`` therefore yields
   ``MEHO_AGENT_SECRET_AGENT_INCIDENT_TRIAGE``.
 
-The function is deterministic + pure (no side effects, no I/O beyond
-:func:`os.environ`'s lookup) so unit tests can exercise it without
-fixtures by monkey-patching the env directly.
+:func:`agent_client_id_from_identity_ref` is deterministic + pure (no
+side effects, no I/O) so the env-var-name derivation can be unit-tested
+without fixtures. :func:`resolve_agent_credentials` performs a Vault read
+(I/O) before falling back to :func:`os.environ`.
 """
 
 from __future__ import annotations
@@ -54,7 +69,11 @@ from __future__ import annotations
 import os
 import re
 
+import structlog
+
 from meho_backplane.settings import get_settings
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "AgentCredentialsUnresolvedError",
@@ -96,44 +115,92 @@ def agent_client_id_from_identity_ref(identity_ref: str) -> str:
     return _ENV_NAME_FORBIDDEN.sub("_", identity_ref)
 
 
-def resolve_agent_credentials(identity_ref: str) -> tuple[str, str]:
+def _env_var_name_for(identity_ref: str) -> str:
+    """Return the env-var name the secret pattern resolves to for *identity_ref*.
+
+    Substitutes the sanitised + upper-cased identity_ref into
+    :attr:`Settings.scheduler_agent_secret_env_pattern`, then upper-cases
+    the whole result. Operators who set a non-upper-cased pattern (e.g.
+    ``meho_agent_secret_{client_id}``) otherwise resolve to a mixed-case
+    env-var name that Linux's case-sensitive lookup would miss — the
+    precondition gate would skip every fire with a
+    ``credentials_unresolved`` warning pointing at the secret rather than
+    the case-mismatch. The contract is "the whole substituted name is
+    upper-cased"; this makes the code match it.
+    """
+    settings = get_settings()
+    sanitised = agent_client_id_from_identity_ref(identity_ref).upper()
+    return settings.scheduler_agent_secret_env_pattern.format(client_id=sanitised).upper()
+
+
+def _secret_from_env(identity_ref: str) -> str:
+    """Return the agent secret from the env var, or ``""`` when unset/empty."""
+    return os.environ.get(_env_var_name_for(identity_ref), "").strip()
+
+
+async def resolve_agent_credentials(identity_ref: str) -> tuple[str, str]:
     """Resolve ``(client_id, client_secret)`` for a scheduled-fire agent.
 
     *identity_ref* is :attr:`AgentDefinition.identity_ref` (the
     Keycloak client-id reference set at definition-create time).
+
+    **Vault-first** (G0.19-T2 #1478): the secret is read from Vault under
+    the scheduler's static service token, falling back to the env-var
+    path only when Vault yields nothing. See the module docstring for the
+    full resolution order.
 
     Returns the tuple :meth:`AgentInvoker.run_scheduled` expects:
 
     * ``client_id`` -- the identity_ref verbatim (Keycloak's
       client-id namespace tolerates the ``:`` separators MEHO uses,
       so no transformation is needed for the grant request).
-    * ``client_secret`` -- read from the env-var whose name the
-      :attr:`Settings.scheduler_agent_secret_env_pattern` resolves to
-      against the sanitised + upper-cased *identity_ref*.
+    * ``client_secret`` -- the resolved secret (Vault, else env var).
 
     Raises:
-        AgentCredentialsUnresolvedError: the resolved env-var is not
-            set or empty. Operator must wire the secret before the
-            trigger can fire.
+        AgentCredentialsUnresolvedError: neither Vault nor the env-var
+            fallback yielded a secret. The loop logs
+            ``scheduler_credentials_unresolved`` and leaves the trigger
+            active for the next tick.
     """
-    settings = get_settings()
-    sanitised = agent_client_id_from_identity_ref(identity_ref).upper()
-    # Upper-case the *whole* substituted name, not just the
-    # ``client_id`` token. Operators who set a non-upper-cased pattern
-    # (e.g. ``meho_agent_secret_{client_id}``) otherwise resolve to a
-    # mixed-case env-var name that Linux's case-sensitive lookup would
-    # miss -- the precondition gate would skip every fire with a
-    # ``credentials_unresolved`` warning that points at the secret
-    # rather than the case-mismatch. The contract in this module's
-    # docstring is "the whole substituted name is upper-cased"; this
-    # ``.upper()`` makes the code match it.
-    env_name = settings.scheduler_agent_secret_env_pattern.format(client_id=sanitised).upper()
-    secret = os.environ.get(env_name, "").strip()
-    if not secret:
-        raise AgentCredentialsUnresolvedError(
-            f"no client_credentials secret resolved for identity_ref={identity_ref!r}; "
-            f"expected env var {env_name!r} to be set. Wire the agent's Keycloak "
-            "client secret into the backplane pod (Helm chart secret / "
-            "external-secrets / sealed-secret) and retry."
+    # Local import avoids a module-load cycle (vault_credentials imports
+    # this module's sanitiser for its Vault-path derivation).
+    from meho_backplane.scheduler.vault_credentials import (
+        SchedulerVaultBrokerError,
+        SchedulerVaultNotConfiguredError,
+        read_agent_secret,
+    )
+
+    # 1. Vault-first.
+    try:
+        vault_secret = await read_agent_secret(identity_ref)
+    except SchedulerVaultNotConfiguredError:
+        # No scheduler Vault identity wired — fall through to the env-var
+        # path silently (the documented fallback configuration).
+        vault_secret = None
+    except SchedulerVaultBrokerError as exc:
+        # Vault is configured but the read failed (unreachable, denied,
+        # malformed). Log at WARN and try the env-var fallback rather than
+        # failing the fire outright — a transient Vault blip shouldn't
+        # block an agent whose secret is also wired into the pod env.
+        _log.warning(
+            "scheduler_vault_read_failed",
+            identity_ref=identity_ref,
+            reason=str(exc),
         )
-    return identity_ref, secret
+        vault_secret = None
+    if vault_secret:
+        return identity_ref, vault_secret
+
+    # 2. Env-var fallback / break-glass.
+    env_secret = _secret_from_env(identity_ref)
+    if env_secret:
+        return identity_ref, env_secret
+
+    env_name = _env_var_name_for(identity_ref)
+    raise AgentCredentialsUnresolvedError(
+        f"no client_credentials secret resolved for identity_ref={identity_ref!r}; "
+        f"neither the Vault path (scheduler_agent_vault_path_pattern, read under "
+        f"VAULT_SCHEDULER_TOKEN) nor the fallback env var {env_name!r} yielded a "
+        "secret. Register the agent over the API (persists the secret to Vault) or "
+        "wire the agent's Keycloak client secret into the backplane pod env and retry."
+    )

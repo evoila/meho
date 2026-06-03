@@ -348,10 +348,12 @@ async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | No
     * **definition disabled** -- the agent definition exists but
       ``enabled=False``. Same recovery shape: flip the flag, schedule
       resumes.
-    * **credentials unresolved** -- the env var derived from the
-      :attr:`Settings.scheduler_agent_secret_env_pattern` pattern is
-      not set or empty. The operator wires the secret (Helm chart /
-      external-secrets / sealed-secret); the next tick retries.
+    * **credentials unresolved** -- neither the Vault path
+      (:attr:`Settings.scheduler_agent_vault_path_pattern`, read under
+      ``VAULT_SCHEDULER_TOKEN``) nor the fallback env var derived from
+      :attr:`Settings.scheduler_agent_secret_env_pattern` yields a
+      secret. Registering the agent over the API persists the secret to
+      Vault; the next tick retries.
 
     The lookup session is opened fresh -- separate from the claim
     session whose transaction is still open at the caller -- so the
@@ -379,7 +381,7 @@ async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | No
         )
         return None
     try:
-        agent_client_id, agent_client_secret = resolve_agent_credentials(
+        agent_client_id, agent_client_secret = await resolve_agent_credentials(
             definition.identity_ref,
         )
     except AgentCredentialsUnresolvedError as exc:

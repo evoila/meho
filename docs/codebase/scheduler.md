@@ -103,31 +103,57 @@ DBOS rebase swaps only the loop module.
 
 ### Autonomous-agent credentials
 
-The scheduler is operator-less (no JWT to forward), so it sources the
-``client_credentials`` grant identity from the backplane pod's env
-vars rather than Vault. The lookup chain:
+The scheduler is operator-less (no Keycloak JWT to forward to Vault's
+JWT/OIDC auth method), so it sources the `client_credentials` secret
+**Vault-first** under its own static service token, falling back to a
+pod env var only when Vault yields nothing (#1478). The lookup chain:
 
 1. The trigger's `agent_definition_id` resolves to an
-   `AgentDefinition.identity_ref` (e.g. `agent:reporter`).
+   `AgentDefinition.identity_ref` (e.g. `agent:reporter`). The
+   `identity_ref` verbatim is the `client_id` passed to `run_scheduled`
+   (Keycloak's namespace tolerates the `:` separator).
 2. `resolve_agent_credentials(identity_ref)` (in
    [scheduler/credentials.py](../../backend/src/meho_backplane/scheduler/credentials.py))
    sanitises the ref (non-alphanumeric chars to `_`, upper-case) and
-   substitutes it into `SCHEDULER_AGENT_SECRET_ENV_PATTERN`
-   (default `MEHO_AGENT_SECRET_{client_id}`). For
-   `agent:reporter` the resolved env var is
-   `MEHO_AGENT_SECRET_AGENT_REPORTER`.
-3. The env-var value becomes the `client_secret`; the `client_id`
-   passed to `run_scheduled` is the `identity_ref` verbatim
-   (Keycloak's namespace tolerates the `:` separator).
-4. An unset / empty env var raises `AgentCredentialsUnresolvedError`;
-   the loop logs `scheduler_credentials_unresolved` and skips the
-   fire. The trigger stays `active` so an operator who wires the
-   secret unblocks the schedule on the next tick — no parking.
+   resolves the secret:
+   - **Vault (first).**
+     [`read_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)
+     reads the secret from `SCHEDULER_AGENT_VAULT_PATH_PATTERN`
+     (default `secret/data/agents/{client_id}/credentials`) under
+     `VAULT_SCHEDULER_TOKEN`. The raw KV-v2 API path is split into
+     hvac's `(mount_point, logical_path)` form by `split_kv_v2_api_path`.
+     This is the path registration writes to (see below), so an agent
+     registered + defined purely over the API is schedulable with **no
+     pod env var and no redeploy**. A missing path / unset token / read
+     error falls through to the env var.
+   - **Env var (fallback / break-glass).** When Vault yields nothing,
+     the secret is read from the env var derived from
+     `SCHEDULER_AGENT_SECRET_ENV_PATTERN` (default
+     `MEHO_AGENT_SECRET_{client_id}`). For `agent:reporter` the
+     resolved env var is `MEHO_AGENT_SECRET_AGENT_REPORTER`. Operators
+     wire it the same way `ANTHROPIC_API_KEY` is wired when Vault is
+     unavailable.
+3. When **neither** source yields a secret,
+   `AgentCredentialsUnresolvedError` is raised; the loop logs
+   `scheduler_credentials_unresolved` and skips the fire. The trigger
+   stays `active` so a subsequent tick retries once the secret is
+   available — no parking.
 
-The `SCHEDULER_AGENT_VAULT_PATH_PATTERN` setting is reserved for a
-future G11.2 follow-up that will swap the env-var path for a
-scheduler-service-token Vault read; ships configured but unused in
-v0.2.
+The write side: registering an agent principal
+([`AgentPrincipalService.register`](../../backend/src/meho_backplane/auth/agent_principals.py))
+captures the Keycloak-generated client secret (`get_client_secret`) and
+persists it to Vault at `SCHEDULER_AGENT_VAULT_PATH_PATTERN`
+([`write_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)),
+under the same scheduler service token. A Vault-write failure rolls back
+the just-created Keycloak client so registration never produces an
+unschedulable agent.
+
+`VAULT_SCHEDULER_TOKEN` is a static token bound to a narrow read/write
+policy on the agent-credentials path — the lowest-friction
+operator-less Vault identity (it reuses hvac's `Client(token=…)`
+primitive with no AppRole `secret_id` bootstrap). Operators preferring
+AppRole run a Vault Agent sidecar that renews a token into the env var:
+additive, no code change.
 
 ### Precondition gate vs invoke-time failure
 
@@ -135,11 +161,11 @@ The two fire paths follow the same lifecycle shape:
 
 1. **Prepare** (`_prepare_invocation`) — look up the agent definition
    (FK; real-FK lookup-by-primary-key) and resolve the agent's
-   `client_credentials` pair from the env var pattern. Returns
+   `client_credentials` pair Vault-first (env-var fallback). Returns
    `None` (skip without state writes) when any precondition fails:
    - the agent definition was removed since trigger creation, or
    - the definition is disabled, or
-   - the agent's secret env var is not set / empty.
+   - the agent's secret is in neither Vault nor the fallback env var.
 2. **Advance / mark-fired** — only when the prepare step succeeded.
    The conditional `UPDATE` (status / next_fire_at guard) commits
    the row's state transition.

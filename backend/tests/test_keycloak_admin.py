@@ -159,3 +159,53 @@ async def test_delete_client_unexpected_status_raises() -> None:
         async with _client() as kc:
             with pytest.raises(KeycloakAdminError):
                 await kc.delete_client(_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_client_secret_returns_value() -> None:
+    """``get_client_secret`` extracts the ``value`` field (G0.19-T2 #1478)."""
+    with respx.mock as r:
+        _mock_token(r)
+        r.get(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}/client-secret").mock(
+            return_value=httpx.Response(200, json={"type": "secret", "value": "gen-secret"})
+        )
+        async with _client() as kc:
+            secret = await kc.get_client_secret(_INTERNAL_ID)
+    assert secret == "gen-secret"
+
+
+@pytest.mark.asyncio
+async def test_get_client_secret_not_found_raises() -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        r.get(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}/client-secret").mock(
+            return_value=httpx.Response(404)
+        )
+        async with _client() as kc:
+            with pytest.raises(KeycloakClientNotFoundError):
+                await kc.get_client_secret(_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_client_secret_empty_value_raises() -> None:
+    """An empty ``value`` (public client / misconfig) is an admin error."""
+    with respx.mock as r:
+        _mock_token(r)
+        r.get(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}/client-secret").mock(
+            return_value=httpx.Response(200, json={"type": "secret", "value": ""})
+        )
+        async with _client() as kc:
+            with pytest.raises(KeycloakAdminError):
+                await kc.get_client_secret(_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_client_secret_unexpected_status_raises() -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        r.get(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}/client-secret").mock(
+            return_value=httpx.Response(500)
+        )
+        async with _client() as kc:
+            with pytest.raises(KeycloakAdminError):
+                await kc.get_client_secret(_INTERNAL_ID)

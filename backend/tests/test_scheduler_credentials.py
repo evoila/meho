@@ -1,44 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for :mod:`meho_backplane.scheduler.credentials` (G11.3-T2 #823).
+"""Unit tests for :mod:`meho_backplane.scheduler.credentials` (#823, #1478).
 
 The credential-resolution shim sits between the scheduler loop and
 :meth:`AgentInvoker.run_scheduled` (G11.2-T2 #1096) -- it sources the
 ``(client_id, client_secret)`` pair the ``client_credentials`` grant
-needs by looking the secret up via an env-var pattern derived from
-the agent's ``identity_ref``.
+needs. Resolution is **Vault-first** (G0.19-T2 #1478): the secret is read
+from Vault under the scheduler's static service token, falling back to an
+env-var pattern derived from the agent's ``identity_ref`` only when Vault
+yields nothing.
 
 Coverage matrix
 ---------------
 
 * **Sanitiser** -- ``agent:reporter`` -> ``AGENT_REPORTER`` (default
-  upper-case + non-alnum -> ``_``); edge cases:
-  ``agent:incident-triage`` -> ``AGENT_INCIDENT_TRIAGE``; trailing /
-  leading punctuation collapses; already-clean strings are pass-through.
-* **Resolution happy path** -- when the env var derived from the
-  pattern + identity_ref is set, return ``(identity_ref, secret)``
-  exactly. Identity_ref is *not* sanitised in the returned tuple
-  (Keycloak's client-id namespace tolerates the original form).
-* **Missing env var raises** -- unset env -> the loop's "skip + log"
-  path is exercised by :class:`AgentCredentialsUnresolvedError`.
-* **Empty env var raises** -- ``MEHO_AGENT_SECRET_X=""`` is the same
-  as not setting it (strip semantics; defends against Helm template
-  leaks that render an empty value).
-* **Custom env pattern** -- a non-default
-  ``SCHEDULER_AGENT_SECRET_ENV_PATTERN`` is honoured (operators wiring
-  agent secrets through a non-MEHO env prefix).
+  upper-case + non-alnum -> ``_``); edge cases.
+* **Vault-first happy path** -- when Vault returns a secret, it wins over
+  the env var.
+* **Env-var fallback** -- Vault not configured / secret absent -> the env
+  var resolves.
+* **Vault read error -> env fallback** -- a transient broker error falls
+  back to the env var rather than failing the fire.
+* **Both miss raises** -- neither Vault nor env -> the loop's "skip + log"
+  path via :class:`AgentCredentialsUnresolvedError`.
 
-These tests live separately from :mod:`tests.test_scheduler` so the
-credential boundary stays its own audited unit -- regressions in the
-sanitiser or env-pattern expansion fail here without being masked by
-the integration-shaped scheduler-loop tests.
+The Vault read seam is mocked here (the resolver imports
+:func:`read_agent_secret` lazily); the live-Vault round-trip is covered
+by the integration suite.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+import meho_backplane.scheduler.vault_credentials as vault_credentials
 from meho_backplane.scheduler.credentials import (
     AgentCredentialsUnresolvedError,
     agent_client_id_from_identity_ref,
@@ -58,6 +56,22 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
+def _patch_vault_read(monkeypatch: pytest.MonkeyPatch, result: Any) -> None:
+    """Stub :func:`read_agent_secret` to return *result* (or raise it).
+
+    The resolver imports ``read_agent_secret`` lazily from the
+    ``vault_credentials`` module, so patching the module attribute is what
+    the import resolves to.
+    """
+
+    async def _fake(identity_ref: str) -> str | None:
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(vault_credentials, "read_agent_secret", _fake)
+
+
 @pytest.mark.parametrize(
     ("identity_ref", "expected"),
     [
@@ -65,10 +79,8 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch):
         ("agent:incident-triage", "agent_incident_triage"),
         ("agent:billing.summary", "agent_billing_summary"),
         ("agent:multi:colon:ref", "agent_multi_colon_ref"),
-        # Already env-clean -- no rewrite needed.
         ("AGENT_X", "AGENT_X"),
         ("agent_x", "agent_x"),
-        # Edge: leading + trailing punctuation collapse.
         (":foo:", "_foo_"),
     ],
 )
@@ -77,80 +89,118 @@ def test_sanitiser_collapses_non_env_chars(identity_ref: str, expected: str) -> 
     assert agent_client_id_from_identity_ref(identity_ref) == expected
 
 
-def test_resolve_returns_identity_ref_verbatim_as_client_id(
+async def test_vault_first_secret_wins_over_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The returned ``client_id`` is the *identity_ref verbatim* (no sanitisation).
+    """When Vault returns a secret, it is used even if the env var is set."""
+    _patch_vault_read(monkeypatch, "vault-secret")
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "env-secret")
 
-    Keycloak's client-id namespace tolerates the ``:`` separators MEHO
-    uses, and the ``client_credentials`` grant carries the original
-    identifier. The sanitisation applies only to the env-var-name
-    derivation.
-    """
-    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "s3cr3t")
-
-    client_id, client_secret = resolve_agent_credentials("agent:reporter")
+    client_id, secret = await resolve_agent_credentials("agent:reporter")
 
     assert client_id == "agent:reporter"
-    assert client_secret == "s3cr3t"
+    assert secret == "vault-secret"
 
 
-def test_resolve_uses_sanitised_uppercased_env_name(
+async def test_env_fallback_when_vault_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Env-var name is sanitised then upper-cased.
+    """Vault secret absent (``None``) -> the env-var fallback resolves."""
+    _patch_vault_read(monkeypatch, None)
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "env-secret")
 
-    Pattern default ``MEHO_AGENT_SECRET_{client_id}`` against
-    ``agent:incident-triage`` -> ``MEHO_AGENT_SECRET_AGENT_INCIDENT_TRIAGE``.
+    client_id, secret = await resolve_agent_credentials("agent:reporter")
+
+    assert client_id == "agent:reporter"
+    assert secret == "env-secret"
+
+
+async def test_env_fallback_when_vault_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``VAULT_SCHEDULER_TOKEN`` -> NotConfigured -> env fallback.
+
+    Exercises the real :func:`read_agent_secret`, which raises
+    :class:`SchedulerVaultNotConfiguredError` before touching Vault when
+    the token is unset; the resolver swallows it and falls back.
     """
+    monkeypatch.delenv("VAULT_SCHEDULER_TOKEN", raising=False)
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "env-secret")
+    get_settings.cache_clear()
+
+    _, secret = await resolve_agent_credentials("agent:reporter")
+
+    assert secret == "env-secret"
+
+
+async def test_vault_broker_error_falls_back_to_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Vault read error falls back to the env var rather than failing.
+
+    A transient Vault outage must not block an agent whose secret is also
+    wired into the pod env (break-glass).
+    """
+    _patch_vault_read(
+        monkeypatch,
+        vault_credentials.SchedulerVaultBrokerError("vault unreachable"),
+    )
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "env-secret")
+
+    _, secret = await resolve_agent_credentials("agent:reporter")
+
+    assert secret == "env-secret"
+
+
+async def test_resolve_uses_sanitised_uppercased_env_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env-var name is sanitised then upper-cased (fallback path)."""
+    _patch_vault_read(monkeypatch, None)
     monkeypatch.setenv(
         "MEHO_AGENT_SECRET_AGENT_INCIDENT_TRIAGE",
         "triage-secret",
     )
 
-    _, secret = resolve_agent_credentials("agent:incident-triage")
+    _, secret = await resolve_agent_credentials("agent:incident-triage")
 
     assert secret == "triage-secret"
 
 
-def test_resolve_missing_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unset env var -> :class:`AgentCredentialsUnresolvedError`."""
+async def test_resolve_missing_both_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither Vault nor env -> :class:`AgentCredentialsUnresolvedError`."""
+    _patch_vault_read(monkeypatch, None)
     monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
 
     with pytest.raises(AgentCredentialsUnresolvedError, match=r"agent:reporter"):
-        resolve_agent_credentials("agent:reporter")
+        await resolve_agent_credentials("agent:reporter")
 
 
-def test_resolve_empty_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_resolve_empty_env_with_no_vault_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An empty env-var value is treated as unset (Helm template defence)."""
+    _patch_vault_read(monkeypatch, None)
     monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "")
 
     with pytest.raises(AgentCredentialsUnresolvedError):
-        resolve_agent_credentials("agent:reporter")
+        await resolve_agent_credentials("agent:reporter")
 
 
-def test_resolve_whitespace_only_env_raises(
+async def test_resolve_whitespace_only_env_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Whitespace-only env-var value is treated as unset.
-
-    Defence against a Helm template that renders ``"\n"`` for an
-    unbound secret -- a literal-newline secret would pass an
-    ``if env_value`` check but fail Keycloak's grant request.
-    """
+    """Whitespace-only env-var value is treated as unset."""
+    _patch_vault_read(monkeypatch, None)
     monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "   \n\t  ")
 
     with pytest.raises(AgentCredentialsUnresolvedError):
-        resolve_agent_credentials("agent:reporter")
+        await resolve_agent_credentials("agent:reporter")
 
 
-def test_custom_env_pattern_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-default ``SCHEDULER_AGENT_SECRET_ENV_PATTERN`` reroutes the lookup.
-
-    Operators wiring agent secrets through a non-``MEHO_AGENT_SECRET_``
-    prefix swap the pattern; the resolver must read from the alternate
-    name without code changes.
-    """
+async def test_custom_env_pattern_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-default ``SCHEDULER_AGENT_SECRET_ENV_PATTERN`` reroutes the lookup."""
+    _patch_vault_read(monkeypatch, None)
     monkeypatch.setenv(
         "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
         "OPS_AGENT_{client_id}_PASSPHRASE",
@@ -158,25 +208,16 @@ def test_custom_env_pattern_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPS_AGENT_AGENT_REPORTER_PASSPHRASE", "rotating-key")
     get_settings.cache_clear()
 
-    _, secret = resolve_agent_credentials("agent:reporter")
+    _, secret = await resolve_agent_credentials("agent:reporter")
 
     assert secret == "rotating-key"
 
 
-def test_resolve_uppercases_full_env_var_name_even_with_lowercase_pattern(
+async def test_resolve_uppercases_full_env_var_name_even_with_lowercase_pattern(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A lower-cased pattern still resolves to the upper-cased env var.
-
-    The module docstring promises "the whole substituted name is
-    upper-cased". An operator who sets a non-upper-cased pattern
-    (e.g. ``meho_agent_secret_{client_id}`` -- common shape if their
-    Helm value template renders that way) must still find their secret
-    at ``MEHO_AGENT_SECRET_AGENT_REPORTER`` rather than at a literal
-    lower-case key. Linux env-var lookup is case-sensitive, so if the
-    code only upper-cased the ``client_id`` substitution this test
-    would fail with :class:`AgentCredentialsUnresolvedError`.
-    """
+    """A lower-cased pattern still resolves to the upper-cased env var."""
+    _patch_vault_read(monkeypatch, None)
     monkeypatch.setenv(
         "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
         "meho_agent_secret_{client_id}",
@@ -184,7 +225,7 @@ def test_resolve_uppercases_full_env_var_name_even_with_lowercase_pattern(
     monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "the-secret")
     get_settings.cache_clear()
 
-    _, secret = resolve_agent_credentials("agent:reporter")
+    _, secret = await resolve_agent_credentials("agent:reporter")
 
     assert secret == "the-secret"
 
@@ -202,13 +243,7 @@ def test_settings_rejects_malformed_scheduler_secret_pattern(
     monkeypatch: pytest.MonkeyPatch,
     bad_pattern: str,
 ) -> None:
-    """The settings validator fails fast at load on malformed patterns.
-
-    Pull-up to :class:`Settings` construction so a typo'd env var
-    surfaces as a startup error with an actionable message rather
-    than at first scheduled fire (when it would either collapse
-    every agent onto one shared secret or raise on every fire).
-    """
+    """The settings validator fails fast at load on malformed patterns."""
     monkeypatch.setenv("SCHEDULER_AGENT_SECRET_ENV_PATTERN", bad_pattern)
     get_settings.cache_clear()
 
@@ -231,20 +266,15 @@ def test_settings_accepts_valid_scheduler_secret_pattern(
     assert settings.scheduler_agent_secret_env_pattern == "CORP_AGENT_{client_id}_SECRET"
 
 
-def test_error_message_names_expected_env_var(
+async def test_error_message_names_expected_env_var(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The :class:`AgentCredentialsUnresolvedError` message names the env-var
-    operators need to set.
-
-    A reader of the scheduler's WARN log line should be able to copy
-    the env-var name from the error into their Helm values without
-    deriving the sanitisation by hand.
-    """
+    """The error names the env var operators need to set (fallback path)."""
+    _patch_vault_read(monkeypatch, None)
     monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_BILLING_SUMMARY", raising=False)
 
     with pytest.raises(AgentCredentialsUnresolvedError) as excinfo:
-        resolve_agent_credentials("agent:billing.summary")
+        await resolve_agent_credentials("agent:billing.summary")
 
     msg = str(excinfo.value)
     assert "MEHO_AGENT_SECRET_AGENT_BILLING_SUMMARY" in msg

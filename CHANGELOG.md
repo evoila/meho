@@ -90,6 +90,17 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- Scheduler now sources an agent's `client_credentials` secret from Vault
+  instead of a pod environment variable, so an agent registered + defined
+  purely over the API is schedulable with no `MEHO_AGENT_SECRET_*` env var
+  and no redeploy. Registration captures the Keycloak-generated client
+  secret and persists it to Vault under a scheduler service token
+  (`VAULT_SCHEDULER_TOKEN`); `resolve_agent_credentials` reads it
+  Vault-first, keeping the env var as a documented break-glass fallback
+  (#1478).
+
 ## [0.10.0] - 2026-06-01
 
 The **connector write-surface** release: MEHO connectors graduate from

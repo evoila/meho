@@ -307,6 +307,62 @@ class KeycloakAdminClient:
             )
         return internal_id
 
+    async def get_client_secret(self, keycloak_internal_id: str) -> str:
+        """Return the ``client_credentials`` secret for an existing client.
+
+        Calls ``GET /clients/{id}/client-secret`` (G0.19-T2 #1478). The
+        Keycloak Admin REST API returns a ``CredentialRepresentation``
+        ``{"type": "secret", "value": "<secret>"}``; this method extracts
+        and returns the ``value``. Used by the agent-principal register
+        path to capture the secret Keycloak generated for the new
+        confidential client (``create_client`` only returns the internal
+        UUID — the generated secret is never echoed there) so it can be
+        persisted to Vault for the operator-less scheduler to read.
+
+        The secret is **never** logged or surfaced in an error message —
+        only its absence is.
+
+        Raises
+        ------
+        KeycloakClientNotFoundError
+            The internal id is unknown (Keycloak 404).
+        KeycloakAdminError
+            A non-404 failure, or a 200 whose body carries no usable
+            ``value`` (a public client / a client without a secret).
+        """
+        assert self._http is not None
+        assert self._token
+        log = structlog.get_logger(__name__)
+        url = f"{self._admin_url}/clients/{keycloak_internal_id}/client-secret"
+        try:
+            resp = await self._http.get(url, headers=self._auth_headers())
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak get_client_secret network error: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code == 404:
+            raise KeycloakClientNotFoundError(f"Keycloak client {keycloak_internal_id!r} not found")
+        if resp.status_code != 200:
+            log.warning(
+                "keycloak_get_client_secret_failed",
+                keycloak_internal_id=keycloak_internal_id,
+                status=resp.status_code,
+            )
+            raise KeycloakAdminError(f"Keycloak get_client_secret failed: HTTP {resp.status_code}")
+        representation: dict[str, Any] = resp.json()
+        secret = str(representation.get("value", "")).strip()
+        if not secret:
+            # A confidential client always has a secret; an empty value
+            # means the client is public (no secret) or the realm is
+            # misconfigured. Surface it as an admin error rather than
+            # persisting an empty credential the scheduler can't use.
+            raise KeycloakAdminError(
+                f"Keycloak get_client_secret returned no secret value for "
+                f"client {keycloak_internal_id!r} (public client or "
+                "misconfigured realm?)"
+            )
+        return secret
+
     async def disable_client(self, keycloak_internal_id: str) -> None:
         """Disable the Keycloak client identified by *keycloak_internal_id*.
 

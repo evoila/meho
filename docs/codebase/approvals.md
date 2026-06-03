@@ -52,7 +52,11 @@ model, or resume endpoint):
    request.principal_sub`, unless the audited break-glass switch
    `APPROVAL_ALLOW_SELF_APPROVAL=true`
    (`Settings.approval_allow_self_approval`, default `False` =
-   fail-closed) is set. Even under break-glass the self-approval writes
+   fail-closed) is set. Both wire strings keep the
+   `self_approval_forbidden` token as a prefix and append the
+   exception message, so the `APPROVAL_ALLOW_SELF_APPROVAL` break-glass
+   hint reaches the operator-facing REST `detail` and MCP error message
+   rather than being dropped to a bare token (#1483). Even under break-glass the self-approval writes
    its decision audit row, so the use is forensically visible. **Reject
    is unguarded** — withdrawing one's own pending request is never a
    privilege escalation. The guard runs after the role check and before

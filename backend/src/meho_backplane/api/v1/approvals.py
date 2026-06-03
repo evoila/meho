@@ -410,9 +410,13 @@ async def approve_approval_request(
             detail="insufficient_role",
         ) from exc
     except SelfApprovalForbiddenError as exc:
+        # Keep the ``self_approval_forbidden`` token prefix (stable for
+        # clients matching on it) but append ``str(exc)``, which carries
+        # the ``APPROVAL_ALLOW_SELF_APPROVAL=true`` break-glass hint the
+        # exception already constructs (#1483).
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
-            detail="self_approval_forbidden",
+            detail=f"self_approval_forbidden: {exc}",
         ) from exc
     except ApprovalRequestAlreadyDecidedError as exc:
         raise HTTPException(
@@ -614,9 +618,12 @@ async def decide_approval_request(
             detail="insufficient_role",
         ) from exc
     except SelfApprovalForbiddenError as exc:
+        # Same token-prefix + ``str(exc)`` hint as the /approve path
+        # so /decide's self-approval rejection also names the
+        # ``APPROVAL_ALLOW_SELF_APPROVAL`` break-glass flag (#1483).
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
-            detail="self_approval_forbidden",
+            detail=f"self_approval_forbidden: {exc}",
         ) from exc
     except ApprovalRequestAlreadyDecidedError as exc:
         raise HTTPException(

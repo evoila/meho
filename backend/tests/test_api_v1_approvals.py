@@ -281,3 +281,59 @@ async def test_resume_dispatches_when_no_target_was_pinned(
     assert result.status == "ok"
     assert seen["target"] is None
     assert seen["_approved"] is True
+
+
+# ---------------------------------------------------------------------------
+# T6 (#1483) — self_approval_forbidden REST detail must carry the
+# APPROVAL_ALLOW_SELF_APPROVAL break-glass hint the exception constructs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path_suffix, body",
+    [
+        ("approve", {"params": {}}),
+        ("decide", {"decision": "approved"}),
+    ],
+)
+def test_self_approval_forbidden_detail_carries_break_glass_hint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    path_suffix: str,
+    body: dict[str, Any],
+) -> None:
+    """403 ``self_approval_forbidden`` detail names ``APPROVAL_ALLOW_SELF_APPROVAL``.
+
+    The service raises :class:`SelfApprovalForbiddenError` whose message
+    already names the break-glass flag; both the ``/approve`` and the
+    operator-decision ``/decide`` route map it to 403. The wire ``detail``
+    must keep the machine-readable ``self_approval_forbidden`` token prefix
+    **and** carry the env-var hint so a solo operator sees the escape hatch
+    in the response body rather than a bare token (#1483).
+    """
+    from meho_backplane.api.v1 import approvals as approvals_module
+    from meho_backplane.operations.approval_queue import SelfApprovalForbiddenError
+
+    request_id = uuid.UUID("55555555-5555-5555-5555-555555555555")
+
+    async def _raise_self_approval(*_a: object, **_kw: object) -> None:
+        raise SelfApprovalForbiddenError(request_id, principal_sub="op-test")
+
+    # Both routes call the module-level ``approve_request``; patch it to
+    # raise before any DB row is touched.
+    monkeypatch.setattr(approvals_module, "approve_request", _raise_self_approval)
+
+    key = make_rsa_keypair("kid-op")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        response = client.post(
+            f"/api/v1/approvals/{request_id}/{path_suffix}",
+            headers=headers,
+            json=body,
+        )
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail.startswith("self_approval_forbidden"), detail
+    assert "APPROVAL_ALLOW_SELF_APPROVAL" in detail, detail

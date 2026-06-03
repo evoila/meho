@@ -122,6 +122,15 @@ connector-related release-notes line.
   exist were corrected to the truthful guidance (re-call with narrower
   params / native pagination); string-shaped outputs such as `k8s.exec`
   are unaffected (#1479).
+- `list_operation_groups` / `search_operations` now return a typed
+  `connector_not_ingested` hint for a connector that is v2-registered but
+  not yet ingested (0 DB rows, `state="registered"`) instead of an opaque
+  `-32603 UnknownConnectorError` over MCP. The error carries the same
+  `meho connector ingest …` next-step verb the `GET /api/v1/connectors`
+  listing already emits (`-32602` + `error.data.reason` over MCP; `404`
+  with a structured `detail` over REST), and stays distinguishable from a
+  genuinely unknown connector_id so an agent can self-correct
+  ([#1482](https://github.com/evoila/meho/issues/1482)).
 
 ## [0.10.0] - 2026-06-01
 

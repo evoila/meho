@@ -55,7 +55,10 @@ from typing import Any
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.meta_tools import (
+    ConnectorNotIngestedError,
+    UnknownConnectorError,
     call_operation,
     list_operation_groups,
     search_operations,
@@ -69,20 +72,68 @@ __all__: list[str] = []
 # ---------------------------------------------------------------------------
 
 
+def _connector_error_to_invalid_params(
+    exc: UnknownConnectorError | ConnectorNotIngestedError,
+) -> McpInvalidParamsError:
+    """Map a connector-resolution domain error to a typed ``-32602``.
+
+    The discovery meta-tools raise a :class:`ValueError` subclass when a
+    ``connector_id`` does not resolve. Left to propagate, the dispatcher's
+    generic ``except Exception`` would mistranslate it into an opaque
+    ``-32603 "internal error: …"`` — exactly the trap #1482 removes.
+    Catching it here and re-raising :class:`McpInvalidParamsError` flips
+    the wire code to ``-32602 INVALID_PARAMS`` (the spec's "bad argument"
+    code) and threads a machine-readable ``error.data`` discriminator so
+    an agent can tell the two cases apart:
+
+    * :class:`ConnectorNotIngestedError` →
+      ``{"reason": "connector_not_ingested", "connector_id", "next_step"}``
+      — the connector exists but awaits ingest; ``next_step.verb`` is the
+      ``meho connector ingest …`` command to run.
+    * :class:`UnknownConnectorError` →
+      ``{"reason": "unknown_connector", "connector_id"}`` — no such
+      connector on this deploy.
+    """
+    if isinstance(exc, ConnectorNotIngestedError):
+        return McpInvalidParamsError(str(exc), data=exc.as_error_data())
+    return McpInvalidParamsError(
+        str(exc),
+        data={"reason": "unknown_connector", "connector_id": exc.connector_id},
+    )
+
+
 async def _list_operation_groups_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Thin shim over :func:`list_operation_groups`."""
-    return await list_operation_groups(operator, arguments)
+    """Thin shim over :func:`list_operation_groups`.
+
+    Translates the connector-resolution domain errors to a typed
+    ``-32602`` (see :func:`_connector_error_to_invalid_params`) so a
+    registered-but-not-ingested connector surfaces an actionable
+    ``connector_not_ingested`` hint instead of an opaque ``-32603``
+    (#1482).
+    """
+    try:
+        return await list_operation_groups(operator, arguments)
+    except (UnknownConnectorError, ConnectorNotIngestedError) as exc:
+        raise _connector_error_to_invalid_params(exc) from exc
 
 
 async def _search_operations_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Thin shim over :func:`search_operations`."""
-    return await search_operations(operator, arguments)
+    """Thin shim over :func:`search_operations`.
+
+    Shares :func:`_list_operation_groups_handler`'s connector-error
+    mapping so both discovery meta-tools surface the same typed
+    ``-32602`` taxonomy (#1482).
+    """
+    try:
+        return await search_operations(operator, arguments)
+    except (UnknownConnectorError, ConnectorNotIngestedError) as exc:
+        raise _connector_error_to_invalid_params(exc) from exc
 
 
 async def _call_operation_handler(
@@ -111,10 +162,15 @@ register_mcp_tool(
             "Argument: `connector_id` in `<impl_id>-<version>` form "
             '(e.g. "vmware-rest-9.0", "vault-1.x") -- NOT the bare '
             "product name. Returns groups in `group_key` order. An "
-            "UNKNOWN connector_id is an error (no such connector); a "
-            "KNOWN connector with no enabled groups returns an empty "
-            "list (operationally meaningful: it exists, nothing enabled "
-            "yet). Pagination (G0.18-T5 #1358): keyset on `group_key`; "
+            "UNKNOWN connector_id is an error (no such connector, "
+            "`-32602` with `data.reason=unknown_connector`); a "
+            "REGISTERED-BUT-NOT-INGESTED connector is also an error but "
+            "recoverable (`-32602` with `data.reason=connector_not_ingested` "
+            "and `data.next_step.verb` = the `meho connector ingest …` "
+            "command to run, then retry); a KNOWN connector with no "
+            "enabled groups returns an empty list (operationally "
+            "meaningful: it exists, nothing enabled yet). Pagination "
+            "(G0.18-T5 #1358): keyset on `group_key`; "
             "default `limit=100`, max 500; pass the response's "
             "`next_cursor` back as the next call's `cursor` to fetch "
             "the next page. A `null` `next_cursor` is the end."
@@ -214,9 +270,13 @@ register_mcp_tool(
             "`query` (required, free-form), `group` (optional, narrows "
             "to that group's ops), `limit` (default 10, max 50). "
             "`connector_id` is `<impl_id>-<version>` (NOT the bare "
-            "product name); an unknown connector_id is an error. An "
-            "unknown group, by contrast, narrows the result set to "
-            "zero hits and is not an error."
+            "product name); an unknown connector_id is an error "
+            "(`-32602`, `data.reason=unknown_connector`), and a "
+            "registered-but-not-ingested connector is a recoverable error "
+            "(`-32602`, `data.reason=connector_not_ingested` + "
+            "`data.next_step.verb` to run, then retry). An unknown group, "
+            "by contrast, narrows the result set to zero hits and is not "
+            "an error."
         ),
         inputSchema={
             "type": "object",

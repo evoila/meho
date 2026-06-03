@@ -51,6 +51,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations.meta_tools import (
+    ConnectorNotIngestedError,
     UnknownConnectorError,
     call_operation,
     describe_descriptor,
@@ -259,6 +260,139 @@ async def test_search_operations_unknown_connector_raises(
             operator,
             {"connector_id": "ghost-9.9", "query": "anything"},
         )
+
+
+class _RegisteredNotIngestedConnector(Connector):
+    """v2-registered class whose ``connector_id`` round-trips losslessly.
+
+    Registered as ``product="ghost"`` / ``version="9.0"`` /
+    ``impl_id="ghost-rest"`` so ``parse_connector_id("ghost-rest-9.0")``
+    recovers the same triple — the listing's lossless-round-trip contract
+    (#773). No DB rows are seeded for it, so it is the "State 0.5"
+    registered-but-not-ingested case.
+    """
+
+    product = "ghost"
+    version = "9.0"
+    impl_id = "ghost-rest"
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self,
+        target: Any,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        raise NotImplementedError
+
+
+def _register_ghost_class() -> None:
+    """Register the State-0.5 ghost connector class (no DB rows)."""
+    register_connector_v2(
+        product="ghost",
+        version="9.0",
+        impl_id="ghost-rest",
+        cls=_RegisteredNotIngestedConnector,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_operation_groups_registered_not_ingested_raises_typed() -> None:
+    """#1482: a v2-registered, 0-row connector raises ConnectorNotIngestedError.
+
+    Distinct from UnknownConnectorError: the connector exists (its class is
+    registered) but has nothing to dispatch yet. The error carries the
+    ``meho connector ingest …`` next_step hint so the caller self-corrects.
+    """
+    _register_ghost_class()
+    operator = _make_operator()
+
+    with pytest.raises(ConnectorNotIngestedError) as excinfo:
+        await list_operation_groups(operator, {"connector_id": "ghost-rest-9.0"})
+
+    exc = excinfo.value
+    assert exc.connector_id == "ghost-rest-9.0"
+    assert "registered but not yet ingested" in str(exc)
+    # The hint points at the ingest verb (manual-mode for an off-catalog
+    # connector). Catalog-driven hints are exercised by the listing tests;
+    # here we assert the meta-tool surfaces *a* runnable ingest verb.
+    assert exc.next_step is not None
+    assert "ingest" in exc.next_step["verb"]
+    data = exc.as_error_data()
+    assert data["reason"] == "connector_not_ingested"
+    assert data["connector_id"] == "ghost-rest-9.0"
+
+
+@pytest.mark.asyncio
+async def test_search_operations_registered_not_ingested_raises_typed(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """#1482: search_operations shares the gate — same typed not-ingested error."""
+    _register_ghost_class()
+    operator = _make_operator()
+
+    with pytest.raises(ConnectorNotIngestedError) as excinfo:
+        await search_operations(
+            operator,
+            {"connector_id": "ghost-rest-9.0", "query": "anything"},
+        )
+
+    assert excinfo.value.connector_id == "ghost-rest-9.0"
+
+
+@pytest.mark.asyncio
+async def test_list_operation_groups_unknown_distinct_from_not_ingested() -> None:
+    """#1482 AC3: unknown and not-ingested are distinguishable by the caller.
+
+    With the ghost class registered, a *different* (unregistered)
+    connector_id still raises the plain UnknownConnectorError — never the
+    not-ingested error — so the two cases never collapse into one.
+    """
+    _register_ghost_class()
+    operator = _make_operator()
+
+    with pytest.raises(UnknownConnectorError) as excinfo:
+        await list_operation_groups(operator, {"connector_id": "nonsuch-9.9"})
+
+    # The unknown error is NOT the not-ingested subclass.
+    assert not isinstance(excinfo.value, ConnectorNotIngestedError)
+    assert excinfo.value.connector_id == "nonsuch-9.9"
+
+
+@pytest.mark.asyncio
+async def test_list_operation_groups_ingested_disabled_groups_returns_empty() -> None:
+    """#1482 AC4: an ingested connector with no *enabled* groups still returns [].
+
+    The connector has DB rows (a staged group), so ``connector_exists`` is
+    True and the not-ingested gate never fires — the empty list is the
+    operationally-meaningful "exists, nothing enabled yet" answer, not an
+    error. This guards against a regression where the new gate wrongly
+    re-classified a disabled-only ingested connector as not-ingested.
+    """
+    # Register the ghost class AND seed a staged (non-enabled) group under
+    # its triple, so it is ingested-but-nothing-enabled rather than 0-row.
+    _register_ghost_class()
+    await _seed_group(
+        tenant_id=None,
+        product="ghost",
+        version="9.0",
+        impl_id="ghost-rest",
+        group_key="staged-only",
+        name="Staged",
+        when_to_use="staged.",
+        review_status="staged",
+    )
+    operator = _make_operator()
+
+    result = await list_operation_groups(operator, {"connector_id": "ghost-rest-9.0"})
+
+    assert result["groups"] == []
+    assert result["next_cursor"] is None
 
 
 @pytest.mark.asyncio

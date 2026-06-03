@@ -2176,7 +2176,7 @@
           "operations"
         ],
         "summary": "Get Groups",
-        "description": "List enabled operation groups for *connector_id*.\n\nDelegates to :func:`list_operation_groups`. An *unknown*\n``connector_id`` (no operations registered for the parsed triple)\nis a ``404`` \u2014 not an empty ``200``: the empty-catalog trap was\nthat a mis-shaped id looked identical to an empty connector. A\n*known* connector with zero enabled groups still returns\n``{\"groups\": [], \"next_cursor\": null}`` (that empty is\noperationally meaningful).\n\nPagination is keyset on ``group_key`` (G0.18-T5 #1358); the\nresponse carries ``next_cursor`` set to the last returned\n``group_key`` when a page is full, ``null`` otherwise.",
+        "description": "List enabled operation groups for *connector_id*.\n\nDelegates to :func:`list_operation_groups`. An *unknown*\n``connector_id`` (no operations registered for the parsed triple)\nis a ``404`` \u2014 not an empty ``200``: the empty-catalog trap was\nthat a mis-shaped id looked identical to an empty connector. A\n*registered-but-not-ingested* connector (v2-registered class, zero\nDB rows) is also a ``404`` but with a structured ``detail``\ncarrying ``reason=\"connector_not_ingested\"`` and the ``meho\nconnector ingest \u2026`` ``next_step`` hint, distinct from the\nunknown-connector ``404`` (#1482). A *known* connector with zero\nenabled groups still returns ``{\"groups\": [], \"next_cursor\": null}``\n(that empty is operationally meaningful).\n\nPagination is keyset on ``group_key`` (G0.18-T5 #1358); the\nresponse carries ``next_cursor`` set to the last returned\n``group_key`` when a page is full, ``null`` otherwise.",
         "operationId": "get_groups_api_v1_operations_groups_get",
         "parameters": [
           {
@@ -2275,7 +2275,7 @@
           "operations"
         ],
         "summary": "Get Search",
-        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``\n(same unknown-vs-known-empty contract as ``/groups``); a known\nconnector with no matching ops returns ``200`` with an empty list.",
+        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``;\na registered-but-not-ingested connector \u2192 ``404`` with the typed\n``connector_not_ingested`` ``detail`` (same contract as ``/groups``,\n#1482); a known connector with no matching ops returns ``200`` with\nan empty list.",
         "operationId": "get_search_api_v1_operations_search_get",
         "parameters": [
           {

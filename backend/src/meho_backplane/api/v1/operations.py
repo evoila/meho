@@ -41,6 +41,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.operations.meta_tools import (
     CallOperationBody,
+    ConnectorNotIngestedError,
     OperationDescriptor,
     UnknownConnectorError,
     call_operation,
@@ -89,6 +90,29 @@ _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 
+def _connector_not_ingested_404(exc: ConnectorNotIngestedError) -> HTTPException:
+    """Map :class:`ConnectorNotIngestedError` to a structured ``404``.
+
+    Both the registered-but-not-ingested case and the genuinely-unknown
+    case are ``404`` on REST (no resolvable connector to dispatch), but
+    they stay distinguishable: this one carries a structured ``detail``
+    with ``reason="connector_not_ingested"`` and the ``meho connector
+    ingest …`` ``next_step`` hint, mirroring the ``state="registered"``
+    row ``GET /api/v1/connectors`` already emits (#1482). An *unknown*
+    connector keeps its plain-string ``detail`` (the long-form mistyped-id
+    recovery hint).
+    """
+    return HTTPException(
+        status_code=404,
+        detail={
+            "message": str(exc),
+            "reason": "connector_not_ingested",
+            "connector_id": exc.connector_id,
+            "next_step": exc.next_step,
+        },
+    )
+
+
 @router.get("/groups")
 async def get_groups(
     connector_id: str = Query(
@@ -125,9 +149,13 @@ async def get_groups(
     ``connector_id`` (no operations registered for the parsed triple)
     is a ``404`` — not an empty ``200``: the empty-catalog trap was
     that a mis-shaped id looked identical to an empty connector. A
-    *known* connector with zero enabled groups still returns
-    ``{"groups": [], "next_cursor": null}`` (that empty is
-    operationally meaningful).
+    *registered-but-not-ingested* connector (v2-registered class, zero
+    DB rows) is also a ``404`` but with a structured ``detail``
+    carrying ``reason="connector_not_ingested"`` and the ``meho
+    connector ingest …`` ``next_step`` hint, distinct from the
+    unknown-connector ``404`` (#1482). A *known* connector with zero
+    enabled groups still returns ``{"groups": [], "next_cursor": null}``
+    (that empty is operationally meaningful).
 
     Pagination is keyset on ``group_key`` (G0.18-T5 #1358); the
     response carries ``next_cursor`` set to the last returned
@@ -138,6 +166,8 @@ async def get_groups(
             operator,
             {"connector_id": connector_id, "limit": limit, "cursor": cursor},
         )
+    except ConnectorNotIngestedError as exc:
+        raise _connector_not_ingested_404(exc) from exc
     except UnknownConnectorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -157,9 +187,11 @@ async def get_search(
     """Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.
 
     Delegates to :func:`search_operations`. See its docstring for the
-    full algorithm and tenant scoping. Unknown ``connector_id`` → ``404``
-    (same unknown-vs-known-empty contract as ``/groups``); a known
-    connector with no matching ops returns ``200`` with an empty list.
+    full algorithm and tenant scoping. Unknown ``connector_id`` → ``404``;
+    a registered-but-not-ingested connector → ``404`` with the typed
+    ``connector_not_ingested`` ``detail`` (same contract as ``/groups``,
+    #1482); a known connector with no matching ops returns ``200`` with
+    an empty list.
     """
     try:
         return await search_operations(
@@ -171,6 +203,8 @@ async def get_search(
                 "limit": limit,
             },
         )
+    except ConnectorNotIngestedError as exc:
+        raise _connector_not_ingested_404(exc) from exc
     except UnknownConnectorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

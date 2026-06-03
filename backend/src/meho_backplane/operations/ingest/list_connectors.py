@@ -91,9 +91,56 @@ from meho_backplane.operations.ingest.catalog import (
     load_catalog,
 )
 
-__all__ = ["list_ingested_connectors"]
+__all__ = ["list_ingested_connectors", "next_step_for_registered_connector"]
 
 _log = structlog.get_logger(__name__)
+
+
+def next_step_for_registered_connector(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> NextStep | None:
+    """Return the ingest ``next_step`` for a registered-but-not-ingested connector.
+
+    The meta-tools' ``connector_not_ingested`` signal (#1482) reuses the
+    exact hint ``GET /api/v1/connectors`` renders on a ``state="registered"``
+    row, so the in-product "what do I run next?" answer is identical across
+    the listing surface and the discovery meta-tools
+    (:func:`~meho_backplane.operations.meta_tools.list_operation_groups` /
+    :func:`~meho_backplane.operations.meta_tools.search_operations`).
+
+    *(product, version, impl_id)* is the triple
+    :func:`parse_connector_id` derived from the caller's ``connector_id`` —
+    the same parsed shape the listing emits. The catalog lookup, however,
+    is keyed on the *registry* product (SDDC registers under
+    ``"sddc-manager"`` while the listing emits ``"sddc"``), so this helper
+    re-finds the matching v2-registry entry by the same lossless
+    round-trip the listing uses and feeds the registry triple to
+    :func:`_next_step_for_registered`. Returns ``None`` when no registry
+    entry round-trips to the parsed triple (the connector is genuinely
+    unknown, not merely un-ingested) so the caller can fall through to the
+    unknown-connector path.
+    """
+    catalog = _load_catalog_or_none()
+    for reg_product, reg_version, reg_impl_id in sorted(all_connectors_v2().keys()):
+        parsed = _resolve_class_only_natural_key(
+            registry_product=reg_product,
+            registry_version=reg_version,
+            registry_impl_id=reg_impl_id,
+        )
+        if parsed is None:
+            continue
+        _connector_id, parsed_product, parsed_version, parsed_impl_id = parsed
+        if (parsed_product, parsed_version, parsed_impl_id) == (product, version, impl_id):
+            return _next_step_for_registered(
+                catalog=catalog,
+                registry_product=reg_product,
+                registry_version=reg_version,
+                registry_impl_id=reg_impl_id,
+            )
+    return None
 
 
 def _next_step_for_registered(

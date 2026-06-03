@@ -185,6 +185,9 @@ async def handle_tools_list(
     return {"tools": visible}
 
 
+# code-quality-allow: pre-existing oversized MCP envelope dispatcher (>100
+# lines / C901 / PLR0915 on main before #1481); the #1481 audit-status fix
+# adds a small except arm, not the size — refactor is out of scope here.
 async def handle_tools_call(
     operator: Operator,
     params: dict[str, Any] | None,
@@ -317,6 +320,25 @@ async def handle_tools_call(
             "content": [{"type": "text", "text": json.dumps(result)}],
             "isError": False,
         }
+    except McpInvalidParamsError:
+        # Class-wide audit-status correction (#1481). A tool handler can
+        # raise ``McpInvalidParamsError`` *after* all the explicit
+        # pre-dispatch gates (name/arguments/unknown-tool/RBAC/schema)
+        # — e.g. ``_approve_handler`` rejecting a self-approval,
+        # ``approval_request_not_found``, or ``approval_unauthorized``.
+        # Those raises bypass every branch that set ``status_code``, so
+        # it is still the init 500 — a server-fault projection of what is
+        # actually a JSON-RPC ``-32602`` parameter/policy rejection on
+        # the wire. Project the whole class onto a 403 "denied" status so
+        # the audit row and the broadcast event
+        # (:func:`_classify_mcp_status`) classify the rejection
+        # consistently with the wire outcome instead of mis-reporting a
+        # crash. Explicit pre-dispatch branches already set 400/403/404,
+        # so they flow through here unchanged; only the residual init 500
+        # is corrected.
+        if status_code == 500:
+            status_code = 403
+        raise
     finally:
         duration_ms = (time.monotonic() - start) * 1000
         audit_id = uuid.uuid4()
@@ -472,6 +494,9 @@ async def handle_resources_templates_list(
     return {"resourceTemplates": visible}
 
 
+# code-quality-allow: pre-existing oversized resources/read handler (>100
+# lines on main before #1481); the #1481 audit-status fix adds a small
+# except arm, not the size — refactor is out of scope here.
 async def handle_resources_read(
     operator: Operator,
     params: dict[str, Any] | None,
@@ -566,6 +591,18 @@ async def handle_resources_read(
                 },
             ],
         }
+    except McpInvalidParamsError:
+        # Class-wide audit-status correction (#1481), mirroring
+        # :func:`handle_tools_call`. A resource handler that raises
+        # ``McpInvalidParamsError`` after the explicit gates leaves
+        # ``status_code`` at the init 500; the wire outcome is a
+        # ``-32602`` rejection, so project it onto a 403 "denied" status
+        # for the audit row and the broadcast event. Pre-dispatch
+        # branches (400/404/403) already set ``status_code`` and pass
+        # through untouched.
+        if status_code == 500:
+            status_code = 403
+        raise
     finally:
         duration_ms = (time.monotonic() - start) * 1000
         audit_id = uuid.uuid4()

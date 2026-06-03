@@ -66,6 +66,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import (
     ApprovalRequest,
@@ -243,6 +244,9 @@ async def _write_audit_row(
     await session.flush()
 
 
+# code-quality-allow: already over the 100-line limit on main before #1481
+# (105 lines); the principal_act source fix adds a handful of lines, not the
+# bulk — splitting the row-build + audit-write is out of scope for this fix.
 async def create_pending_request(
     session: AsyncSession,
     *,
@@ -299,7 +303,15 @@ async def create_pending_request(
         if target_id is not None:
             proposed_effect["target_id"] = str(target_id)
 
-    principal_act: str | None = getattr(operator, "identity_act", None)
+    # RFC 8693 ``act`` (#1481): the agent principal acting on the human
+    # subject's behalf on a delegated run, read from the same
+    # ``actor_delegation`` contextvar the synchronous audit log resolves
+    # (``resolve_actor_sub``). Keeps the row's ``principal_sub`` +
+    # ``principal_act`` lineage in lock-step with the audit log; a direct
+    # human / autonomous-agent call (no delegation bound) resolves to
+    # ``None``. The prior ``getattr(operator, "identity_act", None)`` was
+    # dead code — ``Operator`` has no such field, so it was always ``None``.
+    principal_act: str | None = resolve_actor_sub()
 
     request = ApprovalRequest(
         id=uuid.uuid4(),

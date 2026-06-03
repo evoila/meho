@@ -33,11 +33,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
+from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST
+from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     build_operator,
@@ -167,6 +169,76 @@ async def test_tools_call_unknown_tool_writes_audit_row_with_404(
     assert row.path == "/mcp/tools/call/no.such.tool"
     assert row.status_code == 404
     assert row.payload["op_class"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# #1481: a post-gate McpInvalidParamsError audits as "denied" (403), not 500
+# ---------------------------------------------------------------------------
+
+
+async def _post_gate_rejecting_handler(
+    _operator: Operator,
+    _arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Tool handler that raises ``McpInvalidParamsError`` after all gates.
+
+    Models the production approval-queue rejections — self-approval,
+    ``approval_request_not_found``, ``approval_unauthorized`` — which
+    ``_approve_handler`` re-raises as :class:`McpInvalidParamsError`
+    *after* the dispatcher's name/argument/RBAC/schema checks have
+    already passed (so none of them set ``status_code``).
+    """
+    raise McpInvalidParamsError(
+        "self_approval_forbidden: requester and approver must differ",
+    )
+
+
+@pytest.mark.asyncio
+async def test_tools_call_post_gate_invalid_params_audits_as_denied_not_500(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """#1481: a post-gate ``McpInvalidParamsError`` audits as 403 "denied".
+
+    Regression for the bug where ``status_code`` initialised to 500 and
+    a handler-raised :class:`McpInvalidParamsError` (the wire
+    ``-32602``) never overwrote it, so the audit row recorded a fake
+    500 server crash for a clean policy rejection. The fix lives at the
+    dispatch boundary so the whole class is covered — self-approval,
+    ``approval_request_not_found``, ``approval_unauthorized``, and any
+    future post-gate ``McpInvalidParamsError`` — not just self-approval.
+    """
+    client, _op = client_with_operator
+
+    register_mcp_tool(
+        ToolDefinition(
+            name="test.post_gate_reject",
+            description="Raises McpInvalidParamsError after the gates (test only).",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+            required_role=TenantRole.READ_ONLY,
+            op_class="write",
+        ),
+        _post_gate_rejecting_handler,
+    )
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "test.post_gate_reject", "arguments": {}},
+        },
+    )
+    # Wire outcome: -32602 INVALID_PARAMS (a parameter/policy rejection).
+    assert response.json()["error"]["code"] == INVALID_PARAMS
+
+    rows = await _audit_rows()
+    mcp_rows = [r for r in rows if r.method == "MCP"]
+    assert len(mcp_rows) == 1
+    row = mcp_rows[0]
+    assert row.path == "/mcp/tools/call/test.post_gate_reject"
+    # The audit projection now matches the "denied" wire outcome, not 500.
+    assert row.status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -915,3 +987,24 @@ async def test_initialize_issued_session_id_round_trips_to_audit_row(
     mcp_rows = [r for r in rows if r.method == "MCP"]
     assert len(mcp_rows) == 1
     assert mcp_rows[0].agent_session_id == session_uuid
+
+
+# ---------------------------------------------------------------------------
+# #1481: broadcast classification of the corrected post-gate status
+# ---------------------------------------------------------------------------
+
+
+def test_classify_mcp_status_403_is_denied_not_error() -> None:
+    """#1481: the 403 a post-gate rejection now records classifies "denied".
+
+    Locks the broadcast half of the fix — once the audit ``status_code``
+    is corrected from the init 500 to 403, ``_classify_mcp_status`` maps
+    it to ``"denied"`` (not ``"error"``), so the live feed event
+    reflects a policy rejection rather than a fake server crash. 500
+    stays ``"error"`` so a genuine handler fault is still surfaced.
+    """
+    from meho_backplane.mcp.handlers import _classify_mcp_status
+
+    assert _classify_mcp_status(403) == "denied"
+    assert _classify_mcp_status(500) == "error"
+    assert _classify_mcp_status(200) == "ok"

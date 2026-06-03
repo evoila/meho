@@ -20,6 +20,13 @@ predate T8's provisioning stay green. The unit-test fixtures cover
 contract behaviour; this test only asserts the parser scales to the
 real spec corpus per the Initiative's acceptance criterion ("≥95% of
 paths produce a row with non-null parameter_schema").
+
+G0.16-T8 (#95): the fetcher now accepts only ``https://`` URIs. When the
+resolver returns a local filesystem path the test wraps the file content
+in a respx-mocked HTTPS endpoint so the guard is exercised on real spec
+bytes without requiring an outbound network connection. HTTPS URLs
+(including ``http://`` env-var values) are rejected — set MEHO_VCENTER_OPENAPI
+to an ``https://`` URL or a local path; ``http://`` is no longer accepted.
 """
 
 from __future__ import annotations
@@ -27,7 +34,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 
 from meho_backplane.operations.ingest import parse_openapi
 
@@ -35,14 +44,18 @@ from meho_backplane.operations.ingest import parse_openapi
 def _resolve_vcenter_spec() -> str | None:
     """Resolve the vCenter spec from env vars.
 
-    Returns either an ``http(s)://`` URL or a local filesystem path,
-    both of which ``parse_openapi`` accepts. ``None`` when no source
-    is configured — the integration test skips in that case.
+    Returns an ``https://`` URL or a local filesystem path.
+    ``None`` when no source is configured — the integration test skips
+    in that case. ``http://`` URLs are no longer accepted (the fetcher
+    requires ``https``).
     """
     explicit = os.getenv("MEHO_VCENTER_OPENAPI")
     if explicit:
-        if explicit.startswith(("http://", "https://")):
+        if explicit.startswith("https://"):
             return explicit
+        if explicit.startswith("http://"):
+            # http:// no longer accepted — skip gracefully.
+            return None
         candidate = Path(explicit)
         if candidate.exists():
             return str(candidate)
@@ -57,15 +70,32 @@ def _resolve_vcenter_spec() -> str | None:
 @pytest.mark.skipif(
     _resolve_vcenter_spec() is None,
     reason=(
-        "vcenter.yaml unavailable — set MEHO_VCENTER_OPENAPI or MEHO_CONSUMER_DOCS_ROOT. "
+        "vcenter.yaml unavailable — set MEHO_VCENTER_OPENAPI (https:// URL or local path) "
+        "or MEHO_CONSUMER_DOCS_ROOT. "
         "The unit-test fixtures cover the parser contract; this integration test only "
         "verifies the parser scales to the real spec corpus."
     ),
 )
 def test_parse_vcenter_meets_path_coverage_threshold() -> None:
-    spec_path = _resolve_vcenter_spec()
-    assert spec_path is not None  # guarded by skipif above
-    rows = parse_openapi(spec_path, spec_source="spec:vcenter.yaml")
+    spec_source = _resolve_vcenter_spec()
+    assert spec_source is not None  # guarded by skipif above
+
+    if spec_source.startswith("https://"):
+        rows = parse_openapi(spec_source, spec_source="spec:vcenter.yaml")
+    else:
+        # Local filesystem path — serve via respx mock to satisfy the https guard.
+        spec_bytes = Path(spec_source).read_bytes()
+        spec_url = "https://specs.example.test/vcenter.yaml"
+        with respx.mock(assert_all_called=False) as router:
+            router.get(spec_url).mock(
+                return_value=httpx.Response(
+                    200,
+                    content=spec_bytes,
+                    headers={"content-type": "application/yaml"},
+                )
+            )
+            rows = parse_openapi(spec_url, spec_source="spec:vcenter.yaml")
+
     distinct_paths = {row.path for row in rows}
     assert len(rows) >= 950, f"got {len(rows)} rows; acceptance threshold is 950"
     assert len(distinct_paths) >= 950, (

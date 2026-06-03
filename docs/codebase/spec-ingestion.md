@@ -704,11 +704,51 @@ version-gate steps but returns the spec's `info.version` string
 pipeline can fail the spec-vs-label check in milliseconds rather
 than after spending CPU on a 2,000-op spec walk.
 
+## Security: SSRF and local-file guard (G0.16-T8, #95)
+
+`_load_spec_bytes` (the fetch sink shared by `parse_openapi` and
+`read_spec_info_version`) enforces two invariants before any network
+activity:
+
+1. **Scheme allowlist.** Only `https://` is accepted on the
+   network-facing ingest path. `http://`, `file://`, and bare filesystem
+   paths are rejected with `InvalidSpecError`. The restriction covers both
+   the REST `POST /api/v1/connectors/ingest` and the MCP
+   `meho.connector.ingest` tool, both of which are `TENANT_ADMIN`-gated.
+
+2. **Pre-connect destination guard (`_assert_fetchable_remote_url`).** Before
+   opening any socket, the hostname is resolved with `socket.getaddrinfo`
+   and every returned address is checked against the private / loopback /
+   link-local / ULA / reserved ranges using `ipaddress`. Any candidate IP in
+   `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+   `169.254.0.0/16` (cloud metadata), `::1`, `fc00::/7`, or `fe80::/10` is
+   rejected before the transport opens a connection.
+
+3. **Per-hop redirect re-validation.** `_load_spec_bytes` uses
+   `follow_redirects=False` and manually follows each 30x hop, calling
+   `_assert_fetchable_remote_url` on the redirect target before issuing the
+   next request. A redirect from a public host to a private IP is rejected
+   at the hop — the private-target socket is never opened.
+
+4. **Response size cap.** The response body is streamed and rejected if it
+   exceeds 20 MiB (`_MAX_SPEC_BYTES`), preventing a redirect to a large
+   internal endpoint from exhausting pod memory.
+
+5. **Oracle-free error messages.** Error messages never echo the
+   operator-supplied URI or OS-level error text. Error text is
+   intentionally terse and path-free.
+
+Pre-#95: `http`/`https` URIs were fetched with `follow_redirects=True` and
+no IP check; `file://` URIs and bare paths were read via `Path(...).read_bytes()`;
+OS errors were echoed verbatim. The fix removes the filesystem branch from this
+network-facing function entirely.
+
 ## Control flow
 
 ```text
 parse_openapi
-├─ _load_spec_bytes        # file:// or http(s)://; httpx with a 30s timeout
+├─ _load_spec_bytes        # https:// only; SSRF guard + redirect re-validation
+│  └─ _assert_fetchable_remote_url  # scheme check, DNS resolve, IP allowlist
 ├─ _decode_spec            # CSafeLoader-preferred YAML, stdlib JSON
 ├─ _validate_openapi_version
 └─ _iter_operations

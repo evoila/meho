@@ -45,6 +45,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
@@ -177,6 +178,66 @@ async def test_create_pending_request_inserts_row(session: AsyncSession) -> None
     assert request.run_id is None
     assert request.reviewed_by is None
     assert request.decided_at is None
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_records_principal_act_on_delegated_run(
+    session: AsyncSession,
+) -> None:
+    """#1481 AC: a delegated agent run records ``principal_act=agent:<name>``.
+
+    A human-initiated agent run binds the acting agent into the
+    ``actor_delegation`` contextvar (RFC 8693 ``act``); the approval row
+    must carry that actor so its ``principal_sub`` + ``principal_act``
+    lineage matches the synchronous audit log's ``actor_sub``. The prior
+    ``getattr(operator, "identity_act", None)`` dropped it (dead read of
+    a nonexistent field).
+    """
+    # operator.sub is the *human* subject who triggered the run.
+    operator = _make_operator(sub="human-sub", principal_kind=PrincipalKind.USER)
+
+    with actor_delegation("agent:incident-bot"):
+        request = await create_pending_request(
+            session,
+            operator=operator,
+            connector_id="vault-1.x",
+            op_id="vault.kv.write",
+            target=None,
+            params={"key": "value"},
+            params_hash=compute_params_hash({"key": "value"}),
+        )
+    await session.commit()
+
+    assert request.principal_sub == "human-sub"
+    assert request.principal_act == "agent:incident-bot"
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_principal_act_null_without_delegation(
+    session: AsyncSession,
+) -> None:
+    """#1481 AC (no regression): a direct call with no actor binding
+    leaves ``principal_act`` NULL.
+
+    Outside an ``actor_delegation`` block, ``resolve_actor_sub()``
+    returns ``None`` — the correct value for a direct human request or
+    an autonomous agent run (the agent is the subject, with no separate
+    actor).
+    """
+    operator = _make_operator(sub="agent-sub")
+
+    request = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.write",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    await session.commit()
+
+    assert request.principal_act is None
 
 
 @pytest.mark.asyncio

@@ -100,6 +100,17 @@ connector-related release-notes line.
   (`VAULT_SCHEDULER_TOKEN`); `resolve_agent_credentials` reads it
   Vault-first, keeping the env var as a documented break-glass fallback
   (#1478).
+- **Approval-queue audit fidelity (G0.19-T4).** A self-approval (and any
+  other post-gate `McpInvalidParamsError` — `approval_request_not_found`,
+  `approval_unauthorized`) rejection over MCP now audits with a `403`
+  "denied" status consistent with the JSON-RPC `-32602` wire outcome,
+  instead of a misleading `500`; the live broadcast event is classified
+  "denied", not "error". Delegated agent runs now record
+  `principal_act=agent:<name>` on the parked `ApprovalRequest` row (read
+  from the same `actor_sub` delegation context the audit log uses);
+  previously this field read a nonexistent `Operator.identity_act` and
+  was always null. Direct human approvals keep `principal_act=NULL`
+  (#1481).
 
 ## [0.10.0] - 2026-06-01
 

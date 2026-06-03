@@ -30,6 +30,48 @@ truth:
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
 
+## Subject + actor attribution on the request row (#1481)
+
+The `approval_request` row carries the RFC 8693 two-claim attribution
+shape:
+
+- `principal_sub` = the subject — `operator.sub`, the party on whose
+  behalf the parked op runs (a human, or an autonomous agent acting as
+  itself).
+- `principal_act` = the actor — the agent principal currently wielding
+  the subject's authority on a *delegated* run, or `NULL` when there is
+  no separate actor.
+
+`create_pending_request` sources `principal_act` from
+`resolve_actor_sub()` (`backend/src/meho_backplane/auth/delegation.py`)
+— the same `actor_sub` contextvar the synchronous audit log reads. A
+human-initiated agent run binds the acting agent via `actor_delegation()`
+(`backend/src/meho_backplane/agent/invocation.py`) for the lifetime of
+the run task, so the parked row records `principal_sub=<human>` +
+`principal_act=agent:<name>`, keeping the approval row's lineage
+in lock-step with the audit log. A direct human call (no delegation
+bound) and an autonomous agent run both resolve to `principal_act=NULL`.
+(Before #1481 the field read a nonexistent `Operator.identity_act`
+attribute and was always `NULL`.)
+
+## MCP audit status for post-gate rejections (#1481)
+
+A `tools/call` that a tool handler rejects *after* the dispatch gates
+(name / arguments / unknown-tool / RBAC / schema) — e.g. the
+approval-queue's self-approval, `approval_request_not_found`, or
+`approval_unauthorized` re-raised as `McpInvalidParamsError` — returns
+JSON-RPC `-32602` on the wire. The MCP envelope handler
+(`backend/src/meho_backplane/mcp/handlers.py`) projects that whole class
+onto audit `status_code=403` ("denied") instead of the init `500`
+("error"), so the audit row and the live broadcast event
+(`_classify_mcp_status`) classify a clean policy rejection as denied
+rather than a fake server crash. The correction sits at the dispatch
+boundary (`except McpInvalidParamsError` in both `handle_tools_call` and
+`handle_resources_read`), so it covers every post-gate
+`McpInvalidParamsError`, not just self-approval; explicit pre-gate
+branches that already set `400`/`403`/`404` pass through untouched, and a
+genuine handler fault still records `500`.
+
 ## G11.7-T1 policy hardening (#1401)
 
 Phase C of the wrapper-retirement effort moves connector **writes**

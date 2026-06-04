@@ -92,6 +92,25 @@ connector-related release-notes line.
 
 ### Fixed
 
+- **`agents.delete` on a definition that ever had a `scheduled_trigger`
+  (including a cancelled one) no longer fails with an opaque
+  `-32603 "internal error: IntegrityError"` (MCP) / unhandled HTTP 500
+  (REST).** The `scheduled_trigger.agent_definition_id` FK was created
+  without an `ondelete` clause (default `NO ACTION`), so deleting a
+  once-scheduled definition violated the constraint — and because
+  `cancel()` retains the trigger row for audit and there is no API path
+  to hard-delete it, such a definition was permanently undeletable, only
+  `enabled=false`-able. Migration `0035` adds `ON DELETE CASCADE` to the
+  FK (a DB-level cascade, since the delete is a bulk Core statement that
+  bypasses ORM relationship cascades), so deleting a definition
+  cascade-deletes its dependent trigger rows on both MCP and REST.
+  `agent_run` history is a nullable soft-FK and is unaffected. (#1480)
+- The `self_approval_forbidden` REST/MCP error strings now carry the
+  `APPROVAL_ALLOW_SELF_APPROVAL` break-glass hint that the underlying
+  `SelfApprovalForbiddenError` already constructs, surfaced on all three
+  operator-facing catch sites (REST `/approve` + `/decide`, MCP
+  `meho.approvals.approve`); `self_approval_forbidden` is preserved as a
+  stable token prefix (#1483).
 - Scheduler now sources an agent's `client_credentials` secret from Vault
   instead of a pod environment variable, so an agent registered + defined
   purely over the API is schedulable with no `MEHO_AGENT_SECRET_*` env var
@@ -322,20 +341,6 @@ vault / VMware connectors, and the Runbooks operator console ships at
 - unblock v0.9.0 release tooling + reconcile roadmap (#1379)
 
 ### Fixed
-
-- **`agents.delete` on a definition that ever had a `scheduled_trigger`
-  (including a cancelled one) no longer fails with an opaque
-  `-32603 "internal error: IntegrityError"` (MCP) / unhandled HTTP 500
-  (REST).** The `scheduled_trigger.agent_definition_id` FK was created
-  without an `ondelete` clause (default `NO ACTION`), so deleting a
-  once-scheduled definition violated the constraint — and because
-  `cancel()` retains the trigger row for audit and there is no API path
-  to hard-delete it, such a definition was permanently undeletable, only
-  `enabled=false`-able. Migration `0035` adds `ON DELETE CASCADE` to the
-  FK (a DB-level cascade, since the delete is a bulk Core statement that
-  bypasses ORM relationship cascades), so deleting a definition
-  cascade-deletes its dependent trigger rows on both MCP and REST.
-  `agent_run` history is a nullable soft-FK and is unaffected. (#1480)
 
 - Agent runtime no longer 404s on the shipped default model id: the
   `provider:` prefix of a pydantic-ai spec-form id

@@ -70,6 +70,22 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "meho-admin",
+      "name": "Integration-test Keycloak admin client (G0.19 #1487)",
+      "description": "Confidential service-account client the backplane's KeycloakAdminClient authenticates as to provision agent clients over the Admin REST API. Holds realm-management/manage-clients so the #1487 register-provisions-mappers test can create an agent client purely over the API (no realm-fixture pre-injection of mappers).",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "admin-secret-do-not-use-anywhere-else-g0-19-1487",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountClientRoles": {
+        "realm-management": ["manage-clients"]
+      }
     }
   ]
 }

@@ -54,12 +54,13 @@ test. The integration-test CI gate enforces a non-empty
 
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
 from meho_backplane.auth.agent_token import get_client_credentials_token
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
+from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
 from meho_backplane.auth.operator import PrincipalKind, TenantRole
 from meho_backplane.settings import get_settings
 from tests.integration.conftest import KeycloakBootstrap
@@ -125,3 +126,83 @@ async def test_client_credentials_grant_end_to_end(
     assert operator.principal_kind == PrincipalKind.AGENT
     assert operator.tenant_role == TenantRole.TENANT_ADMIN
     assert operator.tenant_id == UUID(keycloak_bootstrap.expected_tenant_id)
+
+
+async def test_register_provisioned_client_authenticates_end_to_end(
+    keycloak_bootstrap: KeycloakBootstrap,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent client created over the Admin API authenticates with no realm surgery.
+
+    This is the #1487 proof surface. Unlike
+    :func:`test_client_credentials_grant_end_to_end` — which uses the
+    ``agent:test-bot`` client whose audience / tenant / principal-kind
+    mappers the **realm fixture** pre-injects — this test creates a fresh
+    agent client purely through
+    :meth:`~meho_backplane.auth.keycloak_admin.KeycloakAdminClient.create_client`,
+    the exact path ``agent_principals.register`` drives. The realm import
+    adds **no** mappers for this client; the only way its
+    ``client_credentials`` token carries ``aud`` / ``sub`` / ``tenant_id``
+    / ``tenant_role`` is the mapper + default-scope set ``create_client``
+    now provisions. Before the fix, the token minted here is rejected
+    fail-closed at ``verify_jwt_for_audience`` (``missing_audience`` /
+    ``missing_sub`` / ``missing_tenant_claim``) before any operation
+    dispatches.
+
+    The ``tenant_id`` passed to ``create_client`` is a fresh UUID — not
+    the fixture's pinned value — so the decode-assert proves the claim
+    flows from the ``create_client`` argument through the provisioned
+    hardcoded-claim mapper, not from any realm-baked constant.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", keycloak_bootstrap.issuer_url)
+    get_settings.cache_clear()
+    clear_jwks_cache()
+
+    tenant_id = uuid4()
+    client_id = f"agent:reg-via-api-{uuid4().hex[:8]}"
+
+    # 1. Provision the agent client exactly as register() does: through
+    # the production KeycloakAdminClient, with the audience + tenant-claim
+    # mappers and the default scopes that carry ``sub``. No realm fixture
+    # pre-injects these — create_client is the only source.
+    admin = KeycloakAdminClient(
+        admin_url=keycloak_bootstrap.admin_url,
+        token_url=f"{keycloak_bootstrap.issuer_url}/protocol/openid-connect/token",
+        client_id=keycloak_bootstrap.admin_client_id,
+        client_secret=keycloak_bootstrap.admin_client_secret,
+    )
+    async with admin:
+        internal_id = await admin.create_client(
+            client_id=client_id,
+            name=client_id.removeprefix("agent:"),
+            tenant_id=str(tenant_id),
+            owner_sub="integration-test-owner",
+            audience=keycloak_bootstrap.audience,
+            tenant_role=TenantRole.TENANT_ADMIN.value,
+        )
+        client_secret = await admin.get_client_secret(internal_id)
+
+    assert client_secret, "create_client must yield a usable client secret"
+
+    # 2. Mint via the same production primitive the scheduler uses.
+    token = await get_client_credentials_token(
+        issuer_url=keycloak_bootstrap.issuer_url,
+        client_id=client_id,
+        client_secret=client_secret,
+        audience=keycloak_bootstrap.audience,
+    )
+    assert isinstance(token, str) and token, "client_credentials grant returned empty token"
+
+    # 3. Drive the token through the production validation chain — the same
+    # pre-dispatch gate ``run_scheduled`` hits. Reaching the asserts below
+    # proves no missing_audience / missing_sub / missing_*_claim 401.
+    operator = await verify_jwt_for_audience(
+        f"Bearer {token}",
+        expected_audience=keycloak_bootstrap.audience,
+    )
+
+    # 4. Every claim the provisioned mappers + default scopes must land.
+    assert operator.sub, "Operator.sub must resolve (carried by the basic scope's mapper)"
+    assert operator.tenant_id == tenant_id
+    assert operator.tenant_role == TenantRole.TENANT_ADMIN
+    assert operator.principal_kind == PrincipalKind.AGENT

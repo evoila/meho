@@ -69,6 +69,18 @@ __all__ = [
 
 _ADMIN_HTTP_TIMEOUT_SECONDS: float = 10.0
 
+#: Realm default-default client scopes an agent client must carry. Clients
+#: created through the Admin REST ``POST /clients`` do **not** inherit the
+#: realm's default scopes the way the Admin Console "Create" button does
+#: (the request body must set ``defaultClientScopes`` explicitly), so the
+#: ``basic`` scope — which carries the ``sub`` protocol mapper Keycloak 25+
+#: moved out of the hardcoded token path — is absent unless named here. A
+#: token without ``sub`` is rejected by ``verify_jwt_for_audience``
+#: (``missing_sub``, RFC 9068 §2.2.1). ``roles``/``web-origins``/``acr`` are
+#: the rest of the realm default set; they are cheap and keep the agent
+#: client byte-identical to a console-created one.
+_AGENT_DEFAULT_CLIENT_SCOPES: tuple[str, ...] = ("basic", "roles", "web-origins", "acr")
+
 #: Gold-standard 503 detail surfaced by ``POST /api/v1/agent-principals``
 #: (and any other admin-surfaced route that catches
 #: :class:`KeycloakAdminNotConfiguredError`) when the Keycloak admin
@@ -105,6 +117,67 @@ class KeycloakClientNotFoundError(KeycloakAdminError):
     """Raised when the target client does not exist (404 from Keycloak)."""
 
 
+def _hardcoded_claim_mapper(name: str, claim_name: str, claim_value: str) -> dict[str, Any]:
+    """Build an ``oidc-hardcoded-claim-mapper`` representation.
+
+    The ``config`` keys are Keycloak's dotted protocol-mapper config names
+    (not camelCase); they mirror the ``agent:test-bot`` rows in the
+    live-Keycloak integration realm so the API-created client is
+    byte-equivalent to the fixture that already authenticates end-to-end.
+    The claim is stamped onto the **access** token only — the
+    ``client_credentials`` grant issues no ID or userinfo token.
+    """
+    return {
+        "name": name,
+        "protocol": "openid-connect",
+        "protocolMapper": "oidc-hardcoded-claim-mapper",
+        "config": {
+            "claim.name": claim_name,
+            "claim.value": claim_value,
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+        },
+    }
+
+
+def _agent_protocol_mappers(
+    *,
+    audience: str,
+    tenant_id: str,
+    tenant_role: str,
+) -> list[dict[str, Any]]:
+    """Return the protocol mappers an agent client needs to authenticate.
+
+    Clones the mapper set the working ``meho-backplane`` client / the
+    ``agent:test-bot`` integration-realm fixture carry (#1487):
+
+    * an ``oidc-audience-mapper`` stamping *audience* into ``aud`` via the
+      ``included.custom.audience`` config (the only way to land an
+      arbitrary audience on a ``client_credentials`` token — the RFC 8707
+      request param is ignored without a configured mapper);
+    * hardcoded-claim mappers for ``tenant_id`` / ``tenant_role`` and
+      ``principal_kind=agent`` so the Operator chain resolves the agent's
+      tenant scope and ``PrincipalKind.AGENT`` discriminator.
+    """
+    return [
+        {
+            "name": "audience-mapper",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-audience-mapper",
+            "config": {
+                "included.custom.audience": audience,
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+            },
+        },
+        _hardcoded_claim_mapper("tenant-id-claim", "tenant_id", tenant_id),
+        _hardcoded_claim_mapper("tenant-role-claim", "tenant_role", tenant_role),
+        _hardcoded_claim_mapper("principal-kind-claim", "principal_kind", "agent"),
+    ]
+
+
 class KeycloakAdminClient:
     """Async context manager for Keycloak Admin REST API calls.
 
@@ -122,6 +195,8 @@ class KeycloakAdminClient:
                 name="my-bot",
                 tenant_id=str(tenant_id),
                 owner_sub=operator.sub,
+                audience=settings.keycloak_audience,
+                tenant_role="tenant_admin",
             )
     """
 
@@ -241,6 +316,8 @@ class KeycloakAdminClient:
         name: str,
         tenant_id: str,
         owner_sub: str,
+        audience: str,
+        tenant_role: str,
     ) -> str:
         """Register a new Keycloak client tagged ``kind=agent``.
 
@@ -256,6 +333,28 @@ class KeycloakAdminClient:
         via ``client_credentials`` and never involves a browser. Custom
         attributes ``kind=agent``, ``tenant_id``, ``owner_sub`` are added
         so the realm admin console and IaC tooling can identify agent clients.
+
+        Token-claim provisioning (the fix for #1487): the client is created
+        with the **same** protocol-mapper + default-client-scope set the
+        working ``meho-backplane`` client carries, so its
+        ``client_credentials`` token validates through
+        :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience` with no
+        manual Keycloak surgery. Without these, a scheduled agent run dies
+        at JWT verify (pre-dispatch) because the token lacks ``aud``
+        (``missing_audience``), ``sub`` (carried by the ``basic`` scope's
+        subject mapper — Keycloak 25+ moved it out of the hardcoded path),
+        and the ``tenant_id`` / ``tenant_role`` claims the Operator chain
+        requires:
+
+        * an ``oidc-audience-mapper`` stamping *audience* into ``aud`` —
+          stock Keycloak does **not** honour the RFC 8707 ``audience``
+          request param on a ``client_credentials`` grant without this
+          mapper, so requesting the audience at mint time is not enough;
+        * ``oidc-hardcoded-claim-mapper`` rows for ``tenant_id`` /
+          ``tenant_role`` / ``principal_kind=agent`` (the same shape the
+          live-Keycloak integration realm injects on ``agent:test-bot``);
+        * the realm default client scopes
+          (:data:`_AGENT_DEFAULT_CLIENT_SCOPES`) that carry ``sub``.
 
         Raises :class:`KeycloakClientConflictError` when a client with the
         same ``clientId`` already exists (Keycloak 409).
@@ -277,6 +376,12 @@ class KeycloakAdminClient:
                 "tenant_id": tenant_id,
                 "owner_sub": owner_sub,
             },
+            "protocolMappers": _agent_protocol_mappers(
+                audience=audience,
+                tenant_id=tenant_id,
+                tenant_role=tenant_role,
+            ),
+            "defaultClientScopes": list(_AGENT_DEFAULT_CLIENT_SCOPES),
         }
         try:
             resp = await self._http.post(

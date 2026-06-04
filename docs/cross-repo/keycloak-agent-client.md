@@ -65,18 +65,27 @@ The MEHO backplane reads this claim (default claim name:
 claim default to `PrincipalKind.USER` — all pre-G11.2 human-operator
 tokens continue to work unchanged.
 
-To add `principal_kind=agent` to every token issued for an agent client,
-add a **Hardcoded claim** mapper to the client (or to a client scope):
+`register` provisions this mapper automatically (#1487) — see
+[Token-claim provisioning](#token-claim-provisioning) below; no manual
+Keycloak console step is required.
 
-| Field | Value |
-|-------|-------|
-| Mapper type | `Hardcoded Claim` |
-| Token Claim Name | `principal_kind` |
-| Claim value | `agent` |
-| Claim JSON type | `String` |
-| Add to access token | On |
-| Add to ID token | Off |
-| Add to userinfo | Off |
+### Token-claim provisioning
+
+`register` creates the agent client with the **same** protocol-mapper +
+default-client-scope set the working `meho-backplane` client carries, so
+its `client_credentials` token validates through the backplane's JWT
+chain with no manual Keycloak surgery (#1487). Without these the token
+is rejected fail-closed *before any operation dispatches* — a scheduled
+run dies at JWT verify rather than reaching a parked approval. The
+provisioned set:
+
+| Provisioned on the client | Output claim | Why it is required |
+|---------------------------|--------------|--------------------|
+| `oidc-audience-mapper` (`included.custom.audience` = `KEYCLOAK_AUDIENCE`) | `aud` | Stock Keycloak does **not** honour the RFC 8707 `audience` request param on a `client_credentials` grant without a configured mapper, so requesting the audience at mint time is not enough. A token with no `aud` is rejected `missing_audience` / `invalid_audience`. |
+| `defaultClientScopes: [basic, roles, web-origins, acr]` | `sub` (via `basic`) | Clients created over the Admin REST API do **not** inherit the realm's default scopes; without `basic` the token has no `sub` (Keycloak 25+ moved `sub` into a `basic`-scope mapper) and is rejected `missing_sub`. |
+| `oidc-hardcoded-claim-mapper` → `tenant_id` | `tenant_id` | The Operator chain resolves the agent's tenant scope from this claim; absent → `missing_tenant_claim`. Value = the registering tenant's UUID. |
+| `oidc-hardcoded-claim-mapper` → `tenant_role` | `tenant_role` | Absent → `missing_tenant_role_claim`. Provisioned as `tenant_admin`; the per-principal permission model (G11.2-T3) is the finer-grained gate. |
+| `oidc-hardcoded-claim-mapper` → `principal_kind` | `principal_kind` | Sets `Operator.principal_kind = PrincipalKind.AGENT`. Value = `agent`. |
 
 ## Prerequisites
 
@@ -206,18 +215,22 @@ team responsible for the agent. They can obtain a `client_secret` from
 the **Credentials** tab in the Keycloak Console for client
 `agent:deploy-bot`.
 
-## Step 5 — Add the principal_kind mapper (optional but recommended)
+## Step 5 — Token claims are provisioned automatically (#1487)
 
-To have the agent's access token carry `principal_kind=agent`:
+No manual mapper step is required. `register` creates the agent client
+with the audience mapper, the `tenant_id` / `tenant_role` /
+`principal_kind=agent` hardcoded-claim mappers, and the default client
+scopes that carry `sub` — see
+[Token-claim provisioning](#token-claim-provisioning). Tokens issued for
+`agent:deploy-bot` therefore carry `aud`, `sub`, `tenant_id`,
+`tenant_role` and `principal_kind=agent` out of the box, and a scheduled
+run authenticates through the backplane's JWT chain with no Keycloak
+console edits.
 
-1. **Clients → `agent:deploy-bot` → Client scopes → `agent:deploy-bot`-dedicated**
-2. **Add mapper → By configuration → Hardcoded claim**
-3. Fill in the table from [Principal-kind claim](#principal-kind-claim)
-   above.
-
-Tokens issued for `agent:deploy-bot` will now carry
-`"principal_kind": "agent"` and `Operator.principal_kind` will resolve
-to `PrincipalKind.AGENT` in the backplane.
+> Before #1487 this step was a manual console action and a scheduled
+> agent run died at JWT verify (pre-dispatch) on a client registered
+> purely over the API, because `create_client` provisioned no mappers
+> and no default scopes.
 
 ## Step 6 — Revoke (kill switch)
 

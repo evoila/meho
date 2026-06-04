@@ -631,6 +631,14 @@ async def count_audit_rows(async_url: str) -> int:
 
 _KEYCLOAK_REALM: str = "meho-integration"
 _KEYCLOAK_CLIENT_ID: str = "agent:test-bot"
+# Confidential admin client the backplane's KeycloakAdminClient
+# authenticates as to provision agent clients over the Admin REST API.
+# Holds realm-management/manage-clients in the realm import; the #1487
+# register-provisions-mappers test uses it to create an agent client
+# purely over the API (no realm-fixture pre-injection of mappers). Same
+# throwaway-credential discipline as ``_KEYCLOAK_CLIENT_SECRET``.
+_KEYCLOAK_ADMIN_CLIENT_ID: str = "meho-admin"
+_KEYCLOAK_ADMIN_CLIENT_SECRET: str = "admin-secret-do-not-use-anywhere-else-g0-19-1487"
 # This secret is generated *into* the testcontainer realm import and
 # only ever held in this module + the realm JSON. It is bound to a
 # throwaway per-test-run Keycloak instance that never persists, is
@@ -678,6 +686,13 @@ class KeycloakBootstrap:
       ``expected_principal_kind`` — the literal values the realm's
       hardcoded-claim mappers stamp; the integration test asserts the
       resulting :class:`Operator` carries these.
+    * ``admin_url`` / ``admin_client_id`` / ``admin_client_secret`` — the
+      Admin REST API base (``{base_url}/admin/realms/{realm}``) and the
+      ``meho-admin`` confidential client the backplane's
+      :class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminClient`
+      authenticates as. The #1487 test uses these to provision an agent
+      client purely over the API (no realm-fixture pre-injection of
+      mappers) and prove it authenticates end-to-end.
     """
 
     base_url: str
@@ -689,6 +704,9 @@ class KeycloakBootstrap:
     expected_tenant_id: str
     expected_tenant_role: str
     expected_principal_kind: str
+    admin_url: str
+    admin_client_id: str
+    admin_client_secret: str
 
 
 @pytest.fixture(scope="module")
@@ -814,6 +832,9 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
             expected_tenant_id=_KEYCLOAK_TENANT_ID,
             expected_tenant_role=_KEYCLOAK_TENANT_ROLE,
             expected_principal_kind=_KEYCLOAK_PRINCIPAL_KIND,
+            admin_url=f"{base_url}/admin/realms/{_KEYCLOAK_REALM}",
+            admin_client_id=_KEYCLOAK_ADMIN_CLIENT_ID,
+            admin_client_secret=_KEYCLOAK_ADMIN_CLIENT_SECRET,
         )
         yield bootstrap
     finally:

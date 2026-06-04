@@ -66,12 +66,14 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakClientConflictError,
     KeycloakClientNotFoundError,
 )
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPrincipal
 from meho_backplane.scheduler.vault_credentials import (
     SchedulerVaultNotConfiguredError,
     write_agent_secret,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "AgentPrincipalCreate",
@@ -87,6 +89,13 @@ _NAME_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_\-\.]+$")
 
 #: Convention: the Keycloak clientId for an agent principal.
 _CLIENT_ID_PREFIX: str = "agent:"
+
+#: ``tenant_role`` stamped into the agent client's access token (#1487).
+#: An agent acts with tenant-admin scope inside its tenant; the
+#: per-principal permission model (G11.2-T3) is the finer-grained gate,
+#: not this coarse JWT role. Matches the ``agent:test-bot`` integration
+#: realm fixture, the only agent client that authenticates end-to-end.
+_AGENT_TENANT_ROLE: str = TenantRole.TENANT_ADMIN.value
 
 
 def _keycloak_client_id(name: str) -> str:
@@ -188,11 +197,16 @@ class AgentPrincipalService:
             )
         owner = payload.owner_sub or created_by_sub
         client_id = _keycloak_client_id(payload.name)
+        audience = get_settings().keycloak_audience
 
         # Phase 1: create Keycloak client + capture its generated secret
         # in the same admin session (create_client returns only the
         # internal UUID; Keycloak never echoes the generated secret on
-        # create). Fail before any DB write on error.
+        # create). The client is provisioned with the audience +
+        # tenant-claim mappers and the default scopes that carry ``sub``,
+        # so its client_credentials token validates through the JWT chain
+        # with no manual Keycloak surgery (#1487). Fail before any DB write
+        # on error.
         kc_client = KeycloakAdminClient.from_settings()
         try:
             async with kc_client:
@@ -201,6 +215,8 @@ class AgentPrincipalService:
                     name=payload.name,
                     tenant_id=str(tenant_id),
                     owner_sub=owner,
+                    audience=audience,
+                    tenant_role=_AGENT_TENANT_ROLE,
                 )
                 client_secret = await kc_client.get_client_secret(internal_id)
         except KeycloakClientConflictError as exc:

@@ -6340,7 +6340,7 @@
           "approvals"
         ],
         "summary": "Decide Approval Request",
-        "description": "Capture an operator decision without re-dispatching (G11.2-T5).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and publishes the ``approval.{approved,rejected}``\nbroadcast event. **Does not** re-dispatch the original op \u2014 that is\nthe agent's path (``POST .../approve`` with ``params``, which uses\nthe ``_approved`` gate-bypass). Backs the CLI/MCP operator-decision\nflow where the operator approves by id alone.",
+        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and publishes the ``approval.{approved,rejected}``\nbroadcast event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **approval of a direct operator op** (``run_id IS NULL``), the\ndecision then drives a re-dispatch using the params stored on the row\nat park time (#1503) \u2014 so a parked direct write approved here lands\nits effect exactly once, rather than being silently re-parked on the\nnext call. The request is already in a terminal ``approved`` state\nbefore the re-dispatch, so a concurrent second decide hits the\nalready-decided guard (409) and cannot double-execute.\n\nOn approval of an **agent-run** request (``run_id`` set), ``/decide``\nrecords the decision only and does **not** re-dispatch: the\nin-process agent runtime awaits the ``approval.approved`` broadcast\nand re-dispatches from its own in-memory params (the must-not-regress\npath). Re-dispatching here too would execute the op twice.",
         "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
         "parameters": [
           {
@@ -12204,7 +12204,7 @@
           "decision"
         ],
         "title": "DecideRequestBody",
-        "description": "POST body for ``/decide`` \u2014 the operator-decision path.\n\nDistinct from :class:`ApproveRequestBody` (which requires the\noriginal ``params`` for the agent / REST re-dispatch path). The\noperator-decision path captures the decision durably (status flip +\ndecision audit row + ``approval_decided`` broadcast) without\nre-dispatching \u2014 the agent's REST path is what re-dispatches with\nthe params it has."
+        "description": "POST body for ``/decide`` \u2014 the operator-decision path.\n\nDistinct from :class:`ApproveRequestBody` (which requires the\noriginal ``params`` for the REST re-dispatch path): ``/decide``\napproves by request id alone \u2014 the params are read back from the\nrow the dispatcher stored at park time (#1503)."
       },
       "DecideResponseBody": {
         "properties": {
@@ -12220,6 +12220,35 @@
           "reason": {
             "type": "string",
             "title": "Reason"
+          },
+          "dispatch_status": {
+            "type": "string",
+            "nullable": true,
+            "title": "Dispatch Status"
+          },
+          "dispatch_op_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Dispatch Op Id"
+          },
+          "dispatch_result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "nullable": true,
+            "title": "Dispatch Result"
+          },
+          "dispatch_error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Dispatch Error"
           }
         },
         "type": "object",
@@ -12229,7 +12258,7 @@
           "reason"
         ],
         "title": "DecideResponseBody",
-        "description": "Response for a successful operator decision."
+        "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated only when ``/decide``\nre-dispatched the approved op \u2014 i.e. an approved **direct** operator\nop (no ``run_id``) whose stored params drove a fresh execution\n(#1503). They stay ``None`` on a rejection and on an approved\n**agent-run** request (``run_id`` set), where the in-process agent\nruntime owns the re-dispatch and ``/decide`` only records the\ndecision (avoiding a double execution)."
       },
       "DeprecateTemplateResponse": {
         "properties": {

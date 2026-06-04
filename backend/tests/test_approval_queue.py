@@ -82,6 +82,24 @@ async def _approval_test_dangerous_handler(
     return {"executed": True}
 
 
+#: Records each execution of ``_approval_test_recording_handler`` so a
+#: test can assert the approved op ran exactly once (#1503). Reset at the
+#: top of every test that uses it.
+_RECORDED_EXECUTIONS: list[dict[str, Any]] = []
+
+
+async def _approval_test_recording_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Append each call to ``_RECORDED_EXECUTIONS`` and echo the params (#1503).
+
+    Lets a test prove a parked direct op approved via ``/decide`` or MCP
+    by-id re-dispatched with the stored params and executed exactly once.
+    """
+    _RECORDED_EXECUTIONS.append({"params": params})
+    return {"executed": True, "params": params}
+
+
 async def _approval_test_target_reading_handler(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1454,6 +1472,265 @@ async def test_pause_reject_abort(
     assert len(dec_rows) == 1
     assert dec_rows[0].payload["decision"] == "rejected"
     assert dec_rows[0].payload["reason"] == "too risky"
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+# ---------------------------------------------------------------------------
+# #1503 — parked direct operator op approved via /decide or MCP by-id is
+# re-dispatched using the stored params (execute-after-approve on every
+# surface, not only REST /approve). Must NOT double-execute an agent-run
+# request (the in-process agent runtime resumes those off the broadcast).
+# ---------------------------------------------------------------------------
+
+
+async def _register_recording_requires_approval_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Register a ``requires_approval`` typed op backed by the recording handler.
+
+    Shared setup for the #1503 surface tests: a clean registry, a stubbed
+    broadcast publisher, and one ``rectest.write`` op whose handler appends
+    to ``_RECORDED_EXECUTIONS`` so a test can assert the approved op ran
+    exactly once.
+    """
+    from unittest.mock import AsyncMock
+
+    import meho_backplane.operations._audit as audit_module
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+    from meho_backplane.operations import register_typed_operation
+
+    async def _capture(event: Any) -> None:
+        pass
+
+    monkeypatch.setattr(audit_module, "publish_event", _capture)
+
+    class _RecConnector(Connector):
+        product = "rectest"
+        version = "1.x"
+        impl_id = "rectest"
+        priority = 10
+
+        async def fingerprint(self, host: str, port: int | None) -> FingerprintResult:
+            return FingerprintResult(
+                probe=ProbeResult(reachable=True, probe_method="none"),
+                product="rectest",
+                version="1.x",
+            )
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(product="rectest", version="", impl_id="", cls=_RecConnector)
+
+    stub_emb = AsyncMock()
+    stub_emb.encode_one.return_value = [0.1] * 384
+    stub_emb.encode.return_value = [[0.1] * 384]
+    stub_emb.dimension = 384
+
+    await register_typed_operation(
+        product="rectest",
+        version="1.x",
+        impl_id="rectest",
+        op_id="rectest.write",
+        handler=_approval_test_recording_handler,
+        summary="Direct write op requiring approval.",
+        description="Test.",
+        parameter_schema={"type": "object"},
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_emb,
+    )
+
+
+@pytest.mark.asyncio
+async def test_decide_approve_redispatches_direct_op_with_stored_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked direct op approved via ``/decide`` executes once (#1503, AC1+AC2).
+
+    1. A human operator dispatches a ``requires_approval`` op directly →
+       parked (``awaiting_approval``); the row stores the original params.
+    2. A distinct operator approves via the ``/decide`` REST route (by id
+       alone, no params in-band).
+    3. ``/decide`` re-dispatches using the **stored** params → the handler
+       runs exactly once and the response carries the dispatch outcome.
+    """
+    from meho_backplane.api.v1.approvals import DecideRequestBody, decide_approval_request
+    from meho_backplane.connectors.registry import clear_registry
+    from meho_backplane.operations import dispatch, reset_dispatcher_caches
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+
+    _RECORDED_EXECUTIONS.clear()
+    reset_dispatcher_caches()
+    clear_registry()
+    await _register_recording_requires_approval_op(monkeypatch)
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    params = {"path": "secret/db", "value": "s3cr3t"}
+
+    # Step 1: direct dispatch → parked.
+    result1 = await dispatch(
+        operator=requester,
+        connector_id="rectest-1.x",
+        op_id="rectest.write",
+        target=None,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    approval_request_id = uuid.UUID(result1.extras["approval_request_id"])
+    assert _RECORDED_EXECUTIONS == [], "op must not run while parked"
+
+    # The row persisted the original params + has no run_id (direct op).
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, approval_request_id)
+        assert pending is not None
+        assert pending.run_id is None
+        assert pending.params == params
+
+    # Step 2+3: a distinct operator decides "approved" via /decide.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    response = await decide_approval_request(
+        approval_request_id,
+        DecideRequestBody(decision="approved"),
+        operator=reviewer,
+    )
+
+    assert response.decision == "approved"
+    assert response.dispatch_status == "ok", response.dispatch_error
+    assert response.dispatch_op_id == "rectest.write"
+    # Executed exactly once, with the stored params (not re-supplied).
+    assert len(_RECORDED_EXECUTIONS) == 1
+    assert _RECORDED_EXECUTIONS[0]["params"] == params
+
+    # The row is terminal (approved) — a second decide cannot double-execute.
+    async with get_sessionmaker()() as s:
+        decided = await s.get(ApprovalRequest, approval_request_id)
+        assert decided is not None
+        assert decided.status == ApprovalRequestStatus.APPROVED.value
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.asyncio
+async def test_mcp_approve_redispatches_direct_op_with_stored_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked direct op approved via MCP by-id executes once (#1503, AC1).
+
+    Mirrors the ``/decide`` test for the MCP ``meho.approvals.approve``
+    surface: approve by id alone → the handler re-dispatches with the
+    stored params, runs once, and returns the dispatch outcome under
+    ``dispatch``.
+    """
+    from meho_backplane.connectors.registry import clear_registry
+    from meho_backplane.mcp.tools.approvals import _approve_handler
+    from meho_backplane.operations import dispatch, reset_dispatcher_caches
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+
+    _RECORDED_EXECUTIONS.clear()
+    reset_dispatcher_caches()
+    clear_registry()
+    await _register_recording_requires_approval_op(monkeypatch)
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    params = {"path": "secret/api", "value": "tok-123"}
+
+    result1 = await dispatch(
+        operator=requester,
+        connector_id="rectest-1.x",
+        op_id="rectest.write",
+        target=None,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    approval_request_id = uuid.UUID(result1.extras["approval_request_id"])
+
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    out = await _approve_handler(reviewer, {"approval_request_id": str(approval_request_id)})
+
+    assert out["status"] == ApprovalRequestStatus.APPROVED.value
+    assert out["dispatch"]["status"] == "ok", out["dispatch"]["error"]
+    assert out["dispatch"]["op_id"] == "rectest.write"
+    assert len(_RECORDED_EXECUTIONS) == 1
+    assert _RECORDED_EXECUTIONS[0]["params"] == params
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.asyncio
+async def test_decide_approve_does_not_redispatch_agent_run_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent-run request approved via ``/decide`` is NOT re-dispatched (#1503, AC3).
+
+    The in-process agent runtime resumes an agent-run op off the
+    ``approval.approved`` broadcast. ``/decide`` re-dispatching it too
+    would execute the op twice. For a request with ``run_id`` set,
+    ``/decide`` must record the decision only and leave the
+    ``dispatch_*`` fields empty — the must-not-regress guard.
+    """
+    from meho_backplane.api.v1.approvals import DecideRequestBody, decide_approval_request
+    from meho_backplane.connectors.registry import clear_registry
+    from meho_backplane.operations import reset_dispatcher_caches
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+
+    _RECORDED_EXECUTIONS.clear()
+    reset_dispatcher_caches()
+    clear_registry()
+    await _register_recording_requires_approval_op(monkeypatch)
+
+    # Park an agent-run request directly (run_id set) — the realistic
+    # shape the agent runtime parks via the contextvar.
+    requester = _make_operator(sub="agent-run-sub", principal_kind=PrincipalKind.AGENT)
+    params = {"path": "secret/agent"}
+    run_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        pending = await create_pending_request(
+            s,
+            operator=requester,
+            connector_id="rectest-1.x",
+            op_id="rectest.write",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            run_id=run_id,
+        )
+        await s.commit()
+    approval_request_id = pending.id
+
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    response = await decide_approval_request(
+        approval_request_id,
+        DecideRequestBody(decision="approved"),
+        operator=reviewer,
+    )
+
+    assert response.decision == "approved"
+    # No inline re-dispatch — the agent runtime owns that path.
+    assert response.dispatch_status is None
+    assert response.dispatch_op_id is None
+    assert _RECORDED_EXECUTIONS == [], "agent-run op must NOT execute from /decide"
 
     reset_dispatcher_caches()
     clear_registry()

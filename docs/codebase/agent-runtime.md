@@ -366,13 +366,23 @@ The substrate preserves the operator/agent split G11.2 established:
 | REST `/approve` with `params` | inline | inline (human as operator + agent) |
 | REST `/decide`, MCP, CLI | durable row + broadcast | **agent runtime via wait+wrap** |
 
-Storing the `params` on the approval row would turn the table into a
-re-dispatch primitive holding secrets-bearing call payloads — a security
-and audit-surface tradeoff the issue body documents (`#1117` "Why not store
-params on approval_request"). The agent-side in-memory params are
-authoritative for the live-wait case this Task targets. Resuming agent
-runs whose process died between dispatch and approval is explicitly
-out-of-scope for v1.
+For the **agent-run** case this Task targets, the agent-side in-memory
+params are authoritative: the live `call_operation` wait holds them and
+re-dispatches from there, so `#1117` deliberately did not store `params`
+on the approval row. Resuming agent runs whose process died between
+dispatch and approval is explicitly out-of-scope for v1.
+
+The **direct operator op** case is different — there is no in-process
+wait holding the params, so a parked direct op approved by id alone
+(`/decide`, MCP, CLI) had nothing to re-dispatch. #1503 (G0.20-T3) adds a
+nullable `approval_request.params` column (migration 0036) so a direct
+op's stored params drive the post-approval re-dispatch on any surface.
+That column is `run_id`-gated at the re-dispatch sites: an agent-run
+request (`run_id` set) is never re-dispatched from `/decide`/MCP — the
+broadcast-driven runtime resume above remains its only re-dispatch path,
+so this section's behaviour is unchanged. The params column is internal
+re-dispatch input only and is never surfaced on a read view or broadcast
+frame. See [approvals.md § G0.20-T3](approvals.md#g020-t3--execute-a-parked-direct-op-on-approve-via-every-surface-1503).
 
 ### Audit attribution
 

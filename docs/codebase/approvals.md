@@ -1,10 +1,12 @@
-# Approvals (G11.2-T4 + T5; G11.7-T1 policy hardening)
+# Approvals (G11.2-T4 + T5; G11.7-T1 policy hardening; G0.20-T3 direct-op execute)
 
 **Initiative:** #803 — G11.2 Agent identity + RBAC + approval;
-#1397 — G11.7 Approval-policy hardening
+#1397 — G11.7 Approval-policy hardening; #1500 — G0.20 v0.10.1 dogfood
+hardening
 **Tasks:** #817 (T4 — durable approval queue) + #818 (T5 — operator
 surfacing channel) + #1401 (G11.7-T1 — queue humans, self-approval
-guard, resume-target fix, write-op secret redaction)
+guard, resume-target fix, write-op secret redaction) + #1503 (G0.20-T3
+— execute a parked direct operator op on approve via every surface)
 
 ## Overview
 
@@ -131,6 +133,67 @@ routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
 the call instead of executing it, so the bypass is what lets the
 approved op run.
 
+## G0.20-T3 — execute a parked direct op on approve via every surface (#1503)
+
+Before #1503 the **only** execute-after-approve path for a parked
+**direct** operator op (an operator calling a `requires_approval` op
+directly, not via an agent run) was REST `POST .../approve` carrying the
+original `params` in-band. Approving the same parked write via `/decide`
+or the MCP/CLI by-id approve surface committed the decision but never
+re-dispatched — and simply re-calling the op re-parked it. So an
+operator who approved a colleague's parked direct write through the
+activity feed / `/decide` / MCP saw it marked approved while the write
+never landed.
+
+Two changes close that gap, scoped to the **direct**-op path:
+
+1. **Store the params on the row.** `approval_request.params` (nullable
+   JSON, migration
+   `backend/alembic/versions/0036_add_approval_request_params.py`) holds
+   the original dispatch params, written by `create_pending_request` at
+   park time. The row already held `connector_id` / `op_id` /
+   `target_id`; adding `params` makes it a complete re-dispatch
+   primitive, so a surface that holds only the request id can still
+   re-execute the exact original call. The column is **internal
+   re-dispatch input only** — it is never serialised onto a read view
+   (`_view`, the MCP `_row_to_dict`) or a broadcast frame; the redacted
+   `proposed_effect` and the swap-defence `params_hash` remain the
+   reviewer-facing fields. (This reverses, for the direct-op path only,
+   the "keep params off the row" tradeoff #1117 made for the agent-run
+   case — see [agent-runtime.md § Awaiting-approval resume](agent-runtime.md#awaiting-approval-resume-t9-1117).)
+
+2. **Re-dispatch from the approve decision on every surface.** The
+   single execute-after-approve entry point is
+   `approval_queue.resume_dispatch_after_approval` — it re-hydrates the
+   stored target by id (G11.7-T1 fail-closed semantics preserved) and
+   re-dispatches with `dispatch(..., _approved=True)`, falling back to
+   the stored `request.params` when the surface supplies none. REST
+   `/approve` (caller params, hash-verified), REST `/decide`, and the
+   MCP `meho.approvals.approve` tool all route through it. `/decide` and
+   the MCP tool return the dispatch outcome (`dispatch_*` fields /
+   `dispatch` block) alongside the decision.
+
+**The `run_id` gate (no double-execution / agent-run regression
+guard).** `/decide` and the MCP approve tool re-dispatch **only when
+`run_id IS NULL`** — i.e. a direct operator op. An **agent-run** request
+(`run_id` set) is still resumed in-process by the agent runtime off the
+`approval.approved` broadcast (the must-not-regress path); re-dispatching
+it from `/decide`/MCP too would execute the op twice. So the agent-run
+resume path is untouched: it keeps its in-memory params, ignores the new
+column, and remains the sole re-dispatcher for `run_id`-bearing requests.
+
+**Double-execution prevention (terminal-state guard).**
+`approve_request` flips the row to `approved` (terminal) and commits
+*before* the re-dispatch runs. A concurrent second `/decide`/approve on
+the same row hits the already-decided guard (409 / `not_pending`), so the
+stored params drive exactly one execution.
+
+**Pre-0036 rows.** A row parked before migration 0036 has `params IS
+NULL`. Approving it via `/decide`/MCP (no in-band params) finds nothing
+to re-dispatch, so `resume_dispatch_after_approval` **fails closed** with
+a structured `denied` result naming the gap — the operator resumes it via
+REST `/approve` + params, exactly as before 0036.
+
 ## `proposed_effect` builder hook (#1437)
 
 `ApprovalRequest.proposed_effect` holds what the reviewer sees in the
@@ -190,6 +253,7 @@ their own builders as needed.
 | `GET` | `/api/v1/approvals` | operator | List, filtered by `status` (default: `pending`). |
 | `GET` | `/api/v1/approvals/{id}` | operator | **Inspect one request** (T5). 404 on cross-tenant. |
 | `POST` | `/api/v1/approvals/{id}/approve` | operator | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1). |
+| `POST` | `/api/v1/approvals/{id}/decide` | operator | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). |
 | `POST` | `/api/v1/approvals/{id}/reject` | operator | Reject. The op never executes. |
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
@@ -200,9 +264,11 @@ Four `meho.approvals.*` tools (all `TenantRole.OPERATOR`-gated):
 - `meho.approvals.get` — full detail by id.
 - `meho.approvals.approve` — operator-decision path (status flip + audit +
   `approval.approved` broadcast; **no `params` required** —
-  `approve_request` skips the hash check when called without params, because
-  the operator decision path does not have the agent's params). The
-  agent's REST path retains the hash check and is what re-dispatches.
+  `approve_request` skips the hash check when called without params). For
+  an approved **direct** op (`run_id IS NULL`) it then re-dispatches using
+  the stored params (#1503) and returns the outcome under `dispatch`; for
+  an agent-run request the in-process agent runtime resumes the op off the
+  broadcast, so the tool only records the decision.
 - `meho.approvals.reject` — same shape; optional `reason`.
 
 RBAC is enforced at two layers: the MCP registry filter hides write
@@ -255,20 +321,22 @@ explicit `meho.approvals.{approve,reject}` tools.
 
 ## Agent-runtime resume on `approval.{approved,rejected}` (T9 #1117)
 
-The operator/agent split: operator paths capture the decision durably and
-publish a broadcast event; the agent runtime subscribes and resumes (or
-surfaces the rejection) from its own side. Each path:
+The operator/agent split, keyed on whether the parked request belongs to
+an **agent run** (`run_id` set) or a **direct operator op** (`run_id IS
+NULL`):
 
-| Path | Decision capture | Re-dispatch |
-|---|---|---|
-| REST `/approve` with `params` | inline | inline — the human operator's call re-dispatches with `_approved=True` (the human-driven express lane). |
-| REST `/decide`, MCP, CLI | durable row + broadcast | **agent runtime**: the wrapped `call_operation` in `meho_backplane/agent/toolset.py` + `meho_backplane/agent/run.py` blocks on `meho_backplane.agent.approval_wait.wait_for_approval_decision` and re-invokes the dispatcher via `call_operation_with_approval` on approval, or surfaces the rejection to the model. |
+| Path | Decision capture | Re-dispatch (agent run) | Re-dispatch (direct op) |
+|---|---|---|---|
+| REST `/approve` with `params` | inline | inline (`_approved=True`, the human-driven express lane) | inline (caller params, hash-verified) |
+| REST `/decide`, MCP, CLI | durable row + broadcast | **agent runtime**: the wrapped `call_operation` in `meho_backplane/agent/toolset.py` + `meho_backplane/agent/run.py` blocks on `meho_backplane.agent.approval_wait.wait_for_approval_decision` and re-invokes the dispatcher via `call_operation_with_approval` on approval, or surfaces the rejection to the model. | **inline** (#1503): the decision drives `resume_dispatch_after_approval` with the **stored** params (`run_id`-gated so this never fires for an agent run). |
 
-See [agent-runtime.md § Awaiting-approval resume](agent-runtime.md#awaiting-approval-resume-t9-1117)
-for the substrate's full shape, including the wait timeout
-(`Settings.agent_approval_wait_timeout_seconds`, default 30 min), the
-fail-open semantics on broadcast outage, and the security tradeoff that
-keeps `params` off the approval row.
+For an agent-run request the broadcast-driven runtime resume is the only
+re-dispatch path; `/decide`/MCP record the decision only. For a direct
+operator op (#1503) `/decide`/MCP re-dispatch inline with the stored
+params. See [agent-runtime.md § Awaiting-approval resume](agent-runtime.md#awaiting-approval-resume-t9-1117)
+for the agent-run substrate's full shape, including the wait timeout
+(`Settings.agent_approval_wait_timeout_seconds`, default 30 min) and the
+fail-open semantics on broadcast outage.
 
 ## References
 
@@ -277,5 +345,7 @@ keeps `params` off the approval row.
 - `backend/src/meho_backplane/mcp/tools/approvals.py` — MCP tools.
 - `cli/internal/cmd/approvals/` — CLI verbs.
 - `backend/alembic/versions/0023_create_approval_request.py` — schema.
+- `backend/alembic/versions/0036_add_approval_request_params.py` — `params` column for direct-op approve re-dispatch (#1503).
+- `backend/src/meho_backplane/operations/approval_queue.py::resume_dispatch_after_approval` — the single execute-after-approve entry point shared by every operator surface (#1503).
 - `backend/src/meho_backplane/agent/approval_wait.py` — agent-runtime resume substrate (T9 #1117): broadcast subscription + re-dispatch on approval.
 - `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the gate-bypass re-dispatch entry point).

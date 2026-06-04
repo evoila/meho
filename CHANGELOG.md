@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- Wire the agent-run lease/heartbeat into the fire path so a hung, crashed, or worker-killed run is reliably reaped to a terminal `failed` state instead of staying `running` forever; the run loop now stamps a lease on start and heartbeats while alive, and child (`invoke_agent`) runs are leased too (#1501).
+
 ## [0.10.1] - 2026-06-04
 
 ### Fixed

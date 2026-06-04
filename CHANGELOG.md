@@ -135,6 +135,19 @@ connector-related release-notes line.
   (`VAULT_SCHEDULER_TOKEN`); `resolve_agent_credentials` reads it
   Vault-first, keeping the env var as a documented break-glass fallback
   (#1478).
+- A scheduled run for an agent registered purely over the API no longer
+  dies fail-closed at JWT verify (pre-dispatch) with `missing_audience` /
+  `missing_sub` / `missing_tenant_claim`. `agent_principals.register` now
+  provisions the agent's Keycloak client with the **same** mapper + scope
+  set the working `meho-backplane` client carries: an `oidc-audience-mapper`
+  stamping `aud=KEYCLOAK_AUDIENCE` (stock Keycloak ignores the RFC 8707
+  `audience` request param on a `client_credentials` grant without a
+  configured mapper), the default client scopes (`basic`/`roles`/
+  `web-origins`/`acr`) that carry `sub` (Admin-REST-created clients do not
+  inherit them), and the `tenant_id`/`tenant_role`/`principal_kind=agent`
+  hardcoded-claim mappers. An API-registered agent now authenticates
+  end-to-end and reaches an operation / parked approval with no manual
+  Keycloak surgery (#1487).
 - **Approval-queue audit fidelity (G0.19-T4).** A self-approval (and any
   other post-gate `McpInvalidParamsError` — `approval_request_not_found`,
   `approval_unauthorized`) rejection over MCP now audits with a `403`

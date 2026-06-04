@@ -245,6 +245,58 @@ async def _module_handler_raises(
     raise RuntimeError("simulated handler explosion")
 
 
+async def _module_handler_target_optional(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Module-level typed handler that tolerates ``target=None``.
+
+    No ``self`` parameter, so :func:`_handler_requires_target` returns
+    ``False`` and the dispatcher routes it with ``connector_instance=None``
+    even when no target is supplied (G0.20-T6 #1506 — the legitimately
+    target-less case that must keep dispatching).
+    """
+    return {"echo": params, "target_is_none": target is None}
+
+
+class _SelfFirstTypedConnector(Connector):
+    """Connector with a self-first typed handler -- exercises target_required.
+
+    ``keycloak.user.list`` is the production shape: a connector-bound
+    (``self``-first) typed handler that can only run against a resolved
+    connector instance, reached *through* the target. Defined at module
+    scope so ``register_typed_operation``'s ``derive_handler_ref`` round-
+    trips the dotted path back to the same function object.
+    """
+
+    product = "selffirst"
+    version = "1.x"
+    impl_id = "selffirst"
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self,
+        target: Any,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        raise NotImplementedError
+
+    async def list_things(
+        self,
+        target: Any,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Self-first typed handler -- mirrors ``keycloak_user_list``'s shape."""
+        return {"rows": [], "total": 0}
+
+
 # ---------------------------------------------------------------------------
 # import_handler unit tests
 # ---------------------------------------------------------------------------
@@ -750,6 +802,113 @@ async def test_dispatch_typed_returns_ambiguous_when_resolver_cant_tiebreak(
     msg = result.extras["exception_message"]
     assert "preferred_impl_id" in msg
     assert "kclash" in msg
+
+
+# ---------------------------------------------------------------------------
+# G0.20-T6 (#1506): a target-requiring typed/composite op invoked with
+# ``target=None`` must return a clean ``target_required`` usage error --
+# NOT the opaque ``connector_error: RuntimeError`` the self-guard in
+# ``dispatch_typed`` emits for a genuine instance-cache fault. The guard
+# keys on handler SHAPE (self-first => needs target), so a legitimately
+# target-less module-level handler still dispatches unchanged.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_self_first_handler_no_target_returns_target_required(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Self-first typed op + ``target=None`` -> structured ``target_required``.
+
+    Pre-#1506 the dispatcher short-circuited connector resolution on
+    ``target is None`` and let the self-first handler proceed unbound,
+    tripping ``dispatch_typed``'s loud self-guard ``RuntimeError`` — which
+    the generic ``except Exception`` then mislabelled as
+    ``connector_error: RuntimeError`` ("...instance-cache fault..."), an
+    internal-looking message for what is an omitted-argument usage error.
+    The fix catches the no-target case at resolution time and returns the
+    clean ``target_required`` envelope naming the op.
+    """
+    register_connector_v2(
+        product="selffirst",
+        version="",
+        impl_id="",
+        cls=_SelfFirstTypedConnector,
+    )
+    await register_typed_operation(
+        product="selffirst",
+        version="1.x",
+        impl_id="selffirst",
+        op_id="selffirst.thing.list",
+        handler=_SelfFirstTypedConnector.list_things,
+        summary="List things (self-first).",
+        description="Self-first typed op requiring a target.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="selffirst-1.x",
+        op_id="selffirst.thing.list",
+        target=None,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("target_required:")
+    assert result.extras["error_code"] == "target_required"
+    assert result.extras["op_id"] == "selffirst.thing.list"
+    # The misleading internal envelope must NOT surface.
+    assert "connector_error" not in (result.error or "")
+    assert result.extras["error_code"] != "connector_error"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_module_level_handler_no_target_still_dispatches(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A legitimately target-less module-level typed op still dispatches.
+
+    The no-target guard keys on handler SHAPE, not just
+    ``source_kind``+``target``: a module-level handler (no ``self``) needs
+    no connector instance, so ``target=None`` is valid and the dispatch
+    runs with ``connector_instance=None`` (regression guard for #1506's
+    second acceptance criterion).
+    """
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.targetless",
+        handler=_module_handler_target_optional,
+        summary="Target-less module-level op.",
+        description="Module-level typed op that needs no target.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.targetless",
+        target=None,
+        params={"hello": "world"},
+    )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["echo"] == {"hello": "world"}
+    assert result.result["target_is_none"] is True
 
 
 @pytest.mark.asyncio

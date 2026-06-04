@@ -60,6 +60,8 @@ Examples in current use:
 - `spec_label_mismatch` / `multi_spec_inconsistent` /
   `uncovered_version_label`
 - `no_connector` (dispatcher resolver miss)
+- `target_required` (dispatcher: connector-bound typed/composite op
+  invoked with no `target` — #1506)
 
 Naming convention: domain prefix (`ui_`, `keycloak_`, `connector_`)
 when ambiguity is possible across surfaces; bare verb-noun otherwise.

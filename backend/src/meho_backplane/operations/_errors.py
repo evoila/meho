@@ -35,6 +35,7 @@ __all__ = [
     "result_handler_unreachable",
     "result_invalid_params",
     "result_no_connector",
+    "result_target_required",
     "result_unknown_op",
     "status_code_for_result",
     "wrap_ok_result",
@@ -73,6 +74,37 @@ def result_invalid_params(
             "error_code": "invalid_params",
             "validation_errors": validation_errors,
         },
+    )
+
+
+def result_target_required(op_id: str, duration_ms: float) -> OperationResult:
+    """Op needs a ``target`` but the caller supplied none.
+
+    G0.20-T6 (#1506). A typed/composite op whose handler is a
+    connector-bound method (self-first) can only run against a resolved
+    connector instance, which the dispatcher reaches *through* the
+    ``target``. Invoking it with ``target=None`` is an omitted-argument
+    usage error: the dispatcher catches it at connector-resolution time
+    (:func:`~meho_backplane.operations.dispatcher._resolve_connector_instance`)
+    and returns this structured ``target_required`` rather than letting
+    the handler proceed unbound and trip the deliberate self-guard
+    :exc:`RuntimeError` in
+    :func:`~meho_backplane.operations._branches.dispatch_typed` (which
+    stayed a loud internal signal for genuine instance-cache faults).
+
+    Invalid-params-style shape — ``status="error"``,
+    ``error="target_required: <op> requires a target"``, ``error_code``
+    in ``extras`` — so callers that already branch on
+    ``result.extras["error_code"]`` for ``invalid_params`` extend the
+    same pattern. The op id rides in ``extras`` so an agent can name the
+    op it must re-call with a target.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"target_required: {op_id!r} requires a target; none was supplied",
+        duration_ms=duration_ms,
+        extras={"error_code": "target_required", "op_id": op_id},
     )
 
 

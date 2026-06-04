@@ -633,11 +633,12 @@ _KEYCLOAK_REALM: str = "meho-integration"
 _KEYCLOAK_CLIENT_ID: str = "agent:test-bot"
 # Confidential admin client the backplane's KeycloakAdminClient
 # authenticates as to provision agent clients over the Admin REST API.
-# Its service account is granted realm-management/manage-clients
-# post-boot by ``_grant_manage_clients_to_admin_sa`` (NOT via the realm
-# import — a serviceAccountClientRoles entry crashes Keycloak 26.x boot);
-# the #1487 register-provisions-mappers test uses it to create an agent
-# client purely over the API (no realm-fixture pre-injection of mappers).
+# Its service account is granted realm-management/manage-clients at
+# import time via the realm ``users`` array — a service-account user
+# (``serviceAccountClientId: meho-admin``) carrying the ``clientRoles``
+# grant, the canonical ``kc export`` shape. The #1487
+# register-provisions-mappers test uses it to create an agent client
+# purely over the API (no realm-fixture pre-injection of mappers).
 # Same throwaway-credential discipline as ``_KEYCLOAK_CLIENT_SECRET``.
 _KEYCLOAK_ADMIN_CLIENT_ID: str = "meho-admin"
 _KEYCLOAK_ADMIN_CLIENT_SECRET: str = "admin-secret-do-not-use-anywhere-else-g0-19-1487"
@@ -711,90 +712,6 @@ class KeycloakBootstrap:
     admin_client_secret: str
 
 
-def _grant_manage_clients_to_admin_sa(base_url: str) -> None:
-    """Grant ``realm-management/manage-clients`` to the ``meho-admin`` SA.
-
-    The ``meho-admin`` confidential client provisions agent clients over
-    the Admin REST API, which requires its service account to hold
-    ``realm-management/manage-clients``. That role mapping is **not**
-    expressed in the realm-import JSON: a ``serviceAccountClientRoles``
-    entry referencing the per-realm ``realm-management`` client crashes
-    Keycloak 26.x ``--import-realm`` (the container exits code 1 before
-    Quarkus prints ``Listening on:``) because the mapping is resolved
-    before the ``realm-management`` client and its roles exist in the
-    import transaction. So the grant is applied post-boot, over the same
-    Admin REST API the production code uses, authenticated as the
-    master-realm bootstrap admin.
-
-    The endpoint sequence is the long-stable Keycloak Admin REST shape:
-    master-realm ``admin-cli`` direct-grant token → resolve the
-    ``meho-admin`` client + its service-account user → resolve the
-    ``realm-management`` client + its ``manage-clients`` role → POST the
-    role to the SA user's client-level role mappings. Idempotent: a
-    second POST of an already-assigned role is a Keycloak no-op.
-    """
-    import httpx
-
-    realm = _KEYCLOAK_REALM
-    admin_api = f"{base_url}/admin/realms/{realm}"
-    with httpx.Client(timeout=30.0) as http:
-        token_resp = http.post(
-            f"{base_url}/realms/master/protocol/openid-connect/token",
-            data={
-                "grant_type": "password",
-                "client_id": "admin-cli",
-                "username": _KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME,
-                "password": _KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD,
-            },
-        )
-        token_resp.raise_for_status()
-        headers = {"Authorization": f"Bearer {token_resp.json()['access_token']}"}
-
-        def _client_uuid(client_id: str) -> str:
-            resp = http.get(
-                f"{admin_api}/clients",
-                params={"clientId": client_id},
-                headers=headers,
-            )
-            resp.raise_for_status()
-            found = resp.json()
-            if not found:
-                raise RuntimeError(
-                    f"Keycloak client {client_id!r} not found in realm "
-                    f"{realm!r} after import — realm fixture out of sync."
-                )
-            return str(found[0]["id"])
-
-        admin_client_uuid = _client_uuid(_KEYCLOAK_ADMIN_CLIENT_ID)
-        realm_mgmt_uuid = _client_uuid("realm-management")
-
-        sa_resp = http.get(
-            f"{admin_api}/clients/{admin_client_uuid}/service-account-user",
-            headers=headers,
-        )
-        sa_resp.raise_for_status()
-        sa_user_id = str(sa_resp.json()["id"])
-
-        role_resp = http.get(
-            f"{admin_api}/clients/{realm_mgmt_uuid}/roles/manage-clients",
-            headers=headers,
-        )
-        role_resp.raise_for_status()
-        # POST the full RoleRepresentation the GET returned back verbatim
-        # (id + name + containerId + ...). A hand-trimmed {id, name} subset
-        # is accepted by some Keycloak versions but the complete
-        # representation is the version-stable shape.
-        role = role_resp.json()
-
-        assign_resp = http.post(
-            f"{admin_api}/users/{sa_user_id}/role-mappings/clients/{realm_mgmt_uuid}",
-            json=[role],
-            headers=headers,
-        )
-        # 204 = assigned now; Keycloak is idempotent on a re-POST.
-        assign_resp.raise_for_status()
-
-
 @pytest.fixture(scope="module")
 def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
     """Boot Keycloak with the integration realm imported, yield the bootstrap.
@@ -834,14 +751,11 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
     (the 26.x replacement for ``KEYCLOAK_ADMIN`` /
     ``KEYCLOAK_ADMIN_PASSWORD``). The integration test authenticates as
     the imported ``meho-admin`` confidential client, not as this
-    master-realm admin — but the fixture *does* use the bootstrap admin
-    once, post-boot, to grant ``realm-management/manage-clients`` to the
-    ``meho-admin`` service account (see
-    :func:`_grant_manage_clients_to_admin_sa`). That grant cannot live in
-    the realm-import JSON without crashing Keycloak 26.x boot, so it is
-    applied over the Admin REST API after ``Listening on:``. Keycloak
-    also refuses to start without bootstrap admin creds on a fresh
-    database, so they are load-bearing regardless.
+    master-realm admin; the ``meho-admin`` service account is granted
+    ``realm-management/manage-clients`` at import time via the realm
+    ``users`` array, so no post-boot admin REST call is needed. Keycloak
+    refuses to start without bootstrap admin creds on a fresh database,
+    so they are load-bearing regardless.
     """
     image = os.environ.get("MEHO_TEST_KEYCLOAK_IMAGE")
     if not image:
@@ -914,12 +828,6 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8080)
         base_url = f"http://{host}:{port}"
-        # Grant realm-management/manage-clients to the meho-admin SA
-        # post-boot. This is deliberately NOT in the realm-import JSON: a
-        # serviceAccountClientRoles entry referencing realm-management
-        # crashes Keycloak 26.x --import-realm (container exits code 1
-        # before "Listening on:"). See _grant_manage_clients_to_admin_sa.
-        _grant_manage_clients_to_admin_sa(base_url)
         bootstrap = KeycloakBootstrap(
             base_url=base_url,
             realm=_KEYCLOAK_REALM,

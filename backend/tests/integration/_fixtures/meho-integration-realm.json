@@ -74,7 +74,7 @@
     {
       "clientId": "meho-admin",
       "name": "Integration-test Keycloak admin client (G0.19 #1487)",
-      "description": "Confidential service-account client the backplane's KeycloakAdminClient authenticates as to provision agent clients over the Admin REST API. Its service account is granted realm-management/manage-clients post-boot by the keycloak_bootstrap fixture (NOT via serviceAccountClientRoles here): a serviceAccountClientRoles entry referencing the realm-management client at --import-realm time crashes Keycloak 26.x boot (exit code 1) because the role mapping is resolved before the per-realm realm-management client/roles exist in the import transaction.",
+      "description": "Confidential service-account client the backplane's KeycloakAdminClient authenticates as to provision agent clients over the Admin REST API (G0.19 #1487). Granted realm-management/manage-clients via the realm users[] array below.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
@@ -83,6 +83,16 @@
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false
+    }
+  ],
+  "users": [
+    {
+      "username": "service-account-meho-admin",
+      "enabled": true,
+      "serviceAccountClientId": "meho-admin",
+      "clientRoles": {
+        "realm-management": ["manage-clients"]
+      }
     }
   ]
 }

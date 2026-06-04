@@ -107,6 +107,16 @@ connector-related release-notes line.
   approval decision now drives the re-dispatch using the params stored on
   the request at park time, so an approved direct write lands its effect
   exactly once. Agent-run resume is `run_id`-gated and unchanged (#1503).
+- Return a clean structured `target_required` error when a
+  target-requiring typed/composite op (e.g. `keycloak.user.list`) is
+  dispatched with no `target`, instead of the opaque
+  `connector_error: RuntimeError` ("…reached dispatch still unbound…
+  instance-cache fault…") it previously surfaced. The dispatcher now
+  catches the no-target case at connector-resolution time, keyed on
+  handler shape (a connector-bound, self-first handler needs a target; a
+  module-level handler does not), so a legitimately target-less op still
+  dispatches and the loud self-guard `RuntimeError` stays in place for
+  genuine instance-cache faults (#1506).
 
 ## [0.10.1] - 2026-06-04
 

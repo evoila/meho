@@ -83,6 +83,14 @@ Detail payloads land in ``extras``. Codes:
   to both the ``ingested`` and ``typed``/``composite`` source-kind
   paths; pre-#1142 the exception bubbled past the dispatcher as a
   bare 500.
+* ``target_required`` -- a typed/composite op whose handler is a
+  connector-bound (self-first) method was invoked with ``target=None``.
+  The instance the method binds to is reached *through* the target, so a
+  ``None`` target is an omitted-argument usage error. Caught at
+  connector-resolution time (G0.20-T6 #1142 follow-up, #1506) before the
+  handler proceeds unbound and trips ``dispatch_typed``'s self-guard
+  :exc:`RuntimeError`. A module-level handler (no ``self``) needs no
+  target and dispatches unchanged.
 * ``handler_unreachable`` -- ``importlib`` couldn't resolve
   ``handler_ref``, or the resolved symbol is not callable.
 * ``denied`` -- the policy gate issued an outright ``deny`` verdict.
@@ -127,6 +135,7 @@ References
 
 from __future__ import annotations
 
+import inspect
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -159,6 +168,7 @@ from meho_backplane.operations._errors import (
     result_handler_unreachable,
     result_invalid_params,
     result_no_connector,
+    result_target_required,
     result_unknown_op,
     wrap_ok_result,
 )
@@ -250,6 +260,33 @@ def reset_dispatcher_caches() -> None:
 type Dispatcher = Callable[..., Awaitable[OperationResult]]
 
 
+def _handler_requires_target(handler_ref: str) -> bool:
+    """True when *handler_ref* names a connector-bound (self-first) handler.
+
+    Keys the no-target guard on **handler shape**, not just
+    ``source_kind`` — a typed/composite handler whose first parameter is
+    ``self`` is a connector method that only binds to its instance
+    *through* a resolved target, so dispatching it with ``target=None``
+    is a usage error (G0.20-T6 #1506). A module-level handler (no
+    ``self``) genuinely needs no target and must keep dispatching with
+    ``connector_instance=None``.
+
+    Mirrors the first-parameter check :func:`dispatch_typed` uses for its
+    self-guard so the two stay in agreement on what "unbound" means.
+    Resolution failures here are swallowed to ``False`` on purpose: an
+    unimportable / non-callable ``handler_ref`` is the
+    ``handler_unreachable`` path's concern, reached when the branch
+    re-imports the handler for real — this probe must not pre-empt that
+    diagnosis with a misleading ``target_required``.
+    """
+    try:
+        handler = import_handler(handler_ref)
+    except (ImportError, TypeError):
+        return False
+    param_names = list(inspect.signature(handler).parameters.keys())
+    return bool(param_names) and param_names[0] == "self"
+
+
 async def _resolve_connector_instance(
     descriptor: EndpointDescriptor,
     target: Any,
@@ -275,6 +312,16 @@ async def _resolve_connector_instance(
       :exc:`~meho_backplane.connectors.AmbiguousConnectorResolution`
       text — already naming the candidates + the remediation step)
       under ``extras["exception_message"]``.
+    * ``(None, "target_required", None)`` -- typed/composite op invoked
+      with ``target is None`` whose handler is a connector-bound method
+      (self-first). The instance the method binds to is reached *through*
+      the target, so a ``None`` target is an omitted-argument usage
+      error; the caller surfaces it as the ``target_required`` error
+      (G0.20-T6 #1506) instead of letting the handler proceed unbound
+      and trip the self-guard :exc:`RuntimeError` in
+      :func:`~meho_backplane.operations._branches.dispatch_typed`. A
+      module-level handler (no ``self``) returns ``(None, None, None)``
+      below and dispatches with ``connector_instance=None`` unchanged.
 
     G0.14-T1 (#1142) restructured this helper to:
 
@@ -316,8 +363,18 @@ async def _resolve_connector_instance(
             return None, label, exc_message
         assert cls is not None
         return get_or_create_connector_instance(cls), None, None
-    # No target → no resolution attempt. Composite/typed module-level
-    # handlers that don't bind to a connector instance land here.
+    # No target → no resolution attempt. A module-level handler (no
+    # ``self``) doesn't bind to a connector instance and dispatches with
+    # ``connector_instance=None`` unchanged. A connector-bound (self-first)
+    # handler, by contrast, reaches its instance *through* the target — so
+    # ``target is None`` is an omitted-argument usage error (G0.20-T6
+    # #1506). Catch it here as ``target_required`` rather than letting the
+    # handler proceed unbound and trip the loud self-guard RuntimeError in
+    # ``dispatch_typed`` (which stays a genuine instance-cache-fault signal).
+    if descriptor.source_kind in ("typed", "composite") and _handler_requires_target(
+        descriptor.handler_ref or ""
+    ):
+        return None, "target_required", None
     return None, None, None
 
 
@@ -1109,6 +1166,13 @@ async def dispatch(
     connector_instance, resolution_error, exception_message = await _resolve_connector_instance(
         descriptor, target
     )
+    if resolution_error == "target_required":
+        # G0.20-T6 (#1506): a connector-bound (self-first) typed/composite
+        # handler invoked with ``target=None``. Clean usage error before
+        # the handler proceeds unbound and trips ``dispatch_typed``'s loud
+        # self-guard RuntimeError (preserved for genuine instance-cache
+        # faults, which only arise when a target *was* supplied).
+        return result_target_required(op_id, _elapsed_ms(started))
     if resolution_error == "no_connector":
         return result_no_connector(
             op_id,

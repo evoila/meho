@@ -213,6 +213,27 @@ async def _handler_returning_bearer_token(
     }
 
 
+async def _handler_returning_refresh_token(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Simulate a connector response that embeds a refresh_token label.
+
+    Mirrors real-world OAuth error bodies (e.g. an ingested OpenAPI connector
+    echoing ``refresh_token: <value>`` in a structured error field) that
+    previously slipped through Tier-1 because the _API_KEY alternation did
+    not cover the bare ``refresh_token`` label.
+    """
+    # Fragments split so gitleaks' generic-api-key scanner does not
+    # false-positive on the test source.
+    raw_value = "rt_abcdefgh" + "ijkl1234"
+    return {
+        "error": "Authorization failed, refresh_token: " + raw_value,
+        "hint": "token expired",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -452,3 +473,73 @@ async def test_default_safe_is_not_pass_through(
     assert result.status == "ok", result.error
     assert "Bearer eyJ" not in str(result.result)
     assert "[REDACTED:" in str(result.result)
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_label_redacted_in_caller_view_raw_retained_in_audit(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Regression: a connector response embedding ``refresh_token: <value>``
+    must be redacted in the caller view AND the raw value must be retained in
+    the audit row with a ``strip-api-key`` manifest entry.
+
+    Acceptance criterion 5 from Task #94: covers one of the six labels that
+    previously slipped through Tier-1 (``refresh_token``); the other five are
+    covered by the unit tests in ``test_redaction_patterns.py``.
+    """
+    raw_value = "rt_abcdefgh" + "ijkl1234"  # same fragment split as the handler
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.refresh-token.read",
+        handler=_handler_returning_refresh_token,
+        summary="Read with refresh_token in response.",
+        description="Read.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator(principal_kind=PrincipalKind.USER)
+    target = _FakeTarget(product="vault")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.refresh-token.read",
+        target=target,
+        params={},
+    )
+
+    # 1) Caller / agent view must not expose the raw token value.
+    assert result.status == "ok", result.error
+    serialised = str(result.result)
+    assert raw_value not in serialised
+    assert "[REDACTED:api_key]" in serialised
+
+    # 2) Audit row keeps the unredacted raw payload.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(AuditLog.path == "vault.refresh-token.read")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.raw_payload is not None
+    assert raw_value in str(row.raw_payload)
+
+    # 3) Manifest records a strip-api-key firing.
+    assert isinstance(row.redaction_manifest, list)
+    rule_names = {entry["rule"] for entry in row.redaction_manifest}
+    assert "strip-api-key" in rule_names

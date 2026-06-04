@@ -47,7 +47,7 @@ rules:
   - name: strip-api-key
     pattern: api_key
     action: redact
-    reason: "labelled credential pair (api_key/token/secret/password)"
+    reason: "labelled credential pair (api_key/token/refresh_token/auth_token/session_token/secret/secret_id/private_key/password/passwd/pwd/client_secret)"
 
   - name: strip-kubeconfig
     pattern: kubeconfig

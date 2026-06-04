@@ -90,14 +90,37 @@ _JWT = re.compile(
 )
 
 # Generic API keys / secret tokens. This is intentionally narrow: we
-# only match labelled secrets (``api[_-]?key``, ``token``, ``secret``,
-# ``password``) followed by ``=`` / ``:`` / `` `` and a non-trivial
-# value. A naked 40-char base64 string in a paragraph is **not** matched
-# here because the false-positive rate against opaque IDs (Git SHAs,
+# only match labelled secrets followed by ``=`` / ``:`` and a
+# non-trivial value. Covered labels:
+#
+#   ``api[_-]?key``, ``access[_-]?token``, ``refresh[_-]?token``,
+#   ``auth[_-]?token``, ``session[_-]?token``, ``token`` (bare),
+#   ``secret(?:[_-]?(?:key|id))?``, ``private[_-]?key``,
+#   ``password``, ``passwd``, ``pwd``, ``client[_-]?secret``
+#
+# More-specific ``*_token`` / ``secret[_-]?id`` / ``private[_-]?key``
+# members are listed before the broad bare ``token`` member so that the
+# leftmost-first alternation rule does not shadow them (both orders
+# match identically here since the value tail is group 0, but the
+# ordering makes the intent readable).
+#
+# A naked 40-char base64 string in a paragraph is **not** matched
+# because the false-positive rate against opaque IDs (Git SHAs,
 # build hashes, CSP nonces) would be intolerable; downstream Tier-2 NER
 # can take a second pass on free text.
 _API_KEY = re.compile(
-    r"\b(?:api[_-]?key|access[_-]?token|secret(?:[_-]?key)?|password|passwd|pwd|client[_-]?secret)"
+    r"\b(?:"
+    r"api[_-]?key"
+    r"|access[_-]?token"
+    r"|refresh[_-]?token"
+    r"|auth[_-]?token"
+    r"|session[_-]?token"
+    r"|secret(?:[_-]?(?:key|id))?"
+    r"|private[_-]?key"
+    r"|password|passwd|pwd"
+    r"|client[_-]?secret"
+    r"|token"
+    r")"
     r"\s*[=:]\s*['\"]?[A-Za-z0-9._\-+/=]{8,}['\"]?",
     re.IGNORECASE,
 )

@@ -50,6 +50,14 @@ _EXPECTED_NAMES = {
 _JWT_FIXTURE_POS = "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0" + "." + "abcdefghij"
 _AUTH_HEADER_FIXTURE = "Authorization: Bearer " + _JWT_FIXTURE_POS
 _CLIENT_SECRET_FIXTURE_POS = "client_secret" + " = " + "ABCDEFGHIJKL" + "12345"
+# New label fixtures for the Task #94 extension. Assembled from fragments
+# for the same gitleaks-avoidance reason as the fixtures above.
+_TOKEN_FIXTURE_POS = "token" + ": " + "ghp_abcdefgh" + "1234"
+_REFRESH_TOKEN_FIXTURE_POS = "refresh_token" + ": " + "rt_abcdefgh" + "1234"
+_AUTH_TOKEN_FIXTURE_POS = "auth_token" + ": " + "at_abcdefgh" + "1234"
+_SESSION_TOKEN_FIXTURE_POS = "session_token" + ": " + "st_abcdefgh" + "1234"
+_SECRET_ID_FIXTURE_POS = "secret_id" + ": " + "11111111-2222" + "-3333-aaaa"
+_PRIVATE_KEY_FIXTURE_POS = "private_key" + ": " + "MIIEvQIBADA" + "NBgkq"
 
 
 def test_catalog_lists_expected_patterns() -> None:
@@ -148,6 +156,43 @@ def test_get_pattern_unknown_raises() -> None:
             "api_key",
             _CLIENT_SECRET_FIXTURE_POS,
             True,
+        ),
+        # api_key: new labels added by Task #94
+        (
+            "api_key",
+            _TOKEN_FIXTURE_POS,
+            True,
+        ),
+        (
+            "api_key",
+            _REFRESH_TOKEN_FIXTURE_POS,
+            True,
+        ),
+        (
+            "api_key",
+            _AUTH_TOKEN_FIXTURE_POS,
+            True,
+        ),
+        (
+            "api_key",
+            _SESSION_TOKEN_FIXTURE_POS,
+            True,
+        ),
+        (
+            "api_key",
+            _SECRET_ID_FIXTURE_POS,
+            True,
+        ),
+        (
+            "api_key",
+            _PRIVATE_KEY_FIXTURE_POS,
+            True,
+        ),
+        # api_key: negative control -- bare ``token`` in free prose must not fire
+        (
+            "api_key",
+            "the token machine is broken",
+            False,
         ),
         # kubeconfig: requires the apiVersion + kind preamble
         (
@@ -260,6 +305,13 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("api_key", "the resource id is 12345-abcdef", False),
     ("api_key", "password: 's3cr3tValue!'", True),
     ("api_key", _CLIENT_SECRET_FIXTURE_POS, True),
+    ("api_key", _TOKEN_FIXTURE_POS, True),
+    ("api_key", _REFRESH_TOKEN_FIXTURE_POS, True),
+    ("api_key", _AUTH_TOKEN_FIXTURE_POS, True),
+    ("api_key", _SESSION_TOKEN_FIXTURE_POS, True),
+    ("api_key", _SECRET_ID_FIXTURE_POS, True),
+    ("api_key", _PRIVATE_KEY_FIXTURE_POS, True),
+    ("api_key", "the token machine is broken", False),
     ("kubeconfig", "apiVersion: v1\nkind: Config\n", True),
     ("kubeconfig", "apiVersion: v1\nkind: Pod\n", False),
     ("uuid", "tenant_id=12345678-1234-1234-1234-123456789abc", True),

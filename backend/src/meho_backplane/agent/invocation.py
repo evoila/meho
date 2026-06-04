@@ -79,6 +79,7 @@ from decimal import Decimal
 from typing import Final
 
 import structlog
+from pydantic import SecretStr
 
 from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.agent.run import (
@@ -743,7 +744,7 @@ class AgentInvoker:
         inputs: str,
         *,
         agent_client_id: str,
-        agent_client_secret: str,
+        agent_client_secret: SecretStr,
     ) -> AgentRunOutcome:
         """Run an agent autonomously under its own ``client_credentials`` identity.
 
@@ -762,6 +763,11 @@ class AgentInvoker:
         audit-shape seam it calls. Blocks until the loop completes (autonomous
         runs have no client waiting on a sync timeout).
 
+        ``agent_client_secret`` is a :class:`~pydantic.SecretStr` so it can
+        never be rendered into a log line as a frame local on any exception
+        path -- the value is unwrapped via ``.get_secret_value()`` only at
+        the single :func:`get_client_credentials_token` call below.
+
         Raises:
             AgentTokenError: the ``client_credentials`` grant failed.
             AgentNotFoundError / AgentDisabledError: no enabled definition
@@ -773,7 +779,7 @@ class AgentInvoker:
         token = await get_client_credentials_token(
             issuer_url=str(settings.keycloak_issuer_url),
             client_id=agent_client_id,
-            client_secret=agent_client_secret,
+            client_secret=agent_client_secret.get_secret_value(),
             audience=settings.keycloak_audience,
         )
         operator = await verify_jwt_for_audience(

@@ -36,6 +36,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import SecretStr
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
@@ -796,7 +797,7 @@ async def test_run_scheduled_rejects_cross_agent_definition(
             "other-bot",
             "do the thing",
             agent_client_id="agent:a",
-            agent_client_secret="s3cr3t",
+            agent_client_secret=SecretStr("s3cr3t"),
         )
     # Fail-closed before persisting anything.
     create_spy.assert_not_awaited()
@@ -853,7 +854,7 @@ async def test_run_scheduled_allows_matching_agent_definition(
             "a-bot",
             "do the thing",
             agent_client_id="agent:a",
-            agent_client_secret="s3cr3t",
+            agent_client_secret=SecretStr("s3cr3t"),
         )
     # Guard passed — the run row creation was reached.
     create_spy.assert_awaited_once()

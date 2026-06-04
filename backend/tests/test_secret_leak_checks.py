@@ -52,7 +52,9 @@ import hvac.exceptions
 import pytest
 import respx
 import structlog
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -640,6 +642,185 @@ def test_regex_sweep_on_authenticated_request_log_buffer(
 # ---------------------------------------------------------------------------
 # Operator-model unit-level leak guard (cheap belt-and-suspenders)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Scheduler agent client_credentials secret leak (#1488)
+#
+# A failed scheduled agent run is logged via ``_log.exception(
+# "scheduler_fire_failed", ...)`` on ``run_one_tick``'s broad ``except``.
+# structlog's ``dict_tracebacks`` renders frame locals; the agent's
+# ``client_credentials`` secret used to be a plain ``str`` frame local on
+# the captured traceback (``_PreparedInvocation.agent_client_secret`` /
+# the ``agent_client_secret`` kwarg through ``run_scheduled``), so every
+# failed fire wrote it to stdout in cleartext (CWE-532).
+#
+# The fix is defense in depth: (1) the secret is a ``SecretStr`` from
+# ``_PreparedInvocation`` through ``run_scheduled`` (masks to
+# ``'**********'`` even as a bare frame local), unwrapped only at the
+# token-mint call; and (2) production ``configure_logging`` runs the
+# traceback transformer with ``show_locals=False`` (drops every frame's
+# locals dict). Each test below pins one layer so a regression in either
+# is caught independently.
+# ---------------------------------------------------------------------------
+
+#: Sentinel standing in for the agent ``client_credentials`` secret. An
+#: obvious dummy — never a realistic credential value — that we grep the
+#: rendered traceback for. Module-level so the value is never a bare local
+#: in a test *function* frame (which would itself land in a ``show_locals``
+#: dump and make the assertion vacuously fail on the test's own frame
+#: rather than the production frames under test).
+_AGENT_SECRET_CANARY = "dummy-agent-client-secret-CANARY-1488"
+
+
+def _configure_production_capture(buf: io.StringIO) -> None:
+    """Bind the **production** structlog chain to ``buf``.
+
+    Unlike :func:`_configure_capture` (which mirrors the pre-#1488
+    default with ``show_locals=True``), this drives the real
+    :func:`meho_backplane.logging.configure_logging` processor list, so
+    the ``show_locals=False`` layer is exercised exactly as it runs in
+    production. The logger factory is swapped to write to ``buf`` after
+    the production configure call.
+    """
+    from meho_backplane.logging import configure_logging
+
+    structlog.reset_defaults()
+    configure_logging(level=logging.INFO)
+    # Re-point the factory at the buffer; the production configure writes
+    # to the lazy stdout factory, which pytest capture would intercept
+    # less reliably than a private buffer.
+    current = structlog.get_config()
+    structlog.configure(
+        processors=current["processors"],
+        wrapper_class=current["wrapper_class"],
+        logger_factory=structlog.PrintLoggerFactory(file=buf),
+        cache_logger_on_first_use=False,
+    )
+
+
+def _raise_dispatch_through_scheduler_log(buf: io.StringIO, exc: Exception) -> None:
+    """Drive a failed fire through the real ``scheduler_fire_failed`` path.
+
+    Mirrors ``run_one_tick``'s per-row failure handler verbatim: build a
+    ``_PreparedInvocation`` holding the secret as a ``SecretStr``, call
+    ``_dispatch_invocation`` (which forwards into ``run_scheduled``),
+    and log any escaping exception via ``_log.exception(
+    "scheduler_fire_failed", ...)`` so the captured traceback spans the
+    secret-bearing frames. *exc* is raised from inside ``run_scheduled``
+    (stubbed) so it is **not** in ``_dispatch_invocation``'s narrow
+    ``except`` list and escapes to the broad handler — the exact path
+    the leak travelled.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from meho_backplane.scheduler import loop as scheduler_loop
+
+    invoker = SimpleNamespace(run_scheduled=AsyncMock(side_effect=exc))
+    prepared = scheduler_loop._PreparedInvocation(  # type: ignore[attr-defined]
+        name="reporter",
+        identity_ref="agent:reporter",
+        agent_client_id="agent:reporter",
+        # The canary lives only inside the SecretStr from here on.
+        agent_client_secret=SecretStr(_AGENT_SECRET_CANARY),
+        inputs_str="ping",
+    )
+    row = SimpleNamespace(id="11111111-1111-1111-1111-111111111111", kind="cron")
+    log = structlog.get_logger("meho_backplane.scheduler.loop")
+    try:
+        asyncio.run(
+            scheduler_loop._dispatch_invocation(row, prepared, invoker)  # type: ignore[arg-type]
+        )
+    except Exception:
+        # Verbatim shape of run_one_tick's per-row except (loop.py).
+        log.exception("scheduler_fire_failed", trigger_id=str(row.id))
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        # The audience 401 the sibling ticket triggers: an HTTPException
+        # is not in _dispatch_invocation's narrow except list, so it
+        # escapes to the broad scheduler_fire_failed handler.
+        HTTPException(status_code=401, detail="invalid_audience"),
+        # A distinct, unexpected failure cause (e.g. a bug in the budget
+        # system surfacing as a bare RuntimeError) — also escapes.
+        RuntimeError("unexpected budget-subsystem failure"),
+    ],
+    ids=["audience_401", "runtime_error"],
+)
+def test_scheduler_secret_never_renders_in_fire_failed_log(
+    exc: Exception,
+) -> None:
+    """A failed scheduled run never writes the agent secret to the logs.
+
+    Drives the production ``configure_logging`` chain (``show_locals=
+    False`` plus ``SecretStr``) and asserts the secret canary is absent
+    from the ``scheduler_fire_failed`` JSON log line, for two distinct
+    escaping exceptions (acceptance criterion: holds regardless of which
+    exception escapes)."""
+    buf = io.StringIO()
+    _configure_production_capture(buf)
+    try:
+        _raise_dispatch_through_scheduler_log(buf, exc)
+        captured = buf.getvalue()
+    finally:
+        structlog.reset_defaults()
+
+    # Non-vacuous: the failure WAS logged (else the assertion below is
+    # trivially true on an empty buffer).
+    assert "scheduler_fire_failed" in captured, (
+        "expected the scheduler_fire_failed event to be logged"
+    )
+    assert _AGENT_SECRET_CANARY not in captured, (
+        "agent client_credentials secret leaked into the scheduler_fire_failed log line"
+    )
+
+
+def test_scheduler_secret_masked_even_with_show_locals_enabled() -> None:
+    """The ``SecretStr`` layer masks the secret even if locals are rendered.
+
+    Pins the type-level guarantee independently of the
+    ``show_locals=False`` logging config: with frame locals *explicitly
+    re-enabled* (the pre-#1488 structlog default), the secret still does
+    not appear — it renders as ``SecretStr('**********')`` because it is
+    held as a ``SecretStr``. This is the defense that survives anyone
+    later re-enabling ``show_locals`` for triage, or a new log call
+    rendering a prepared-invocation frame."""
+    from structlog.tracebacks import ExceptionDictTransformer
+
+    buf = io.StringIO()
+    structlog.reset_defaults()
+    structlog.configure(
+        processors=[
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            # Frame locals ON — the exact vector #1488 closes elsewhere.
+            structlog.processors.ExceptionRenderer(ExceptionDictTransformer(show_locals=True)),
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.PrintLoggerFactory(file=buf),
+        cache_logger_on_first_use=False,
+    )
+    try:
+        _raise_dispatch_through_scheduler_log(buf, RuntimeError("boom with locals on"))
+        captured = buf.getvalue()
+    finally:
+        structlog.reset_defaults()
+
+    assert "scheduler_fire_failed" in captured
+    # Locals are present (proves show_locals=True actually rendered them),
+    # but the secret is masked, not leaked.
+    assert _AGENT_SECRET_CANARY not in captured, (
+        "SecretStr failed to mask the agent secret with show_locals=True"
+    )
+    assert "**********" in captured, (
+        "expected the SecretStr-masked form to appear in the rendered locals "
+        "(else the locals dump did not include the secret-bearing frame and "
+        "this test asserts on nothing)"
+    )
 
 
 def test_operator_repr_excludes_raw_jwt() -> None:

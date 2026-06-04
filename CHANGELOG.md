@@ -92,6 +92,22 @@ connector-related release-notes line.
 
 ### Fixed
 
+- **Security (credential disclosure): a failed scheduled agent run no
+  longer writes the agent's `client_credentials` secret into the JSON
+  logs.** On the `scheduler_fire_failed` path the secret was held as a
+  plain-`str` frame local, and structlog's traceback renderer
+  (`dict_tracebacks`) defaults to `show_locals=True`, so every failed
+  fire serialised the secret to stdout in cleartext (CWE-532). Two
+  defenses now apply: the secret is threaded as a `pydantic.SecretStr`
+  from `_PreparedInvocation` through `run_scheduled` (masking to
+  `'**********'` even as a bare frame local, unwrapped only at the
+  token-mint call site — the first `SecretStr` in the backplane), and
+  `configure_logging` runs the traceback transformer with
+  `show_locals=False`, dropping every frame's locals dict (which also
+  closes the latent `auth/agent_token.py` frame where the secret is an
+  unavoidable plain `str` for the httpx form-post). The structured
+  traceback (file / line / function / exception type) is retained for
+  triage (#1488).
 - **`agents.delete` on a definition that ever had a `scheduled_trigger`
   (including a cancelled one) no longer fails with an opaque
   `-32603 "internal error: IntegrityError"` (MCP) / unhandled HTTP 500

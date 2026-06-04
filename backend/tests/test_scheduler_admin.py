@@ -41,6 +41,7 @@ from uuid import UUID, uuid4
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import select
 
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
@@ -919,7 +920,7 @@ async def test_durability_trigger_survives_scheduler_restart(
         name="durable-bot",
         identity_ref=f"agent:{_TENANT_A}-durable-bot",
         agent_client_id="dummy",
-        agent_client_secret="dummy",
+        agent_client_secret=SecretStr("dummy"),
         inputs_str="",
     )
 

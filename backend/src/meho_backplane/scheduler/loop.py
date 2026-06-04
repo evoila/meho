@@ -119,6 +119,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
+from pydantic import SecretStr
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -322,7 +323,16 @@ class _PreparedInvocation:
     name: str
     identity_ref: str
     agent_client_id: str
-    agent_client_secret: str
+    #: The agent's ``client_credentials`` secret, held as a
+    #: :class:`~pydantic.SecretStr` so it can never be rendered into a log
+    #: line. A failed scheduled fire is logged via ``_log.exception`` on
+    #: ``run_one_tick``'s broad ``except`` (:func:`run_one_tick`), and the
+    #: structlog ``dict_tracebacks`` processor renders frame locals
+    #: (``show_locals``) -- a plain ``str`` here would print the secret
+    #: verbatim into stdout (CWE-532). ``SecretStr`` masks to
+    #: ``'**********'`` even as a bare frame local; the real value is read
+    #: only at the token-mint call site via ``.get_secret_value()``.
+    agent_client_secret: SecretStr
     inputs_str: str
 
 
@@ -397,7 +407,12 @@ async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | No
         name=definition.name,
         identity_ref=definition.identity_ref,
         agent_client_id=agent_client_id,
-        agent_client_secret=agent_client_secret,
+        # Wrap the resolved secret immediately so it lives as a SecretStr
+        # for the rest of its lifetime -- the plain ``agent_client_secret``
+        # local above is the only frame that holds it bare, and it is not
+        # on the failure-logging traceback (this function returns before
+        # any fire that ``run_one_tick`` would log on).
+        agent_client_secret=SecretStr(agent_client_secret),
         inputs_str=_coerce_inputs(row.inputs),
     )
 

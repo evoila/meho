@@ -59,6 +59,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentPrincipal,
     AgentRun,
+    AgentRunStatus,
     AgentRunTrigger,
     ScheduledTrigger,
     ScheduledTriggerKind,
@@ -983,3 +984,112 @@ async def test_one_off_scheduler_invoke_refused_on_budget_marks_fired_and_does_n
     async with sessionmaker() as session:
         rows_after = list((await session.execute(select(AgentRun))).scalars().all())
     assert rows_after == []
+
+
+# ---------------------------------------------------------------------------
+# #1502: a blocking run does not stall later triggers in the same tick, and
+# the tick returns promptly so the advisory lock is released each cadence.
+# ---------------------------------------------------------------------------
+
+
+def _first_run_blocks_invoker(gate: asyncio.Event) -> AgentInvoker:
+    """An invoker whose *first* run blocks on *gate*; later runs answer fast.
+
+    ``model_factory`` is invoked once per run (per ``PydanticAgentRun.start``),
+    so a call-count latch makes only the first scheduled run hang — modelling
+    one stuck trigger followed by a healthy one within a single tick.
+    """
+    calls = {"n": 0}
+
+    def factory() -> FunctionModel:
+        calls["n"] += 1
+        if calls["n"] == 1:
+
+            async def blocking(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+                await gate.wait()
+                return ModelResponse(parts=[TextPart("eventually")])
+
+            return FunctionModel(blocking)
+        return _final_text("done")
+
+    return AgentInvoker(runtime=PydanticAgentRun(model_factory=factory))
+
+
+@pytest.mark.asyncio
+async def test_blocking_run_does_not_stall_later_triggers_in_same_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung first run converts-to-async; the second due trigger still fires.
+
+    Two cron triggers are due in the same tick. The first agent run blocks
+    (a hung model call). Before #1502 the bare ``await task`` would hold the
+    serial ``for row in rows`` loop — and the advisory lock — until the run
+    returned (in the realistic case, an approval wait of up to 30 min) or a
+    pod restart. With ``run_scheduled``'s wait bounded by
+    ``AGENT_SYNC_TIMEOUT_SECONDS``, the first run is abandoned to the
+    background and the tick proceeds to fire the second trigger, then returns
+    promptly so the lock is freed each cadence.
+    """
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    first = await _create_cron(agent_definition_id=agent_id, base=base)
+    second = await _create_cron(agent_definition_id=agent_id, base=base)
+    # Both overdue so a single tick claims and fires both.
+    await _force_due(first.id, datetime(2026, 1, 1, tzinfo=UTC))
+    await _force_due(second.id, datetime(2026, 1, 1, tzinfo=UTC))
+
+    gate = asyncio.Event()
+    invoker = _first_run_blocks_invoker(gate)
+
+    # Bound the per-run wait low; the tick must return well under the ceiling
+    # even though the first run is still parked on the (never-set-in-tick) gate.
+    # ``run_scheduled`` reads ``get_settings()`` itself, so set the env var and
+    # clear the lru cache (mirrors test_long_sync_run_converts_to_async).
+    monkeypatch.setenv("AGENT_SYNC_TIMEOUT_SECONDS", "0.05")
+    get_settings.cache_clear()
+
+    try:
+        # The whole tick must finish quickly — a regression (bare await) would
+        # hang here until the 5s ceiling trips, failing the test.
+        fires = await asyncio.wait_for(run_one_tick(invoker=invoker), timeout=5.0)
+
+        # Both triggers fired in the one tick despite the first run blocking.
+        assert fires == 2
+
+        # The second (healthy) run reaches a durable row promptly. The first
+        # is still running in the background (parked on the gate), so we assert
+        # at least one run row exists now and the tick already returned.
+        runs = await _wait_for_agent_runs(1, trigger=AgentRunTrigger.SCHEDULED)
+        assert len(runs) >= 1
+
+        # Both cron rows advanced (the fire/advance commit happens before the
+        # bounded wait), so neither is stuck re-claiming on the next tick.
+        for tid in (first.id, second.id):
+            advanced = await _get_trigger(tid)
+            assert advanced.status == ScheduledTriggerStatus.ACTIVE.value
+            next_fire = _aware(advanced.next_fire_at)
+            assert next_fire is not None
+            assert next_fire > datetime(2026, 1, 1, tzinfo=UTC)
+    finally:
+        # Let the abandoned background loop finish so it does not leak a
+        # pending task past the test (clean pytest-asyncio shutdown).
+        gate.set()
+
+    # Both background runs ultimately reach a terminal state — the wait was
+    # abandoned, not the run. Poll the durable rows until both finalise (the
+    # blocked run's row is created RUNNING up front and updated on completion).
+    sessionmaker = get_sessionmaker()
+    deadline = asyncio.get_event_loop().time() + 3.0
+    final_runs: list[AgentRun] = []
+    while asyncio.get_event_loop().time() < deadline:
+        async with sessionmaker() as session:
+            final_runs = list((await session.execute(select(AgentRun))).scalars().all())
+        if len(final_runs) == 2 and all(
+            r.status == AgentRunStatus.SUCCEEDED.value for r in final_runs
+        ):
+            break
+        await asyncio.sleep(0.05)
+    assert len(final_runs) == 2
+    assert all(r.status == AgentRunStatus.SUCCEEDED.value for r in final_runs), [
+        r.status for r in final_runs
+    ]

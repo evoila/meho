@@ -254,9 +254,13 @@ State lives in the `scheduled_trigger` row. On pod restart:
   on the next tick and transitions to `fired`.
 
 The "compute next then fire" discipline (advance BEFORE invoking the
-agent) is what guarantees this: even a slow agent run cannot delay the
-next tick, because `next_fire_at` is already persisted at the next
-scheduled instant by the time the agent run starts.
+agent) is what guarantees single-fire: `next_fire_at` is already
+persisted at the next scheduled instant by the time the agent run
+starts, so a missed/duplicated claim cannot replay it. The wait on
+the agent loop itself is separately bounded inside `run_scheduled`
+(`AGENT_SYNC_TIMEOUT_SECONDS`, default 30 s) so a hung or
+approval-gated run cannot stall later ticks or strand the advisory
+lock — see "Known issues / limitations" (#1502).
 
 ## Dependencies
 
@@ -296,6 +300,17 @@ scheduled instant by the time the agent run starts.
 - **`AgentRunTrigger.SCHEDULED` provenance** — passed through to
   `AgentInvoker.run`'s new `trigger` kwarg. Audit queries that filter by
   trigger see scheduled runs distinctly from direct invocations.
+- **A blocking run is abandoned, not reclaimed, by this loop** (#1502) —
+  `run_scheduled` bounds its wait by `AGENT_SYNC_TIMEOUT_SECONDS`
+  (default 30 s) and, on timeout, returns the still-running handle
+  (`converted_to_async`) while the agent loop keeps running in the
+  background. This is what keeps the serial tick non-blocking and frees
+  the advisory lock each tick even when a run hangs or blocks on a
+  `requires_approval` wait (up to `AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS`,
+  default 30 min). The lock is therefore held at most one bounded wait
+  per blocking run per tick, not for the run's whole lifetime. Driving
+  the abandoned background run to a terminal state (lease/heartbeat
+  reaper) is a separate concern (T1 #1501), not this loop's job.
 - **Pause / resume not exposed yet** — the T5 admin surface ships
   create / list / cancel; pause-then-resume of an active trigger is
   not in v0.2. `ScheduledTriggerStatus.PAUSED` exists in the enum and

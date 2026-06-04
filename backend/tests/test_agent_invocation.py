@@ -955,3 +955,80 @@ async def test_run_scheduled_allows_matching_agent_definition(
         )
     # Guard passed — the run row creation was reached.
     create_spy.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# #1502: run_scheduled bounds its wait so a hung run cannot block the serial
+# scheduler tick (and strand the advisory lock) until a pod restart.
+# ---------------------------------------------------------------------------
+
+
+def _blocking_model(gate: asyncio.Event) -> FunctionModel:
+    """A model whose first turn awaits *gate* — simulates a hung HTTP call."""
+
+    async def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        await gate.wait()
+        return ModelResponse(parts=[TextPart("eventually")])
+
+    return FunctionModel(fn)
+
+
+async def test_run_scheduled_bounds_wait_and_converts_to_async(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduled run still executing at the deadline returns a running handle.
+
+    The wait abandons (``converted_to_async``) instead of blocking forever, so
+    the serial scheduler tick can return and release its advisory lock; the
+    background loop keeps running and is later reaped/finalised (#1502).
+    """
+    await _seed_definition(name="reporter")
+    gate = asyncio.Event()
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: _blocking_model(gate)))
+
+    # The scheduled path obtains a client_credentials token and verifies the
+    # JWT before launching; stub both seams (no Keycloak in unit tests). The
+    # verified operator must own the seeded ``agent:reporter`` definition.
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.get_client_credentials_token",
+        AsyncMock(return_value="agent-token"),
+    )
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(return_value=_make_operator(sub="sa-reporter")),
+    )
+
+    # Drive the bound near zero so the wait abandons deterministically while the
+    # background loop is still parked on the gate — no real long-running call.
+    monkeypatch.setenv("AGENT_SYNC_TIMEOUT_SECONDS", "0.05")
+    get_settings.cache_clear()
+
+    try:
+        outcome = await asyncio.wait_for(
+            invoker.run_scheduled(
+                "reporter",
+                "go",
+                agent_client_id="agent:reporter",
+                agent_client_secret=SecretStr("s3cr3t"),
+            ),
+            # Generous ceiling: the call must return on the 0.05s inner bound,
+            # well under this; exceeding it means run_scheduled blocked on the
+            # still-gated loop — the bug this guards against.
+            timeout=5.0,
+        )
+    finally:
+        # Release the background loop so it finalises cleanly regardless of
+        # outcome (avoids a "Task was destroyed but it is pending" warning).
+        gate.set()
+
+    assert outcome.converted_to_async is True
+    assert outcome.status is AgentRunStatus.RUNNING
+
+    # The abandoned loop keeps running and reaches a terminal state once the
+    # gate is released — the wait was abandoned, not the run.
+    for _ in range(200):
+        view = await invoker.poll(_make_operator(sub="sa-reporter"), outcome.run_id)
+        if view.status is AgentRunStatus.SUCCEEDED:
+            break
+        await asyncio.sleep(0.01)
+    assert view.status is AgentRunStatus.SUCCEEDED

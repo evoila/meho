@@ -90,8 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-06-04
+
 ### Fixed
 
+- Connector credential handling: every Vault-sourced credential is now
+  whitespace-stripped before use (a `client_secret` stored with a
+  trailing newline was sent verbatim and rejected by Keycloak as
+  `unauthorized_client`, surfacing only as an opaque `HTTP 401`). A shared
+  `strip_credential_value()` in `_shared/vault_creds.py` is applied at
+  every credential-field extraction path (`load_basic_credentials`
+  consumers — vmware, nsx, harbor, sddc, argocd, vcf — plus the Keycloak
+  admin + GitHub App/PAT loaders), and `KeycloakAdminTokenError` now
+  surfaces the OAuth2 `error`/`error_description` instead of only the HTTP
+  status ([#1475](https://github.com/evoila/meho/issues/1475)).
 - **Security (credential disclosure): a failed scheduled agent run no
   longer writes the agent's `client_credentials` secret into the JSON
   logs.** On the `scheduler_fire_failed` path the secret was held as a

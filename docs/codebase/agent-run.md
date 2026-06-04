@@ -61,10 +61,28 @@ What is **not** in T6 or T4 (other tasks own these):
   cadence so the reaper does not reclaim a healthy run; the loop must
   also honour `LeaseLostError` by aborting immediately (any further
   side effects would be at-least-twice).
-- The trigger-firing path that calls `claim_lease` +
-  `snapshot_in_flight_policy` at run-start — G11.3-T2 (#823, cron + one-off)
-  and G11.3-T3 (#824, event subscription). T4 ships the substrate;
-  T2/T3 wire the call site.
+- The `snapshot_in_flight_policy` call site that copies a *firing
+  trigger's* `resume | fail_into_audit` onto the run at run-start —
+  G11.3-T2 (#823, cron + one-off) and G11.3-T3 (#824, event
+  subscription). Those tasks own the scheduled/event dispatch path that
+  has a trigger row to snapshot. (The `claim_lease` half of the
+  fire-path wiring is **no longer** future work — see below.)
+- **`claim_lease` at run-start is now wired (#1501).** The run fire
+  path (`agent/invocation.py`) stamps a lease in the **same committed
+  transaction** as the `pending -> running` transition, so a committed
+  run is never `running` without a lease and the reaper's claim query
+  (`status='running' AND lease_expires_at < now()`) can actually match
+  a real run. A heartbeat sidecar (`_heartbeat_loop`) bumps the lease
+  forward at `ttl_seconds/2` while the run is alive and is cancelled on
+  every exit path; if the worker task dies the sidecar dies with it,
+  the lease lapses, and the reaper drives the row to `failed`. This
+  ships across all three run shapes: the background run loop
+  (`_run_loop_to_completion`), the inline SSE stream (`stream`), and
+  child `invoke_agent` runs (`_record_child_run` returns
+  `(run_id, lease_owner)` so the `invoke_agent` tool heartbeats the
+  child for its loop's lifetime). Direct / scheduled / agent-invoked
+  runs leave `in_flight_policy` at the row default (`fail_into_audit`)
+  — they have no firing-trigger row to snapshot.
 - Per-tool-call raw+redacted audit rows + replay — G11.4/C2 (this is the
   run-level record those rows link to via `agent_session_id`).
 - Cost computation — G11.5/C3. The `cost` column is recorded here but
@@ -208,9 +226,11 @@ one transaction):
 ## In-flight reaper (T4 #825)
 
 `backend/src/meho_backplane/agent/reaper.py` owns the *reclaim* half of
-the no-silently-lost contract. The trigger-firing path (T2 / T3) writes
-the lease at run-start; the healthy worker bumps it forward via
-`heartbeat`; the reaper scans for expired leases on a fixed cadence
+the no-silently-lost contract. The run fire path (`agent/invocation.py`,
+#1501) writes the lease at run-start in the same transaction as
+`pending -> running`; the healthy worker bumps it forward via
+`heartbeat` (a `_heartbeat_loop` sidecar); the reaper scans for expired
+leases on a fixed cadence
 (`AGENT_RUN_REAPER_TICK_INTERVAL_SECONDS`, default 30s) and applies the
 per-run `in_flight_policy`:
 
@@ -310,6 +330,11 @@ Settings (all in `Settings`, all opt-out via env):
   #800 (G11 agentic ops runtime).
 - Initiative #804 (G11.3 Scheduler), Task #825 (T4 — lease/heartbeat
   + reaper).
+- #1501 — wires `claim_lease` + the `_heartbeat_loop` sidecar into the
+  run fire path (`backend/src/meho_backplane/agent/invocation.py`,
+  `agent/invoke.py`) across the background loop, the inline SSE stream,
+  and child `invoke_agent` runs, so the T4 reaper can reclaim a hung
+  run.
 - Migration `0017_create_agent_run.py` (T6 — table) +
   `0026_add_agent_run_lease_reaper.py` (T4 — lease columns); model
   `AgentRun` in `backend/src/meho_backplane/db/models.py`; service

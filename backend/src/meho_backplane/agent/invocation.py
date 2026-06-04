@@ -72,6 +72,9 @@ the operator's tenant owns (cross-tenant run ids surface as
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import socket
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -233,6 +236,66 @@ class _RunState:
 #: initiative resolves the logical model tier to this concrete pair through
 #: the settings default; the multi-provider resolver is G11.5.
 _DEFAULT_PROVIDER: Final[str] = "anthropic"
+
+
+def _lease_owner() -> str:
+    """Compute a stable per-process identifier for the run's ``lease_owner``.
+
+    ``"<hostname>:<pid>"`` -- the same shape
+    :func:`meho_backplane.events.drain._claimer_identity` uses for the
+    outbox-drain claimer. Visible from PG diagnostics, no PII, no secret
+    material; an operator chasing a reaped run can map the
+    ``prior_lease_owner`` the reaper records straight back to the pod /
+    process whose worker died.
+    """
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+async def _heartbeat_loop(run_id: uuid.UUID, owner: str) -> None:
+    """Extend *run_id*'s lease on a cadence until cancelled or the lease is lost.
+
+    Wiring the lease lifecycle into the fire path (#1501) closes the
+    G11.3-T4 #825 gap: :func:`run_lifecycle.claim_lease` stamps the lease
+    at run-start, but without a heartbeat the lease expires under any run
+    that outlives one TTL window and the reaper would reclaim a perfectly
+    healthy worker. This sidecar bumps ``lease_expires_at`` forward every
+    ``ttl_seconds / 2`` so a live worker keeps its lease, while a worker
+    that has died (its event loop gone) stops heartbeating and the reaper
+    reclaims the run after the TTL lapses.
+
+    Each heartbeat opens its own short-lived committed transaction -- the
+    conditional ``UPDATE`` in :func:`run_lifecycle.heartbeat` is atomic, so
+    no longer-held session is needed. A :class:`run_lifecycle.LeaseLostError`
+    means the reaper (or an operator cancel) already took the run over: the
+    loop logs and returns so it stops touching a row it no longer owns.
+    :class:`asyncio.CancelledError` (the run finished, the sidecar is being
+    torn down) propagates verbatim.
+    """
+    settings = get_settings()
+    ttl_seconds = settings.agent_run_lease_ttl_seconds
+    # Heartbeat at half the TTL so a single missed beat (a transient DB
+    # blip, a short GC pause) still leaves one full window of slack before
+    # the reaper reclaims -- the same two-window margin the reaper's
+    # default tick/TTL pairing documents.
+    interval = max(1.0, ttl_seconds / 2.0)
+    sessionmaker = get_sessionmaker()
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with sessionmaker() as session:
+                await run_lifecycle.heartbeat(
+                    session,
+                    run_id=run_id,
+                    owner=owner,
+                    ttl_seconds=ttl_seconds,
+                )
+                await session.commit()
+        except run_lifecycle.LeaseLostError:
+            # The reaper reclaimed the row or an operator cancelled it
+            # out from under us. Stop heartbeating -- the run is no
+            # longer ours to keep alive.
+            _log.info("agent_run_lease_lost", run_id=str(run_id), owner=owner)
+            return
 
 
 def _log_decision(
@@ -479,16 +542,31 @@ class AgentInvoker:
         provider: str,
         model: str,
         trigger: AgentRunTrigger = AgentRunTrigger.DIRECT,
-    ) -> uuid.UUID:
-        """Insert a ``pending`` run row, transition it to ``running``, commit.
+    ) -> tuple[uuid.UUID, str]:
+        """Insert a ``pending`` run row, claim a lease, go ``running``, commit.
 
         Done in its own committed transaction *before* the loop starts so
         the run is pollable the instant :meth:`run` returns a handle — even
         in async mode where the background task has not made progress yet.
-        Returns the run id (the durable handle + audit-lineage key). A
-        human-initiated :meth:`run` records ``DIRECT``; an autonomous
-        :meth:`run_scheduled` records ``SCHEDULED``.
+        Returns ``(run_id, lease_owner)``: the run id is the durable handle
+        + audit-lineage key; the lease owner is the per-process stamp the
+        heartbeat sidecar reuses so its conditional ``UPDATE`` matches the
+        row this worker claimed. A human-initiated :meth:`run` records
+        ``DIRECT``; an autonomous :meth:`run_scheduled` records
+        ``SCHEDULED``.
+
+        The lease is stamped (#1501 / G11.3-T4 #825) in the *same*
+        transaction as the ``pending`` -> ``running`` transition, so a
+        committed run is never ``running`` without a lease: the reaper's
+        claim query (``status='running' AND lease_expires_at < now()``)
+        can therefore reclaim this run once its lease lapses, instead of
+        the row staying stuck ``running`` forever. The in-flight policy
+        is left at the row default (``fail_into_audit``) -- a direct /
+        scheduled run has no firing-trigger row to snapshot, and
+        ``fail_into_audit`` is the conservative reclaim outcome the
+        reaper applies.
         """
+        owner = _lease_owner()
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             row = await run_lifecycle.create_run(
@@ -500,9 +578,15 @@ class AgentInvoker:
                 agent_definition_id=entry.id,
             )
             await run_lifecycle.start_run(session, row, provider=provider, model=model)
+            await run_lifecycle.claim_lease(
+                session,
+                row,
+                owner=owner,
+                ttl_seconds=get_settings().agent_run_lease_ttl_seconds,
+            )
             run_id = row.id
             await session.commit()
-        return run_id
+        return run_id, owner
 
     @staticmethod
     async def _finalize_run(
@@ -579,6 +663,7 @@ class AgentInvoker:
         inputs: str,
         *,
         meta: AgentRunAuditMeta,
+        lease_owner: str,
     ) -> None:
         """Background coroutine: run the loop and record its terminal state.
 
@@ -588,6 +673,17 @@ class AgentInvoker:
         re-raises — a failed run is a recorded ``failed`` row, not a crashed
         background task (an unhandled task exception would surface only as a
         log warning at GC time).
+
+        A heartbeat sidecar (:func:`_heartbeat_loop`) runs alongside the
+        loop for its whole lifetime (#1501): it keeps the run's lease fresh
+        so the reaper does not reclaim a healthy long-running worker, and is
+        cancelled in the ``finally`` once the loop terminates (success,
+        failure, or cancel). If *this* task dies (worker recycle, unhandled
+        crash), the sidecar dies with it -- the lease then lapses and the
+        reaper drives the row to ``failed`` rather than leaving it stuck
+        ``running``. The lifecycle's terminal-transition helpers already
+        clear the lease, so a cleanly-finished run drops its lease before
+        the sidecar is even cancelled; the cancel is belt-and-suspenders.
 
         Binds three contextvars around the loop, each scoped to this run:
 
@@ -610,6 +706,10 @@ class AgentInvoker:
         run_token = current_agent_run_id_var.set(run_id)
         session_token = agent_session_id_var.set(run_id)
         meta_token = agent_run_audit_meta_var.set(meta)
+        heartbeat = asyncio.create_task(
+            _heartbeat_loop(run_id, lease_owner),
+            name=f"agent-heartbeat-{run_id}",
+        )
         try:
             try:
                 handle = self._runtime.start(definition, operator, inputs)
@@ -637,6 +737,14 @@ class AgentInvoker:
                 usage=usage,
             )
         finally:
+            # Stop the heartbeat sidecar before resetting the contextvars:
+            # the run has reached its terminal state (or is being cancelled),
+            # so the lease no longer needs extending. Awaiting the cancel
+            # keeps a stray "Task was destroyed but it is pending!" warning
+            # from surfacing at GC under pytest-asyncio shutdown.
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
             agent_run_audit_meta_var.reset(meta_token)
             agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
@@ -690,13 +798,16 @@ class AgentInvoker:
         # actor_delegation (empty identity_ref) raises before the row is
         # committed — never a ``running`` row with no backing task.
         with actor_delegation(entry.identity_ref):
-            run_id = await self._create_run_row(operator, entry, provider=provider, model=model)
+            run_id, lease_owner = await self._create_run_row(
+                operator, entry, provider=provider, model=model
+            )
             task = self._launch_run(
                 run_id,
                 definition,
                 operator,
                 inputs,
                 meta=AgentRunAuditMeta(model=model, provider=provider),
+                lease_owner=lease_owner,
             )
 
         _log.info(
@@ -809,7 +920,7 @@ class AgentInvoker:
         # rather than a human.
         definition = await self._enforce_pre_run_budget(operator, definition)
         provider, model = _split_model_id(settings.agent_default_model)
-        run_id = await self._create_run_row(
+        run_id, lease_owner = await self._create_run_row(
             operator,
             entry,
             provider=provider,
@@ -824,6 +935,7 @@ class AgentInvoker:
             operator,
             inputs,
             meta=AgentRunAuditMeta(model=model, provider=provider),
+            lease_owner=lease_owner,
         )
         _log.info(
             "agent_scheduled_started",
@@ -849,6 +961,7 @@ class AgentInvoker:
         inputs: str,
         *,
         meta: AgentRunAuditMeta,
+        lease_owner: str,
     ) -> asyncio.Task[None]:
         """Launch the loop as a background task anchored in the run store.
 
@@ -861,10 +974,19 @@ class AgentInvoker:
         per-tool-call audit row's payload (G11.4-T5 #1074) -- carried
         into the background task via
         :data:`~meho_backplane.operations._audit.agent_run_audit_meta_var`
-        in :meth:`_run_loop_to_completion`.
+        in :meth:`_run_loop_to_completion`. *lease_owner* is the
+        per-process stamp :meth:`_create_run_row` wrote with the lease;
+        the loop's heartbeat sidecar reuses it (#1501).
         """
         task = asyncio.create_task(
-            self._run_loop_to_completion(run_id, definition, operator, inputs, meta=meta),
+            self._run_loop_to_completion(
+                run_id,
+                definition,
+                operator,
+                inputs,
+                meta=meta,
+                lease_owner=lease_owner,
+            ),
             name=f"agent-invoke-{run_id}",
         )
         self._store[run_id] = _RunState(
@@ -926,7 +1048,9 @@ class AgentInvoker:
         definition = await self._enforce_pre_run_budget(operator, definition)
         settings = get_settings()
         provider, model = _split_model_id(settings.agent_default_model)
-        run_id = await self._create_run_row(operator, entry, provider=provider, model=model)
+        run_id, lease_owner = await self._create_run_row(
+            operator, entry, provider=provider, model=model
+        )
 
         terminal_output: dict[str, object] | None = None
         terminal_error: str | None = None
@@ -944,6 +1068,15 @@ class AgentInvoker:
         meta_token = agent_run_audit_meta_var.set(
             AgentRunAuditMeta(model=model, provider=provider),
         )
+        # Heartbeat sidecar (#1501): the streamed run executes inline in the
+        # SSE coroutine, so a hung tool call or a slow model would let the
+        # lease lapse and the reaper reclaim a live stream. Keep the lease
+        # fresh for the stream's lifetime; cancel it once the stream
+        # terminates (final/error event, client disconnect, cancel).
+        heartbeat = asyncio.create_task(
+            _heartbeat_loop(run_id, lease_owner),
+            name=f"agent-heartbeat-{run_id}",
+        )
         try:
             async for event in self._runtime.stream_events(definition, operator, inputs, run_id):
                 if event.kind is AgentRunEventKind.FINAL:
@@ -952,6 +1085,9 @@ class AgentInvoker:
                     terminal_error = str(event.data.get("error"))
                 yield run_id, event
         finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
             agent_run_audit_meta_var.reset(meta_token)
             agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
@@ -985,8 +1121,8 @@ async def _record_child_run(
     operator: Operator,
     definition: AgentDefinition,
     parent_run_id: uuid.UUID | None,
-) -> uuid.UUID:
-    """Persist a child ``agent_run`` row linked to its parent; return its id.
+) -> tuple[uuid.UUID, str]:
+    """Persist a child ``agent_run`` row linked to its parent; return ``(id, owner)``.
 
     The :class:`~meho_backplane.agent.invoke.ChildRunRecorder` the live invoker
     injects (G11.1-T7 #1067). The seam value object carries neither the
@@ -997,12 +1133,15 @@ async def _record_child_run(
     so the child run is inspectable while it executes (mirrors
     :meth:`AgentInvoker._create_run_row`).
 
-    The row's *terminal* state is deliberately not written here: the
-    ``ChildRunRecorder`` protocol returns only the new id, and the child loop's
-    success/failure surfaces through the parent run. Finalizing child rows to
-    ``succeeded`` / ``failed`` is a follow-up — it needs a protocol extension
-    (a finalizer hook), out of #1067's "wire the existing mechanism" scope. A
-    definition deleted between resolution and recording raises
+    Like the top-level path (#1501), the row is leased in the same
+    transaction as the ``running`` transition; the lease owner is returned so
+    the ``invoke_agent`` tool can heartbeat the child for its loop's lifetime
+    and the reaper can reclaim a child whose worker died mid-flight.
+
+    The row's *terminal* state is closed by the companion
+    :func:`_finalize_child_run` (G11.1-T8 #1087) after the child loop returns,
+    so the child reaches ``succeeded`` / ``failed``. A definition deleted
+    between resolution and recording raises
     :class:`~meho_backplane.agent.run.AgentRunError`, surfaced by
     ``invoke_agent`` as a ``ModelRetry``.
     """
@@ -1012,6 +1151,7 @@ async def _record_child_run(
         raise AgentRunError(f"agent definition {definition.name!r} no longer exists")
     settings = get_settings()
     provider, model = _split_model_id(settings.agent_default_model)
+    owner = _lease_owner()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = await run_lifecycle.create_run(
@@ -1024,9 +1164,15 @@ async def _record_child_run(
             parent_run_id=parent_run_id,
         )
         await run_lifecycle.start_run(session, row, provider=provider, model=model)
+        await run_lifecycle.claim_lease(
+            session,
+            row,
+            owner=owner,
+            ttl_seconds=settings.agent_run_lease_ttl_seconds,
+        )
         child_run_id = row.id
         await session.commit()
-    return child_run_id
+    return child_run_id, owner
 
 
 async def _finalize_child_run(

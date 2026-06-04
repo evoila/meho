@@ -509,12 +509,14 @@ async def test_escalation_cap_enforced_in_recorder_hook() -> None:
     )
 
     # First two escalations land cleanly; the recorder returns a
-    # fresh UUID for each (mirroring the production invocation
-    # surface's child_run_id contract).
-    first_id = await recorder(operator=operator, definition=deep, parent_run_id=None)
-    second_id = await recorder(operator=operator, definition=deep, parent_run_id=None)
+    # fresh ``(UUID, lease_owner)`` for each (mirroring the production
+    # invocation surface's child_run_id + lease contract, #1501).
+    first_id, first_owner = await recorder(operator=operator, definition=deep, parent_run_id=None)
+    second_id, second_owner = await recorder(operator=operator, definition=deep, parent_run_id=None)
     assert isinstance(first_id, uuid.UUID)
     assert isinstance(second_id, uuid.UUID)
+    assert first_owner == "example-harness:0"
+    assert second_owner == "example-harness:0"
     assert observed == [deep.name, deep.name]
 
     # Third attempt trips the cap. ModelRetry surfaces inside the

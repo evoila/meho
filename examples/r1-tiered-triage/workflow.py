@@ -476,12 +476,16 @@ def make_policy_persisting_hooks(
         operator: Operator,
         definition: AgentDefinition,
         parent_run_id: uuid.UUID | None,
-    ) -> uuid.UUID:
-        # Synthetic id -- the harness has no DB row to point at. A
-        # production invocation surface would create a real
-        # ``agent_run`` row here and return its id; the harness gets
-        # away with a fresh UUID because the only consumer of the id
-        # is the finalizer, which keys on the output, not on the row.
+    ) -> tuple[uuid.UUID, str]:
+        # Synthetic id + lease owner -- the harness has no DB row to
+        # point at. A production invocation surface would create a real
+        # ``agent_run`` row here, stamp a lease, and return its id +
+        # ``lease_owner`` (the per-process worker stamp the
+        # ``invoke_agent`` heartbeat reuses); the harness gets away with
+        # a fresh UUID + a static owner because the only consumer of the
+        # id is the finalizer (which keys on the output, not the row),
+        # and the heartbeat never beats before the synthetic child loop
+        # returns.
         import uuid as _uuid_mod
 
         # Cap enforcement: refuse the escalation *before* the child
@@ -506,7 +510,7 @@ def make_policy_persisting_hooks(
             # escalation target (the deep tier); seeing N entries here
             # means N events the cheap tier classified as interesting.
             escalations_observed.append(definition.name)
-        return _uuid_mod.uuid4()
+        return _uuid_mod.uuid4(), "example-harness:0"
 
     async def _finalize(
         run_id: uuid.UUID,

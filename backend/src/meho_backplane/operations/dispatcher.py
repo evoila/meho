@@ -186,6 +186,7 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._preview import (
     PreviewContext,
+    build_permission_preflight,
     build_proposed_effect,
 )
 from meho_backplane.operations._validate import (
@@ -904,43 +905,90 @@ async def _reduce_or_error(
         return result_connector_error(op_id, exc, duration_ms)
 
 
+def _identifier_default_effect(
+    *,
+    op_id: str,
+    connector_id: str,
+    target: Any,
+) -> dict[str, Any]:
+    """Build the identifier-only ``proposed_effect`` default.
+
+    Mirrors the default
+    :func:`~meho_backplane.operations.approval_queue.create_pending_request`
+    constructs when no preview is supplied, so a permission-preflight-only
+    park keeps the op identity on the row (``{op_id, connector_id,
+    target_id}``) and merely appends the preflight banner to it.
+    """
+    effect: dict[str, Any] = {"op_id": op_id, "connector_id": connector_id}
+    raw_tid = getattr(target, "id", None) if target is not None else None
+    if isinstance(raw_tid, uuid.UUID):
+        effect["target_id"] = str(raw_tid)
+    return effect
+
+
 async def _build_proposed_effect(
     *,
     op_id: str,
+    connector_id: str,
     descriptor: EndpointDescriptor,
     operator: Operator,
     target: Any,
     params: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Resolve the connector + invoke the op's preview builder, if any.
+    """Resolve the connector + run the op's preview builder and permission preflight.
 
-    G11.7 follow-up (#1437). Resolves the connector instance the same way
-    the execute path does (so a ``k8s.apply`` preview hits the same target
-    the real apply would), assembles a :class:`PreviewContext`, and
-    delegates to :func:`build_proposed_effect`. Returns ``None`` -- the
-    caller's identifier-only default -- when the op has no builder, when
-    connector resolution can't pick an instance, or (inside
-    :func:`build_proposed_effect`) when the builder declines or the op is
-    a credential class. Never raises: connector-resolution faults degrade
-    to "no preview" so the park always proceeds.
+    G11.7 follow-up (#1437) + G0.20-T4 (#1504). Resolves the connector
+    instance the same way the execute path does (so a ``k8s.apply``
+    preview hits the same target the real apply would), assembles a
+    :class:`PreviewContext`, and runs two independent, opt-in hooks:
+
+    * :func:`build_proposed_effect` -- the side-effect-free *preview* of
+      what the write would do. Suppressed for credential-class ops (the
+      durable row must not echo secret material), so most Vault/k8s
+      secret writes get ``None`` here.
+    * :func:`build_permission_preflight` -- the park-time *permission
+      check* (``vault.kv.put`` etc. probe ``sys/capabilities-self``).
+      Returns only capability names -- no secret value -- so it runs even
+      for credential-class ops and is merged under the
+      ``"permission_preflight"`` key.
+
+    Returns the merged envelope, or ``None`` when neither hook produced
+    anything (the caller then stores the identifier-only default). When
+    only the preflight fired, its result is merged onto the identifier
+    default-shaped base so the reviewer still sees the denial banner.
+    Never raises: connector-resolution faults degrade to "no preview" so
+    the park always proceeds.
     """
     try:
         connector_instance, resolution_error, _ = await _resolve_connector_instance(
             descriptor, target
         )
         if resolution_error is not None:
-            # The op can't be previewed against an unresolved connector;
-            # the reviewer still gets the identifier-only default.
-            return None
-        return await build_proposed_effect(
-            PreviewContext(
-                descriptor=descriptor,
-                connector_instance=connector_instance,
-                operator=operator,
-                target=target,
-                params=params,
-            )
+            connector_instance = None
+        ctx = PreviewContext(
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
         )
+        preview = await build_proposed_effect(ctx)
+        preflight = await build_permission_preflight(ctx)
+        if preflight is None:
+            # No permission preflight ran -- preserve the prior contract
+            # (builder result, or ``None`` → identifier-only default).
+            return preview
+        # The preflight fired; attach it to whatever base the preview
+        # produced. When there is no preview (the common case: a
+        # suppressed credential-class write), use the same identifier-only
+        # shape ``create_pending_request`` would default to so the row
+        # still names the op alongside the denial banner.
+        if preview is not None:
+            base = dict(preview)
+        else:
+            base = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
+        base["permission_preflight"] = preflight
+        return base
     except Exception:
         import structlog as _structlog
 
@@ -993,8 +1041,17 @@ async def _handle_needs_approval(
     # in the approval queue. Opt-in per op + fail-soft: ops without a
     # registered builder (and any builder that raises) yield ``None`` and
     # the queue stores the identifier-only default exactly as before.
+    #
+    # G0.20-T4 (#1504): the same hook also runs the op's park-time
+    # permission preflight (the Vault KV-write ops probe
+    # ``sys/capabilities-self``) and merges its capability-only,
+    # secret-free result under ``proposed_effect["permission_preflight"]``
+    # so a write Vault would deny surfaces a "this write will be denied"
+    # banner at park time instead of failing only after a four-eyes
+    # approval. Fail-soft too: a probe fault degrades to no banner.
     proposed_effect = await _build_proposed_effect(
         op_id=op_id,
+        connector_id=connector_id,
         descriptor=descriptor,
         operator=operator,
         target=target,

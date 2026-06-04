@@ -556,6 +556,36 @@ class _FakeSysBackend:
     mount_enable_calls: list[dict[str, Any]] = field(default_factory=list)
     raise_on_mount_tune: Exception | None = None
     mount_tune_calls: list[dict[str, Any]] = field(default_factory=list)
+    # G0.20-T4 (#1504) park-time write-capability preflight. The Vault
+    # KV-write preflight calls ``client.sys.get_capabilities(paths=[...])``
+    # → ``POST sys/capabilities-self``. ``capabilities_by_path`` maps the
+    # probed data path to the capability list Vault would return; an
+    # unmapped path falls back to ``default_capabilities`` (defaults to
+    # the deny-by-omission empty list so a test that forgets to grant a
+    # path models a read-only role). ``raise_on_get_capabilities`` drives
+    # the fail-soft branch.
+    capabilities_by_path: dict[str, list[str]] = field(default_factory=dict)
+    default_capabilities: list[str] = field(default_factory=list)
+    raise_on_get_capabilities: Exception | None = None
+    get_capabilities_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def get_capabilities(
+        self, paths: list[str], token: str | None = None, accessor: str | None = None
+    ) -> dict[str, Any]:
+        self.get_capabilities_calls.append(
+            {"paths": list(paths), "token": token, "accessor": accessor}
+        )
+        if self.raise_on_get_capabilities is not None:
+            raise self.raise_on_get_capabilities
+        # Vault returns a per-path key plus a ``capabilities`` mirror for
+        # a single-path query. Model both so consumers can read either.
+        body: dict[str, Any] = {}
+        single = paths[0] if len(paths) == 1 else None
+        for p in paths:
+            body[p] = list(self.capabilities_by_path.get(p, self.default_capabilities))
+        if single is not None:
+            body["capabilities"] = list(body[single])
+        return body
 
     def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
         self.read_calls.append({"method": method})

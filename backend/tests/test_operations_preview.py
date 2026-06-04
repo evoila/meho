@@ -34,7 +34,9 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.operations._preview import (
     PreviewContext,
+    build_permission_preflight,
     build_proposed_effect,
+    register_permission_preflight,
     register_preview_builder,
 )
 
@@ -207,3 +209,73 @@ async def test_credential_class_op_preview_suppressed() -> None:
     )
     assert await build_proposed_effect(ctx) is None
     assert builder_ran is False, "sensitive-class gate must run before the builder"
+
+
+# ---------------------------------------------------------------------------
+# Permission preflight hook (G0.20-T4 #1504)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_permission_preflight_runs_for_credential_class_op() -> None:
+    """A permission preflight runs even when the op classifies credential-class.
+
+    This is the whole point of the separate hook: ``vault.kv.put`` IS
+    ``credential_write`` (so its *preview* is suppressed), yet its
+    capability-only *permission* check must still run — it carries no
+    secret material, and it is exactly the op whose write Vault may deny
+    post-approval.
+    """
+    ran = False
+
+    async def _preflight(_ctx: PreviewContext) -> dict[str, Any]:
+        nonlocal ran
+        ran = True
+        return {"check": "vault.capabilities-self", "will_be_denied": True}
+
+    register_permission_preflight("vault.kv.put", _preflight)
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="vault.kv.put"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"path": "secret/data/x", "data": {"k": "v"}},
+    )
+
+    # The preview is suppressed (credential class), proving the preflight
+    # is a genuinely separate, non-suppressed path.
+    assert await build_proposed_effect(ctx) is None
+    result = await build_permission_preflight(ctx)
+    assert ran is True
+    assert result == {"check": "vault.capabilities-self", "will_be_denied": True}
+
+
+@pytest.mark.asyncio
+async def test_permission_preflight_none_without_registration() -> None:
+    """An op with no registered preflight yields ``None`` (no banner)."""
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="some.unregistered.op"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={},
+    )
+    assert await build_permission_preflight(ctx) is None
+
+
+@pytest.mark.asyncio
+async def test_permission_preflight_is_fail_soft() -> None:
+    """A preflight that raises degrades to ``None`` — the park always proceeds."""
+
+    async def _boom(_ctx: PreviewContext) -> dict[str, Any] | None:
+        raise RuntimeError("capabilities probe hit Vault and failed")
+
+    register_permission_preflight("test.preflight.boom", _boom)
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="test.preflight.boom"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={},
+    )
+    assert await build_permission_preflight(ctx) is None

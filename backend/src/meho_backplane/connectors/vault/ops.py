@@ -77,6 +77,7 @@ from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
     "VAULT_KV_READ_PARAMETER_SCHEMA",
+    "VAULT_KV_WRITE_CAPABILITIES",
     "register_vault_typed_operations",
     "vault_kv_delete",
     "vault_kv_list",
@@ -84,6 +85,8 @@ __all__ = [
     "vault_kv_put",
     "vault_kv_read",
     "vault_kv_versions",
+    "vault_kv_write_capability_preflight",
+    "vault_kv_write_target_path",
 ]
 
 #: Default KV-v2 mount point. hvac's ``mount_point`` parameter defaults
@@ -826,6 +829,156 @@ async def vault_kv_delete(
             mount_point=mount,
         )
         return {"deleted_versions": versions}
+
+
+# ---------------------------------------------------------------------------
+# Park-time write-capability preflight (G0.20-T4 #1504)
+# ---------------------------------------------------------------------------
+
+#: Vault ACL capabilities each KV-v2 write op needs on its target
+#: ``<mount>/data/<path>``, keyed by op-id. ``put`` / ``patch`` create
+#: a new secret version (``create`` for a first write, ``update`` for a
+#: subsequent one — Vault requires *both* on the path for an
+#: unconditional write); ``delete`` soft-deletes versions via
+#: ``POST <mount>/delete/<path>``, which Vault authorizes with ``update``
+#: on the *data* path (the canonical KV-v2 write capability). The doc
+#: stanza in ``docs/cross-repo/connector-vault-policy.md`` §6 grants
+#: exactly ``["create", "update"]`` on the templated write path, which
+#: satisfies every op here. A token "passes" the preflight when its
+#: capabilities on the data path are a superset of the op's requirement.
+VAULT_KV_WRITE_CAPABILITIES: dict[str, frozenset[str]] = {
+    "vault.kv.put": frozenset({"create", "update"}),
+    "vault.kv.patch": frozenset({"create", "update"}),
+    "vault.kv.delete": frozenset({"update"}),
+}
+
+
+def vault_kv_write_target_path(params: dict[str, Any]) -> str:
+    """Render the ``<mount>/data/<path>`` a KV-v2 write op authorizes against.
+
+    KV-v2 splits the API surface: the value lives under ``<mount>/data/``
+    and Vault authorizes a write (``put`` / ``patch`` / version
+    soft-delete) against that data path. The preflight queries
+    ``sys/capabilities-self`` on this exact string so the answer matches
+    what the real write would be authorized against.
+
+    Mirrors the ``mount`` / ``path`` defaulting + ``.strip()`` the write
+    handlers apply (default mount ``"secret"``; ``path`` is the location
+    under the mount, no leading slash). A ``KeyError`` propagates if
+    ``path`` is absent — but the dispatcher only reaches the preflight
+    after :func:`~meho_backplane.operations.dispatcher.validate_params`
+    has confirmed ``path`` is present, so the key is always set here.
+    """
+    mount = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
+    path = str(params["path"]).strip().lstrip("/")
+    return f"{mount}/data/{path}"
+
+
+def _capabilities_grant_write(granted: list[str], required: frozenset[str]) -> bool:
+    """Decide whether *granted* Vault capabilities satisfy *required*.
+
+    Vault's ``root`` pseudo-capability (held by a root-class token)
+    authorizes everything, so its presence is a pass regardless of the
+    fine-grained list. The ``deny`` capability explicitly revokes access
+    even when paired with grants — an explicit ``deny`` on the path wins,
+    so it forces a fail. Otherwise the token passes only when every
+    required capability is present in the grant.
+    """
+    granted_set = set(granted)
+    if "deny" in granted_set:
+        return False
+    if "root" in granted_set:
+        return True
+    return required.issubset(granted_set)
+
+
+async def vault_kv_write_capability_preflight(
+    operator: Operator,
+    op_id: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Check, via ``sys/capabilities-self``, whether a KV-v2 write will be denied.
+
+    G0.20-T4 (#1504). Called at approval-park time (the dispatcher's
+    :func:`~meho_backplane.operations.dispatcher._handle_needs_approval`)
+    so a write Vault would reject surfaces a clear "this write will be
+    denied" on the approval row instead of failing only *after* a human
+    has spent a four-eyes review approving it.
+
+    The probe logs in exactly as the real write does
+    (:func:`~meho_backplane.auth.vault.vault_client_for_operator`, the
+    ``meho-mcp`` OIDC role) and issues ``POST sys/capabilities-self`` on
+    the op's ``<mount>/data/<path>``. ``sys/capabilities-self`` returns
+    only the *capability names* the calling token holds on the path
+    (``["create", "update"]`` / ``["read"]`` / ``["deny"]``) — **never
+    any secret material** — so it sidesteps the credential-class
+    preview-suppression rule that bars a value-revealing dry-run for a
+    credential write.
+
+    Identity caveat (documented, not enforced here): this probe runs
+    under the **dispatching** operator's token, but an approved
+    re-dispatch executes under the **reviewing** operator's token
+    (:func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`).
+    The two usually share the ``meho-mcp`` role policy, so the
+    dispatcher's answer is the right early signal; the reviewer must
+    nonetheless carry the same write grant. The result dict names the
+    probed ``principal_sub`` so the caveat is auditable on the row.
+
+    Returns ``None`` (no preflight result — caller stores the
+    identifier-only / builder default) when *op_id* is not a KV-v2 write,
+    or — **fail-soft** — when the probe itself errors (Vault unreachable,
+    role login fault, malformed response): a missing preflight must never
+    block the park, exactly as the ``proposed_effect`` builder hook
+    degrades. On success returns a redaction-safe summary:
+
+    ``{"check": "vault.capabilities-self", "path": <data-path>,
+    "required": [...], "granted": [...], "will_be_denied": bool,
+    "principal_sub": <dispatching-operator-sub>}``.
+    """
+    required = VAULT_KV_WRITE_CAPABILITIES.get(op_id)
+    if required is None:
+        return None
+
+    data_path = vault_kv_write_target_path(params)
+    try:
+        async with _auth_vault.vault_client_for_operator(operator) as client:
+            response = await asyncio.to_thread(
+                client.sys.get_capabilities,
+                paths=[data_path],
+            )
+    except Exception:
+        # Fail-soft: the park is the safety-relevant action; a probe that
+        # cannot reach Vault (or whose role login transiently fails) must
+        # not block it. The reviewer falls back to the identifier-only
+        # default and the post-approval write surfaces any real denial.
+        import structlog as _structlog
+
+        _structlog.get_logger(__name__).warning(
+            "vault_capability_preflight_failed",
+            op_id=op_id,
+            path=data_path,
+            operator_sub=operator.sub,
+            exc_info=True,
+        )
+        return None
+
+    # ``sys/capabilities-self`` returns the per-path capability list under
+    # the path key, with a top-level ``capabilities`` mirror for a single
+    # path. Prefer the path key; fall back to the mirror.
+    granted_raw = response.get(data_path)
+    if granted_raw is None:
+        granted_raw = response.get("capabilities")
+    granted = [str(c) for c in granted_raw] if isinstance(granted_raw, list) else []
+
+    will_be_denied = not _capabilities_grant_write(granted, required)
+    return {
+        "check": "vault.capabilities-self",
+        "path": data_path,
+        "required": sorted(required),
+        "granted": sorted(granted),
+        "will_be_denied": will_be_denied,
+        "principal_sub": operator.sub,
+    }
 
 
 #: Per-op registration specs for the KV-v2 group. One dict per op

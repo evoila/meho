@@ -51,7 +51,11 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
 
 from meho_backplane.agent.invocation import AgentInvoker
-from meho_backplane.agent.run import PydanticAgentRun
+from meho_backplane.agent.run import (
+    SCHEDULED_RUN_NO_INPUT_CLASS,
+    PydanticAgentRun,
+    prompt_is_effectively_empty,
+)
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -72,7 +76,7 @@ from meho_backplane.scheduler.cron import (
     is_valid_cron_expr,
     next_fire_after,
 )
-from meho_backplane.scheduler.loop import run_one_tick
+from meho_backplane.scheduler.loop import _coerce_inputs, run_one_tick
 from meho_backplane.scheduler.repository import (
     create_cron_trigger,
     create_one_off_trigger,
@@ -152,6 +156,27 @@ def _make_invoker() -> AgentInvoker:
     """Build an invoker over a deterministic FunctionModel (no real LLM)."""
     return AgentInvoker(
         runtime=PydanticAgentRun(model_factory=lambda: _final_text("done")),
+    )
+
+
+def _exploding_model() -> FunctionModel:
+    """A model that fails the test if the loop ever calls it.
+
+    Used by the no-input regression: the no-input guard must short-circuit
+    *before* any model call, so reaching the model means the guard did not
+    fire (the doomed empty-``messages`` request would otherwise be made).
+    """
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        pytest.fail("model was invoked for a no-input scheduled run; the guard did not fire")
+
+    return FunctionModel(fn)
+
+
+def _make_no_call_invoker() -> AgentInvoker:
+    """Build an invoker whose model raises if the loop ever reaches it."""
+    return AgentInvoker(
+        runtime=PydanticAgentRun(model_factory=_exploding_model),
     )
 
 
@@ -249,6 +274,49 @@ async def _create_one_off(
             agent_definition_id=agent_definition_id,
             run_at=run_at,
             inputs={"prompt": "one-shot"},
+            identity_sub="op-scheduler",
+            created_by_sub="seed-admin",
+        )
+        await session.commit()
+        return row
+
+
+async def _create_cron_no_inputs(
+    *,
+    agent_definition_id: uuid.UUID,
+    base: datetime,
+) -> ScheduledTrigger:
+    """A cron trigger created with ``inputs=None`` (the no-input defect shape)."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await create_cron_trigger(
+            session,
+            tenant_id=_TENANT_A,
+            agent_definition_id=agent_definition_id,
+            cron_expr="*/5 * * * *",
+            inputs=None,
+            identity_sub="op-scheduler",
+            created_by_sub="seed-admin",
+            base=base,
+        )
+        await session.commit()
+        return row
+
+
+async def _create_one_off_no_inputs(
+    *,
+    agent_definition_id: uuid.UUID,
+    run_at: datetime,
+) -> ScheduledTrigger:
+    """A one-off trigger created with ``inputs=None`` (the no-input defect shape)."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await create_one_off_trigger(
+            session,
+            tenant_id=_TENANT_A,
+            agent_definition_id=agent_definition_id,
+            run_at=run_at,
+            inputs=None,
             identity_sub="op-scheduler",
             created_by_sub="seed-admin",
         )
@@ -492,6 +560,99 @@ async def test_one_off_with_unresolved_credentials_stays_active_and_fires_on_sec
     assert fires_after == 1
     finalised = await _get_trigger(trigger.id)
     assert finalised.status == ScheduledTriggerStatus.FIRED.value
+
+
+# ---------------------------------------------------------------------------
+# No-inputs trigger -> typed scheduled_run_no_input failure (#1505)
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_inputs_none_renders_empty_and_is_effectively_empty() -> None:
+    """``_coerce_inputs(None)`` is ``""`` and reads as an empty prompt (#1505).
+
+    The defect's root: a trigger created without ``inputs`` coerces to the
+    empty string, which every supported backend drops to an empty
+    ``messages`` array (provider 400). ``prompt_is_effectively_empty``
+    classifies that doomed shape -- and treats whitespace-only the same,
+    since the adapter drops that too.
+    """
+    assert _coerce_inputs(None) == ""
+    assert prompt_is_effectively_empty(_coerce_inputs(None))
+    assert prompt_is_effectively_empty("   \n\t ")
+    # A real prompt is not empty.
+    assert not prompt_is_effectively_empty(_coerce_inputs({"prompt": "ping"}))
+
+
+@pytest.mark.asyncio
+async def test_one_off_no_inputs_fails_typed_without_model_call() -> None:
+    """A no-inputs one-off fires but the run fails typed, never hitting the model.
+
+    Regression for #1505: previously a no-inputs trigger reached the
+    Anthropic adapter with an empty user turn, producing an empty
+    ``messages`` array and an opaque provider 400 finalised to a generic
+    ``failed`` row. The guard now finalises the run ``failed`` with a
+    ``scheduled_run_no_input``-tagged error *before* the model call. The
+    one-off is still consumed (at-most-once), and the model is never
+    invoked (the exploding invoker fails the test if it is).
+    """
+    agent_id = await _seed_tenant_and_agent()
+    trigger = await _create_one_off_no_inputs(
+        agent_definition_id=agent_id,
+        run_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    fires = await run_one_tick(invoker=_make_no_call_invoker())
+    # The trigger fired (was claimed + marked) even though the run failed.
+    assert fires == 1
+
+    runs = await _wait_for_agent_runs(1, trigger=AgentRunTrigger.SCHEDULED)
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.status == AgentRunStatus.FAILED.value, (
+        "a no-inputs scheduled run must finalise failed, not run to success"
+    )
+    assert run.error is not None
+    assert run.error.startswith(SCHEDULED_RUN_NO_INPUT_CLASS), (
+        f"failure must be typed {SCHEDULED_RUN_NO_INPUT_CLASS!r}, got {run.error!r}"
+    )
+    assert run.output is None
+
+    # The one-off is consumed -- no retry storm on the permanent misconfig.
+    finalised = await _get_trigger(trigger.id)
+    assert finalised.status == ScheduledTriggerStatus.FIRED.value
+
+
+@pytest.mark.asyncio
+async def test_cron_no_inputs_fails_typed_and_advances() -> None:
+    """A no-inputs cron fires + advances; the run fails typed, no model call.
+
+    Regression for #1505 on the cron path: the run is finalised ``failed``
+    with the ``scheduled_run_no_input`` classification, the model is never
+    called, and the cron still advances ``next_fire_at`` (the fire is not a
+    transient retry -- the fix is operator-side, add ``inputs``).
+    """
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron_no_inputs(agent_definition_id=agent_id, base=base)
+    await _force_due(trigger.id, datetime(2026, 1, 1, tzinfo=UTC))
+
+    fires = await run_one_tick(invoker=_make_no_call_invoker())
+    assert fires == 1
+
+    runs = await _wait_for_agent_runs(1, trigger=AgentRunTrigger.SCHEDULED)
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.status == AgentRunStatus.FAILED.value
+    assert run.error is not None
+    assert run.error.startswith(SCHEDULED_RUN_NO_INPUT_CLASS)
+
+    # The cron advanced despite the typed failure -- not a retry condition.
+    advanced = await _get_trigger(trigger.id)
+    assert advanced.status == ScheduledTriggerStatus.ACTIVE.value
+    next_fire = _aware(advanced.next_fire_at)
+    assert next_fire is not None
+    assert next_fire > datetime(2026, 1, 1, tzinfo=UTC)
+    assert advanced.last_fired_at is not None
 
 
 @pytest.mark.asyncio

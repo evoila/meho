@@ -45,8 +45,10 @@ DBOS rebase swaps only the loop module.
   - `next_fire_at` (the hot column the loop scans, populated for
     both cron and one-off), `last_fired_at`, `status` (closed enum:
     `active`/`paused`/`cancelled`/`fired`).
-  - `inputs` (JSON-shaped, nullable, passed to the agent as the run's
-    input string).
+  - `inputs` (JSON-shaped, nullable; `_coerce_inputs` renders it to the
+    run's user-prompt input string — `"prompt"` key when present, else the
+    dict as JSON, else `""` for a `NULL`/no-`inputs` trigger). A `""`
+    result is refused typed at fire time, see the no-input guard below.
 - `ScheduledTriggerKind`, `ScheduledTriggerStatus` — closed StrEnums
   kept in lock-step with the DB-layer `CHECK (... IN (...))` constraints
   via migrations `0020` (T1 substrate) and `0025` (T2 dispatcher
@@ -311,6 +313,22 @@ lock — see "Known issues / limitations" (#1502).
   per blocking run per tick, not for the run's whole lifetime. Driving
   the abandoned background run to a terminal state (lease/heartbeat
   reaper) is a separate concern (T1 #1501), not this loop's job.
+- **No-inputs trigger fails typed, not at create** (#1505) — a trigger
+  created without `inputs` (or whose `inputs` render to a whitespace-only
+  prompt) is *accepted* at create: whether a user turn is needed depends
+  on the referenced agent definition, which the wire-shape validator does
+  not load. At fire time `run_scheduled` detects the empty prompt
+  (`prompt_is_effectively_empty`) **before** the model call and finalises
+  the run `failed` with a `scheduled_run_no_input`-tagged `error`
+  (`SCHEDULED_RUN_NO_INPUT_CLASS`), rather than letting it reach the
+  provider as a system-prompt-only request with an empty `messages` array
+  (every supported backend 400s on that). The scheduler logs
+  `scheduler_fired_run_failed` (not `scheduler_fired`) so the
+  misconfiguration is visible at fire time. The fire still counts (a
+  one-off is consumed, a cron has advanced) — the fix is operator-side
+  (add `inputs`), not a scheduler retry. MEHO deliberately does **not**
+  inject a synthetic user turn (it would misrepresent operator intent); a
+  genuine no-user-turn autonomous run shape would be a distinct feature.
 - **Pause / resume not exposed yet** — the T5 admin surface ships
   create / list / cancel; pause-then-resume of an active trigger is
   not in v0.2. `ScheduledTriggerStatus.PAUSED` exists in the enum and

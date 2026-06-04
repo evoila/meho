@@ -73,6 +73,7 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     AuditLog,
 )
+from meho_backplane.operations._errors import result_denied
 from meho_backplane.operations._validate import compute_params_hash
 
 __all__ = [
@@ -89,6 +90,7 @@ __all__ = [
     "list_pending",
     "publish_approval_event",
     "reject_request",
+    "resume_dispatch_after_approval",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -276,8 +278,10 @@ async def create_pending_request(
         op_id: The operation id.
         target: The dispatch target (or ``None`` for tenant-wide ops).
             ``target.id`` is extracted when present.
-        params: The original dispatch params. Used to verify hash
-            consistency; not stored on the row.
+        params: The original dispatch params. Stored verbatim on the row
+            (#1503) so any approval surface (REST ``/decide``, MCP by-id
+            approve) can re-dispatch a parked direct operator op with the
+            stored params, and also used to verify hash consistency.
         params_hash: Pre-computed
             :func:`~meho_backplane.operations._validate.compute_params_hash`
             of *params*. Stored for resume-path verification.
@@ -323,6 +327,7 @@ async def create_pending_request(
         connector_id=connector_id,
         target_id=target_id,
         params_hash=params_hash,
+        params=params,
         proposed_effect=proposed_effect,
         status=ApprovalRequestStatus.PENDING.value,
         created_at=_now(),
@@ -524,6 +529,140 @@ async def reject_request(
     )
     request._audit_id = reject_audit_id  # type: ignore[attr-defined]
     return request
+
+
+async def resume_dispatch_after_approval(
+    *,
+    operator: Operator,
+    request: ApprovalRequest,
+    params: dict[str, Any] | None = None,
+) -> Any:
+    """Re-hydrate the stored target and re-dispatch an approved op (#1503, G11.7-T1).
+
+    The single execute-after-approve entry point shared by every operator
+    approval surface — REST ``/approve`` and ``/decide``, and the MCP
+    by-id approve tool. It re-runs the original dispatch under the
+    committed approval decision (``dispatch(..., _approved=True)``), so a
+    parked **direct** operator op is executed exactly once regardless of
+    which surface granted it. The in-process agent-run resume path does
+    not call this — it keeps the params in memory and re-dispatches from
+    there (see :mod:`meho_backplane.agent.approval_wait`).
+
+    *params* source:
+
+    * REST ``/approve`` passes the caller-supplied params (already
+      hash-verified against ``params_hash`` by :func:`approve_request`).
+    * ``/decide`` and the MCP by-id approve hold only the request id, so
+      they pass ``params=None`` and this helper falls back to the params
+      stored on the row at park time (``request.params``, #1503). A row
+      written before migration 0036 has ``params IS NULL`` and no
+      caller-supplied params — there is nothing to re-dispatch, so the
+      helper **fails closed** with a structured ``denied`` result naming
+      the gap (the op must be resumed via REST ``/approve`` + params, the
+      pre-0036 path).
+
+    Target re-hydration (G11.7-T1 #1401): the row persists only
+    ``target_id``, not the full target. A write op whose handler reads
+    ``target.host`` / ``target.name`` would mis-resolve (or crash) if
+    re-dispatched with ``target=None``, so a concrete ``target_id`` is
+    re-loaded by id (tenant-scoped, ``deleted_at IS NULL``). A target
+    soft-deleted (or revoked) between request and approval resolves to
+    ``None``; the re-dispatch then **fails closed** (structured ``denied``,
+    never calls :func:`dispatch`) rather than executing the approved
+    privileged write outside the original target scope. Tenant-wide ops
+    (no original target) keep ``target_id IS NULL`` → ``None`` and
+    dispatch normally.
+
+    The re-dispatch bypasses the policy gate (``_approved=True``): the
+    committed approval decision is the authorization. Without the bypass
+    the re-dispatch would re-queue (a human/service principal now routes
+    ``requires_approval`` to ``needs-approval`` per G11.7-T1; an agent
+    re-hits ``needs-approval``), so the approved op would never execute.
+    """
+    effective_params = params if params is not None else request.params
+    if effective_params is None:
+        # Pre-0036 row (params not stored) approved via a surface that
+        # carries no params (/decide, MCP by-id). Nothing to re-dispatch.
+        _log.warning(
+            "approval_resume_params_unavailable",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+            operator_sub=operator.sub,
+        )
+        return result_denied(
+            request.op_id,
+            (
+                f"approval request {request.id} has no stored params "
+                "(parked before migration 0036); re-dispatch refused — "
+                "approve via REST /approve with the original params instead"
+            ),
+            0.0,
+        )
+
+    resolved_target, denied = await _rehydrate_resume_target(operator, request)
+    if denied is not None:
+        return denied
+
+    from meho_backplane.operations.dispatcher import dispatch
+
+    return await dispatch(
+        operator=operator,
+        connector_id=request.connector_id,
+        op_id=request.op_id,
+        target=resolved_target,
+        params=effective_params,
+        _approved=True,
+    )
+
+
+async def _rehydrate_resume_target(
+    operator: Operator,
+    request: ApprovalRequest,
+) -> tuple[Any, Any]:
+    """Re-load the stored target by id for a resume re-dispatch (G11.7-T1 #1401).
+
+    Returns ``(resolved_target, None)`` on success — ``resolved_target``
+    is ``None`` for a tenant-wide op (no ``target_id`` pinned) and the
+    live :class:`Target` otherwise. Returns ``(None, denied_result)`` when
+    a concrete ``target_id`` was pinned at request time but no live target
+    resolves it now (soft-deleted / revoked between request and approval,
+    or cross-tenant): the caller must **fail closed** and not dispatch,
+    since dispatching with ``target=None`` would let a typed handler that
+    derives its connection from ``connector_id`` / ``params`` execute the
+    approved privileged write outside the original target scope.
+    """
+    if request.target_id is None:
+        return None, None
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.targets.resolver import resolve_target_by_id
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        resolved_target = await resolve_target_by_id(session, operator.tenant_id, request.target_id)
+    if resolved_target is not None:
+        return resolved_target, None
+
+    _log.warning(
+        "approval_resume_target_unresolvable",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        connector_id=request.connector_id,
+        target_id=str(request.target_id),
+        operator_sub=operator.sub,
+    )
+    denied = result_denied(
+        request.op_id,
+        (
+            f"approved target {request.target_id} no longer resolves "
+            "(soft-deleted or revoked between request and approval); "
+            "re-dispatch refused to avoid executing outside the "
+            "original target scope"
+        ),
+        0.0,
+    )
+    return None, denied
 
 
 async def expire_stale_requests(

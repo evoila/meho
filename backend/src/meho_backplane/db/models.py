@@ -3815,8 +3815,17 @@ class ApprovalRequest(Base):
 
     * ``params_hash`` -- SHA-256 hex hash of the canonicalised params
       (from :func:`~meho_backplane.operations._validate.compute_params_hash`).
-      Does not persist the params themselves; the resume endpoint
-      re-hashes its params against this value to detect substitution.
+      The swap-defence value: a caller-supplied params dict on the REST
+      ``/approve`` path is re-hashed against this to detect substitution
+      between request and approval.
+
+    * ``params`` -- JSON nullable (JSONB on PG). The original dispatch
+      params, stored verbatim (#1503) so a parked **direct** operator op
+      approved via ``/decide`` or MCP by-id — surfaces that hold only the
+      request id, not the params — can re-dispatch with the stored params
+      rather than only recording the decision. Nullable so pre-0036 rows
+      remain valid. Internal re-dispatch input; never serialised onto a
+      read view or broadcast frame.
 
     * ``proposed_effect`` -- JSON (JSONB on PG). Human-readable summary of
       what the op would do if approved; populated at queue time; JSONB for
@@ -3868,6 +3877,21 @@ class ApprovalRequest(Base):
     connector_id: Mapped[str] = mapped_column(Text, nullable=False)
     target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
     params_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # Original dispatch params, stored verbatim so any approval surface
+    # (REST /decide, MCP by-id approve) can re-dispatch a parked *direct*
+    # operator op without the approver re-supplying them (#1503). REST
+    # /approve still supplies them in-band and verifies them against
+    # params_hash; the in-process agent-run resume uses its own in-memory
+    # params and ignores this column. Nullable so pre-0036 rows (which
+    # have no stored params) stay valid; a row written on or after 0036
+    # always carries the params. Internal re-dispatch input only -- never
+    # surfaced on a read view or broadcast frame (the swap-defence hash
+    # and the redacted proposed_effect remain the reviewer-facing fields).
+    params: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
     # Proposed effect -- human-readable summary for the reviewer.
     proposed_effect: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,

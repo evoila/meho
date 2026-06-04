@@ -2046,11 +2046,9 @@ type DbStatus struct {
 // DecideRequestBody POST body for “/decide“ — the operator-decision path.
 //
 // Distinct from :class:`ApproveRequestBody` (which requires the
-// original “params“ for the agent / REST re-dispatch path). The
-// operator-decision path captures the decision durably (status flip +
-// decision audit row + “approval_decided“ broadcast) without
-// re-dispatching — the agent's REST path is what re-dispatches with
-// the params it has.
+// original “params“ for the REST re-dispatch path): “/decide“
+// approves by request id alone — the params are read back from the
+// row the dispatcher stored at park time (#1503).
 type DecideRequestBody struct {
 	// Decision One of 'approved' / 'rejected'.
 	Decision string `json:"decision"`
@@ -2060,10 +2058,33 @@ type DecideRequestBody struct {
 }
 
 // DecideResponseBody Response for a successful operator decision.
+//
+// The “dispatch_*“ fields are populated only when “/decide“
+// re-dispatched the approved op — i.e. an approved **direct** operator
+// op (no “run_id“) whose stored params drove a fresh execution
+// (#1503). They stay “None“ on a rejection and on an approved
+// **agent-run** request (“run_id“ set), where the in-process agent
+// runtime owns the re-dispatch and “/decide“ only records the
+// decision (avoiding a double execution).
 type DecideResponseBody struct {
-	ApprovalRequestId openapi_types.UUID `json:"approval_request_id"`
-	Decision          string             `json:"decision"`
-	Reason            string             `json:"reason"`
+	ApprovalRequestId openapi_types.UUID                 `json:"approval_request_id"`
+	Decision          string                             `json:"decision"`
+	DispatchError     *string                            `json:"dispatch_error"`
+	DispatchOpId      *string                            `json:"dispatch_op_id"`
+	DispatchResult    *DecideResponseBody_DispatchResult `json:"dispatch_result"`
+	DispatchStatus    *string                            `json:"dispatch_status"`
+	Reason            string                             `json:"reason"`
+}
+
+// DecideResponseBodyDispatchResult0 defines model for .
+type DecideResponseBodyDispatchResult0 map[string]interface{}
+
+// DecideResponseBodyDispatchResult1 defines model for .
+type DecideResponseBodyDispatchResult1 = []interface{}
+
+// DecideResponseBody_DispatchResult defines model for DecideResponseBody.DispatchResult.
+type DecideResponseBody_DispatchResult struct {
+	union json.RawMessage
 }
 
 // DeprecateTemplateResponse Response for “runbook_deprecate_template“ -- the now-deprecated coordinates.
@@ -5925,6 +5946,68 @@ func (t CallOperationBody_Target) MarshalJSON() ([]byte, error) {
 }
 
 func (t *CallOperationBody_Target) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsDecideResponseBodyDispatchResult0 returns the union data inside the DecideResponseBody_DispatchResult as a DecideResponseBodyDispatchResult0
+func (t DecideResponseBody_DispatchResult) AsDecideResponseBodyDispatchResult0() (DecideResponseBodyDispatchResult0, error) {
+	var body DecideResponseBodyDispatchResult0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromDecideResponseBodyDispatchResult0 overwrites any union data inside the DecideResponseBody_DispatchResult as the provided DecideResponseBodyDispatchResult0
+func (t *DecideResponseBody_DispatchResult) FromDecideResponseBodyDispatchResult0(v DecideResponseBodyDispatchResult0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeDecideResponseBodyDispatchResult0 performs a merge with any union data inside the DecideResponseBody_DispatchResult, using the provided DecideResponseBodyDispatchResult0
+func (t *DecideResponseBody_DispatchResult) MergeDecideResponseBodyDispatchResult0(v DecideResponseBodyDispatchResult0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsDecideResponseBodyDispatchResult1 returns the union data inside the DecideResponseBody_DispatchResult as a DecideResponseBodyDispatchResult1
+func (t DecideResponseBody_DispatchResult) AsDecideResponseBodyDispatchResult1() (DecideResponseBodyDispatchResult1, error) {
+	var body DecideResponseBodyDispatchResult1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromDecideResponseBodyDispatchResult1 overwrites any union data inside the DecideResponseBody_DispatchResult as the provided DecideResponseBodyDispatchResult1
+func (t *DecideResponseBody_DispatchResult) FromDecideResponseBodyDispatchResult1(v DecideResponseBodyDispatchResult1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeDecideResponseBodyDispatchResult1 performs a merge with any union data inside the DecideResponseBody_DispatchResult, using the provided DecideResponseBodyDispatchResult1
+func (t *DecideResponseBody_DispatchResult) MergeDecideResponseBodyDispatchResult1(v DecideResponseBodyDispatchResult1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t DecideResponseBody_DispatchResult) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *DecideResponseBody_DispatchResult) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }

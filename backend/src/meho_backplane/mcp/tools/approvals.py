@@ -72,6 +72,7 @@ from meho_backplane.operations.approval_queue import (
     list_pending,
     publish_approval_event,
     reject_request,
+    resume_dispatch_after_approval,
 )
 
 _log = structlog.get_logger(__name__)
@@ -350,8 +351,8 @@ async def _approve_handler(
         try:
             # Operator-decision path: no params supplied → approve_request
             # skips the hash check and just flips status + writes the
-            # decision audit row + publishes the approval_decided event.
-            # The agent's REST path (with params) is what re-dispatches.
+            # decision audit row. The params for the re-dispatch are read
+            # back from the row (stored at park time, #1503).
             row = await approve_request(
                 session,
                 request_id,
@@ -385,23 +386,54 @@ async def _approve_handler(
         principal_sub=operator.sub,
         audit_id=row._audit_id,  # type: ignore[attr-defined]
     )
-    return _row_to_dict(row)
+
+    result = _row_to_dict(row)
+
+    # Direct operator op (no agent run): the approve drives the execute
+    # (#1503). The committed approval is the authorization; the stored
+    # params re-hydrate the dispatch. Agent-run requests (run_id set) are
+    # resumed in-process by the agent runtime off the approval.approved
+    # broadcast — re-dispatching here too would double-execute, so this
+    # MCP tool only records the decision for them (its historical shape).
+    if row.run_id is None:
+        dispatch_result = await resume_dispatch_after_approval(
+            operator=operator, request=row, params=None
+        )
+        _log.info(
+            "approval_request_redispatched",
+            approval_request_id=str(request_id),
+            op_id=row.op_id,
+            dispatch_status=dispatch_result.status,
+            operator_sub=operator.sub,
+            via="mcp",
+        )
+        result["dispatch"] = {
+            "status": dispatch_result.status,
+            "op_id": dispatch_result.op_id,
+            "result": dispatch_result.result,
+            "error": dispatch_result.error,
+        }
+
+    return result
 
 
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.approvals.approve",
         description=(
-            "Approve a pending approval request (G11.2-T5 / #818). "
+            "Approve a pending approval request (G11.2-T5 / #818; #1503). "
             "Operator-level. Flips the request to 'approved', writes the "
             "decision audit row, and announces approval_decided on the "
-            "broadcast feed. The agent's REST resume path is what "
-            "re-dispatches the approved op (with the params it has + the "
-            "_approved gate-bypass) — this MCP tool captures the operator "
-            "decision durably. Only pending requests may be approved; any "
-            "other status returns approval_request_not_pending. Pass "
-            "either `approval_request_id` (canonical name; G0.18-T5 "
-            "#1358) or the deprecated `id` alias."
+            "broadcast feed. For a direct operator op (no agent run) the "
+            "approve then re-dispatches the op using the params stored at "
+            "park time, so the approved write lands exactly once; the "
+            "dispatch outcome is returned under `dispatch`. For an "
+            "agent-run request the in-process agent runtime resumes the "
+            "op off the broadcast, so this tool only records the decision. "
+            "Only pending requests may be approved; any other status "
+            "returns approval_request_not_pending. Pass either "
+            "`approval_request_id` (canonical name; G0.18-T5 #1358) or the "
+            "deprecated `id` alias."
         ),
         inputSchema={
             "type": "object",

@@ -102,6 +102,11 @@ connector-related release-notes line.
   the background (`converted_to_async`) while the serial tick returns and
   releases its advisory lock each cadence
   ([#1502](https://github.com/evoila/meho/issues/1502)).
+- Execute a parked direct operator op when it is approved via `/decide`
+  or the MCP/CLI by-id approve, not only via REST `/approve`: the
+  approval decision now drives the re-dispatch using the params stored on
+  the request at park time, so an approved direct write lands its effect
+  exactly once. Agent-run resume is `run_id`-gated and unchanged (#1503).
 
 ## [0.10.1] - 2026-06-04
 

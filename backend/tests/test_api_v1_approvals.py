@@ -195,20 +195,25 @@ async def test_resume_refuses_when_pinned_target_no_longer_resolves(
         principal_kind=PrincipalKind.USER,
     )
     # Minimal stand-in for the ApprovalRequest ORM row: the resume helper
-    # only reads id / target_id / op_id / connector_id off it.
+    # reads id / target_id / op_id / connector_id / params off it.
     request = SimpleNamespace(
         id=uuid.uuid4(),
         target_id=target_id,
         op_id="vault.kv.put",
         connector_id="vault-1.x",
+        params={"path": "secret/x", "value": "s3cr3t"},
     )
 
     # The pinned target no longer resolves (soft-deleted between request
-    # and approval).
+    # and approval). The resume helper (now in the service layer) imports
+    # ``resolve_target_by_id`` lazily from ``targets.resolver``, so patch
+    # it at its source module.
+    import meho_backplane.targets.resolver as resolver_module
+
     async def _resolve_none(*_a: object, **_kw: object) -> None:
         return None
 
-    monkeypatch.setattr(approvals_module, "resolve_target_by_id", _resolve_none)
+    monkeypatch.setattr(resolver_module, "resolve_target_by_id", _resolve_none)
 
     # Spy on dispatch — it must NOT be reached on the fail-closed path.
     dispatch_calls: list[dict[str, Any]] = []
@@ -260,6 +265,7 @@ async def test_resume_dispatches_when_no_target_was_pinned(
         target_id=None,
         op_id="some.tenant_wide.op",
         connector_id="some-1.x",
+        params={"k": "v"},
     )
 
     seen: dict[str, Any] = {}

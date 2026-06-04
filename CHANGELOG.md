@@ -93,6 +93,15 @@ connector-related release-notes line.
 ### Fixed
 
 - Wire the agent-run lease/heartbeat into the fire path so a hung, crashed, or worker-killed run is reliably reaped to a terminal `failed` state instead of staying `running` forever; the run loop now stamps a lease on start and heartbeats while alive, and child (`invoke_agent`) runs are leased too (#1501).
+- Bound the scheduler tick's wait on a scheduled agent run so a hung or
+  approval-gated run can no longer block later triggers — or strand the
+  process-wide advisory lock — until a pod restart. `run_scheduled` now
+  waits on the run via `asyncio.wait_for(asyncio.shield(task), …)` capped
+  at `AGENT_SYNC_TIMEOUT_SECONDS` (default 30s, mirroring the human
+  `run()` path); a run still executing at the deadline keeps running in
+  the background (`converted_to_async`) while the serial tick returns and
+  releases its advisory lock each cadence
+  ([#1502](https://github.com/evoila/meho/issues/1502)).
 
 ## [0.10.1] - 2026-06-04
 

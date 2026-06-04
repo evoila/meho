@@ -117,7 +117,7 @@ from meho_backplane.operations.budget_enforcement import (
     evaluate_pre_run_budget,
 )
 from meho_backplane.operations.identity_budget import TokenUsage
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
     "AgentDisabledError",
@@ -849,30 +849,22 @@ class AgentInvoker:
             error=view.error,
         )
 
-    async def run_scheduled(
+    async def _authenticate_scheduled_agent(
         self,
         name: str,
-        inputs: str,
         *,
         agent_client_id: str,
         agent_client_secret: SecretStr,
-    ) -> AgentRunOutcome:
-        """Run an agent autonomously under its own ``client_credentials`` identity.
+        settings: Settings,
+    ) -> tuple[Operator, AgentDefinitionRead]:
+        """Authenticate the agent's own identity and resolve its owned definition.
 
-        No human initiator: the agent authenticates as itself via the
-        ``client_credentials`` grant (a single
-        :func:`~meho_backplane.auth.agent_token.get_client_credentials_token`
-        call), so it is the *subject* (``operator_sub``=agent) and there is no
-        separate actor — ``actor_sub`` stays ``NULL`` on every audit row the
-        run produces (this method deliberately does **not** bind
-        :func:`~meho_backplane.auth.delegation.actor_delegation`, unlike the
-        human-initiated :meth:`run`).
-
-        The scheduler that decides *when* to fire a run and supplies the agent
-        credentials (from Vault / config) is G11.3's
-        ``SCHEDULED``-trigger scope; this method is the authentication +
-        audit-shape seam it calls. Blocks until the loop completes (autonomous
-        runs have no client waiting on a sync timeout).
+        Obtains a ``client_credentials`` token for *agent_client_id*, verifies
+        the issued JWT, loads the named definition, and asserts the
+        authenticated client owns it. Returns the verified ``operator`` and the
+        ``entry`` for the caller to launch. Split out of :meth:`run_scheduled`
+        so that method stays focused on the run-lifecycle (create row → launch
+        → bounded wait) rather than the auth-and-bind preamble.
 
         ``agent_client_secret`` is a :class:`~pydantic.SecretStr` so it can
         never be rendered into a log line as a frame local on any exception
@@ -881,10 +873,11 @@ class AgentInvoker:
 
         Raises:
             AgentTokenError: the ``client_credentials`` grant failed.
+            AgentInvocationError: the authenticated client does not own the
+                named definition (cross-agent launch refused).
             AgentNotFoundError / AgentDisabledError: no enabled definition
                 named *name* in the agent's tenant.
         """
-        settings = get_settings()
         # Request the audience we then verify, so the token carries it even on
         # realms without a default audience mapper.
         token = await get_client_credentials_token(
@@ -912,6 +905,79 @@ class AgentInvoker:
                 f"scheduled run rejected: agent credentials for {agent_client_id!r} "
                 f"do not own definition {name!r} (identity_ref={entry.identity_ref!r})"
             )
+        return operator, entry
+
+    async def run_scheduled(
+        self,
+        name: str,
+        inputs: str,
+        *,
+        agent_client_id: str,
+        agent_client_secret: SecretStr,
+    ) -> AgentRunOutcome:
+        """Run an agent autonomously under its own ``client_credentials`` identity.
+
+        No human initiator: the agent authenticates as itself via the
+        ``client_credentials`` grant (a single
+        :func:`~meho_backplane.auth.agent_token.get_client_credentials_token`
+        call), so it is the *subject* (``operator_sub``=agent) and there is no
+        separate actor — ``actor_sub`` stays ``NULL`` on every audit row the
+        run produces (this method deliberately does **not** bind
+        :func:`~meho_backplane.auth.delegation.actor_delegation`, unlike the
+        human-initiated :meth:`run`).
+
+        The scheduler that decides *when* to fire a run and supplies the agent
+        credentials (from Vault / config) is G11.3's
+        ``SCHEDULED``-trigger scope; this method is the authentication +
+        audit-shape seam it calls. The wait on the loop is **bounded** by
+        :attr:`Settings.agent_sync_timeout_seconds` (mirroring :meth:`run`):
+        a run still executing at the deadline keeps going in the background
+        (it is shielded from the wait's cancellation) and the call returns a
+        :class:`AgentRunOutcome` flagged ``converted_to_async``. Without this
+        bound a single hung or approval-gated run would block the serial
+        scheduler tick — and strand the tick's advisory lock — until a pod
+        restart (#1502); the lifecycle/reaper, not this wait, owns reclaiming
+        an abandoned background run.
+
+        Authentication + identity binding (token grant, JWT verify,
+        owns-definition guard) is delegated to
+        :meth:`_authenticate_scheduled_agent`.
+
+        Raises:
+            AgentTokenError: the ``client_credentials`` grant failed.
+            AgentInvocationError: the authenticated client does not own the
+                named definition.
+            AgentNotFoundError / AgentDisabledError: no enabled definition
+                named *name* in the agent's tenant.
+        """
+        settings = get_settings()
+        operator, entry = await self._authenticate_scheduled_agent(
+            name,
+            agent_client_id=agent_client_id,
+            agent_client_secret=agent_client_secret,
+            settings=settings,
+        )
+        return await self._launch_scheduled_run(
+            name, inputs, operator=operator, entry=entry, settings=settings
+        )
+
+    async def _launch_scheduled_run(
+        self,
+        name: str,
+        inputs: str,
+        *,
+        operator: Operator,
+        entry: AgentDefinitionRead,
+        settings: Settings,
+    ) -> AgentRunOutcome:
+        """Budget-gate, persist, launch, and bounded-wait a scheduled run.
+
+        The run-lifecycle half of :meth:`run_scheduled`, kept separate from the
+        auth-and-bind preamble. The wait on the background loop is bounded by
+        ``settings.agent_sync_timeout_seconds``; on timeout the still-running
+        handle is returned (``converted_to_async``) so the serial scheduler tick
+        is not blocked and its advisory lock is released each cadence (#1502).
+        """
         definition = self._to_agent_definition(entry)
         # G11.5-T6 #1080 — same pre-execution gate as :meth:`run`.
         # A scheduler-fired run is the most common cost-runaway shape
@@ -944,7 +1010,27 @@ class AgentInvoker:
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
         )
-        await task
+        try:
+            # Bound the wait so a hung/approval-gated run cannot block the
+            # serial scheduler tick (and strand its advisory lock) until a
+            # pod restart (#1502). Shield so the timeout abandons the *wait*,
+            # not the run — the loop keeps going in the background and stays
+            # pollable / reapable; the reaper owns reclaiming an abandoned run.
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=settings.agent_sync_timeout_seconds,
+            )
+        except TimeoutError:
+            _log.info(
+                "agent_scheduled_converted_to_async",
+                run_id=str(run_id),
+                timeout=settings.agent_sync_timeout_seconds,
+            )
+            return AgentRunOutcome(
+                run_id=run_id,
+                status=AgentRunStatus.RUNNING,
+                converted_to_async=True,
+            )
         view = await self.poll(operator, run_id)
         return AgentRunOutcome(
             run_id=run_id,

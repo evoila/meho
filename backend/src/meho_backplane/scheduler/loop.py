@@ -32,10 +32,16 @@ scheduler. On each cadence (default 30s, settable via
    result means another claimer beat us to it and we skip the fire.
 
 4. **Invoke the agent** through the G11.1-T4
-   :class:`~meho_backplane.agent.invocation.AgentInvoker` in async mode
-   so the scheduler tick returns promptly; the actual agent loop runs
-   as a separate background task in the invoker's run store. The
-   ``agent_run`` row's ``trigger`` column is set to
+   :class:`~meho_backplane.agent.invocation.AgentInvoker` via
+   :meth:`~meho_backplane.agent.invocation.AgentInvoker.run_scheduled`.
+   The actual agent loop runs as a background task in the invoker's run
+   store; ``run_scheduled`` waits on it **bounded** by
+   ``AGENT_SYNC_TIMEOUT_SECONDS`` (default 30s) and, on timeout, returns
+   the still-running handle (``converted_to_async``) while the loop keeps
+   going in the background. This bound is what keeps the serial tick
+   returning promptly — and the advisory lock released each tick — even
+   when a run hangs or blocks on a ``requires_approval`` wait (#1502).
+   The ``agent_run`` row's ``trigger`` column is set to
    ``AgentRunTrigger.SCHEDULED`` for provenance.
 
 5. **Release the advisory lock** in a ``finally`` so a crash mid-tick

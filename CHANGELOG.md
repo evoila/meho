@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-05
+
 ### Added
 
 - Add a read-back surface for materialized JSONFlux result handles over

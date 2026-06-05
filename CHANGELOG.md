@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- Add a corpus-agnostic per-tenant **capability gate** on the MCP tool +
+  resource surface (G4.5-T1). A `ToolDefinition` /
+  `ResourceTemplateDefinition` may now declare an optional
+  `required_capability`; a tool/template carrying one is **absent** from
+  `tools/list` / `resources/templates/list` AND rejected with a
+  403-class error at `tools/call` / `resources/read` for any operator
+  whose tenant hasn't provisioned that capability — true absence, not
+  just un-callable, so an agent never sees a capability it can't use.
+  The gate is a second axis orthogonal to the existing role gate
+  (mirrors the connector enable model, not a packaging/entitlement
+  system). `Operator` gains a `capabilities: frozenset[str]` populated
+  from a configurable JWT claim (`JWT_CAPABILITIES_CLAIM_NAME`, default
+  `capabilities`) with no DB hit on `tools/list`; an absent or malformed
+  claim resolves to the empty set (fail-closed). `meho://tenant/{id}/info`
+  now returns a `capabilities` array so MCP clients and the CLI read
+  provisioning from one source of truth. The `meho-docs` add-on is the
+  first consumer.
+
 ## [0.11.0] - 2026-06-05
 
 ### Added

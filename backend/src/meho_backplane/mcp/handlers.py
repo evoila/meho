@@ -91,6 +91,7 @@ from meho_backplane.mcp.registry import (
     ToolDefinition,
     all_resource_templates_for,
     all_tools_for,
+    capability_satisfied,
     get_resource_for_uri,
     get_tool,
     role_at_least,
@@ -285,6 +286,23 @@ async def handle_tools_call(
             status_code = 403
             raise McpInvalidParamsError(
                 f"forbidden: {name!r} requires a higher role",
+            )
+
+        # Capability gate (G4.5-T1): the tool's required_capability gates
+        # invocation too, not just listing. all_tools_for already hides a
+        # capability-gated tool the tenant hasn't provisioned, but a
+        # client that learned the name out-of-band could still try to
+        # call it. Re-check here so knowing the name can't bypass the
+        # gate — same 403-projected path as the role re-check above.
+        if not capability_satisfied(operator, defn.required_capability):
+            _log.warning(
+                "mcp_tool_call_capability_forbidden",
+                tool=name,
+                required_capability=defn.required_capability,
+            )
+            status_code = 403
+            raise McpInvalidParamsError(
+                f"forbidden: {name!r} requires an unprovisioned capability",
             )
 
         # Validate arguments against the tool's inputSchema. ``cls`` is
@@ -571,6 +589,21 @@ async def handle_resources_read(
             status_code = 403
             raise McpInvalidParamsError(
                 f"forbidden: resource {uri!r} requires a higher role",
+            )
+
+        # Capability gate (G4.5-T1): same call-time re-check as tools.
+        # all_resource_templates_for hides a capability-gated template the
+        # tenant hasn't provisioned; re-check here so a known URI can't
+        # bypass the gate.
+        if not capability_satisfied(operator, defn.required_capability):
+            _log.warning(
+                "mcp_resource_read_capability_forbidden",
+                uri=uri,
+                required_capability=defn.required_capability,
+            )
+            status_code = 403
+            raise McpInvalidParamsError(
+                f"forbidden: resource {uri!r} requires an unprovisioned capability",
             )
 
         body = await handler(operator, bound_params)

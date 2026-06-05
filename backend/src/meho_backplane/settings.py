@@ -1251,6 +1251,9 @@ def get_settings() -> Settings:
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
         ),
+        result_handle_max_spill_rows=int(
+            os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
+        ),
         composite_max_depth=int(
             os.environ.get("COMPOSITE_MAX_DEPTH", "8"),
         ),

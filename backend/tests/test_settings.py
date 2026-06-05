@@ -221,6 +221,38 @@ def test_mcp_require_session_id_non_truthy_stays_false(
         get_settings.cache_clear()
 
 
+def test_result_handle_max_spill_rows_defaults_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``RESULT_HANDLE_MAX_SPILL_ROWS`` → the 10000 field default."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("RESULT_HANDLE_MAX_SPILL_ROWS", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().result_handle_max_spill_rows == 10000
+    finally:
+        get_settings.cache_clear()
+
+
+def test_result_handle_max_spill_rows_env_override_takes_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``RESULT_HANDLE_MAX_SPILL_ROWS`` flows through ``get_settings()``.
+
+    Regression guard for the wiring gap where the field was declared on
+    :class:`Settings` but never read from the environment, so the
+    documented operator override was a silent no-op and the 10000 default
+    always won.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("RESULT_HANDLE_MAX_SPILL_ROWS", "250000")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().result_handle_max_spill_rows == 250000
+    finally:
+        get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # G11.5-T6 #1080 — AGENT_RUNS_DISABLED_TENANTS UUID validation
 # ---------------------------------------------------------------------------

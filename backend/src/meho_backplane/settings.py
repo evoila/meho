@@ -221,6 +221,16 @@ class Settings(BaseModel):
         ``docs/cross-repo/keycloak-agent-client.md``. The claim is
         **optional** — tokens that carry no claim resolve to ``user``
         (graceful fallback for all pre-G11.2 human-operator tokens).
+    jwt_capabilities_claim_name:
+        Name of the JWT claim that carries the tenant-provisioned
+        capability keys (a JSON array of strings) added by G4.5-T1
+        (#1519). Default ``capabilities``. Drives the MCP capability
+        gate (:class:`~meho_backplane.mcp.registry.ToolDefinition`'s
+        ``required_capability``). The claim is **optional** — tokens
+        that carry no claim (or a malformed value) resolve to the empty
+        set, so capability-gated tools are simply absent for that
+        operator (fail-closed). Override only when the realm exposes the
+        capability list under a different attribute.
     keycloak_admin_url:
         Base URL of the Keycloak Admin REST API for the realm managing
         MEHO principals, e.g.
@@ -768,6 +778,7 @@ class Settings(BaseModel):
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
+    jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
     keycloak_admin_client_secret: str = Field(default="", repr=False)
@@ -1201,6 +1212,10 @@ def get_settings() -> Settings:
         jwt_principal_kind_claim_name=os.environ.get(
             "JWT_PRINCIPAL_KIND_CLAIM_NAME",
             "principal_kind",
+        ),
+        jwt_capabilities_claim_name=os.environ.get(
+            "JWT_CAPABILITIES_CLAIM_NAME",
+            "capabilities",
         ),
         keycloak_admin_url=os.environ.get("KEYCLOAK_ADMIN_URL", "").strip(),
         keycloak_admin_client_id=os.environ.get("KEYCLOAK_ADMIN_CLIENT_ID", "").strip(),

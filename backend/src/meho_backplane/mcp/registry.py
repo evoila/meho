@@ -75,6 +75,7 @@ __all__ = [
     "ToolHandler",
     "all_resource_templates_for",
     "all_tools_for",
+    "capability_satisfied",
     "clear_registries",
     "eager_import_mcp_modules",
     "get_resource_for_uri",
@@ -135,6 +136,31 @@ def role_at_least(actual: TenantRole, required: TenantRole) -> bool:
     return _ROLE_RANK.index(actual) >= _ROLE_RANK.index(required)
 
 
+def capability_satisfied(
+    operator: Operator,
+    required_capability: str | None,
+) -> bool:
+    """Return True when *operator* is admitted past the capability gate.
+
+    A tool / resource with ``required_capability=None`` has no capability
+    gate and is always admitted (only its role gate applies). When a
+    capability *is* required, the operator passes iff the key is in
+    :attr:`~meho_backplane.auth.operator.Operator.capabilities`. The
+    operator's set is fail-closed — empty when the JWT carries no
+    capability claim — so an unprovisioned tenant never satisfies a
+    capability gate.
+
+    Centralised so the gate shape stays single-source for both
+    :func:`all_tools_for` (list-time true-absence filter) and the
+    call-time re-check in :mod:`~meho_backplane.mcp.handlers`. Public so
+    the handlers module imports it at module level rather than dipping
+    into a private sibling symbol, exactly like :func:`role_at_least`.
+    """
+    if required_capability is None:
+        return True
+    return required_capability in operator.capabilities
+
+
 #: JSON-Schema combinator keywords the Anthropic Messages API rejects at
 #: the *top level* of a tool's ``input_schema``. A request carrying one
 #: 400s with ``input_schema does not support oneOf, allOf, or anyOf at
@@ -170,13 +196,22 @@ class ToolDefinition(BaseModel):
 
     The wire shape exposed via ``tools/list`` is derived through
     :meth:`to_wire`, which drops the MEHO-internal fields (``required_role``,
-    ``op_class``) — clients don't need them and they'd leak server-side
-    policy detail.
+    ``op_class``, ``required_capability``) — clients don't need them and
+    they'd leak server-side policy detail.
 
     ``inputSchema`` is a JSON Schema 2020-12 object the handler validates
     incoming ``tools/call.arguments`` against. ``outputSchema`` is
     optional; when present the handler's return value is also validated
     against it (T4 reference tool wires this).
+
+    ``required_capability`` (G4.5-T1) is an optional second gating axis
+    *orthogonal* to ``required_role``. When set, the tool is filtered out
+    of ``tools/list`` and rejected at ``tools/call`` for any operator
+    whose :attr:`~meho_backplane.auth.operator.Operator.capabilities`
+    set lacks the key — true absence for unprovisioned tenants, mirroring
+    the connector enable model rather than a packaging/entitlement
+    system. ``None`` (the default) means "no capability gate", so every
+    existing tool keeps its role-only behaviour.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -188,14 +223,16 @@ class ToolDefinition(BaseModel):
     outputSchema: dict[str, Any] | None = None  # noqa: N815
     required_role: TenantRole = TenantRole.OPERATOR
     op_class: str = "read"
+    required_capability: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         """Serialise to the MCP wire shape, dropping MEHO-internal fields.
 
         Spec fields kept: ``name``, ``description``, ``inputSchema``,
         optional ``title`` / ``outputSchema``. MEHO fields dropped:
-        ``required_role``, ``op_class``. The drop is deliberate — clients
-        don't need server-side RBAC details and shouldn't see them.
+        ``required_role``, ``op_class``, ``required_capability``. The
+        drop is deliberate — clients don't need server-side RBAC /
+        capability details and shouldn't see them.
 
         ``inputSchema`` is additionally passed through
         :func:`_wire_safe_input_schema`, which strips top-level
@@ -222,13 +259,20 @@ class ResourceTemplateDefinition(BaseModel):
     """MCP resource-template definition + MEHO-internal RBAC metadata.
 
     The wire shape exposed via ``resources/templates/list`` is derived
-    through :meth:`to_wire`; ``required_role`` is dropped for the same
-    reason it is on :class:`ToolDefinition`.
+    through :meth:`to_wire`; ``required_role`` and ``required_capability``
+    are dropped for the same reason they are on :class:`ToolDefinition`.
 
     ``uriTemplate`` follows the RFC 6570 syntax for ``{var}`` substitution.
     v0.2 supports only simple variable substitution (no expression
     operators like ``+`` / ``#`` / ``?``); :func:`_match_uri_template`
     documents what it actually parses.
+
+    ``required_capability`` (G4.5-T1) gates the template the same way it
+    gates a tool: a capability-gated template is absent from
+    ``resources/templates/list`` and 403s on ``resources/read`` for an
+    operator lacking the key. ``None`` (the default) means no capability
+    gate. T4's companion ``meho://docs/{...}`` resource is the first
+    consumer.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -239,6 +283,7 @@ class ResourceTemplateDefinition(BaseModel):
     mimeType: str = "application/json"  # noqa: N815
     title: str | None = None
     required_role: TenantRole = TenantRole.OPERATOR
+    required_capability: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         """Serialise to the MCP wire shape, dropping MEHO-internal fields."""
@@ -360,22 +405,35 @@ def get_resource_for_uri(
 
 
 def all_tools_for(operator: Operator) -> list[ToolDefinition]:
-    """Return tools the operator's :class:`TenantRole` admits, in registration order."""
+    """Return tools the operator may see, in registration order.
+
+    Two orthogonal gates, both AND-ed: the operator's
+    :class:`TenantRole` must meet ``required_role`` *and* — when the tool
+    declares a ``required_capability`` — that key must be in the
+    operator's provisioned :attr:`Operator.capabilities`. A
+    capability-gated tool the tenant hasn't provisioned is *absent* from
+    the listing (true absence, G4.5-T1), not just un-callable.
+    """
     return [
         defn
         for defn, _ in _TOOLS.values()
         if role_at_least(operator.tenant_role, defn.required_role)
+        and capability_satisfied(operator, defn.required_capability)
     ]
 
 
 def all_resource_templates_for(
     operator: Operator,
 ) -> list[ResourceTemplateDefinition]:
-    """Return resource templates the operator's role admits, in registration order."""
+    """Return resource templates the operator may see, in registration order.
+
+    Same two-gate (role AND capability) filter as :func:`all_tools_for`.
+    """
     return [
         defn
         for defn, _ in _RESOURCES.values()
         if role_at_least(operator.tenant_role, defn.required_role)
+        and capability_satisfied(operator, defn.required_capability)
     ]
 
 

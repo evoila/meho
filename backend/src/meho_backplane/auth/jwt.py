@@ -678,6 +678,62 @@ def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
         return PrincipalKind.USER
 
 
+def _extract_capabilities(claims: Any, settings: Settings) -> frozenset[str]:
+    """Extract the tenant-provisioned capability set from *claims*.
+
+    G4.5-T1 (#1519): the ``capabilities`` claim is **optional** and
+    **fail-closed**. It carries the capability keys the operator's
+    tenant has provisioned (the meho-docs add-on, future add-ons); the
+    MCP registry filters capability-gated tools against this set both at
+    ``tools/list`` (true absence) and ``tools/call`` (403). A token that
+    carries no claim — or a malformed one — resolves to the empty set,
+    so capability-gated tools are simply *absent* for that operator. The
+    fail-closed direction is deliberate: a missing/garbage capability
+    claim must never *grant* a gated capability, but it also must not
+    lock the operator out of un-gated tools (so it is not a 401, unlike
+    a missing tenant claim).
+
+    Accepted shapes:
+
+    * **absent** → empty set (pre-G4.5 tokens, tenants with no add-on).
+    * **list of strings** → the canonical Keycloak protocol-mapper
+      shape for a multivalued claim. Non-string entries are dropped and
+      logged; the surviving strings form the set.
+    * **single string** → coerced to a one-element set, tolerating a
+      realm that emits a scalar mapper for a single provisioned add-on.
+
+    Any other JSON type (number, object, bool) is logged under
+    ``malformed_capabilities_claim`` and resolves to the empty set.
+
+    The claim name is configurable via ``JWT_CAPABILITIES_CLAIM_NAME``
+    (default ``capabilities``) so realms that surface provisioning under
+    a different attribute are accommodated without a code change.
+    """
+    claim_name = settings.jwt_capabilities_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        return frozenset({raw})
+    if isinstance(raw, (list, tuple)):
+        values = {item for item in raw if isinstance(item, str)}
+        if len(values) != len(raw):
+            log = structlog.get_logger(__name__)
+            log.warning(
+                "malformed_capabilities_claim",
+                claim_name=claim_name,
+                reason="non_string_entries_dropped",
+            )
+        return frozenset(values)
+    log = structlog.get_logger(__name__)
+    log.warning(
+        "malformed_capabilities_claim",
+        claim_name=claim_name,
+        reason="not_a_string_or_array",
+    )
+    return frozenset()
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -725,6 +781,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     tenant_id = _extract_tenant_id(claims, settings)
     tenant_role = _extract_tenant_role(claims, settings)
     principal_kind = _extract_principal_kind(claims, settings)
+    capabilities = _extract_capabilities(claims, settings)
     try:
         return Operator(
             sub=sub,
@@ -734,6 +791,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             tenant_id=tenant_id,
             tenant_role=tenant_role,
             principal_kind=principal_kind,
+            capabilities=capabilities,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

@@ -26,8 +26,8 @@ import (
 // The G0.3-deferred verb (#256 explicitly defers it to G9.1-T6).
 // Iterates every connector registered for <product>, calling each
 // connector's list_candidates discovery hook, and surfaces the merged
-// candidate list for the operator to review before running
-// `meho targets create`. --seed-target scopes discovery to one
+// candidate list for the operator to review before registering
+// them with `meho targets import`. --seed-target scopes discovery to one
 // already-registered target's reach (e.g. peer clusters in the same
 // kubeconfig); it is resolved tenant-scoped server-side so a 404 on a
 // cross-tenant seed name is identical to a typo.
@@ -53,8 +53,8 @@ func newDiscoverCmd() *cobra.Command {
 			"potentially-reachable targets every connector registered " +
 			"for <product> inferred but that are not yet registered. " +
 			"The verb is read-only — it never creates `targets` rows; " +
-			"the operator reviews the candidates and runs " +
-			"`meho targets create`. --seed-target scopes discovery to " +
+			"the operator reviews the candidates and registers them " +
+			"with `meho targets import`. --seed-target scopes discovery to " +
 			"one already-registered target's reach (resolved tenant-" +
 			"scoped server-side; a cross-tenant seed 404s like a typo). " +
 			"Connectors that contributed nothing are listed under " +
@@ -176,6 +176,6 @@ func printDiscoverTables(w io.Writer, r *api.TargetsDiscoverResult) {
 	}
 	if len(r.Discovered) > 0 {
 		fmt.Fprintln(w, strings.TrimSpace(
-			"\nreview candidates, then register with `meho targets create` (auto-registration is v0.2.next)"))
+			"\nreview candidates, then register with `meho targets import` (one-shot auto-registration is not yet available)"))
 	}
 }

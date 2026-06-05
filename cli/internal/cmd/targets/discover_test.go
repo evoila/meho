@@ -70,7 +70,7 @@ func TestPrintDiscoverTablesRendersBoth(t *testing.T) {
 	for _, want := range []string{
 		"NAME", "HOST", "PORT", "CONFIDENCE", "esxi-2", "443", "high",
 		"SKIPPED", "REASON", "vmware-pyvmomi-7.0", "no candidates",
-		"meho targets create",
+		"meho targets import",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printDiscoverTables missing %q in %q", want, out)

@@ -165,6 +165,23 @@ connector-related release-notes line.
   (the corpus transport is search-only). One hashed audit row per call
   (`op_class=read`); the raw query is never logged (#1523).
 
+### Documentation
+
+- Operator runbook for the `meho-docs` add-on:
+  `docs/cross-repo/meho-docs-addon.md` (G4.5-T6). Covers what the add-on
+  **is** (federated vendor-document layer, not ingested — vs the
+  lightweight kb `search_knowledge`), **provisioning** (granting the
+  `meho-docs` capability via the JWT `capabilities` claim from T1, plus
+  the `CORPUS_*` settings from T2 the deploy needs), **verify** (the
+  surface present + returning cited chunks on a provisioned tenant,
+  absent on an unprovisioned one, the `meho.docs.search` audit row
+  visible via who-touched), and the one-line **routing convention** —
+  "ask the team first (`search_knowledge` / `search_memory`), escalate
+  to `search_docs` only on a miss or an explicit vendor-fact need" —
+  matching the shipped T4 tool description. Notes the external
+  MEHO.Knowledge → meho-docs corpus rename is ops-side, tracked on the
+  consumer repo (#1525).
+
 ## [0.11.0] - 2026-06-05
 
 ### Added

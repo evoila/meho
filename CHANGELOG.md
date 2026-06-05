@@ -116,6 +116,22 @@ connector-related release-notes line.
   fail-closed `CorpusUnavailable` error (corpus unconfigured, unreachable,
   or non-2xx) that the upcoming `search_docs` route maps to HTTP 503
   (#1520). Transport only — the `search_docs` route lands separately.
+- `POST /api/v1/search_docs` — the federated vendor-document retrieval
+  route of the `meho-docs` add-on (G4.5-T3). Operator role minimum,
+  tenant-scoped via the forwarded operator JWT. Enforces a **mandatory
+  binary product+version scope** (REQUIRE_FILTERS): a request missing
+  either is rejected `422` (fail-closed), never forwarded as an
+  unfiltered corpus query — the scope is a containment filter, not a
+  ranking weight (#1178 / #1177). Enforcement is gated by
+  `CORPUS_REQUIRE_FILTERS` (default on). The route federates to the
+  external corpus via the T2 client (`CorpusUnavailable` → `503`, never
+  an empty `200`) and binds one central audit row per query under the
+  named op `meho.docs.search` (`op_class=read`), storing the query only
+  as a SHA-256 hash plus the product/version scope and hit count — so
+  `query_audit` / who-touched surface every docs query without leaking
+  the raw query. The scope-validation + corpus-call + cited-chunk shape
+  live in a shared `docs_search` service the future MCP tool (T4) and
+  CLI verb (T5) reuse (#1521).
 
 ## [0.11.0] - 2026-06-05
 

@@ -90,6 +90,7 @@ from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
 from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
+from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -581,6 +582,17 @@ app.include_router(api_v1_retrieve_eval_router)
 # counts can leak retire-decision intent so the broadcast event ships
 # in aggregate-only mode.
 app.include_router(api_v1_retrieve_retire_router)
+# G4.5-T3 (#1521) — federated vendor-document retrieval at
+# `POST /api/v1/search_docs` (the `meho-docs` add-on, Initiative #1518).
+# Operator role minimum; tenant-scoped via the forwarded operator JWT.
+# Enforces the mandatory binary product+version scope (422 fail-closed
+# under `corpus_require_filters`, default on), federates to the external
+# corpus via the T2 client (`CorpusUnavailable` → 503, never an empty
+# 200), and binds the central audit row under the canonical op_id
+# `meho.docs.search` + `read` class via the `audit_op_id` /
+# `audit_op_class` contextvar overrides. The MCP tool (T4) and CLI verb
+# (T5) reuse the same `docs_search.search_docs` service this route fronts.
+app.include_router(api_v1_search_docs_router)
 # G0.3-T3 (#254) — targets CRUD surface. All 5 routes are tenant-scoped
 # via the JWT's tenant_id claim; cross-tenant reads are impossible.
 # G9.1-T5 (#453) extends this router with GET /api/v1/targets/discover

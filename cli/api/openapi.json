@@ -403,6 +403,56 @@
         }
       }
     },
+    "/api/v1/search_docs": {
+      "post": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Search Docs Endpoint",
+        "description": "Federate a vendor-document query to the corpus, returning cited chunks.\n\nEnforces the mandatory binary product+version scope (422 when the\nREQUIRE_FILTERS gate is on and either is absent), forwards the\noperator JWT to the corpus via the shared\n:func:`~meho_backplane.docs_search.search_docs` service, and binds\nthe central ``meho.docs.search`` audit row. ``read_only`` operators\nget 403 via :func:`require_role` before reaching this handler.\n\nThe audit contextvars are bound **before** the corpus call so a\nhandler exception (including the :class:`CorpusUnavailable` \u2192 503\nbranch) still produces an audit row with the query identity + binary\nscope preserved. The raw query is never bound -- only its SHA-256\nhash.",
+        "operationId": "search_docs_endpoint_api_v1_search_docs_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchDocsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchDocsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The mandatory binary product+version scope is absent (REQUIRE_FILTERS). A docs query without both filters is rejected rather than forwarded as an unfiltered corpus query."
+          },
+          "503": {
+            "description": "The external corpus is unavailable -- unconfigured, unreachable, or returned a non-2xx / malformed response. Fail-closed; never an empty 200."
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -12285,6 +12335,40 @@
         "title": "DeprecateTemplateResponse",
         "description": "Response for ``runbook_deprecate_template`` -- the now-deprecated coordinates."
       },
+      "DocsChunk": {
+        "properties": {
+          "chunk_id": {
+            "type": "string",
+            "title": "Chunk Id"
+          },
+          "document_id": {
+            "type": "string",
+            "title": "Document Id"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "source_url": {
+            "type": "string",
+            "nullable": true,
+            "title": "Source Url"
+          },
+          "score": {
+            "type": "number",
+            "nullable": true,
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "chunk_id",
+          "document_id",
+          "content"
+        ],
+        "title": "DocsChunk",
+        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives."
+      },
       "DraftTemplateRequest": {
         "properties": {
           "slug": {
@@ -14696,6 +14780,59 @@
         ],
         "title": "ScheduledTriggerStatus",
         "description": "Closed lifecycle status of a :class:`ScheduledTrigger`.\n\nInitiative #804 (G11.3 Scheduler), Task #822 (T1). The admin\nsurface (T5 #826) walks triggers through this state machine; the\ndispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.\n\nMembers:\n\n* :attr:`ACTIVE` -- the trigger is eligible for dispatch.\n* :attr:`PAUSED` -- the trigger is temporarily disabled by an\n  operator. ``next_fire_at`` is preserved so resuming reactivates\n  without recomputing.\n* :attr:`CANCELLED` -- terminal. The trigger row is retained for\n  audit purposes but never fires again.\n* :attr:`FIRED` -- terminal one-off state. Migration ``0025`` (T2\n  #823) widened the enum so a one-off trigger transitions\n  ``ACTIVE -> FIRED`` after its single dispatch instead of going\n  to ``CANCELLED`` (which carries operator-intent semantics).\n  :class:`ScheduledTrigger` rows in this state are retained for\n  audit (last-fired-at + identity_sub) but never re-dispatched."
+      },
+      "SearchDocsRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "product": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Version"
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "default": 10
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "SearchDocsRequest",
+        "description": "POST body for ``/api/v1/search_docs``.\n\n``product`` / ``version`` are the **mandatory binary scope** under\nthe REQUIRE_FILTERS posture -- they are typed optional here so a\nmissing value is rejected by the service with a route-shaped 422\nnaming the absent key(s), rather than Pydantic's generic\n``field_required`` (which would not say *why* the scope is mandatory\nor honour the ``corpus_require_filters`` gate-off path).\n\n``extra=\"forbid\"`` rejects unknown fields at 422 so a client sending\na pre-rename key fails loud rather than running with the defaults --\nthe same posture every public v1 request schema ships under."
+      },
+      "SearchDocsResponse": {
+        "properties": {
+          "chunks": {
+            "items": {
+              "$ref": "#/components/schemas/DocsChunk"
+            },
+            "type": "array",
+            "title": "Chunks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "chunks"
+        ],
+        "title": "SearchDocsResponse",
+        "description": "Successful response shape for ``/api/v1/search_docs``.\n\n``chunks`` is the corpus's ranked cited-chunk list (best first),\nprojected into MEHO's :class:`~meho_backplane.docs_search.DocsChunk`\nsurface so the wire contract is decoupled from the corpus's. Frozen\nso an accidental post-construction mutation surfaces as a pydantic\nerror rather than a silently-altered response."
       },
       "ShowTemplateResponse": {
         "properties": {

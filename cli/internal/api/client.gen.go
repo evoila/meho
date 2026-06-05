@@ -2094,6 +2094,22 @@ type DeprecateTemplateResponse struct {
 	Version int    `json:"version"`
 }
 
+// DocsChunk One cited chunk in MEHO's “search_docs“ response surface.
+//
+// A stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`
+// into the shape the MCP tool (T4) and CLI (T5) render: chunk text +
+// source citation + score. Decoupling MEHO's surface from the corpus's
+// wire contract means a corpus field rename doesn't churn the public
+// “search_docs“ response; the projection in :func:`_project_chunk` is
+// the one place that mapping lives.
+type DocsChunk struct {
+	ChunkId    string   `json:"chunk_id"`
+	Content    string   `json:"content"`
+	DocumentId string   `json:"document_id"`
+	Score      *float32 `json:"score"`
+	SourceUrl  *string  `json:"source_url"`
+}
+
 // DraftTemplateRequest Request body for “runbook_draft_template“ -- create a new draft.
 //
 // :attr:`slug` is validated against :data:`SLUG_PATTERN` (the kb slug
@@ -3712,6 +3728,36 @@ type ScheduledTriggerRead struct {
 //     :class:`ScheduledTrigger` rows in this state are retained for
 //     audit (last-fired-at + identity_sub) but never re-dispatched.
 type ScheduledTriggerStatus string
+
+// SearchDocsRequest POST body for “/api/v1/search_docs“.
+//
+// “product“ / “version“ are the **mandatory binary scope** under
+// the REQUIRE_FILTERS posture -- they are typed optional here so a
+// missing value is rejected by the service with a route-shaped 422
+// naming the absent key(s), rather than Pydantic's generic
+// “field_required“ (which would not say *why* the scope is mandatory
+// or honour the “corpus_require_filters“ gate-off path).
+//
+// “extra="forbid"“ rejects unknown fields at 422 so a client sending
+// a pre-rename key fails loud rather than running with the defaults --
+// the same posture every public v1 request schema ships under.
+type SearchDocsRequest struct {
+	Limit   *int    `json:"limit,omitempty"`
+	Product *string `json:"product"`
+	Query   string  `json:"query"`
+	Version *string `json:"version"`
+}
+
+// SearchDocsResponse Successful response shape for “/api/v1/search_docs“.
+//
+// “chunks“ is the corpus's ranked cited-chunk list (best first),
+// projected into MEHO's :class:`~meho_backplane.docs_search.DocsChunk`
+// surface so the wire contract is decoupled from the corpus's. Frozen
+// so an accidental post-construction mutation surfaces as a pydantic
+// error rather than a silently-altered response.
+type SearchDocsResponse struct {
+	Chunks []DocsChunk `json:"chunks"`
+}
 
 // ShowTemplateResponse Full template surface returned by “runbook_show_template“.
 //
@@ -5367,6 +5413,11 @@ type CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams struct {
 	Authorization *string             `json:"authorization,omitempty"`
 }
 
+// SearchDocsEndpointApiV1SearchDocsPostParams defines parameters for SearchDocsEndpointApiV1SearchDocsPost.
+type SearchDocsEndpointApiV1SearchDocsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
 	Product *string `form:"product,omitempty" json:"product,omitempty"`
@@ -5733,6 +5784,9 @@ type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody = Under
 
 // CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody defines body for CreateTriggerApiV1SchedulerTriggersPost for application/json ContentType.
 type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCreate
+
+// SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody defines body for SearchDocsEndpointApiV1SearchDocsPost for application/json ContentType.
+type SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody = SearchDocsRequest
 
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
@@ -6918,6 +6972,11 @@ type ClientInterface interface {
 
 	// CancelTriggerApiV1SchedulerTriggersTriggerIdDelete request
 	CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SearchDocsEndpointApiV1SearchDocsPostWithBody request with any body
+	SearchDocsEndpointApiV1SearchDocsPostWithBody(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SearchDocsEndpointApiV1SearchDocsPost(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, body SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -8595,6 +8654,30 @@ func (c *Client) CreateTriggerApiV1SchedulerTriggersPost(ctx context.Context, pa
 
 func (c *Client) CancelTriggerApiV1SchedulerTriggersTriggerIdDelete(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest(c.Server, triggerId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SearchDocsEndpointApiV1SearchDocsPostWithBody(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchDocsEndpointApiV1SearchDocsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SearchDocsEndpointApiV1SearchDocsPost(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, body SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchDocsEndpointApiV1SearchDocsPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -15157,6 +15240,61 @@ func NewCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteRequest(server string,
 	return req, nil
 }
 
+// NewSearchDocsEndpointApiV1SearchDocsPostRequest calls the generic SearchDocsEndpointApiV1SearchDocsPost builder with application/json body
+func NewSearchDocsEndpointApiV1SearchDocsPostRequest(server string, params *SearchDocsEndpointApiV1SearchDocsPostParams, body SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSearchDocsEndpointApiV1SearchDocsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewSearchDocsEndpointApiV1SearchDocsPostRequestWithBody generates requests for SearchDocsEndpointApiV1SearchDocsPost with any type of body
+func NewSearchDocsEndpointApiV1SearchDocsPostRequestWithBody(server string, params *SearchDocsEndpointApiV1SearchDocsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/search_docs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListTargetsApiV1TargetsGetRequest generates requests for ListTargetsApiV1TargetsGet
 func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV1TargetsGetParams) (*http.Request, error) {
 	var err error
@@ -20079,6 +20217,11 @@ type ClientWithResponsesInterface interface {
 	// CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse request
 	CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteWithResponse(ctx context.Context, triggerId openapi_types.UUID, params *CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams, reqEditors ...RequestEditorFn) (*CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse, error)
 
+	// SearchDocsEndpointApiV1SearchDocsPostWithBodyWithResponse request with any body
+	SearchDocsEndpointApiV1SearchDocsPostWithBodyWithResponse(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchDocsEndpointApiV1SearchDocsPostResponse, error)
+
+	SearchDocsEndpointApiV1SearchDocsPostWithResponse(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, body SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchDocsEndpointApiV1SearchDocsPostResponse, error)
+
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
 
@@ -22248,6 +22391,28 @@ func (r CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse) Status() str
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SearchDocsEndpointApiV1SearchDocsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SearchDocsResponse
+}
+
+// Status returns HTTPResponse.Status
+func (r SearchDocsEndpointApiV1SearchDocsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SearchDocsEndpointApiV1SearchDocsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -25042,6 +25207,23 @@ func (c *ClientWithResponses) CancelTriggerApiV1SchedulerTriggersTriggerIdDelete
 		return nil, err
 	}
 	return ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse(rsp)
+}
+
+// SearchDocsEndpointApiV1SearchDocsPostWithBodyWithResponse request with arbitrary body returning *SearchDocsEndpointApiV1SearchDocsPostResponse
+func (c *ClientWithResponses) SearchDocsEndpointApiV1SearchDocsPostWithBodyWithResponse(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchDocsEndpointApiV1SearchDocsPostResponse, error) {
+	rsp, err := c.SearchDocsEndpointApiV1SearchDocsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchDocsEndpointApiV1SearchDocsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) SearchDocsEndpointApiV1SearchDocsPostWithResponse(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, body SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchDocsEndpointApiV1SearchDocsPostResponse, error) {
+	rsp, err := c.SearchDocsEndpointApiV1SearchDocsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchDocsEndpointApiV1SearchDocsPostResponse(rsp)
 }
 
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
@@ -28600,6 +28782,32 @@ func ParseCancelTriggerApiV1SchedulerTriggersTriggerIdDeleteResponse(rsp *http.R
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSearchDocsEndpointApiV1SearchDocsPostResponse parses an HTTP response from a SearchDocsEndpointApiV1SearchDocsPostWithResponse call
+func ParseSearchDocsEndpointApiV1SearchDocsPostResponse(rsp *http.Response) (*SearchDocsEndpointApiV1SearchDocsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SearchDocsEndpointApiV1SearchDocsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SearchDocsResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	}
 

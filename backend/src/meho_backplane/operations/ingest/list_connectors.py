@@ -183,7 +183,14 @@ def _next_step_for_registered(
       rationale calls out the missing catalog entry so the operator
       knows they need to source the OpenAPI spec themselves. Manual
       mode is the same path G0.7-T5 already supports for one-off /
-      not-yet-curated specs (see ``ingest.go``'s mode dispatch).
+      not-yet-curated specs (see ``ingest.go``'s mode dispatch). The
+      rationale also names the **hand-authored** route so a spec-less
+      product (the vendor publishes no OpenAPI at all — VCF Fleet /
+      vRSLCM, Hetzner Robot) doesn't read as a dead end: author a
+      minimal OpenAPI 3.x covering just the ops you need and pass it
+      via ``--spec file://…`` (#1533 / ci-07). See
+      ``docs/cross-repo/connector-ingestion.md`` §"Product publishes
+      no OpenAPI spec".
 
     *catalog* is ``None`` when the package-data load failed (a malformed
     catalog at startup would have crashed the lifespan, so this branch
@@ -219,7 +226,10 @@ def _next_step_for_registered(
         ),
         rationale=(
             "not in catalog; run manual ingest with --spec pointing at the "
-            "vendor OpenAPI spec (file:// / https:// / docs:<...>)"
+            "vendor OpenAPI spec (file:// / https:// / docs:<...>). If the "
+            "product publishes no OpenAPI spec at all, author a minimal "
+            "OpenAPI 3.x covering just the ops you need and pass it via "
+            "--spec file://… (see connector-ingestion.md)"
         ),
     )
 

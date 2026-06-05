@@ -44,6 +44,73 @@ Vendor specs live in one of three places, in priority order:
 2. **The vendor's published URL** (e.g. `https://developer.vmware.com/.../vcenter-rest-9.0.yaml`). Use a full `https://` URL.
 3. **A local download.** Use a full `file:///` path.
 
+All three sources assume the vendor *publishes* an OpenAPI document somewhere. If it doesn't, jump to the next section before concluding the connector is un-ingestable.
+
+#### Product publishes no OpenAPI spec
+
+Some products ship **no** OpenAPI document at all — only HTML/Markdown reference docs (Hetzner Robot), or a proprietary management API with no published spec (VCF Fleet / vRSLCM `/lcm/`). For these, `meho connector ingest` is **not** a dead end, and the catalog-miss `next_step` hint on a `state=registered`, 0-operation connector points you here.
+
+The ingest pipeline only ever sees the *bytes* of an OpenAPI 3.x document — it does not care whether a vendor published those bytes or you typed them by hand. So the supported on-ramp is:
+
+1. **Author a minimal OpenAPI 3.x** covering just the operations you need today. You do **not** have to model the vendor's entire API — a handful of ops is enough to unblock an agent workflow, and you can extend the spec and re-ingest later (re-ingest is idempotent on unchanged rows).
+2. **Save it locally** and ingest it with a `file://` URI, exactly as you would a downloaded spec:
+
+   ```bash
+   meho connector ingest \
+     --product hetzner-robot --version 1.0 --impl hetzner-rest \
+     --spec file:///abs/path/hetzner-robot.yaml \
+     --dry-run
+   ```
+
+A minimal worked example for a spec-less product (two ops — list servers, reset one):
+
+```yaml
+# hetzner-robot.yaml
+openapi: 3.0.3
+info:
+  title: Hetzner Robot (hand-authored)
+  version: "1.0"
+paths:
+  /server:
+    get:
+      summary: List dedicated servers
+      operationId: listServers
+      tags: [server]
+      responses:
+        "200":
+          description: A list of servers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+  /reset/{server_ip}:
+    post:
+      summary: Trigger a hardware reset
+      operationId: resetServer
+      tags: [server]
+      parameters:
+        - name: server_ip
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Reset accepted.
+```
+
+`--dry-run` against this file prints `operations: 2 total (2 inserted …)`; drop `--dry-run` to ingest for real, then continue from [Step 2](#step-2--ingest-the-spec). The parser applies the **same** safety heuristic a downloaded spec gets (`GET` → `safe`, `POST` → `caution`, `DELETE` → `dangerous`), so review the staged groups (Step 4) and mark per-op overrides (Step 6) the same way.
+
+Authoring tips:
+
+- Use the verbs and paths the vendor's HTML/Markdown docs already describe, so the ingested `op_id` (e.g. `POST:/reset/{server_ip}`) reads naturally at the agent surface.
+- Give each operation a `summary` and `description` — these feed the LLM grouping pass and the agent's `when_to_use` retrieval, so a one-line `summary` is worth more than a bare path.
+- A bad path-param shape or a malformed `$ref` surfaces under `--dry-run` before any DB write; iterate on the file until the dry-run op count matches what you intended.
+
+> **Why not auto-derive the spec?** Parsing vendor HTML/Markdown into OpenAPI, or deriving ops from a typed client, is a deliberately **deferred** capability ([initiative #1529 out-of-scope](https://github.com/evoila/meho/issues/1529)). A small hand-authored spec is the cheaper answer than an HTML→OpenAPI inference engine — author the ops you need, not the vendor's whole surface. Conform to [OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3.html) or [3.1.1](https://spec.openapis.org/oas/v3.1.1.html); the parser rejects Swagger 2.0 with a conversion-path remedy (see [`connector-catalog.md`](connector-catalog.md)).
+
 Validate the spec before committing to a tenant-wide ingestion:
 
 ```bash

@@ -37,6 +37,7 @@ PETSTORE_31_JSON = FIXTURES / "petstore_31.json"
 PARAMETER_REFS_30 = FIXTURES / "parameter_refs_30.yaml"
 RESPONSE_REFS_30 = FIXTURES / "response_refs_30.yaml"
 REQUEST_BODY_REFS_30 = FIXTURES / "request_body_refs_30.yaml"
+HANDAUTHORED_MINIMAL_30 = FIXTURES / "handauthored_minimal_30.yaml"
 
 
 def _by_op_id(rows: list[EndpointDescriptorProto]) -> dict[str, EndpointDescriptorProto]:
@@ -182,6 +183,50 @@ def test_parse_petstore_31_json_route() -> None:
     rows = parse_openapi(str(PETSTORE_31_JSON))
     assert {r.op_id for r in rows} == {"GET:/zoos"}
     assert rows[0].response_schema == {"type": "array", "items": {"type": "string"}}
+
+
+# -- hand-authored minimal spec (#1533 / ci-07 on-ramp) --------------------
+
+
+def test_parse_handauthored_minimal_spec_via_file_uri() -> None:
+    """A hand-authored minimal OpenAPI 3.x ingests via a ``file://`` URI.
+
+    #1533 / ci-07: for a product whose vendor publishes no OpenAPI doc
+    at all (VCF Fleet / vRSLCM, Hetzner Robot), the supported on-ramp is
+    to author a minimal OpenAPI 3.x covering just the needed ops and
+    pass it to ``meho connector ingest … --spec file://…``. A
+    hand-authored spec is identical to a downloaded one once it reaches
+    the parser; this test is the worked example proving the end-to-end
+    parse from a ``file://`` URI, matching the workflow documented in
+    ``docs/cross-repo/connector-ingestion.md`` §"Product publishes no
+    OpenAPI spec".
+
+    ``Path.as_uri()`` is the cross-platform ``file://`` form the
+    operator types after ``meho connector ingest`` resolves their local
+    path; the parser's ``file`` scheme branch round-trips it through
+    ``url2pathname`` back to the on-disk file.
+    """
+    file_uri = HANDAUTHORED_MINIMAL_30.as_uri()
+    assert file_uri.startswith("file://")
+
+    rows = parse_openapi(file_uri, spec_source="spec:hetzner-robot.yaml")
+    ops = _by_op_id(rows)
+
+    assert set(ops) == {"GET:/server", "POST:/reset/{server_ip}"}
+
+    list_servers = ops["GET:/server"]
+    assert list_servers.summary == "List dedicated servers"
+    assert list_servers.safety_level == "safe"
+    # The hand-authored source tag threads through unchanged so an
+    # operator can audit which spec a row came from in review.
+    assert "spec:hetzner-robot.yaml" in list_servers.tags
+
+    reset = ops["POST:/reset/{server_ip}"]
+    # POST is a write → "caution" under the same heuristic a downloaded
+    # spec gets; the path param is required.
+    assert reset.safety_level == "caution"
+    assert reset.parameter_schema["properties"]["server_ip"]["x-meho-param-loc"] == "path"
+    assert "server_ip" in reset.parameter_schema["required"]
 
 
 # -- spec_source merging ---------------------------------------------------

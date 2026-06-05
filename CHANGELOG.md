@@ -141,6 +141,10 @@ connector-related release-notes line.
   so the misconfiguration is visible at fire time; no synthetic user turn
   is injected (#1505).
 
+### Documentation
+
+- Document that the scheduler's Vault agent-credentials path uses the **sanitised, UPPER-CASED** `client_id`, not the raw `identity_ref`: `vault_path_for_client_id` substitutes the sanitised + `upper()`-cased form into `SCHEDULER_AGENT_VAULT_PATH_PATTERN`, so `agent:ops-writer` resolves to `secret/data/agents/AGENT_OPS_WRITER/credentials`. Write and read share the one helper and cannot diverge; `docs/codebase/scheduler.md` and the `settings.py` field comment now carry a worked example so an operator hand-provisioning the Vault secret/policy targets the right path (#1508).
+
 ## [0.10.1] - 2026-06-04
 
 ### Fixed

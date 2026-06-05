@@ -116,6 +116,7 @@ if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
 __all__ = [
+    "SCHEDULED_RUN_NO_INPUT_CLASS",
     "AgentDefinition",
     "AgentRun",
     "AgentRunError",
@@ -127,10 +128,36 @@ __all__ = [
     "BudgetExceededError",
     "ModelFactory",
     "PydanticAgentRun",
+    "ScheduledRunNoInputError",
     "default_model_factory",
+    "prompt_is_effectively_empty",
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Machine-readable classification tag prefixed onto the ``agent_run.error``
+#: column when a scheduled run is refused for having no usable user prompt.
+#: Greppable in logs and in the runs table so on-call can distinguish a
+#: misconfigured no-inputs trigger from an opaque provider 400 (the raw
+#: ``"messages: at least one message is required"`` text every supported
+#: backend would otherwise surface). See :class:`ScheduledRunNoInputError`.
+SCHEDULED_RUN_NO_INPUT_CLASS = "scheduled_run_no_input"
+
+
+def prompt_is_effectively_empty(inputs: str) -> bool:
+    """Return ``True`` when *inputs* carries no usable user turn.
+
+    The loop's ``inputs`` string becomes the run's single
+    :class:`~pydantic_ai.messages.UserPromptPart`. Every supported model
+    backend drops a whitespace-only user turn before the request leaves
+    the client (the Anthropic adapter's ``_map_user_prompt`` only yields a
+    text block ``if part.content``), so a blank prompt produces an empty
+    ``messages`` array and a provider 400 ("at least one message is
+    required") -- the system prompt rides the separate ``system`` param
+    and does not count. Treating leading/trailing whitespace as empty
+    matches that drop: ``"   "`` is just as doomed as ``""``.
+    """
+    return not inputs.strip()
 
 
 #: A factory that builds the framework :class:`~pydantic_ai.models.Model`
@@ -191,6 +218,43 @@ class BudgetExceededError(AgentRunError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(reason)
+
+
+class ScheduledRunNoInputError(AgentRunError):
+    """A scheduled run was fired with no usable user prompt.
+
+    Raised by the scheduled-invocation seam when the trigger's rendered
+    ``inputs`` is empty / whitespace-only (the common cause: a trigger
+    created without ``inputs``). Such a run would otherwise reach the
+    provider as a system-prompt-only request with an empty ``messages``
+    array and come back as an opaque provider 400 ("messages: at least
+    one message is required"), finalised to a generic ``failed`` row with
+    raw provider text. Failing typed instead -- *before* the model call
+    -- finalises the row with a :data:`SCHEDULED_RUN_NO_INPUT_CLASS`-tagged
+    ``error`` so the misconfiguration is greppable and the doomed provider
+    call is never made.
+
+    Subclass of :class:`AgentRunError` so the invocation surface's
+    existing failure-recording path (which already maps an
+    :class:`AgentRunError` to a ``failed`` row) classifies it uniformly;
+    a caller that wants to distinguish "no input" from "the loop tripped"
+    catches this subclass specifically.
+
+    The supported no-user-turn rule: MEHO does not (yet) support an
+    autonomous run shape that needs no user turn -- every backend rejects
+    the system-prompt-only request before any tool loop runs, so MEHO
+    fails fast and typed rather than injecting a synthetic user turn
+    (which would misrepresent operator intent). A genuine no-user-turn
+    autonomous shape would be a distinct feature.
+    """
+
+    def __init__(self, *, agent: str) -> None:
+        self.agent = agent
+        super().__init__(
+            f"{SCHEDULED_RUN_NO_INPUT_CLASS}: scheduled run for agent "
+            f"{agent!r} has no usable user prompt (empty inputs); a "
+            "scheduled trigger must supply a non-empty prompt",
+        )
 
 
 class AgentRunStatus(StrEnum):

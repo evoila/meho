@@ -141,6 +141,7 @@ from meho_backplane.auth.agent_token import AgentTokenError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentDefinition,
+    AgentRunStatus,
     ScheduledTrigger,
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
@@ -299,10 +300,19 @@ def _coerce_inputs(inputs: dict[str, object] | None) -> str:
     str`` (the loop's user-prompt string). A scheduled trigger's
     payload is JSON-shaped for future extensibility, so the runtime
     contract is: prefer the conventional ``"prompt"`` key when present
-    (the common shape), else dump the dict as JSON. ``None`` (the
-    trigger inherited the agent definition's default prompt) renders
-    as an empty string so the invoker reads the definition's
-    ``system_prompt`` unaffected.
+    (the common shape), else dump the dict as JSON. ``None`` (a trigger
+    created without ``inputs``) renders as an empty string.
+
+    An empty string is **not** a valid user turn: every supported model
+    backend drops a whitespace-only user prompt, leaving an empty
+    ``messages`` array that the provider 400s on (the system prompt rides
+    the separate ``system`` param and does not count). Rather than
+    inject a synthetic user turn here (which would misrepresent operator
+    intent), the empty result is caught downstream by the typed no-input
+    guard in :meth:`AgentInvoker._launch_scheduled_run`, which finalises
+    the run ``failed`` with a
+    :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS` tag
+    before any model call (#1505).
     """
     if inputs is None:
         return ""
@@ -585,6 +595,25 @@ async def _dispatch_invocation(
             reason=type(exc).__name__,
         )
         return False
+    if outcome.status == AgentRunStatus.FAILED:
+        # The trigger fired (the row was claimed/advanced and a terminal
+        # run row exists) but the run was refused before the model call --
+        # today the only such returned-FAILED outcome is the no-input
+        # guard (#1505). Surface it at WARN with the typed error so the
+        # misconfiguration is visible at fire time rather than masked by a
+        # success-shaped ``scheduler_fired`` line. Still counts as a fire:
+        # a one-off is consumed (at-most-once) and a cron has already
+        # advanced -- the fix is operator-side (add ``inputs``), not a
+        # scheduler retry.
+        _log.warning(
+            "scheduler_fired_run_failed",
+            trigger_id=str(row.id),
+            kind=row.kind,
+            agent_name=prepared.name,
+            agent_run_id=str(outcome.run_id),
+            error=outcome.error,
+        )
+        return True
     _log.info(
         "scheduler_fired",
         trigger_id=str(row.id),

@@ -3438,6 +3438,19 @@ type RunbookTemplateListResponse struct {
 // “"__scheduler__"“ to match the migration-time backstop the
 // ORM-level default sets, so a minimal create body still validates.
 //
+// *inputs* is optional and unvalidated here **by design**. Whether a
+// trigger needs a user prompt depends on the referenced agent
+// definition, which this pure wire-shape validator does not (and must
+// not) load -- the definition FK is checked one layer down in the
+// service. A no-inputs trigger is therefore *accepted* at create and the
+// no-usable-prompt case is handled at fire time: the scheduled-run seam
+// finalises the run “failed“ with a typed
+// :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS` error
+// rather than letting it reach the provider as an empty-“messages“ 400
+// (#1505). This keeps a definition that legitimately needs no user turn
+// from being over-rejected at create while still surfacing the doomed
+// no-prompt fire as a typed, greppable failure.
+//
 // *in_flight_policy* defaults to “fail_into_audit“ per the consumer
 // doc; operators wanting at-least-once semantics opt into “resume“.
 //

@@ -128,6 +128,18 @@ connector-related release-notes line.
   credential-class redaction rule. Also documents the `meho-mcp` role's
   required KV write-capability policy stanza + a `sys/capabilities-self`
   verify command in `docs/cross-repo/connector-vault-policy.md` (#1504).
+- Fail a no-inputs scheduled run with a typed `scheduled_run_no_input`
+  classification instead of an opaque provider 400. A cron/one-off/event
+  trigger created without `inputs` is still accepted at create (whether a
+  user turn is needed depends on the referenced agent definition), but at
+  fire time the scheduled-run seam now detects the empty user prompt
+  *before* the model call and finalises the run `failed` with a greppable
+  `scheduled_run_no_input` error — rather than letting it reach the
+  provider as a system-prompt-only request with an empty `messages` array
+  (which every supported backend rejects with "messages: at least one
+  message is required"). The scheduler logs `scheduler_fired_run_failed`
+  so the misconfiguration is visible at fire time; no synthetic user turn
+  is injected (#1505).
 
 ## [0.10.1] - 2026-06-04
 

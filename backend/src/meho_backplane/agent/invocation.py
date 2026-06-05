@@ -93,6 +93,8 @@ from meho_backplane.agent.run import (
     AgentRunEventKind,
     BudgetExceededError,
     PydanticAgentRun,
+    ScheduledRunNoInputError,
+    prompt_is_effectively_empty,
 )
 from meho_backplane.agents.schemas import AgentDefinitionRead
 from meho_backplane.agents.service import AgentDefinitionService
@@ -128,6 +130,7 @@ __all__ = [
     "AgentRunOutcome",
     "AgentRunStatusView",
     "BudgetExceededError",
+    "ScheduledRunNoInputError",
     "get_agent_invoker",
     "reset_agent_invoker_for_testing",
 ]
@@ -943,6 +946,15 @@ class AgentInvoker:
         owns-definition guard) is delegated to
         :meth:`_authenticate_scheduled_agent`.
 
+        A trigger fired with no usable user prompt (empty / whitespace-only
+        *inputs*, the common cause being a trigger created without
+        ``inputs``) does **not** reach the model: the run row is finalised
+        ``failed`` with a :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`-tagged
+        error and the returned :class:`AgentRunOutcome` carries
+        ``status=FAILED`` (#1505). This is a returned terminal outcome, not
+        a raised exception -- the scheduler treats it as a fired-but-failed
+        trigger (a permanent misconfiguration), not a transient retry.
+
         Raises:
             AgentTokenError: the ``client_credentials`` grant failed.
             AgentInvocationError: the authenticated client does not own the
@@ -959,6 +971,36 @@ class AgentInvoker:
         )
         return await self._launch_scheduled_run(
             name, inputs, operator=operator, entry=entry, settings=settings
+        )
+
+    async def _refuse_scheduled_no_input(
+        self,
+        run_id: uuid.UUID,
+        name: str,
+        operator: Operator,
+    ) -> AgentRunOutcome:
+        """Finalise an already-created scheduled run ``failed`` for no input (#1505).
+
+        The run row exists (so the refusal is auditable in the runs table)
+        but the loop is never launched: the row is finalised ``failed``
+        with a :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`-tagged
+        error and no model call is made. Returns the terminal
+        ``status=FAILED`` outcome the scheduler surfaces as
+        ``scheduler_fired_run_failed``.
+        """
+        error = str(ScheduledRunNoInputError(agent=name))
+        _log.warning(
+            "agent_scheduled_no_input",
+            run_id=str(run_id),
+            agent=name,
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+        )
+        await self._finalize_run(run_id, output=None, error=error)
+        return AgentRunOutcome(
+            run_id=run_id,
+            status=AgentRunStatus.FAILED,
+            error=error,
         )
 
     async def _launch_scheduled_run(
@@ -993,6 +1035,15 @@ class AgentInvoker:
             model=model,
             trigger=AgentRunTrigger.SCHEDULED,
         )
+        # No-input guard (#1505): a scheduled trigger fired with no usable
+        # user prompt (the common cause: created without ``inputs``) would
+        # reach the provider as a system-prompt-only request with an empty
+        # ``messages`` array and come back as an opaque provider 400. Fail
+        # the run typed *before* launching the doomed loop. The row is
+        # created first so the refusal is visible in the runs table the
+        # same as any other terminal scheduled run.
+        if prompt_is_effectively_empty(inputs):
+            return await self._refuse_scheduled_no_input(run_id, name, operator)
         # No actor_delegation: the agent is the subject, not an actor on behalf
         # of a human, so actor_sub stays NULL.
         task = self._launch_run(

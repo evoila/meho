@@ -90,6 +90,16 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Connector ingest — hand-authored spec on-ramp (#1533)
+
+- Document the hand-authored-OpenAPI-3.x → `--spec file://…` route as the
+  intended on-ramp for products that publish **no** OpenAPI spec (VCF
+  Fleet / vRSLCM, Hetzner Robot): a "Product publishes no OpenAPI spec"
+  section in `docs/cross-repo/connector-ingestion.md` with a minimal
+  worked example, and the catalog-miss `next_step` rationale widened to
+  name it so a 0-op `state=registered` connector no longer reads as a
+  dead end.
+
 ### Added
 
 - Add a corpus-agnostic per-tenant **capability gate** on the MCP tool +

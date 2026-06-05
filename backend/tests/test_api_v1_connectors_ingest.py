@@ -947,7 +947,11 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
       manual-mode invocation), echoing the registry's natural key so
       the operator copies the right values verbatim;
     * carry a rationale that says the catalog has no entry so the
-      operator knows they need to source the OpenAPI spec themselves.
+      operator knows they need to source the OpenAPI spec themselves;
+    * name the hand-authored on-ramp (#1533 / ci-07) so a spec-less
+      product whose vendor publishes no OpenAPI at all doesn't read as
+      a dead end — the operator can author a minimal OpenAPI 3.x and
+      pass it via ``--spec file://…``.
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -969,6 +973,10 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
     rationale = custom["next_step"]["rationale"]
     assert "not in catalog" in rationale
     assert "--spec" in rationale
+    # The widened rationale (#1533) must name the hand-authored route so
+    # a spec-less product doesn't read as a dead end.
+    assert "author a minimal OpenAPI 3.x" in rationale
+    assert "file://" in rationale
 
 
 @pytest.mark.asyncio

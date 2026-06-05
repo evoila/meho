@@ -179,6 +179,25 @@ connector-related release-notes line.
   Single-shot Q→cited-A only; no new REST/CLI surface (the tool is
   auto-discovered) (#1526).
 
+### Documentation
+
+- Operator runbook for the `meho-docs` add-on:
+  `docs/cross-repo/meho-docs-addon.md` (G4.5-T6). Covers what the add-on
+  **is** (federated vendor-document layer, not ingested — vs the
+  lightweight kb `search_knowledge`), **provisioning** (granting the
+  `meho-docs` capability via the JWT `capabilities` claim from T1, plus
+  the `CORPUS_*` settings from T2 the deploy needs), **verify** (the
+  surface present + returning cited chunks on a provisioned tenant,
+  absent on an unprovisioned one, the per-face audit row visible via
+  `meho audit query` — `meho.docs.search` for the REST route + CLI verb,
+  `search_docs` for the MCP tool, the dispatcher's tool-name-verbatim
+  convention), and the one-line **routing convention** —
+  "ask the team first (`search_knowledge` / `search_memory`), escalate
+  to `search_docs` only on a miss or an explicit vendor-fact need" —
+  matching the shipped T4 tool description. Notes the external
+  MEHO.Knowledge → meho-docs corpus rename is ops-side, tracked on the
+  consumer repo (#1525).
+
 ## [0.11.0] - 2026-06-05
 
 ### Added

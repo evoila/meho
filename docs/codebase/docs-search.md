@@ -1,4 +1,4 @@
-# search_docs (the meho-docs add-on)
+# search_docs / ask_docs (the meho-docs add-on)
 
 ## Overview
 
@@ -22,10 +22,20 @@ corpus directly) is what buys three properties in one place:
   without a binary product+version scope is rejected — fail-closed — so
   no caller can accidentally run an unfiltered corpus-wide query.
 
-The same `search_docs` service backs three consumers: the REST route
-(T3), the MCP tool `search_docs` (T4, #1523), and the CLI verb
-`meho docs search` (T5, #1524). They share one service so the
-REQUIRE_FILTERS gate and the cited-chunk shape are defined exactly once.
+The same `search_docs` service backs four consumers: the REST route
+(T3), the MCP tool `search_docs` (T4, #1523), the CLI verb
+`meho docs search` (T5, #1524), and the synthesis tool `ask_docs` (T7,
+#1526). They share one service so the REQUIRE_FILTERS gate and the
+cited-chunk shape are defined exactly once.
+
+`ask_docs` is the **synthesis fast-follow**: where `search_docs` returns
+the raw cited chunks, `ask_docs` runs the *same* retrieval and then
+composes one grounded answer over those chunks, returning
+`{answer, citations[]}`. The grounding contract is enforced in code, not
+just in the prompt — no claim survives without a citation that resolves
+to a retrieved chunk, an empty retrieval returns a deterministic "no
+grounded answer" (never a guess), and an unconfigured synthesis model
+fails closed rather than degrading to an ungrounded answer.
 
 ## Key types
 
@@ -63,6 +73,36 @@ The shared service. Calls `search_corpus` with the binary scope and
 projects the corpus's `CorpusChunk`s into MEHO's own `DocsChunk` surface
 (chunk text + source citation + score), decoupling the public response
 from the corpus wire contract. Propagates `CorpusUnavailable` unchanged.
+
+### `synthesize_docs_answer(query, retrieval, *, llm_client=None)` (`meho_backplane.docs_search.synthesis`, T7 #1526)
+
+The synthesis step `ask_docs` runs *after* `search_docs` retrieval. It
+never retrieves — it composes a grounded answer over the chunks the shared
+service already returned. Three invariants, each a code-enforced
+acceptance criterion:
+
+- **No claim without a real citation.** The model is asked to return a
+  strict JSON object `{answer, cited_chunk_ids[]}` rather than prose with
+  parsed inline markers, so the grounding check is machine-enforceable.
+  Every `cited_chunk_id` is validated against the retrieved set; an id
+  outside it raises `DocsSynthesisError` (an invented citation is rejected,
+  not silently dropped). Returned `citations` follow retrieval ranking and
+  de-duplicate.
+- **Empty retrieval → no model call.** Zero retrieved chunks short-circuit
+  to the deterministic `NO_GROUNDED_ANSWER` constant *without* invoking the
+  model — the one answer path produced with no LLM call, precisely so it
+  cannot hallucinate.
+- **Fail-closed synthesis client.** The default client is
+  `build_anthropic_ingest_llm_client` (the #1386 Anthropic-Messages
+  adapter, reused via the shared `LlmClient` Protocol). No
+  `ANTHROPIC_API_KEY` raises `LlmClientUnavailable`; a model that runs but
+  breaks the JSON / citation contract raises `DocsSynthesisError`. Neither
+  is caught in the handler — both bubble to `-32603` (the MCP analogue of
+  503). The synthesis model is never relaxed into an ungrounded answer.
+
+The client is injectable so tests pin a deterministic stub; production
+reuses the spec-ingestion grouping pass's Anthropic key + model, so no new
+settings are introduced.
 
 ### `POST /api/v1/search_docs` (`meho_backplane.api.v1.search_docs`, T3 #1521)
 
@@ -146,6 +186,32 @@ for VENDOR REFERENCE, `search_knowledge` for how THIS team does X,
 `search_memory` for cross-session state — and points to the companion
 resource for the full text of a hit on a later turn.
 
+### `ask_docs` MCP tool (`meho_backplane.mcp.tools.docs`, T7 #1526)
+
+The synthesis sibling, registered alongside `search_docs` in the **same**
+module and carrying the **same** `required_capability="meho-docs"` gate,
+the same `operator` role minimum, and the same strict `inputSchema`
+(`additionalProperties: false`, required `[query, product, version]`,
+`limit` default 10 / cap 50). It is absent from `tools/list` and 403-class
+on `tools/call` for an unprovisioned tenant exactly like `search_docs`.
+
+The handler mirrors `search_docs`'s error arms and adds the synthesis arm:
+`build_docs_scope` enforces REQUIRE_FILTERS (`MissingDocsFilterError` →
+`-32602`); `CorpusUnavailable` from retrieval bubbles to `-32603`; and the
+synthesis failures (`LlmClientUnavailable` for an unconfigured model,
+`DocsSynthesisError` for a broken grounding contract) also bubble to
+`-32603` — never an ungrounded 200. It stays `op_class="read"`: it
+composes over retrieved chunks, it never mutates the corpus. The
+dispatcher writes one `audit_log` row per call with `op_id="ask_docs"`
+(the tool name verbatim, which `classify_op` leaves as `other` while the
+tool definition pins the row's `op_class="read"`) and the raw query hashed
+into `params_hash` — the same privacy posture as `search_docs`.
+
+The description routes the agent between the answer-shaped tool and the
+chunks-shaped one: `ask_docs` for a composed grounded answer, `search_docs`
+for the raw chunks to read itself, `search_knowledge` / `search_memory`
+for the non-vendor corpora.
+
 ### `meho://docs/{product}/{version}/{chunk_id}` resource (`meho_backplane.mcp.resources.docs`, T4 #1523)
 
 The fetch-by-citation companion, gated by the **same**
@@ -216,14 +282,18 @@ just makes the op name canonical for `query_audit` filtering.
   result.
 - No local indexing — federation only. MEHO gains no Qdrant dependency
   and does not absorb the corpus into its own substrate.
-- `ask_docs` (a synthesized answer over the cited chunks) is a
-  fast-follow (T7, #1526), not part of this surface.
+- `ask_docs` is **single-shot** Q→cited-A only — no multi-turn /
+  conversational follow-up, and no re-ranking or weighting beyond what T3
+  retrieval returns (binary scope only, per #1177).
 
 ## References
 
 - Route: `backend/src/meho_backplane/api/v1/search_docs.py`.
 - Service: `backend/src/meho_backplane/docs_search/service.py`.
-- MCP tool: `backend/src/meho_backplane/mcp/tools/docs.py`.
+- Synthesis (`ask_docs`): `backend/src/meho_backplane/docs_search/synthesis.py`.
+- MCP tools (`search_docs` + `ask_docs`): `backend/src/meho_backplane/mcp/tools/docs.py`.
+- Fail-closed LLM client precedent (#1386):
+  `backend/src/meho_backplane/operations/ingest/anthropic_client.py`.
 - MCP resource: `backend/src/meho_backplane/mcp/resources/docs.py`.
 - Capability gate (T1): `backend/src/meho_backplane/mcp/registry.py`
   (`required_capability`, `capability_satisfied`, `all_tools_for`).

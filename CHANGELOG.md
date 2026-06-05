@@ -164,6 +164,20 @@ connector-related release-notes line.
   text of a cited chunk on a later turn by re-issuing a scoped search
   (the corpus transport is search-only). One hashed audit row per call
   (`op_class=read`); the raw query is never logged (#1523).
+- `ask_docs` MCP tool — the synthesized, **cited** answer over the
+  `meho-docs` corpus (G4.5-T7), the fast-follow to `search_docs`. Runs the
+  **same** shared `docs_search` retrieval (same `required_capability=
+  "meho-docs"` gate, same mandatory `product`+`version` REQUIRE_FILTERS
+  scope, same hashed audit row, `op_class=read`), then composes one
+  grounded answer over the retrieved chunks and returns `{answer,
+  citations[]}` where every citation resolves to a retrieved chunk — no
+  claim survives without a citation. An empty retrieval returns a
+  deterministic "no grounded answer" (the model is never called, so it
+  cannot hallucinate), and an unconfigured/unreachable synthesis model
+  fails closed to `-32603` rather than degrading to an ungrounded answer
+  (reusing the #1386 `LlmClientUnavailable` Anthropic-Messages precedent).
+  Single-shot Q→cited-A only; no new REST/CLI surface (the tool is
+  auto-discovered) (#1526).
 
 ## [0.11.0] - 2026-06-05
 

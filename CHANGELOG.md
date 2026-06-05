@@ -132,6 +132,21 @@ connector-related release-notes line.
   the raw query. The scope-validation + corpus-call + cited-chunk shape
   live in a shared `docs_search` service the future MCP tool (T4) and
   CLI verb (T5) reuse (#1521).
+- `meho docs search <query> --product <p> --version <v> [--limit N]
+  [--json]` — the operator-facing CLI verb of the `meho-docs` add-on
+  (G4.5-T5). Wraps `POST /api/v1/search_docs` via the shared generated
+  authed client (bearer + 401-refresh), mirrors the route's
+  REQUIRE_FILTERS gate client-side (missing `--product`/`--version` is
+  rejected before the round-trip), and renders cited chunks as a text
+  table or raw JSON. The `meho docs` tree compiles into every binary
+  but is gated on the tenant's `meho-docs` capability (read from the
+  bearer JWT's `capabilities` claim, T1): when unprovisioned the tree
+  is **hidden from `meho --help`** and every verb refuses with a typed
+  `addon_not_provisioned` error before any network call — true absence,
+  fail-closed. The claim is read unverified (a visibility affordance —
+  the backplane and corpus federation enforce the real boundary), so a
+  forged claim changes only what the CLI shows, not what the server
+  allows (#1524).
 
 ## [0.11.0] - 2026-06-05
 

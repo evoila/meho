@@ -70,6 +70,52 @@ The REST face. `operator` role minimum (`read_only` → 403). Validates
 the scope first (422 before any audit binding), then binds the audit
 contextvars and calls the service.
 
+### `meho docs search` (`cli/internal/cmd/docs`, T5 #1524)
+
+The operator-facing CLI verb. `meho docs search <query> --product <p>
+--version <v> [--limit N] [--json]` POSTs to `/api/v1/search_docs` via
+the shared generated authed client (bearer + lazy 401-refresh), mirrors
+the route's REQUIRE_FILTERS gate client-side (a missing `--product` or
+`--version` is rejected before the round-trip), and renders the cited
+chunks as a text table or raw JSON. It consumes the generated
+`api.SearchDocsRequest` / `api.SearchDocsResponse` / `api.DocsChunk`
+types directly — no hand-typed copies of the backend schemas.
+
+**Gating — true absence when unprovisioned.** The `meho docs` tree
+compiles into every CLI binary, but it is gated on the tenant's
+`meho-docs` capability (the same capability T1 gates the MCP tool on).
+The CLI reads the `capabilities` claim from the stored bearer JWT at
+command-tree-build time and:
+
+- shows `meho docs` in `meho --help` and runs its verbs only when the
+  claim contains `meho-docs`;
+- otherwise marks the parent `Hidden` and makes every verb refuse with
+  a typed `addon_not_provisioned` error (exit 5) before any network
+  call.
+
+The claim is decoded **unverified** — the CLI holds no realm signing
+key and needs none. This is a visibility affordance, not a security
+boundary: the backplane re-validates the JWT on every request and the
+corpus federation enforces the real boundary, so a forged claim can
+change only what the CLI *shows*, never what the server *allows*.
+Reading an unverified claim is safe precisely because the gate never
+grants access on its own; it is fail-closed (no login / unreadable
+store / malformed token → not provisioned), mirroring the backend's
+fail-closed `_extract_capabilities`.
+
+**Why not the server-driven discovery channel.** True per-tenant
+absence via `discovery.Fetch` → `GET /api/v1/commands` was the
+preferred shape on paper, but the discovery channel is anonymous by
+design (it never imports `internal/api` / `internal/auth` and fetches
+before login produces a token) and its `Register` only grafts *stub*
+commands ("not yet implemented locally") — it cannot toggle the
+visibility of a real compiled-in implementation per tenant. A
+tenant-filtered manifest would contradict that anonymous contract and
+require a new authenticated backend route plus an OpenAPI snapshot
+regen. The compiled-in + claim-probe shape achieves the same operator-
+visible outcome (absent from `--help`, non-runnable) without a backend
+change.
+
 ## Control flow (the REST route)
 
 1. `require_role(TenantRole.OPERATOR)` gates the request (`read_only` →

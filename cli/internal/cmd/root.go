@@ -24,6 +24,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/conventions"
+	"github.com/evoila/meho/cli/internal/cmd/docs"
 	"github.com/evoila/meho/cli/internal/cmd/gcloud"
 	"github.com/evoila/meho/cli/internal/cmd/harbor"
 	hetznerrobot "github.com/evoila/meho/cli/internal/cmd/hetzner-robot"
@@ -159,6 +160,20 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `kb` parent.
 	root.AddCommand(kb.NewRootCmd())
+
+	// G4.5-T5 (#1524) -- the `meho docs` tree for Initiative #1518
+	// (the meho-docs add-on). One verb: `docs search` wraps the
+	// /api/v1/search_docs route (T3, #1521) for federated
+	// vendor-document retrieval. The tree compiles into every binary
+	// but is gated on the tenant-provisioned `meho-docs` capability
+	// (T1, #1519): `docs.NewRootCmd` reads the capability from the
+	// stored token's JWT claim and, when absent, marks the parent
+	// Hidden and makes every verb refuse with a typed
+	// `addon_not_provisioned` error — true absence for an
+	// unprovisioned tenant. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `docs` parent.
+	root.AddCommand(docs.NewRootCmd())
 
 	// G12.5-T1 (#1318) -- runbook template authoring verbs
 	// (list-templates / show-template / draft-template / edit-template /

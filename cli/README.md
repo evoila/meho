@@ -157,6 +157,37 @@ Fetch failures (404 before G2.2 ships the endpoint, offline
 operators, etc.) degrade silently to "no extra commands" — the
 local-only `login` / `status` / `version` set stays usable.
 
+## Capability-gated commands
+
+Some commands wrap a **tenant-provisioned add-on** rather than a
+core operation. `meho docs` (the meho-docs vendor-document add-on,
+G4.5) is the first: it compiles into every binary, but the tree is
+only usable when the tenant has the `meho-docs` capability.
+
+The gate reads the `capabilities` claim from the stored bearer JWT
+(the same claim the MCP registry filters tool visibility on) at
+command-tree-build time:
+
+- **Provisioned** (`meho-docs` in the claim) — `meho docs` is listed
+  in `meho --help` and `meho docs search …` runs.
+- **Unprovisioned** (claim absent / no login / unparseable token) —
+  `meho docs` is hidden from `meho --help` and every verb refuses
+  with a typed `addon_not_provisioned` error (exit 5) before any
+  network call. Fail-closed: anything that prevents resolving the
+  claim is treated as "not provisioned".
+
+The claim is read **unverified** — this is a visibility affordance,
+not a security check. The backplane re-validates the JWT and the
+add-on's federation enforces the real boundary on every call, so a
+forged capability claim can change what the CLI *shows* but not what
+the server *allows*.
+
+```bash
+# Mandatory binary scope: --product and --version (REQUIRE_FILTERS).
+meho docs search "nsx config maximums" --product vmware --version 9.0
+meho docs search "nsx config maximums" --product vmware --version 9.0 --json
+```
+
 ## Generated client
 
 `internal/api/client.gen.go` is produced by

@@ -206,6 +206,16 @@ connector-related release-notes line.
 
 ### Fixed
 
+- `meho.connector.ingest` over MCP now returns a typed `-32602 Invalid
+  Params` with structured `error.data` for every spec-rejection class
+  (`UnsupportedSpecError`, `InvalidSpecError`, `UpstreamNotSpecError`,
+  `InvalidSchemaError`, `OpIdCollision`, `LlmOutputInvalid`) instead of a
+  bare `-32603 "internal error: <ClassName>"` with the diagnostic
+  discarded. Agents now get the same actionable detail the REST surface
+  already carried (e.g. the Swagger-2.0 conversion path, "upstream
+  served HTML, not a spec"), completing the #777 error-envelope pattern
+  (#1534).
+
 - NSX 9.x (VCF 9) is now ingestable into a dispatchable connector.
   NSX-T 4.x was renumbered onto the VCF train at VCF 9.0, but
   `NsxConnector` advertised `supported_version_range=">=4.0,<5.0"`, so a

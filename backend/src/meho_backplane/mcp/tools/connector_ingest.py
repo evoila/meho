@@ -54,15 +54,27 @@ the REST route.
 Error mapping
 =============
 
-``VersionMismatchError`` / ``UncoveredVersionLabel`` are caller-input
-validation errors that surface as JSON-RPC ``-32602`` with the shared
-structured detail on ``error.data`` (G0.9.1-T5 #777). These are only
-catchable on the **inline** path — the async path has already returned
-a handle by the time the pipeline raises, so a failure there flips the
-job to ``failed`` and the diagnostic surfaces via ``error`` /
-``error_class`` on the ``meho.connector.ingest_status`` response
-(same trade-off the REST async path makes). A missing / cross-tenant
-job id on the poll tool surfaces as ``-32602`` ``ingest_job_not_found``.
+Every typed ``SpecError`` sibling the pipeline raises is a caller-input
+validation error that surfaces as JSON-RPC ``-32602`` with the shared
+structured detail on ``error.data`` (the #777 envelope pattern,
+completed for the sibling set in #1534):
+``VersionMismatchError`` / ``UncoveredVersionLabel`` (version-vs-label
+mistakes), ``UpstreamNotSpecError`` (URL served HTML, not a spec),
+``UnsupportedSpecError`` (Swagger 2.0 / OpenAPI 4.x / cross-document
+``$ref``), ``InvalidSpecError`` (not a structurally valid spec),
+``InvalidSchemaError`` (broken ``$ref`` / schema), ``OpIdCollision``
+(two ops share an ``op_id``), and ``LlmOutputInvalid`` (grouping LLM
+returned invalid output). Before #1534 only the first two were caught;
+the rest fell through to the dispatcher's generic ``except Exception``
+and surfaced as a bare ``-32603 "internal error: <ClassName>"`` with
+``str(exc)`` discarded — the MCP↔REST asymmetry #1534 closes (REST
+already attached the detail). These are only catchable on the
+**inline** path — the async path has already returned a handle by the
+time the pipeline raises, so a failure there flips the job to
+``failed`` and the diagnostic surfaces via ``error`` / ``error_class``
+on the ``meho.connector.ingest_status`` response (same trade-off the
+REST async path makes). A missing / cross-tenant job id on the poll
+tool surfaces as ``-32602`` ``ingest_job_not_found``.
 """
 
 from __future__ import annotations
@@ -81,8 +93,10 @@ from meho_backplane.mcp.tools._connector_shared import (
     _OP_CLASS_READ,
     _OP_CLASS_WRITE,
     _TENANT_ID_PROPERTY,
+    SPEC_ERROR_TYPES,
     _coerce_tenant_id,
     _model_dump_json_safe,
+    raise_invalid_params_for_spec_error,
 )
 from meho_backplane.operations.ingest import (
     IngestionPipelineResult,
@@ -93,10 +107,6 @@ from meho_backplane.operations.ingest import (
     IngestJobStatusResponse,
     IngestRequest,
     SpecSource,
-    UncoveredVersionLabel,
-    VersionMismatchError,
-    build_uncovered_version_label_detail,
-    build_version_mismatch_detail,
     get_job_registry,
     run_ingest_job,
 )
@@ -199,12 +209,26 @@ async def _run_inline_ingest(
     """Run the pipeline on the request and return the canonical IngestResponse.
 
     The inline path is the pre-#1531 behaviour, preserved verbatim for
-    ``dry_run=true`` and ``async=false`` callers (no regression). The
-    typed caller-input exceptions map to JSON-RPC ``-32602`` with the
-    shared structured detail on ``error.data`` (G0.9.1-T5 #777); the
-    shared builders in :mod:`operations/ingest/error_envelopes` are the
-    single source of truth so the REST 422 envelope and the MCP
-    ``error.data`` member can't drift.
+    ``dry_run=true`` and ``async=false`` callers (no regression). Every
+    typed ``SpecError`` sibling the pipeline raises is a caller-input
+    mistake — the supplied spec is the wrong OpenAPI flavour, isn't a
+    valid spec, served HTML instead of YAML/JSON, collides op-ids, or
+    drove the grouping LLM to invalid output — so each maps to JSON-RPC
+    ``-32602 Invalid Params`` with the shared structured detail on
+    ``error.data`` (the #777 envelope pattern, completed for the sibling
+    set in #1534). Before #1534 only ``VersionMismatchError`` /
+    ``UncoveredVersionLabel`` were caught here; the rest fell through to
+    the dispatcher's generic ``except Exception`` and surfaced as a bare
+    ``-32603 "internal error: <ClassName>"`` with ``str(exc)`` discarded,
+    while the REST surface carried the detail — the MCP↔REST asymmetry
+    this closes. The shared builders in
+    :mod:`operations/ingest/error_envelopes` are the single source of
+    truth so the REST 4xx envelope and the MCP ``error.data`` member
+    can't drift. (The **async** path can't catch these — the handle has
+    already returned by the time the pipeline raises — so there a failure
+    flips the job to ``failed`` and surfaces via ``error`` /
+    ``error_class`` on the ``ingest_status`` poll, the same trade-off the
+    REST async path makes.)
     """
     assert request.product is not None
     assert request.version is not None
@@ -219,16 +243,12 @@ async def _run_inline_ingest(
             tenant_id=tenant_id,
             dry_run=request.dry_run,
         )
-    except VersionMismatchError as exc:
-        raise McpInvalidParamsError(
-            str(exc),
-            data=build_version_mismatch_detail(exc),
-        ) from exc
-    except UncoveredVersionLabel as exc:
-        raise McpInvalidParamsError(
-            str(exc),
-            data=build_uncovered_version_label_detail(exc),
-        ) from exc
+    except SPEC_ERROR_TYPES as exc:
+        # The whole typed SpecError sibling set maps onto JSON-RPC -32602
+        # with the shared structured ``data`` envelope; the dispatch table
+        # lives in ``_connector_shared`` next to the exception tuple so the
+        # two can't drift (#1534, completing the #777 pattern).
+        raise_invalid_params_for_spec_error(exc)
     ingestion_model, grouping_model = result.to_api_models()
     # Build the canonical IngestResponse shape manually — the explicit
     # dict here is the same wire contract the REST router emits.

@@ -276,20 +276,32 @@ synchronously (no regression for small-spec / CI callers). This
 parallels the `meho.agents.run` + `meho.agents.run_status` async
 precedent (#811).
 
-The `ingest` handler additionally maps `VersionMismatchError` and
-`UncoveredVersionLabel` to JSON-RPC `-32602 Invalid Params` with
-the structured detail on `error.data` (G0.9.1-T5 #777) **on the inline
-path**. Both exceptions describe caller-input mistakes — the operator's
-`version` label disagrees with the supplied spec, or falls outside
-every registered class's advertised range — so `-32602` is the right
-code (not `-32603 Internal Error`, which the pre-fix generic catch-all
-emitted). The structured `data` payload is built by the shared helpers
-in `operations/ingest/error_envelopes.py` so the REST 422 detail and
-the MCP `error.data` member share one source of truth. On the **async**
-path the handle has already returned by the time the pipeline raises,
-so the same failures surface via `error` / `error_class` on the
-`ingest_status` poll response instead (the trade-off the REST async
-path also makes).
+The `ingest` handler additionally maps **every typed `SpecError`
+sibling** to JSON-RPC `-32602 Invalid Params` with the structured
+detail on `error.data` **on the inline path**: `VersionMismatchError`
+and `UncoveredVersionLabel` (the G0.9.1-T5 #777 originals),
+`UpstreamNotSpecError`, `UnsupportedSpecError`, `InvalidSpecError`,
+`InvalidSchemaError`, `OpIdCollision`, and `LlmOutputInvalid` (#1534).
+Each describes a caller-input mistake — the operator's `version` label
+disagrees with the supplied spec, the URL served HTML instead of a
+spec, the document is the wrong OpenAPI flavour or structurally
+invalid, two ops collide on an `op_id`, or the grouping LLM returned
+invalid output — so `-32602` is the right code (not `-32603 Internal
+Error`). Before #1534 only the first two were caught here; the other
+six fell through to the dispatcher's generic `except Exception` and
+surfaced as a bare `-32603 "internal error: <ClassName>"` with the
+diagnostic message discarded — while the REST surface already attached
+the detail for all of them, so this closes the MCP↔REST asymmetry.
+The structured `data` payload is built by the shared helpers in
+`operations/ingest/error_envelopes.py` (one `build_*_detail` per
+class) so the REST 4xx detail and the MCP `error.data` member share
+one source of truth; the MCP-side dispatch table that maps each class
+to its builder lives in `mcp/tools/_connector_shared.py`
+(`SPEC_ERROR_TYPES` + `raise_invalid_params_for_spec_error`). On the
+**async** path the handle has already returned by the time the
+pipeline raises, so the same failures surface via `error` /
+`error_class` on the `ingest_status` poll response instead (the
+trade-off the REST async path also makes).
 
 ## Key types
 
@@ -469,29 +481,66 @@ for the field definition and pattern syntax.
 ### Shared error-envelope builders (`ingest/error_envelopes.py`)
 
 The REST route at `POST /api/v1/connectors/ingest` and the MCP
-`meho.connector.ingest` tool both need to surface
-`VersionMismatchError` and `UncoveredVersionLabel` as caller-input
-validation errors carrying structured diagnostic detail (expected-
-vs-received versions, the list of advertised
-`supported_version_range` strings) so the operator — or the agent
-acting on the operator's behalf — can self-correct without re-
-prompting.
+`meho.connector.ingest` tool both need to surface the typed
+`SpecError` siblings as caller-input validation errors carrying
+structured diagnostic detail (expected-vs-received versions, the
+list of advertised `supported_version_range` strings, the detected
+content type, the colliding `op_id`s, the failing grouping pass)
+so the operator — or the agent acting on the operator's behalf —
+can self-correct without re-prompting. Each builder returns a stable
+snake-case `detail` classifier plus a `message` (`str(exc)`), and
+the type-specific machine-resolvable fields on top.
 
-* `build_version_mismatch_detail(exc)` — REST embeds the returned
-  dict in the `HTTPException(status_code=422).detail` field; MCP
-  embeds it in the JSON-RPC `error.data` member (spec §5.1).
-* `build_uncovered_version_label_detail(exc)` — MCP-only for now;
-  REST emits `str(exc)` for backward compatibility but can switch
-  to the structured builder later without changing the wire shape
-  in a non-additive way.
+The MCP inline path catches the full sibling set (the `except
+SPEC_ERROR_TYPES` arm in
+`meho_backplane.mcp.tools.connector_ingest`), and
+`raise_invalid_params_for_spec_error` (in
+`mcp/tools/_connector_shared.py`) dispatches each class to its
+builder before raising `McpInvalidParamsError(str(exc),
+data=detail)` — surfaced as JSON-RPC `-32602` with the detail on
+`error.data` (spec §5.1). The eight siblings and their builders:
 
-Pre-G0.9.1-T5 (#777) the MCP path had no typed handling for either
-exception — both fell through to the dispatcher's generic
-`except Exception` arm in `meho_backplane.mcp.server`, which
-surfaced `-32603 "internal error: VersionMismatchError"` and
-discarded the (already-detailed) exception message. The shared
+* `build_version_mismatch_detail(exc)` — `VersionMismatchError`.
+  REST embeds the returned dict in the
+  `HTTPException(status_code=422).detail` field; MCP embeds it in
+  the JSON-RPC `error.data` member.
+* `build_uncovered_version_label_detail(exc)` —
+  `UncoveredVersionLabel`. MCP carries the structured detail; REST
+  emits `str(exc)` for backward compatibility but can switch to the
+  structured builder later without changing the wire shape in a
+  non-additive way.
+* `build_upstream_not_spec_detail(...)` — `UpstreamNotSpecError`
+  (the #1211 builder, explicit-quadruple variant for the always-
+  explicit MCP path). Names the upstream URL and the detected
+  `content_type` that wasn't a spec (e.g. an HTML login page).
+* `build_unsupported_spec_detail(exc)` — `UnsupportedSpecError`
+  (wrong OpenAPI flavour / unsupported dialect).
+* `build_invalid_spec_detail(exc)` — `InvalidSpecError`
+  (structurally invalid root document).
+* `build_invalid_schema_detail(exc)` — `InvalidSchemaError`
+  (a broken `$ref` or invalid embedded JSON Schema — the narrower
+  domain, dispatched before `InvalidSpecError`).
+* `build_op_id_collision_detail(exc)` — `OpIdCollision`. Adds the
+  machine-resolvable colliding `op_id`s plus `product` / `version`
+  / `impl_id` and the existing-vs-incoming `spec_source`.
+* `build_llm_output_invalid_detail(exc)` — `LlmOutputInvalid`.
+  Surfaces `pass_name` (`propose_groups` / `assign_ops`) and
+  deliberately omits the verbatim `raw_output` (debug-log material,
+  not operator-facing).
+
+The first two are the G0.9.1-T5 (#777) originals; the remaining six
+complete the pattern in #1534. Pre-#1534 the MCP path caught only
+`VersionMismatchError` / `UncoveredVersionLabel` — the other six
+fell through to the dispatcher's generic `except Exception` arm in
+`meho_backplane.mcp.server`, surfaced `-32603 "internal error:
+<ClassName>"`, and discarded the (already-detailed) exception
+message while REST had attached its detail all along. The shared
 builders sit in `operations/ingest/error_envelopes.py` so the REST
-422 body and the MCP `-32602` `data` member can't drift again.
+4xx body and the MCP `-32602` `data` member stay one source of
+truth, and the `SPEC_ERROR_TYPES` tuple co-located with
+`raise_invalid_params_for_spec_error` keeps the `except` target and
+the isinstance dispatch in lockstep — adding a sibling means
+touching both, so the two surfaces can't drift.
 
 ### `list_ingested_connectors()` (`ingest/list_connectors.py`)
 

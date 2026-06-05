@@ -20,9 +20,14 @@ Coverage matrix:
   canonical ``IngestResponse`` synchronously — the pre-#1531 behaviour
   (no regression). Specs + flags + tenant_id thread through to the
   service.
-* **Inline error envelopes**: ``VersionMismatchError`` /
-  ``UncoveredVersionLabel`` map to JSON-RPC ``-32602`` with structured
-  ``error.data`` (the inherited G0.9.1-T5 #777 contract).
+* **Inline error envelopes**: every typed ``SpecError`` sibling
+  (``VersionMismatchError`` / ``UncoveredVersionLabel`` /
+  ``UpstreamNotSpecError`` / ``UnsupportedSpecError`` /
+  ``InvalidSpecError`` / ``InvalidSchemaError`` / ``OpIdCollision`` /
+  ``LlmOutputInvalid``) maps to JSON-RPC ``-32602`` with structured
+  ``error.data`` — the #777 envelope pattern, completed for the sibling
+  set in #1534 (the last six previously degraded to a bare ``-32603``
+  with the message discarded).
 * **Async path** (``async=true``, ``dry_run=false``) returns a job
   handle *before* the pipeline finishes (AC #1: prompt return, no block
   on the grouping pass), and ``ingest_status`` polls the job through to
@@ -55,7 +60,13 @@ from meho_backplane.operations.ingest import (
     GroupingResult,
     IngestionPipelineResult,
     IngestionResult,
+    InvalidSchemaError,
+    InvalidSpecError,
+    LlmOutputInvalid,
+    OpIdCollision,
     UncoveredVersionLabel,
+    UnsupportedSpecError,
+    UpstreamNotSpecError,
     VersionMismatchError,
     get_job_registry,
     reset_job_registry_for_tests,
@@ -429,6 +440,145 @@ async def test_inline_uncovered_version_maps_to_invalid_params(
     assert data is not None
     assert data["product"] == "t9-vmware"
     assert data["version"] == "7.0"
+
+
+# ---------------------------------------------------------------------------
+# Inline error envelopes — SpecError siblings (#1534, completing #777)
+#
+# Before #1534 these six classes fell through the inline handler to the
+# dispatcher's generic ``except Exception`` and surfaced as a bare
+# ``-32603 "internal error: <ClassName>"`` with the diagnostic message
+# discarded; the REST surface always carried the detail. Each test pins
+# that the inline handler now raises ``McpInvalidParamsError`` (the
+# ``-32602`` sentinel) carrying the rendered message plus a structured
+# ``data`` envelope that names the detected-vs-expected shape + remedy.
+# ---------------------------------------------------------------------------
+
+
+async def _expect_inline_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+    exc: Exception,
+) -> McpInvalidParamsError:
+    """Drive the inline ingest handler against a raising pipeline stub.
+
+    Returns the caught :class:`McpInvalidParamsError` so each sibling
+    test asserts on its own ``str`` / ``data`` shape without repeating
+    the handler-invocation boilerplate.
+    """
+    monkeypatch.setattr(ci_mod, "IngestionPipelineService", _RaisingIngestionPipelineService(exc))
+    op = build_operator(TenantRole.TENANT_ADMIN)
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await ci_mod._ingest_handler(
+            op,
+            {
+                "product": "vmware",
+                "version": "9.0",
+                "impl_id": "vmware-rest",
+                "specs": [{"uri": "docs:vcenter-9.0/vcenter.yaml"}],
+            },
+        )
+    return caught.value
+
+
+async def test_inline_unsupported_spec_maps_to_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline UnsupportedSpecError surfaces as -32602 with the remedy message."""
+    exc = UnsupportedSpecError(
+        "Swagger 2.0 is not supported; convert to OpenAPI 3.x via "
+        "swagger2openapi / converter.swagger.io and re-ingest"
+    )
+    err = await _expect_inline_invalid_params(monkeypatch, exc)
+    assert "Swagger 2.0" in str(err)
+    assert err.data is not None
+    assert err.data["detail"] == "unsupported_spec"
+    assert "swagger2openapi" in err.data["message"]
+
+
+async def test_inline_invalid_spec_maps_to_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline InvalidSpecError surfaces as -32602, not a bare -32603."""
+    exc = InvalidSpecError("document is missing the required 'paths' key")
+    err = await _expect_inline_invalid_params(monkeypatch, exc)
+    assert "paths" in str(err)
+    assert err.data is not None
+    assert err.data["detail"] == "invalid_spec"
+    assert err.data["message"] == str(exc)
+
+
+async def test_inline_invalid_schema_maps_to_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline InvalidSchemaError surfaces as -32602 with the schema fault."""
+    exc = InvalidSchemaError("dangling $ref '#/components/schemas/Missing'")
+    err = await _expect_inline_invalid_params(monkeypatch, exc)
+    assert "$ref" in str(err)
+    assert err.data is not None
+    assert err.data["detail"] == "invalid_schema"
+    assert err.data["message"] == str(exc)
+
+
+async def test_inline_op_id_collision_maps_to_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline OpIdCollision surfaces as -32602 with structured op-id detail."""
+    exc = OpIdCollision(
+        op_ids=["get:/widgets", "post:/widgets"],
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        existing_spec_source="spec:vcenter.yaml",
+        incoming_spec_source="spec:vi-json.yaml",
+    )
+    err = await _expect_inline_invalid_params(monkeypatch, exc)
+    assert "get:/widgets" in str(err)
+    assert err.data is not None
+    assert err.data["detail"] == "op_id_collision"
+    # Machine-resolvable fields — the agent names the colliding ops and
+    # the two specs fighting over them without re-parsing the message.
+    assert err.data["op_ids"] == ["get:/widgets", "post:/widgets"]
+    assert err.data["product"] == "vmware"
+    assert err.data["existing_spec_source"] == "spec:vcenter.yaml"
+    assert err.data["incoming_spec_source"] == "spec:vi-json.yaml"
+
+
+async def test_inline_upstream_not_spec_maps_to_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline UpstreamNotSpecError reuses the shared #1211 envelope on -32602."""
+    exc = UpstreamNotSpecError(
+        upstream_url="https://developer.broadcom.com/xapis/vmware",
+        content_type="text/html; charset=utf-8",
+    )
+    err = await _expect_inline_invalid_params(monkeypatch, exc)
+    assert "non-spec content" in str(err)
+    assert err.data is not None
+    # The explicit-quadruple builder (no catalog_entry) — the MCP path is
+    # always explicit-quadruple, so it never echoes a catalog reference.
+    assert err.data["detail"] == "upstream_not_spec"
+    assert err.data["upstream_url"] == "https://developer.broadcom.com/xapis/vmware"
+    assert err.data["content_type"] == "text/html; charset=utf-8"
+    assert "catalog_entry" not in err.data
+
+
+async def test_inline_llm_output_invalid_maps_to_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline LlmOutputInvalid surfaces as -32602 naming the failing pass."""
+    exc = LlmOutputInvalid(
+        pass_name="propose_groups",
+        raw_output="not json",
+        parse_error=ValueError("expecting value: line 1 column 1"),
+    )
+    err = await _expect_inline_invalid_params(monkeypatch, exc)
+    assert "propose_groups" in str(err)
+    assert err.data is not None
+    assert err.data["detail"] == "llm_output_invalid"
+    assert err.data["pass_name"] == "propose_groups"
+    # The raw LLM output is debug-log material, not response material —
+    # only the (truncated) message preview travels on the wire.
+    assert "raw_output" not in err.data
 
 
 # ---------------------------------------------------------------------------

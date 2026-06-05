@@ -27,6 +27,26 @@ import json
 from typing import Any, Final
 from uuid import UUID
 
+from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.operations.ingest import (
+    InvalidSchemaError,
+    InvalidSpecError,
+    LlmOutputInvalid,
+    OpIdCollision,
+    UncoveredVersionLabel,
+    UnsupportedSpecError,
+    UpstreamNotSpecError,
+    VersionMismatchError,
+    build_invalid_schema_detail,
+    build_invalid_spec_detail,
+    build_llm_output_invalid_detail,
+    build_op_id_collision_detail,
+    build_uncovered_version_label_detail,
+    build_unsupported_spec_detail,
+    build_upstream_not_spec_detail,
+    build_version_mismatch_detail,
+)
+
 # Op-class strings keep parity with the audit table conventions used
 # by :mod:`meho_backplane.broadcast.classify` for the credential /
 # audit / read / write taxonomy. List + review + ingest_status are
@@ -95,3 +115,69 @@ def _model_dump_json_safe(model: Any) -> dict[str, Any]:
     # rather than as a generic dispatcher error.
     rehydrated: dict[str, Any] = json.loads(json.dumps(raw))
     return rehydrated
+
+
+#: The typed ``SpecError`` siblings the inline ingest path maps onto a
+#: JSON-RPC ``-32602`` caller-input error. Kept as a tuple next to
+#: :func:`raise_invalid_params_for_spec_error` so the ``except`` target in
+#: :mod:`meho_backplane.mcp.tools.connector_ingest` and the dispatch table
+#: can't fall out of sync — adding a sibling means touching both.
+#: ``VersionMismatchError`` / ``UncoveredVersionLabel`` are the #777
+#: originals; the remaining six complete the pattern (#1534).
+SPEC_ERROR_TYPES: Final = (
+    VersionMismatchError,
+    UncoveredVersionLabel,
+    UpstreamNotSpecError,
+    UnsupportedSpecError,
+    InvalidSchemaError,
+    InvalidSpecError,
+    OpIdCollision,
+    LlmOutputInvalid,
+)
+
+
+def raise_invalid_params_for_spec_error(exc: Exception) -> None:
+    """Map a typed ingest ``SpecError`` onto :class:`McpInvalidParamsError`.
+
+    Every sibling is a caller-input mistake — wrong OpenAPI flavour, an
+    invalid spec, an HTML upstream, an op-id collision, a bad grouping-LLM
+    response — so it surfaces as JSON-RPC ``-32602`` carrying the rendered
+    message plus the shared structured ``data`` envelope from
+    :mod:`operations/ingest/error_envelopes` (the #777 pattern, completed
+    for the sibling set in #1534). The builders are the single source of
+    truth shared with the REST route, so the two surfaces can't drift.
+
+    Lives in the shared module (rather than ``connector_ingest``) so the
+    error-mapping table and the exception tuple have one grep-friendly
+    home, and so ``connector_ingest`` stays under the code-quality
+    file-size budget.
+
+    Always raises when *exc* is one of :data:`SPEC_ERROR_TYPES` (the only
+    types the caller funnels in); the trailing ``raise`` is a defensive
+    re-raise that keeps the function total for a type that slips past the
+    dispatch table.
+    """
+    if isinstance(exc, VersionMismatchError):
+        data = build_version_mismatch_detail(exc)
+    elif isinstance(exc, UncoveredVersionLabel):
+        data = build_uncovered_version_label_detail(exc)
+    elif isinstance(exc, UpstreamNotSpecError):
+        data = build_upstream_not_spec_detail(
+            upstream_url=exc.upstream_url,
+            content_type=exc.content_type,
+        )
+    elif isinstance(exc, UnsupportedSpecError):
+        data = build_unsupported_spec_detail(exc)
+    elif isinstance(exc, InvalidSchemaError):
+        # InvalidSchemaError before InvalidSpecError — a broken $ref is the
+        # narrower domain than a structurally invalid root document.
+        data = build_invalid_schema_detail(exc)
+    elif isinstance(exc, InvalidSpecError):
+        data = build_invalid_spec_detail(exc)
+    elif isinstance(exc, OpIdCollision):
+        data = build_op_id_collision_detail(exc)
+    elif isinstance(exc, LlmOutputInvalid):
+        data = build_llm_output_invalid_detail(exc)
+    else:  # pragma: no cover — defensive; caller funnels only SPEC_ERROR_TYPES
+        raise exc
+    raise McpInvalidParamsError(str(exc), data=data) from exc

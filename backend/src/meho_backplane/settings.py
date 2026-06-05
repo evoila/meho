@@ -321,6 +321,22 @@ class Settings(BaseModel):
         Default 24 matches the locked v0.2 decision-3 contract. T3
         (#309) will use this to set ``XADD MAXLEN`` / ``MINID`` trim
         on every publish; T1 only carries the knob.
+    result_handle_max_spill_rows:
+        Upper bound on how many rows the reducer spills into the
+        :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
+        when materializing a large set-shaped response (G0.20-T7 #1507).
+        The full set is what the ``result_query`` MCP read-back tool
+        serves, but a pathological op could return millions of rows and
+        blow the per-key Valkey value size — so the spill is capped here
+        and the handle records both the stored count and the true total
+        so a reader can tell the tail was truncated. Bounds the store's
+        footprint on the row axis; the handle's ``ttl_seconds`` bounds it
+        on the time axis (Valkey enforces the TTL server-side, so the
+        store cannot grow without bound). Default 10000 covers every
+        realistic connector list response with headroom; operators with
+        genuinely larger sets raise it via
+        ``RESULT_HANDLE_MAX_SPILL_ROWS``. Read once per reduce through
+        :func:`get_settings`'s cache.
     composite_max_depth:
         Hard cap on the recursion depth a composite operation
         (``source_kind='composite'``) may reach via successive
@@ -807,6 +823,7 @@ class Settings(BaseModel):
         min_length=1,
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
+    result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
     topology_refresh_interval_seconds: int = Field(default=3600, gt=0)
@@ -1233,6 +1250,9 @@ def get_settings() -> Settings:
         ),
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
+        ),
+        result_handle_max_spill_rows=int(
+            os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
         composite_max_depth=int(
             os.environ.get("COMPOSITE_MAX_DEPTH", "8"),

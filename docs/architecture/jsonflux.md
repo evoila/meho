@@ -5,10 +5,16 @@ and v0.1-spec §4: no agent ever sees a 4 MB raw API response. Any
 operation returning a set-shaped payload above threshold is materialized
 into an in-memory DuckDB table, summarized, and replaced with a
 [`ResultHandle`](operations-substrate.md#jsonflux-integration) carrying a
-bounded inline `sample` plus a self-documenting `fetch_more` envelope. No
-handle read-back meta-tool (`result_query` / `result_describe`) exists in
-this version — the `fetch_more` envelope tells the agent how to act on more
-than the sample (re-call with narrower params / native pagination).
+bounded inline `sample` plus a self-documenting `fetch_more` envelope. The
+**full** materialized set is spilled to a Valkey-backed
+`ResultHandleStore` (keyed by `(tenant_id, handle_id)`, server-enforced
+TTL, row count capped by `RESULT_HANDLE_MAX_SPILL_ROWS`), and the
+`result_query` MCP meta-tool pages it back beyond the inline sample. When
+the spill succeeds the handle's `fetch_more.drill_in` is `available=true`
+and names that tool; when it is skipped or the store is unreachable the
+envelope still tells the agent how to act on more than the sample (re-call
+with narrower params / native pagination) and the reduce path is
+unaffected (fail-open).
 
 The reduction engine is **vendored** — copied into this repo rather than
 pulled as a PyPI dependency — because the upstream is a single
@@ -237,20 +243,18 @@ has two independent branches; both are always present so consumers
 parse one shape regardless of source.
 
 **`drill_in: FetchMoreDrillIn`** — *"can the agent fetch more rows
-from the handle directly?"* In v0.7.x `available` is **always
-`False`** — the substrate exposes no drill-in surface (no MCP tool,
-resource URI, REST route, or CLI verb for round-tripping a handle
-back to the reducer's in-memory DuckDB table). The deferred
-`available=True` branch is reserved for the v0.8 / v0.9 fetch-back
-Task that ships the addressable spill backing store + the
-`result_query` / `result_aggregate` / `result_export` /
-`result_describe` meta-tools; landing the field today means that
-Task flips a bool and populates the (already-defined) `mcp_resource_uri`
-/ `mcp_tool` / `example_call` / `expires_at` fields without breaking
-any consumer that already parses the envelope. `rationale` carries
-the operator/agent-facing prose explaining the current state —
-today, the workaround pointer ("re-call with native pagination /
-narrower params"); tomorrow, the surfaced resource URI.
+from the handle directly?"* `available=True` when the reducer spilled
+the full materialized set to the `ResultHandleStore` (G0.20-T7 #1507):
+the branch then names the `result_query` MCP tool (`mcp_tool`), a
+ready-to-adapt `example_call` carrying the handle id + a first-page
+`{offset, limit}`, and the handle's `expires_at` (the spill TTL). When
+the spill was skipped — the reduce ran outside a tenant-scoped dispatch
+— or the store was unreachable, `available=False` and `rationale`
+points at the narrower-params / native-pagination workaround. The spill
++ read-back are described under *"Read-back: the `ResultHandleStore`"*
+below; the `mcp_resource_uri` field stays `None` in the current
+tool-only surface. `rationale` always carries the operator/agent-facing
+prose explaining the current state.
 
 **`native_pagination: FetchMoreNativePagination`** — *"what params
 let the underlying op return the next slice?"* When the op
@@ -303,6 +307,44 @@ hint doesn't break the operator's read at runtime. Returning a
 plain dict from the dispatcher helper keeps the dispatcher layer
 free of a Pydantic-import dependency on the connectors schema;
 the reducer owns the validation boundary.
+
+### Read-back: the `ResultHandleStore` (G0.20-T7, #1507)
+
+The inline `sample` is a bounded preview; the **full** materialized set
+is spilled so an agent that needs rows beyond the sample can read them
+back. At materialize time the reducer registers the rows in DuckDB
+(as before), then — after the engine closes — persists the full
+normalized row list to
+[`ResultHandleStore`](../../backend/src/meho_backplane/connectors/result_handle_store.py),
+a thin wrapper over the broadcast Valkey client:
+
+```
+KEY:   meho:reshandle:{tenant_id}:{handle_id}
+VALUE: JSON {operator_sub, op_id, rows, total_rows, stored_rows, created_at}
+TTL:   the handle's ttl_seconds (server-enforced)
+```
+
+The store is bounded on both axes by construction: Valkey enforces the
+TTL server-side (no sweeper, a crashed process leaves no orphaned key),
+and the row count is capped at `RESULT_HANDLE_MAX_SPILL_ROWS` (default
+10000) so one pathological op cannot blow the per-key value size — the
+handle records both `stored_rows` and the true `total_rows` so a reader
+learns when the tail was capped. The dispatcher threads `tenant_id` +
+`operator_sub` into `reducer_context`; a reduce with neither (a
+non-dispatch call) skips the spill, and a Valkey error is swallowed
+(`spill` returns `False`) — a read never fails because the spill backend
+is unreachable.
+
+The `result_query` MCP meta-tool
+([`mcp/tools/result_query.py`](../../backend/src/meho_backplane/mcp/tools/result_query.py))
+is the read surface: `result_query(handle_id, offset, limit)` returns the
+requested window plus `total_rows` / `stored_rows` / `truncated`. The
+tenant comes from the operator's JWT (never the arguments) and the
+spilling operator's `sub` is checked, so a cross-tenant or cross-operator
+read is an indistinguishable `handle_not_found` miss — the same
+recoverable `-32602` taxonomy an expired handle surfaces. This is the
+design first drafted as the `HandleStore` in G3.1-T4 (#304,
+closed-superseded), revived and narrowed to the reduce-time spill case.
 
 ### Sample ordering — head vs tail (G0.19-T1, #1479)
 

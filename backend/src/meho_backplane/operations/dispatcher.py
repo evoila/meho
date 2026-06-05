@@ -857,6 +857,14 @@ async def _reduce_or_error(
         "audit_id": str(audit_id),
         "source_kind": descriptor.source_kind,
     }
+    # G0.20-T7 (#1507): carry the operator's tenant id so the reducer can
+    # spill the full materialized set into the tenant-scoped
+    # :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
+    # keyed by ``(tenant_id, handle_id)``. ``None`` only on operators
+    # without a tenant (never on a real dispatch); the reducer then skips
+    # the spill and the handle's drill-in surface stays unavailable.
+    if operator.tenant_id is not None:
+        reducer_context["tenant_id"] = str(operator.tenant_id)
     target_id = getattr(target, "id", None)
     if target_id is not None:
         reducer_context["target_id"] = str(target_id)

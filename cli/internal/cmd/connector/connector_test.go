@@ -178,16 +178,19 @@ func TestResolveSpecURIDocsWithEnv(t *testing.T) {
 	}
 }
 
-// TestResolveSpecURIDocsNoEnv — `docs:` passes through verbatim
-// when CLAUDE_RDC_DOCS is unset so the backplane can resolve it.
+// TestResolveSpecURIDocsNoEnv — `docs:` is resolved CLI-side only.
+// When CLAUDE_RDC_DOCS is unset the shorthand is rejected here with a
+// hint naming the env var, rather than passed through to the backplane
+// (which does not resolve docs: URIs and would surface an opaque ingest
+// error — #1535).
 func TestResolveSpecURIDocsNoEnv(t *testing.T) {
 	t.Setenv("CLAUDE_RDC_DOCS", "")
-	got, err := resolveSpecURI("docs:vcenter-9.0/vcenter.yaml")
-	if err != nil {
-		t.Fatalf("docs shorthand, no env: %v", err)
+	_, err := resolveSpecURI("docs:vcenter-9.0/vcenter.yaml")
+	if err == nil {
+		t.Fatalf("docs shorthand with no env should reject; got nil error")
 	}
-	if got != "docs:vcenter-9.0/vcenter.yaml" {
-		t.Fatalf("docs shorthand passthrough; got %q", got)
+	if !strings.Contains(err.Error(), "CLAUDE_RDC_DOCS") {
+		t.Fatalf("docs shorthand rejection should name CLAUDE_RDC_DOCS; got %v", err)
 	}
 }
 

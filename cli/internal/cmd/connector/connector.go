@@ -417,9 +417,11 @@ func truncate(s string, maxLen int) string {
 //     convention — points at a checkout of
 //     `claude-rdc-hetzner-dc/docs/meho-coordination/`). The resolved
 //     form is `file://<absolute path>` so the backplane sees a uniform
-//     scheme. When CLAUDE_RDC_DOCS is unset, the shorthand resolves
-//     to a bare `docs:<...>` URI and the backplane handles resolution
-//     server-side against its own configured docs root.
+//     scheme. Resolution is CLI-side only: the backplane has no docs
+//     root and does not resolve a bare `docs:` URI, so when
+//     CLAUDE_RDC_DOCS is unset the shorthand is rejected here with a
+//     hint naming the env var rather than passed through to surface as
+//     an opaque backplane ingest error (#1535).
 //
 // Anything else returns an error — the operator gets a clear "use
 // one of file:// / https:// / docs:<...>" hint rather than a 422
@@ -470,11 +472,16 @@ func resolveSpecURI(raw string) (string, error) {
 		}
 		root := os.Getenv("CLAUDE_RDC_DOCS")
 		if root == "" {
-			// No env override: pass the shorthand through verbatim
-			// for the backplane to resolve against its own checked-in
-			// docs root. Documented behaviour — the v0.2 backplane
-			// understands the `docs:` scheme natively.
-			return raw, nil
+			// The `docs:` shorthand is resolved CLI-side only. The
+			// backplane has no docs root and does not resolve a bare
+			// `docs:` URI — passing one through would surface as an
+			// opaque ingest error (#1535). Fail here with a clear hint
+			// naming the env var the operator must set.
+			return "", errors.New(
+				"--spec docs: shorthand requires $CLAUDE_RDC_DOCS to be set " +
+					"(the backplane does not resolve docs: URIs); set it to a " +
+					"docs checkout, or pass an absolute file:// / https:// spec URI",
+			)
 		}
 		abs := filepath.Join(root, shorthand)
 		if !filepath.IsAbs(abs) {

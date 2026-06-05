@@ -294,6 +294,37 @@ def test_directory_path_raises_invalid_spec(tmp_path: Path) -> None:
         parse_openapi(str(tmp_path))
 
 
+def test_docs_scheme_rejected_unsupported_naming_scheme() -> None:
+    """A bare ``docs:`` URI is a CLI-side shorthand the backend never
+    resolves; it must reject with :exc:`UnsupportedSpecError` that names
+    the scheme + the ``$CLAUDE_RDC_DOCS`` remedy, not fall through to a
+    generic ``InvalidSpecError`` that reads like a missing file (#1535).
+
+    The typed class matters beyond the message: the MCP ingest envelope
+    (#1534) maps every ``SpecError`` sibling onto ``-32602`` with
+    structured detail, so reusing ``UnsupportedSpecError`` here makes the
+    docs-scheme rejection a clean agent-facing error instead of a bare
+    ``-32603``.
+    """
+    with pytest.raises(UnsupportedSpecError, match=r"docs:") as excinfo:
+        parse_openapi("docs:vcenter-9.0/vcenter.yaml")
+    # The remedy must name the env var the CLI resolves against.
+    assert "CLAUDE_RDC_DOCS" in str(excinfo.value)
+    # Regression guard: it must NOT be the opaque file-read error.
+    assert "could not read spec" not in str(excinfo.value)
+
+
+def test_file_uri_unaffected_regression(tmp_path: Path) -> None:
+    """Regression check for #1535: adding the ``docs:`` branch must not
+    perturb the ``file://`` path. An absolute ``file://`` URI to a valid
+    spec still parses end-to-end.
+    """
+    spec = tmp_path / "spec.yaml"
+    spec.write_text(PETSTORE_30.read_text())
+    protos = parse_openapi(spec.resolve().as_uri())
+    assert protos, "file:// spec should yield at least one operation proto"
+
+
 def test_malformed_yaml_bubbles_up(tmp_path: Path) -> None:
     spec = tmp_path / "bad.yaml"
     spec.write_text("openapi: '3.0.3'\npaths:\n  /x:\n   get:\n   summary: oops\n  : bad\n")

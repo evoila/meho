@@ -349,6 +349,14 @@ def _load_spec_bytes(spec_path_or_uri: str) -> bytes:
     in that case. The HTTP gate exists because catalog-driven ingest
     against the Broadcom Developer Portal (vmware/9.0, sddc-manager/9.0)
     returned HTML and surfaced as a useless YAML parse error at line 33.
+
+    The ``docs:<connector-id>/<file>`` shorthand is rejected with
+    :exc:`UnsupportedSpecError` naming the scheme: it is a CLI-side
+    convenience expanded to ``file://`` against ``$CLAUDE_RDC_DOCS``
+    before the request reaches the backend, which has no docs root of
+    its own. Rejecting it explicitly stops a bare ``docs:`` URI from
+    falling through to ``Path("docs:…")`` and surfacing as an opaque
+    ``InvalidSpecError`` that reads like a missing local file.
     """
     parsed = urlparse(spec_path_or_uri)
     if parsed.scheme in {"http", "https"}:
@@ -359,6 +367,25 @@ def _load_spec_bytes(spec_path_or_uri: str) -> bytes:
             content_type=response.headers.get("content-type"),
         )
         return response.content
+    if parsed.scheme == "docs":
+        # The ``docs:<connector-id>/<file>`` shorthand is a *CLI-side*
+        # convenience: the CLI expands it to a ``file://`` URI against
+        # ``$CLAUDE_RDC_DOCS`` before the request reaches the backend.
+        # The backend has no docs root of its own, so a bare ``docs:``
+        # URI that survives to here was never expandable. Reject it as
+        # an unsupported scheme that names itself + the remedy, rather
+        # than letting it fall through to ``Path("docs:…")`` and surface
+        # as an opaque ``InvalidSpecError`` that reads like a missing
+        # file. ``UnsupportedSpecError`` (not ``InvalidSpecError``) keeps
+        # this on the "known shape the resolver doesn't ingest" ladder
+        # alongside Swagger 2.0 / cross-document ``$ref``.
+        raise UnsupportedSpecError(
+            f"the 'docs:' spec-source scheme is not resolvable by the "
+            f"backplane (got {spec_path_or_uri!r}); it is a CLI-side "
+            f"shorthand that the CLI expands to a 'file://' URI against "
+            f"$CLAUDE_RDC_DOCS. Set $CLAUDE_RDC_DOCS so the CLI resolves "
+            f"it, or pass an absolute 'file://' / 'https://' spec URI.",
+        )
     # Treat everything else as a local file path. ``Path`` handles
     # both relative and absolute paths cleanly; ``file://`` URIs go
     # through ``url2pathname`` for cross-platform correctness.

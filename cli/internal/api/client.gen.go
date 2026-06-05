@@ -3802,14 +3802,19 @@ type SkippedConnector struct {
 
 // SpecSource One spec to ingest under a connector triple.
 //
-// “uri“ carries the operator's spec identifier. Three forms are
-// accepted by the underlying :func:`parse_openapi` resolver:
+// “uri“ carries the operator's spec identifier. Two forms are
+// resolved by the underlying :func:`parse_openapi` resolver:
 //
-//   - Absolute local path — “/abs/path/to/spec.yaml“.
+//   - Absolute local path — “/abs/path/to/spec.yaml“ (or its
+//     “file://“ URI form).
 //   - HTTP(S) URL — “https://api.example.com/openapi.yaml“.
-//   - “docs:<connector-id>/<file>“ shorthand — resolves against the
-//     consumer's checked-in docs/ directory; CLI / API layers expand
-//     this before calling the parser.
+//
+// The “meho“ CLI additionally accepts a “docs:<connector-id>/<file>“
+// shorthand, which it expands **CLI-side** to a “file://“ URI against
+// “$CLAUDE_RDC_DOCS“ before sending the request. The backend has no
+// docs root of its own, so a bare “docs:“ URI that reaches the parser
+// unexpanded is rejected with :exc:`UnsupportedSpecError` naming the
+// scheme — the backend does not resolve “docs:“ natively (#1535).
 //
 // Wrapped in its own model so future per-spec knobs (auth headers,
 // dialect pinning, content-type override) can land without

@@ -740,6 +740,8 @@ than after spending CPU on a 2,000-op spec walk.
 ```text
 parse_openapi
 ├─ _load_spec_bytes        # file:// or http(s)://; httpx with a 30s timeout
+│                          # docs:<...> rejected with UnsupportedSpecError
+│                          # (CLI-side shorthand; backend has no docs root, #1535)
 ├─ _decode_spec            # CSafeLoader-preferred YAML, stdlib JSON
 ├─ _validate_openapi_version
 └─ _iter_operations

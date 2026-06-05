@@ -296,7 +296,7 @@ async def nsx_e2e_401_canary(
                 200,
                 json={
                     "node_version": NSX_VERSION,
-                    "kernel_version": "4.2.1.0.0",
+                    "kernel_version": "9.0.2.0.0",
                     "node_uuid": "deadbeef-retry-test",
                     "hostname": "nsx-retry.test.invalid",
                 },

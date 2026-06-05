@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""NSX 4.2 read-only v0.2 core — curated operator-enabled subset.
+"""NSX read-only v0.2 core — curated operator-enabled subset.
 
 This module names the **9 read-only NSX operations** the G3.5 NSX
-v0.2 ship enables out of the much larger
-``nsx-4.2/policy.yaml`` + ``nsx-4.2/manager.yaml`` corpus that the
-G0.7 spec-ingestion pipeline lands under
-``connector_id="nsx-rest-4.2"``. The curation is two-layered:
+v0.2 ship enables out of the much larger ``policy.yaml`` +
+``manager.yaml`` corpus that the G0.7 spec-ingestion pipeline lands
+under the NSX connector triple. NSX-T 4.x was renumbered onto the
+VCF train at VCF 9.0 (#1530), so :data:`NSX_VERSION` tracks the
+VCF-9-aligned ``"9.0"`` line and :data:`NSX_CONNECTOR_ID` is the
+default ``"nsx-rest-9.0"`` slug; :func:`apply_nsx_core_curation`
+accepts a ``connector_id`` override so an operator who ingested
+under a finer 9.x label (e.g. ``"nsx-rest-9.1.0.0"``) can still
+curate the ops the ingest actually landed. The curation is
+two-layered:
 
 * :data:`NSX_CORE_GROUPS` — the operator-reviewed ``when_to_use``
   hint per LLM-grouping pass output group. Each entry's
@@ -33,8 +39,10 @@ review step — the actual curation is applied through
 :func:`apply_nsx_core_curation` against an existing ingested
 connector.
 
-The 9 ops (paths cross-checked against NSX REST API guide v4.2,
-2026-04 snapshot at https://developer.broadcom.com/xapis/nsx-data-center-rest-api/latest/):
+The 9 ops (paths cross-checked against the NSX REST API guide,
+2026-04 snapshot at https://developer.broadcom.com/xapis/nsx-data-center-rest-api/latest/;
+the manager (``/api/v1/...``) and policy (``/policy/api/v1/...``)
+path families are stable across the 4.x and VCF-9-aligned 9.x lines):
 
 1. ``GET:/api/v1/node`` — ``nsx.about`` — manager version / build /
    node UUID (the same surface :meth:`NsxConnector.fingerprint`
@@ -123,6 +131,7 @@ from uuid import UUID
 
 import structlog
 
+from meho_backplane.operations.ingest.payload import ConnectorReviewPayload
 from meho_backplane.operations.ingest.service import ReviewService
 
 __all__ = [
@@ -146,11 +155,14 @@ _log = structlog.get_logger(__name__)
 #: don't import the connector class (avoids re-running the registry
 #: side-effects in the ``__init__``).
 NSX_PRODUCT: Final[str] = "nsx"
-NSX_VERSION: Final[str] = "4.2"
+NSX_VERSION: Final[str] = "9.0"
 NSX_IMPL_ID: Final[str] = "nsx-rest"
 
 #: Connector-id slug the G0.6 dispatcher's ``parse_connector_id``
-#: round-trips back to the triple above: ``"nsx-rest-4.2"``.
+#: round-trips back to the triple above: ``"nsx-rest-9.0"``. This is
+#: the *default* curation target; :func:`apply_nsx_core_curation`
+#: takes a ``connector_id`` override for ingests landed under a
+#: finer 9.x label.
 NSX_CONNECTOR_ID: Final[str] = f"{NSX_IMPL_ID}-{NSX_VERSION}"
 
 
@@ -177,7 +189,7 @@ class NsxCoreOp:
 
     ``op_id`` follows the ``METHOD:path`` shape every
     ``source_kind='ingested'`` row uses; the path matches an entry
-    in NSX 4.2's ``policy.yaml`` (``/policy/api/v1/...``) or
+    in NSX's ``policy.yaml`` (``/policy/api/v1/...``) or
     ``manager.yaml`` (``/api/v1/...``).
 
     ``llm_instructions`` is the per-op JSON blob the meta-tools
@@ -355,8 +367,9 @@ def _instructions(
 #: op_id (``GET:/path`` form ingested ops use), the curated group
 #: assignment, and the operator-reviewed ``llm_instructions`` blob.
 #:
-#: Sourced against NSX REST API v4.2 docs at
-#: https://developer.broadcom.com/xapis/nsx-data-center-rest-api/latest/.
+#: Sourced against the NSX REST API docs at
+#: https://developer.broadcom.com/xapis/nsx-data-center-rest-api/latest/
+#: (path families unchanged across 4.x and the VCF-9-aligned 9.x line).
 NSX_CORE_OPS: Final[tuple[NsxCoreOp, ...]] = (
     NsxCoreOp(
         op_id="GET:/api/v1/node",
@@ -565,6 +578,7 @@ async def apply_nsx_core_curation(
     review_service: ReviewService,
     *,
     tenant_id: UUID | None,
+    connector_id: str = NSX_CONNECTOR_ID,
 ) -> None:
     """Apply the curated 9-op read core against an ingested NSX connector.
 
@@ -607,6 +621,16 @@ async def apply_nsx_core_curation(
     contract); built-in scope (``tenant_id=None``) is the default
     for NSX content, same convention vSphere uses.
 
+    *connector_id* defaults to :data:`NSX_CONNECTOR_ID`
+    (``"nsx-rest-9.0"``) but accepts an override for the case the
+    operator ingested under a finer 9.x label than the class pin
+    — ingested ops land under the **operator-supplied** ``version``
+    label (e.g. a VCF-9 appliance spec ingested as
+    ``version="9.1.0.0"`` lands ``connector_id="nsx-rest-9.1.0.0"``),
+    while :data:`NSX_CONNECTOR_ID` only mirrors the registered
+    class pin. Pass the connector_id the ingest actually produced
+    (#1530).
+
     Re-running is safe but not idempotent at the audit layer.
     :meth:`enable_group` short-circuits on groups already in
     ``review_status='enabled'`` (no audit row), but
@@ -617,91 +641,125 @@ async def apply_nsx_core_curation(
     ``meho.connector.edit_*`` audit rows but never corrupt state.
 
     Raises :class:`~meho_backplane.operations.ingest.ConnectorNotFoundError`
-    if no groups exist for ``nsx-rest-4.2`` under *tenant_id* (the
+    if no groups exist for *connector_id* under *tenant_id* (the
     operator must run ``meho connector ingest`` against the NSX
     specs before this helper applies).
     """
     # Step 1 — read the current state so we can compute the
     # per-group non-core op set.
-    payload = await review_service.get_review_payload(
-        NSX_CONNECTOR_ID,
-        tenant_id,
+    payload = await review_service.get_review_payload(connector_id, tenant_id)
+
+    # Step 2 — disable non-core ops in each curated group so the
+    # subsequent enable_group cascade skips them.
+    await _disable_non_core_ops(
+        review_service, payload, tenant_id=tenant_id, connector_id=connector_id
     )
+    # Steps 3 + 4 — land the reviewed group metadata, then enable each
+    # curated group (cascade respects the step-2 exclusion list).
+    await _enable_curated_groups(review_service, tenant_id=tenant_id, connector_id=connector_id)
+    # Step 5 — land the curated llm_instructions blob per core op.
+    await _land_core_op_instructions(review_service, tenant_id=tenant_id, connector_id=connector_id)
 
-    # Build the per-group allow-list from the curated NSX_CORE_OPS.
-    # ``policy-firewall`` carries two entries (security-policy.list
-    # + rule.list); every other curated group carries exactly one.
-    core_op_ids_by_group: dict[str, set[str]] = {}
+
+def _core_op_ids_by_group() -> dict[str, set[str]]:
+    """Map each curated ``group_key`` to its allow-list of core op_ids.
+
+    ``policy-firewall`` carries two entries (security-policy.list +
+    rule.list); every other curated group carries exactly one.
+    """
+    by_group: dict[str, set[str]] = {}
     for op in NSX_CORE_OPS:
-        core_op_ids_by_group.setdefault(op.group_key, set()).add(op.op_id)
+        by_group.setdefault(op.group_key, set()).add(op.op_id)
+    return by_group
 
-    # Step 2 — disable non-core ops in each curated group via the
-    # operator-override audit-log path so the subsequent
-    # ``enable_group`` cascade skips them.
+
+async def _disable_non_core_ops(
+    review_service: ReviewService,
+    payload: ConnectorReviewPayload,
+    *,
+    tenant_id: UUID | None,
+    connector_id: str,
+) -> None:
+    """Write an operator-override disable row for every non-core op.
+
+    Walks each curated group's ops and disables the ones outside
+    :data:`NSX_CORE_OPS` via the audit-log override path so the
+    follow-on :meth:`ReviewService.enable_group` cascade skips them.
+    The override row is always written — even when the op already
+    appears ``is_enabled=False`` — because the cascade consults the
+    audit log (see
+    :func:`~meho_backplane.operations.ingest._internals.operator_disabled_op_ids`),
+    not the live column value, and a freshly-ingested op carries no
+    ``edit_op`` audit history.
+    """
+    allow_by_group = _core_op_ids_by_group()
     for group_payload in payload.groups:
-        allow_list = core_op_ids_by_group.get(group_payload.group_key)
+        allow_list = allow_by_group.get(group_payload.group_key)
         if allow_list is None:
             # Non-curated group — left entirely alone; its
-            # review_status stays at whatever the ingest pass set
-            # it to (typically 'staged').
+            # review_status stays at whatever the ingest pass set it
+            # to (typically 'staged').
             continue
         for review_op in group_payload.ops:
             if review_op.op_id in allow_list:
                 continue
-            # Always write the override audit row, even when the
-            # op already appears ``is_enabled=False``. The
-            # cascade in :meth:`enable_group` consults the audit
-            # log (see
-            # :func:`~meho_backplane.operations.ingest._internals.operator_disabled_op_ids`),
-            # not the live column value — a freshly-ingested op
-            # is ``is_enabled=False`` by default but carries no
-            # ``edit_op`` audit history, so the cascade would
-            # re-enable it without an explicit override row.
             await review_service.edit_op(
-                NSX_CONNECTOR_ID,
+                connector_id,
                 review_op.op_id,
                 tenant_id=tenant_id,
                 is_enabled=False,
             )
             _log.info(
                 "nsx_non_core_op_disabled",
-                connector_id=NSX_CONNECTOR_ID,
+                connector_id=connector_id,
                 op_id=review_op.op_id,
                 group_key=group_payload.group_key,
             )
 
-    # Steps 3 + 4 — land the operator-reviewed group metadata, then
-    # enable each curated group. The cascade respects the
-    # operator-override exclusion list built in step 2.
+
+async def _enable_curated_groups(
+    review_service: ReviewService,
+    *,
+    tenant_id: UUID | None,
+    connector_id: str,
+) -> None:
+    """Land the reviewed group metadata + enable each curated group."""
     for group in NSX_CORE_GROUPS:
         await review_service.edit_group(
-            NSX_CONNECTOR_ID,
+            connector_id,
             group.group_key,
             tenant_id=tenant_id,
             name=group.name,
             when_to_use=group.when_to_use,
         )
         await review_service.enable_group(
-            NSX_CONNECTOR_ID,
+            connector_id,
             group.group_key,
             tenant_id=tenant_id,
         )
         _log.info(
             "nsx_core_group_enabled",
-            connector_id=NSX_CONNECTOR_ID,
+            connector_id=connector_id,
             group_key=group.group_key,
         )
 
-    # Step 5 — land the curated llm_instructions blob per core op.
+
+async def _land_core_op_instructions(
+    review_service: ReviewService,
+    *,
+    tenant_id: UUID | None,
+    connector_id: str,
+) -> None:
+    """Land the curated ``llm_instructions`` blob on each core op."""
     for op in NSX_CORE_OPS:
         await review_service.edit_op(
-            NSX_CONNECTOR_ID,
+            connector_id,
             op.op_id,
             tenant_id=tenant_id,
             llm_instructions=op.llm_instructions,
         )
         _log.info(
             "nsx_core_op_curated",
-            connector_id=NSX_CONNECTOR_ID,
+            connector_id=connector_id,
             op_id=op.op_id,
         )

@@ -882,7 +882,7 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
     """Catalog-hit + ``catalog_ingest="spec-only"``: row carries the ``--spec`` verb.
 
     G0.18-T8 (#1361) / RDC #789 N8. The VCF-family rows
-    (``vmware/9.0``, ``sddc-manager/9.0``, ``nsx/4.2``) ship with
+    (``vmware/9.0``, ``sddc-manager/9.0``, ``nsx/9.0``) ship with
     ``catalog_ingest: spec-only`` because their upstream URLs are
     Broadcom Developer Portal HTML landing pages (vmware, sddc-manager)
     or fqdn-templated appliance URLs (nsx) — neither shape can drive
@@ -1210,7 +1210,7 @@ def _every_v2_connector_registered() -> Iterator[None]:
         ("harbor", "2.x", "harbor-rest", HarborConnector),
         ("hetzner-robot", "2026.04", "hetzner-rest", HetznerRobotConnector),
         ("k8s", "1.x", "k8s", KubernetesConnector),
-        ("nsx", "4.2", "nsx-rest", NsxConnector),
+        ("nsx", "9.0", "nsx-rest", NsxConnector),
         ("sddc-manager", "9.0", "sddc-rest", SddcManagerConnector),
         ("vault", "1.x", "vault", VaultConnector),
         ("vmware", "9.0", "vmware-rest", VmwareRestConnector),
@@ -2577,7 +2577,7 @@ def test_ingest_packaged_catalog_html_portal_entries_carry_warning_notes() -> No
     ``sddc-manager/9.0`` -- the two confirmed offenders -- both carry
     the warning mirroring the ``harbor/2.x`` Swagger-2.0 precedent. The
     other ``spec_info_version: null`` entries are excluded by earlier
-    422 gates -- ``nsx/4.2`` via ``catalog_entry_templated_upstream``
+    422 gates -- ``nsx/9.0`` via ``catalog_entry_templated_upstream``
     (FQDN placeholder), the three typed connectors (``vault/1.x``,
     ``k8s/1.x``, ``bind9/9.x``) via ``catalog_entry_typed_connector``
     (``upstream: null``) -- so they never reach the fetch path the

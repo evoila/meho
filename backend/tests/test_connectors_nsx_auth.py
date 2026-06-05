@@ -118,11 +118,32 @@ def test_nsx_connector_subclasses_http_connector() -> None:
     """Sanity check: the connector inherits from HttpConnector with the right metadata."""
     assert issubclass(NsxConnector, HttpConnector)
     assert NsxConnector.product == "nsx"
-    assert NsxConnector.version == "4.2"
+    # #1530: VCF-9 renumber — class pin tracks the "9.0" line, range
+    # keeps the standalone NSX-T 4.x line dispatchable.
+    assert NsxConnector.version == "9.0"
     assert NsxConnector.impl_id == "nsx-rest"
-    assert NsxConnector.supported_version_range == ">=4.0,<5.0"
+    assert NsxConnector.supported_version_range == ">=4.0,<10.0"
     # Outranks a future GenericRestConnector auto-shim defensively.
     assert NsxConnector.priority == 1
+
+
+def test_nsx_supported_range_covers_both_4x_and_vcf9_9x() -> None:
+    """The widened range covers standalone NSX-T 4.x and VCF-9-aligned 9.x.
+
+    #1530: a VCF-9 appliance reports NSX 9.0.x and its spec carries
+    ``info.version`` in the 9.x scheme (e.g. 9.1.0.0). The widened
+    ``>=4.0,<10.0`` advertisement is what lets the ingest version-range
+    pre-flight and the runtime resolver accept a 9.x label against this
+    one class; 10.0 and above stay out of band.
+    """
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    spec = SpecifierSet(NsxConnector.supported_version_range)
+    for covered in ("4.0", "4.2", "9.0", "9.0.2", "9.1.0.0", "9.9"):
+        assert Version(covered) in spec, f"{covered} should be covered by {spec}"
+    for excluded in ("3.9", "10.0", "10.1"):
+        assert Version(excluded) not in spec, f"{excluded} should be out of band for {spec}"
 
 
 def test_importing_package_registers_against_v2_registry() -> None:
@@ -130,7 +151,7 @@ def test_importing_package_registers_against_v2_registry() -> None:
     from meho_backplane.connectors.registry import all_connectors_v2
 
     registry = all_connectors_v2()
-    key = ("nsx", "4.2", "nsx-rest")
+    key = ("nsx", "9.0", "nsx-rest")
     assert key in registry
     assert registry[key] is NsxConnector
 

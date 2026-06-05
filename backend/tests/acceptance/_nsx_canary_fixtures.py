@@ -17,7 +17,7 @@ Why a minimal direct-insert path (not the full G0.7 canary ingest)
 ==================================================================
 
 The full two-spec NSX ingestion via :func:`IngestionPipelineService`
-needs live ``nsx-4.2/policy.yaml`` + ``manager.yaml`` (~30 MB
+needs the live NSX ``policy.yaml`` + ``manager.yaml`` (~30 MB
 combined) reachable on the CI runner — the same env-gated pattern
 :mod:`tests.acceptance._vcenter_spec` codifies for vSphere. That
 live two-spec acceptance test is a follow-up to this Task (see the
@@ -114,15 +114,16 @@ NSX_CANARY_BASE_URL: str = "https://nsx-canary.test.invalid"
 
 #: Persisted as ``Target.fingerprint`` — what the connector resolver
 #: reads to bind the target's ``product`` + ``version`` against the
-#: ``NsxConnector.supported_version_range`` advertisement (``>=4.0,<5.0``).
-#: The probe route normally writes this dict at first-probe time;
-#: the dispatch tests seed it directly so the resolver binds the
-#: connector without a real probe round-trip.
+#: ``NsxConnector.supported_version_range`` advertisement (``>=4.0,<10.0``).
+#: The ``build`` mirrors a VCF-9 appliance's NSX 9.x report (#1530);
+#: the probe route normally writes this dict at first-probe time, the
+#: dispatch tests seed it directly so the resolver binds the connector
+#: without a real probe round-trip.
 NSX_CANARY_FINGERPRINT: dict[str, object] = FingerprintResult(
     vendor="vmware",
     product="nsx",
     version=NSX_VERSION,
-    build="4.2.1.0.0",
+    build="9.0.2.0.0",
     reachable=True,
     probed_at=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
     probe_method="GET /api/v1/node",
@@ -284,7 +285,7 @@ async def _insert_nsx_descriptors() -> None:
 def _spec_tag_for(path: str) -> str:
     """Return the ``spec:<source>`` tag matching the path's upstream NSX spec.
 
-    NSX 4.2's OpenAPI corpus is split across two files:
+    NSX's OpenAPI corpus is split across two files:
 
     * ``policy.yaml`` — the modern declarative policy API; every
       path begins with ``/policy/api/v1/...``.
@@ -294,15 +295,15 @@ def _spec_tag_for(path: str) -> str:
     The G0.7 ingestion pipeline tags every persisted row with
     ``spec:<source>`` so operators can audit per-spec coverage via
     ``meho connector review``. The seeded fixture mirrors that
-    contract — the 6 policy-API ops carry ``spec:nsx-4.2/policy.yaml``,
-    the 3 manager-API ops carry ``spec:nsx-4.2/manager.yaml``. A
-    flat single-tag default would misrepresent the corpus split and
-    drift the dispatch-smoke set away from what a real two-spec
-    ingest would land.
+    contract — the 6 policy-API ops carry ``spec:nsx-9.0/policy.yaml``,
+    the 3 manager-API ops carry ``spec:nsx-9.0/manager.yaml`` (the
+    VCF-9-aligned line, #1530). A flat single-tag default would
+    misrepresent the corpus split and drift the dispatch-smoke set
+    away from what a real two-spec ingest would land.
     """
     if path.startswith("/policy/"):
-        return "spec:nsx-4.2/policy.yaml"
-    return "spec:nsx-4.2/manager.yaml"
+        return "spec:nsx-9.0/policy.yaml"
+    return "spec:nsx-9.0/manager.yaml"
 
 
 def _param_schema_for(path: str) -> dict[str, object]:
@@ -360,7 +361,7 @@ def _register_nsx_routes(mock: respx.MockRouter) -> None:
     dispatch tests don't need an out-of-band download path like the
     fastembed model fetch the vSphere agent-flow test triggers).
     """
-    # Session establish. NSX 4.2 returns 200 with the JSESSIONID
+    # Session establish. NSX returns 200 with the JSESSIONID
     # cookie + X-XSRF-TOKEN header; the body is empty.
     mock.post("/api/session/create").respond(
         200,
@@ -374,7 +375,7 @@ def _register_nsx_routes(mock: respx.MockRouter) -> None:
         200,
         json={
             "node_version": NSX_VERSION,
-            "kernel_version": "4.2.1.0.0",
+            "kernel_version": "9.0.2.0.0",
             "node_uuid": "deadbeef-1111-2222-3333-cafebabecafe",
             "hostname": "nsxmgr-canary",
             "external_id": "canary-external-id",
@@ -484,8 +485,8 @@ async def ingested_nsx_canary(
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
        rows for the 9 curated NSX core ops.
     2. Seed a :class:`Target` carrying the :data:`NSX_CANARY_FINGERPRINT`
-       so the resolver binds :class:`NsxConnector` (version 4.2 fits
-       its ``">=4.0,<5.0"`` advertisement).
+       so the resolver binds :class:`NsxConnector` (version 9.0 fits
+       its ``">=4.0,<10.0"`` advertisement).
     3. Resolve + cache the :class:`NsxConnector` instance the
        dispatcher will use, patching only its ``_session_loader``.
        The httpx client is **not** patched — respx intercepts the

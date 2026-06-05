@@ -179,6 +179,20 @@ connector-related release-notes line.
   Single-shot Q→cited-A only; no new REST/CLI surface (the tool is
   auto-discovered) (#1526).
 
+### Fixed
+
+- NSX 9.x (VCF 9) is now ingestable into a dispatchable connector.
+  NSX-T 4.x was renumbered onto the VCF train at VCF 9.0, but
+  `NsxConnector` advertised `supported_version_range=">=4.0,<5.0"`, so a
+  VCF-9 NSX appliance (which reports NSX 9.0.x and a 9.x `info.version`)
+  could not be ingested under any label — the spec/label gate and the
+  class version-range gate pincered every version. The range is widened
+  to `">=4.0,<10.0"` and the class pin + catalog row track the
+  VCF-9-aligned `9.0` line (the standalone NSX-T 4.x line still
+  dispatches through the same class), and `apply_nsx_core_curation` gains
+  a `connector_id` keyword so it curates the ops the ingest actually
+  landed (e.g. `nsx-rest-9.1.0.0`) (#1530).
+
 ### Documentation
 
 - Operator runbook for the `meho-docs` add-on:

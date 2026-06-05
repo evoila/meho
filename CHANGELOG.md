@@ -90,6 +90,14 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### CLI — `targets discover` points at the real registration verb (#1536)
+
+- Repoint `meho targets discover` (help text, post-run output, and the
+  command doc-comment) from the nonexistent `meho targets create` to
+  `meho targets import`, the verb that actually registers a reviewed
+  candidate. The stale `(auto-registration is v0.2.next)` aside is
+  reworded so it no longer dangles on a verb that does not exist.
+
 ### Connector ingest — hand-authored spec on-ramp (#1533)
 
 - Document the hand-authored-OpenAPI-3.x → `--spec file://…` route as the

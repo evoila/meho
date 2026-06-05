@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""NsxConnector -- hand-rolled HttpConnector subclass for NSX 4.x.
+"""NsxConnector -- hand-rolled HttpConnector subclass for NSX.
 
 Skeleton-only -- auth + fingerprint + probe + the G0.6 dispatch shim.
-Operations arrive in #614 via G0.7 spec ingestion against
-``nsx-4.2/policy.yaml`` + ``nsx-4.2/manager.yaml``.
+Operations arrive in #614 via G0.7 spec ingestion against the NSX
+``policy.yaml`` + ``manager.yaml`` corpus the appliance serves.
 
 Registered against the v2 registry at module-import time via
 :func:`~meho_backplane.connectors.registry.register_connector_v2` in
@@ -13,8 +13,23 @@ Registered against the v2 registry at module-import time via
 idempotency check (in
 :func:`~meho_backplane.operations.ingest.connector_registration.ensure_connector_class_registered`
 once #408's pipeline lands in main) no-ops on subsequent ingests
-against the same ``(product="nsx", version="4.2", impl_id="nsx-rest")``
+against the same ``(product="nsx", version="9.0", impl_id="nsx-rest")``
 triple.
+
+VCF-9 version renumber (#1530)
+------------------------------
+
+NSX-T 4.x was renumbered onto the VCF train at VCF 9.0 -- a live
+VCF-9 appliance reports NSX 9.0.x and the vendor spec carries
+``info.version`` in the 9.x scheme. The :attr:`supported_version_range`
+spans ``>=4.0,<10.0`` so a single class covers both the standalone
+NSX-T 4.x line and the VCF-9-aligned 9.x line; dispatch and the
+ingest version-range pre-flight key on the
+:class:`packaging.specifiers.SpecifierSet`, not the class-pinned
+:attr:`version`, so the one class resolves every label in the band.
+Same renumber posture :class:`VmwareRestConnector` took for the
+vSphere 8.x -> 9.0 jump (``version="9.0"``,
+``supported_version_range=">=8.5,<10.0"``).
 
 Auth divergence from the vSphere precedent
 ------------------------------------------
@@ -156,7 +171,7 @@ def _is_acceptable_auth_model(value: Any) -> bool:
 
 
 class NsxConnector(HttpConnector):
-    """NSX 4.x REST connector with session-cookie + XSRF auth.
+    """NSX REST connector with session-cookie + XSRF auth.
 
     Per-target XSRF token cached in :attr:`_session_tokens`; the
     accompanying ``JSESSIONID`` cookie is held by the per-target
@@ -172,11 +187,14 @@ class NsxConnector(HttpConnector):
 
     # G0.6 v2 registry metadata. The (product, version, impl_id) triple
     # matches the dispatcher's parse_connector_id contract:
-    # ``"nsx-rest-4.2"`` -> (``"nsx"``, ``"4.2"``, ``"nsx-rest"``).
+    # ``"nsx-rest-9.0"`` -> (``"nsx"``, ``"9.0"``, ``"nsx-rest"``). The
+    # version pin tracks the VCF-9-aligned product line (#1530); the
+    # ``>=4.0,<10.0`` range keeps the standalone NSX-T 4.x line
+    # dispatchable through the same class.
     product = "nsx"
-    version = "4.2"
+    version = "9.0"
     impl_id = "nsx-rest"
-    supported_version_range = ">=4.0,<5.0"
+    supported_version_range = ">=4.0,<10.0"
     priority = 1
 
     def __init__(
@@ -456,7 +474,7 @@ class NsxConnector(HttpConnector):
         nil-UUID tenant_id + a fixed system sentinel ``sub``; the
         connector's natural key is encoded as the dispatcher's
         ``connector_id`` per ``parse_connector_id``'s contract:
-        ``"nsx-rest-4.2"`` -> (product=``"nsx"``, version=``"4.2"``,
+        ``"nsx-rest-9.0"`` -> (product=``"nsx"``, version=``"9.0"``,
         impl_id=``"nsx-rest"``).
         """
         # Lazy import -- meho_backplane.operations.dispatch transitively

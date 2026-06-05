@@ -135,25 +135,40 @@ entries:
       OpenAPI-3-converted, MEHO-verified ingest. See #743 / harbor-onboarding.md.
 
   - product: nsx
-    version: "4.2"
+    version: "9.0"
     impl_id: nsx-rest
     requires_connector_class: NsxConnector
     upstream:
       - "https://<nsx-mgr-fqdn>/api/v1/spec/openapi/nsx_api.yaml"
-      - "https://developer.broadcom.com/xapis/nsx-t-data-center-rest-api/latest/"
+      - "https://developer.broadcom.com/xapis/nsx-data-center-rest-api/latest/"
     # G0.18-T8 (#1361, RDC #789 N8): the first upstream is fqdn-
     # templated (placeholder ``<nsx-mgr-fqdn>``); the second is the
     # Broadcom Developer Portal text/html landing page. Neither
     # supports catalog-driven ingest server-side. Operators fetch
     # from the appliance and pass via ``--spec``.
     catalog_ingest: spec-only
+    # #1530: NSX-T 4.x was renumbered onto the VCF train at VCF 9.0;
+    # a live VCF-9 appliance reports NSX 9.0.x and serves a spec
+    # whose info.version is in the 9.x scheme (e.g. 9.1.0.0). The
+    # catalog version label tracks the VCF-9-aligned "9.0" product
+    # line; NsxConnector's supported_version_range (">=4.0,<10.0")
+    # keeps the standalone NSX-T 4.x line dispatchable through the
+    # same class. The 9.x band is declared compatible so an operator
+    # who ingests under the appliance's finer 9.x info.version clears
+    # the spec/label gate without a catalog hand-edit.
+    spec_info_versions_compatible:
+      - "9.x.x"
     spec_info_version: null
     sha256: null
     notes: >-
       Generic-ingested. NSX Manager serves the OpenAPI spec at
       /api/v1/spec/openapi/nsx_api.yaml (appliance-served, fqdn-templated);
-      the Broadcom Developer Portal mirrors the reference. spec_info_version
-      pending first verified ingest. See #743.
+      the Broadcom Developer Portal mirrors the reference. NSX-T 4.x was
+      renumbered onto the VCF train at VCF 9.0 (#1530) -- a VCF-9 appliance
+      reports NSX 9.0.x and the spec's info.version is in the 9.x scheme;
+      NsxConnector covers both 4.x and 9.x via supported_version_range
+      ">=4.0,<10.0". spec_info_version pending first verified ingest.
+      See #743 / #1530.
 
   - product: gh
     version: "3"

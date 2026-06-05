@@ -66,7 +66,10 @@ _EXPECTED_PRODUCT_VERSION = {
     ("vmware", "9.0"),
     ("sddc-manager", "9.0"),
     ("harbor", "2.x"),
-    ("nsx", "4.2"),
+    # #1530: NSX-T 4.x was renumbered onto the VCF train at VCF 9.0;
+    # the catalog row tracks the VCF-9-aligned "9.0" line (NsxConnector
+    # covers both 4.x and 9.x via supported_version_range ">=4.0,<10.0").
+    ("nsx", "9.0"),
     ("gh", "3"),
     ("vault", "1.x"),
     ("k8s", "1.x"),
@@ -744,12 +747,15 @@ def test_shipped_catalog_gh3_carries_compatibility_opt_in() -> None:
     assert info_version_matches_compatibility("1.1.4", gh.spec_info_versions_compatible)
 
 
-def test_shipped_catalog_only_gh_and_vmware_rows_opt_in() -> None:
+def test_shipped_catalog_only_gh_vmware_and_nsx_rows_opt_in() -> None:
     """The opt-in is targeted. ``gh`` opts in to bridge the v3-vs-1.1.4
     divergence (T5 #1307); ``vmware`` opts in as a belt-and-suspenders
     declaration over the existing PEP-440 prefix-match (T6 Finding H
-    #1312). All other rows keep ``spec_info_versions_compatible`` null."""
-    expected_opt_in = {"gh", "vmware"}
+    #1312); ``nsx`` opts in to the ``9.x.x`` band so a VCF-9 appliance
+    spec (info.version in the 9.x scheme) clears the spec/label gate
+    under the renumbered "9.0" catalog label (#1530). All other rows
+    keep ``spec_info_versions_compatible`` null."""
+    expected_opt_in = {"gh", "vmware", "nsx"}
     for entry in load_catalog().entries:
         if entry.product in expected_opt_in:
             continue
@@ -797,16 +803,17 @@ def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
     * ``vmware/9.0`` + ``sddc-manager/9.0`` — Broadcom Developer Portal
       ``text/html`` landing pages; the route's existing
       ``catalog_entry_upstream_not_spec`` 422 fires.
-    * ``nsx/4.2`` — first upstream is fqdn-templated
+    * ``nsx/9.0`` — first upstream is fqdn-templated
       (``<nsx-mgr-fqdn>``); the route's
-      ``catalog_entry_templated_upstream`` 422 fires.
+      ``catalog_entry_templated_upstream`` 422 fires. (Row renumbered
+      from ``nsx/4.2`` for the VCF-9 alignment, #1530.)
 
     Marking these rows ``"spec-only"`` is what lets the listing emit
     an honest ``--spec`` ``next_step`` hint instead of the previous
     "spec available in catalog; run ingest" line that sent operators
     into a 422.
     """
-    spec_only_pairs = {("vmware", "9.0"), ("sddc-manager", "9.0"), ("nsx", "4.2")}
+    spec_only_pairs = {("vmware", "9.0"), ("sddc-manager", "9.0"), ("nsx", "9.0")}
     for entry in load_catalog().entries:
         if (entry.product, entry.version) in spec_only_pairs:
             assert entry.catalog_ingest == "spec-only", (

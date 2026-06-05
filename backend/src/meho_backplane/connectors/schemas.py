@@ -136,21 +136,24 @@ class ProbeResult(BaseModel):
 class FetchMoreDrillIn(BaseModel):
     """Drill-in branch of :class:`FetchMore` -- "can the agent fetch more rows from this handle?"
 
-    G0.15-T8 (#1219). The reducer mints a handle but the v0.2/0.7 substrate
-    exposes **no** drill-in surface (no MCP tool, resource URI, REST route,
-    or CLI verb), so ``available`` is currently always ``False`` -- the
-    field exists today so a future Task that ships the fetch-back path
-    can flip it to ``True`` and populate ``mcp_resource_uri`` /
-    ``mcp_tool`` / ``example_call`` / ``expires_at`` without breaking
-    any consumer that already parses the envelope. The contract is
-    self-documenting per the consumer's recommendation in
-    ``claude-rdc-hetzner-dc#753``: *"the reduced response itself should
-    tell the agent how to fetch more"*.
+    G0.15-T8 (#1219) + G0.20-T7 (#1507). The reducer mints a handle and,
+    when it spills the full materialized set to the read-back store,
+    flips ``available`` to ``True`` and names the ``result_query`` MCP
+    tool (``mcp_tool``) plus a ready-to-adapt ``example_call`` and the
+    handle's ``expires_at`` so an agent reading the envelope can page
+    beyond the inline sample without a discovery dance. When the spill
+    was skipped or failed (no tenant-scoped dispatch, store unreachable),
+    ``available`` stays ``False`` and ``rationale`` names the
+    narrower-params workaround. The contract is self-documenting per the
+    consumer's recommendation in ``claude-rdc-hetzner-dc#753``: *"the
+    reduced response itself should tell the agent how to fetch more"*.
 
     ``rationale`` is the operator/agent-facing string explaining the
     current state -- for ``available=False`` it describes the
-    workaround (re-call with narrower params); for ``available=True``
-    a future Task would surface the addressable resource.
+    workaround (re-call with narrower params); for ``available=True`` it
+    names the tool + the handle id to call it with. The ``mcp_tool`` /
+    ``mcp_resource_uri`` / ``example_call`` / ``expires_at`` fields are
+    populated only on the ``available=True`` branch.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -160,10 +163,55 @@ class FetchMoreDrillIn(BaseModel):
         description=(
             "Free-form prose explaining the current drill-in state. "
             "For ``available=False`` this names the workaround (typically "
-            "re-call with native pagination); for ``available=True`` a "
-            "future Task surfaces the resource URI / tool name here."
+            "re-call with native pagination); for ``available=True`` it "
+            "names the read-back tool + the handle id to call it with."
         ),
     )
+    mcp_tool: str | None = Field(
+        default=None,
+        description=(
+            "Name of the MCP meta-tool that reads rows back from this "
+            "handle (``result_query``). Populated only when "
+            "``available=True``."
+        ),
+    )
+    mcp_resource_uri: str | None = Field(
+        default=None,
+        description=(
+            "Optional MCP resource URI addressing the handle, when the "
+            "read-back surface is exposed as a resource rather than a "
+            "tool. ``None`` in the current tool-only surface."
+        ),
+    )
+    example_call: Mapping[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Curated next-call template the agent can adapt -- the "
+            "``result_query`` tool name + a first-page ``{handle_id, "
+            "offset, limit}`` args block. Populated only when "
+            "``available=True``."
+        ),
+    )
+    expires_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the spilled handle expires (TTL from spill time). After "
+            "this, ``result_query`` returns a not-found miss. Populated "
+            "only when ``available=True``."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _freeze_example_call(self) -> "FetchMoreDrillIn":
+        if self.example_call is not None:
+            object.__setattr__(self, "example_call", MappingProxyType(dict(self.example_call)))
+        return self
+
+    @field_serializer("example_call")
+    def _serialize_example_call(self, value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        return dict(value)
 
 
 class FetchMoreNativePagination(BaseModel):
@@ -250,10 +298,11 @@ class FetchMore(BaseModel):
     parts:
 
     * :class:`FetchMoreDrillIn` -- can the agent fetch more rows from
-      the handle directly (resource URI / tool name)? Currently always
-      ``available=False`` in v0.7.x; flips to ``True`` when the drill-in
-      route ships (deferred to v0.8/0.9 per the issue body's
-      out-of-scope clause).
+      the handle directly (tool name / resource URI)? ``available=True``
+      with the ``result_query`` tool named when the reducer spilled the
+      full set to the read-back store (G0.20-T7 #1507);
+      ``available=False`` with the narrower-params workaround when the
+      spill was skipped or failed.
     * :class:`FetchMoreNativePagination` -- can the agent re-call the
       original op with narrower params (k8s ``label_selector``,
       ``_continue`` token, etc.)? Populated from the op's
@@ -341,10 +390,14 @@ class ResultHandle(BaseModel):
     installed via ``set_default_reducer``) populates this handle for
     set-shaped responses above its threshold (>50 rows / >4 KB); smaller /
     scalar payloads pass through and the field on :class:`OperationResult`
-    stays ``None``. The materialized payload is held in DuckDB (in-memory)
-    for v0.2; an addressable spill backing store (MinIO/S3/Valkey) and the
-    ``result_query`` / ``result_aggregate`` read-back meta-tools are a later
-    Initiative.
+    stays ``None``. The materialized payload is summarized from an
+    in-memory DuckDB table and the full set is spilled to a Valkey-backed
+    read-back store
+    (:class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`,
+    G0.20-T7 #1507) keyed by ``(tenant_id, handle_id)`` with the handle's
+    ``ttl_seconds`` as a server-enforced expiry; the ``result_query`` MCP
+    tool reads windows back out of it, surfaced on
+    :attr:`FetchMore.drill_in`.
 
     ``schema_`` (trailing underscore) is the JSON Schema of the underlying
     payload — the trailing underscore avoids collision with Pydantic's own

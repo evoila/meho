@@ -158,6 +158,7 @@ def isolated_registry() -> Iterator[None]:
         knowledge,
         meho_status,
         operations,
+        result_query,
         runbook_runs,
         runbooks,
         topology,
@@ -170,6 +171,12 @@ def isolated_registry() -> Iterator[None]:
     clear_registries()
     importlib.reload(meho_status)
     importlib.reload(operations)
+    # G0.20-T7 (#1507): the JSONFlux handle read-back tool
+    # (``result_query``) joins the reload list for the same reason every
+    # other tool module does -- the autouse ``clear_registries()`` above
+    # would otherwise leave it unregistered in any test file that imports
+    # this fixture after the first one runs in the process.
+    importlib.reload(result_query)
     importlib.reload(connector_admin)
     importlib.reload(audit)
     importlib.reload(broadcast_overrides)

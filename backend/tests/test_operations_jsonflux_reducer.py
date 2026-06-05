@@ -597,7 +597,13 @@ async def test_handle_carries_fetch_more_unavailable_branches_without_context() 
     assert handle.fetch_more.drill_in.rationale, (
         "the drill_in branch must carry a non-empty rationale explaining the workaround"
     )
-    assert "drill-in" in handle.fetch_more.drill_in.rationale.lower()
+    # The unavailable branch names the narrower-params workaround (G0.20-T7
+    # #1507: no spill happened because there is no tenant in the bare
+    # reduce context), and leaves the available-only fields empty.
+    assert "narrower" in handle.fetch_more.drill_in.rationale.lower()
+    assert handle.fetch_more.drill_in.mcp_tool is None
+    assert handle.fetch_more.drill_in.example_call is None
+    assert handle.fetch_more.drill_in.expires_at is None
 
     assert isinstance(handle.fetch_more.native_pagination, FetchMoreNativePagination)
     assert handle.fetch_more.native_pagination.available is False
@@ -681,6 +687,135 @@ async def test_handle_fetch_more_malformed_pagination_hint_falls_back_to_unavail
         "raising would lose the user-visible read result"
     )
     assert native.rationale, "unavailable branch must still carry a rationale"
+
+
+# ---------------------------------------------------------------------------
+# G0.20-T7 (#1507) — spill to the read-back store + drill-in availability
+# ---------------------------------------------------------------------------
+
+
+class _FakeStore:
+    """In-memory stand-in for :class:`ResultHandleStore` the reducer spills into.
+
+    Records every ``spill`` call so a test can assert the full rows (not
+    just the inline sample) were persisted, and serves them back through
+    ``fetch_window`` so the round-trip is exercised without Valkey.
+    """
+
+    def __init__(self) -> None:
+        self.spills: list[dict[str, Any]] = []
+        self._rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    async def spill(
+        self,
+        *,
+        tenant_id: Any,
+        operator_sub: str,
+        handle_id: Any,
+        op_id: str | None,
+        rows: list[dict[str, Any]],
+        total_rows: int,
+        ttl_seconds: int,
+        max_rows: int,
+    ) -> bool:
+        stored = rows[:max_rows]
+        self.spills.append(
+            {
+                "tenant_id": str(tenant_id),
+                "operator_sub": operator_sub,
+                "handle_id": str(handle_id),
+                "op_id": op_id,
+                "stored_rows": len(stored),
+                "total_rows": total_rows,
+                "ttl_seconds": ttl_seconds,
+            }
+        )
+        self._rows[(str(tenant_id), str(handle_id))] = stored
+        return bool(stored)
+
+
+async def test_reduce_spills_full_rows_and_flips_drill_in_available() -> None:
+    """A reducing dispatch spills the full set and marks drill-in available.
+
+    The #1507 acceptance path in isolation: with a tenant + operator in
+    context, the reducer persists the FULL 60-row set (not the 5-row
+    sample) to the store and the handle's ``fetch_more.drill_in`` flips to
+    ``available=True`` naming the ``result_query`` tool, an
+    ``example_call`` carrying the handle id, and an ``expires_at``.
+    """
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    rows = [{"id": f"seg-{i}", "v": i} for i in range(60)]
+    payload = {"results": rows}
+    context = {
+        "op_id": "vault.kv.list.bulk",
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+    }
+
+    _reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None
+    # The FULL set was spilled, keyed by the handle id, not just the sample.
+    assert len(store.spills) == 1
+    spill = store.spills[0]
+    assert spill["stored_rows"] == 60
+    assert spill["total_rows"] == 60
+    assert spill["handle_id"] == str(handle.handle_id)
+    assert spill["operator_sub"] == "op-a"
+    assert spill["ttl_seconds"] == handle.ttl_seconds
+
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is True
+    assert drill_in.mcp_tool == "result_query"
+    assert drill_in.example_call is not None
+    assert drill_in.example_call["tool"] == "result_query"
+    assert drill_in.example_call["args"]["handle_id"] == str(handle.handle_id)
+    assert drill_in.expires_at is not None
+    assert "result_query" in drill_in.rationale
+
+
+async def test_reduce_without_tenant_skips_spill_and_stays_unavailable() -> None:
+    """No tenant in context → no spill, drill-in stays unavailable.
+
+    A non-dispatch reduce (or an operator with no tenant) cannot key the
+    spill, so the store is untouched and the handle keeps the
+    narrower-params workaround branch — exactly the pre-#1507 behaviour.
+    """
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    rows = [{"id": f"seg-{i}"} for i in range(60)]
+
+    _reduced, handle = await reducer.reduce(
+        {"results": rows}, None, {"op_id": "x", "operator_sub": "op-a"}
+    )
+
+    assert handle is not None
+    assert store.spills == []
+    assert handle.fetch_more.drill_in.available is False
+    assert handle.fetch_more.drill_in.mcp_tool is None
+
+
+async def test_reduce_spill_capped_reports_truncated_tail() -> None:
+    """A spill capped below total reports the truncation in the rationale."""
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=40)
+    rows = [{"id": i} for i in range(60)]
+    context = {
+        "op_id": "x",
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+    }
+
+    _reduced, handle = await reducer.reduce({"results": rows}, None, context)
+
+    assert handle is not None
+    assert store.spills[0]["stored_rows"] == 40
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is True
+    # The rationale flags that only the first 40 of 60 rows are retrievable.
+    assert "40" in drill_in.rationale
+    assert "60" in drill_in.rationale
 
 
 async def _set_shaped_handler(

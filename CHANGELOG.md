@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- Add a read-back surface for materialized JSONFlux result handles over
+  MCP: a large (`>50`-row / `>4 KB`) reducing dispatch now spills its
+  **full** row set to a Valkey-backed `ResultHandleStore`
+  (tenant+handle-scoped key, the handle's `ttl_seconds` as a
+  server-enforced expiry, row count capped by
+  `RESULT_HANDLE_MAX_SPILL_ROWS`, default 10000) instead of discarding
+  every row past the inline sample at reduce time. The new `result_query`
+  MCP meta-tool pages the full set back (`handle_id` + `offset`/`limit`,
+  operator+tenant scoped — a cross-operator or cross-tenant read is an
+  indistinguishable not-found miss), and the handle's
+  `fetch_more.drill_in` now flips to `available=true` naming the tool, an
+  `example_call`, and the handle's `expires_at` (no longer hardcoded
+  `false`). The spill is fail-open: an unreachable store leaves the inline
+  sample shipping exactly as before (#1507).
+
 ### Fixed
 
 - Wire the agent-run lease/heartbeat into the fire path so a hung, crashed, or worker-killed run is reliably reaped to a terminal `failed` state instead of staying `running` forever; the run loop now stamps a lease on start and heartbeats while alive, and child (`invoke_agent`) runs are leased too (#1501).

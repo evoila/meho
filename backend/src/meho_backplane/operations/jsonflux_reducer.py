@@ -45,12 +45,19 @@ vendor shape, not just the object-collection happy path.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 import msgspec
 import structlog
 from pydantic import ValidationError
 
+from meho_backplane.connectors.result_handle_store import (
+    ResultHandleStore,
+    get_result_handle_store,
+)
 from meho_backplane.connectors.schemas import (
     FetchMore,
     FetchMoreDrillIn,
@@ -59,24 +66,49 @@ from meho_backplane.connectors.schemas import (
     ResultHandle,
 )
 from meho_backplane.jsonflux.query.engine import QueryEngine
+from meho_backplane.settings import get_settings
 
 __all__ = ["JsonFluxReducer"]
 
 _log = structlog.get_logger(__name__)
 
-#: Rationale strings the reducer surfaces verbatim on the
-#: :attr:`FetchMore.drill_in` and :attr:`FetchMore.native_pagination`
-#: branches. Module-level constants so the wording stays consistent
+#: MCP meta-tool that reads spilled rows back from a handle. The
+#: drill-in rationale + ``mcp_tool`` field name it so an agent reading
+#: the envelope can act on more than the inline sample without a
+#: discovery dance. Must match the registered tool name in
+#: :mod:`meho_backplane.mcp.tools.result_query`. The rationale strings
+#: below are module-level constants so the wording stays consistent
 #: across every reducing dispatch (the agent / consumer sees the same
-#: prose every time) and so the tests can assert against a stable
-#: anchor.
+#: prose every time) and so the tests can assert against a stable anchor.
+_RESULT_QUERY_TOOL = "result_query"
+
 _DRILL_IN_UNAVAILABLE_RATIONALE: str = (
-    "No JsonFlux drill-in path is exposed in this meho version. To act "
-    "on more than the sample, re-call the operation with narrower "
-    "params (see ``native_pagination`` below) or wait for a future "
-    "release that surfaces the handle via an MCP tool / resource URI / "
-    "REST route."
+    "The full result set was not spilled to the read-back store for this "
+    "handle (the spill backend was unreachable, or this op did not run "
+    "through a tenant-scoped dispatch). To act on more than the sample, "
+    "re-call the operation with narrower params (see ``native_pagination`` "
+    "below)."
 )
+
+
+def _drill_in_available_rationale(handle_id: UUID, stored_rows: int, total_rows: int) -> str:
+    """Agent-facing prose for a spilled handle the read-back tool can serve."""
+    tail_note = (
+        ""
+        if stored_rows >= total_rows
+        else (
+            f" Only the first {stored_rows} of {total_rows} rows were "
+            "spilled; rows past that are not retrievable."
+        )
+    )
+    return (
+        f"The full result set ({total_rows} rows) is retrievable over MCP "
+        f"via the ``{_RESULT_QUERY_TOOL}`` tool. Call it with "
+        f"``handle_id={handle_id}`` plus ``offset`` / ``limit`` to page "
+        f"beyond the inline sample.{tail_note}"
+    )
+
+
 _NATIVE_PAGINATION_UNAVAILABLE_RATIONALE: str = (
     "The underlying op did not register a ``pagination_hint`` in its "
     "metadata; native pagination params for this op are not documented "
@@ -164,6 +196,25 @@ def _json_schema_type(duckdb_type: str) -> str:
     return "string"
 
 
+@dataclass(frozen=True, slots=True)
+class _MaterializedSet:
+    """The artefacts :meth:`JsonFluxReducer._materialize` carries forward.
+
+    Decouples the synchronous DuckDB step (which closes its engine in a
+    ``finally``) from the asynchronous spill + the handle assembly.
+    ``full_rows`` is the complete normalized row list -- the data that
+    used to be discarded at engine close, now carried out so it can be
+    persisted to the read-back store.
+    """
+
+    handle_id: UUID
+    total_rows: int
+    schema_: dict[str, Any]
+    summary_md: str
+    sample_rows: list[dict[str, Any]]
+    full_rows: list[dict[str, Any]]
+
+
 class JsonFluxReducer:
     """Materialize large set-shaped payloads; pass small ones through.
 
@@ -186,11 +237,20 @@ class JsonFluxReducer:
         byte_threshold: int = 4096,
         sample_size: int = 5,
         ttl_seconds: int = 3600,
+        store: ResultHandleStore | None = None,
+        max_spill_rows: int | None = None,
     ) -> None:
         self._row_threshold = row_threshold
         self._byte_threshold = byte_threshold
         self._sample_size = sample_size
         self._ttl_seconds = ttl_seconds
+        # ``store`` / ``max_spill_rows`` default to ``None`` so the
+        # production singleton (installed via ``set_default_reducer``)
+        # resolves both lazily at reduce time -- the store from the shared
+        # broadcast Valkey client, the cap from settings. Tests inject a
+        # fake store + explicit cap to exercise the spill path in-process.
+        self._store = store
+        self._max_spill_rows = max_spill_rows
 
     async def reduce(
         self,
@@ -208,6 +268,14 @@ class JsonFluxReducer:
         (under the ``pagination_hint`` key) when the op registered one
         via its ``llm_instructions``; the reducer copies the hint
         verbatim into :attr:`ResultHandle.fetch_more.native_pagination`.
+
+        When the materialized set is spilled to the read-back store
+        (G0.20-T7 #1507), the handle's
+        :attr:`FetchMore.drill_in` flips to ``available=True`` and names
+        the ``result_query`` MCP tool an agent can call to page beyond the
+        inline sample. A spill that is skipped or fails (no tenant in
+        context, store unreachable) leaves ``drill_in.available=False`` --
+        the inline sample still ships, exactly as before this Task.
         """
         del schema  # schema is inferred from the registered table
 
@@ -220,7 +288,9 @@ class JsonFluxReducer:
         if not self._over_threshold(rows, payload):
             return payload, None
 
-        return self._materialize(payload, envelope_key, rows, context)
+        materialized = self._materialize(rows, context)
+        spilled_rows = await self._spill(materialized, context)
+        return self._assemble(materialized, envelope_key, context, spilled_rows)
 
     def _over_threshold(self, rows: list[Any], payload: Any) -> bool:
         """True when *rows* exceeds the row OR byte threshold.
@@ -237,24 +307,26 @@ class JsonFluxReducer:
 
     def _materialize(
         self,
-        payload: Any,
-        envelope_key: str | None,
         rows: list[Any],
         context: dict[str, Any] | None,
-    ) -> tuple[dict[str, Any], ResultHandle]:
-        """Register *rows* in DuckDB and mint a handle + inline summary.
+    ) -> _MaterializedSet:
+        """Register *rows* in DuckDB; return the materialized artefacts.
 
         A fresh :class:`QueryEngine` is created per call (in-memory,
         per-payload isolation) and closed before returning so no DuckDB
-        connection leaks across dispatches.
+        connection leaks across dispatches. The full normalized row list
+        is carried out on :attr:`_MaterializedSet.full_rows` so
+        :meth:`_spill` can persist it **after** the engine closes --
+        decoupling the (sync) DuckDB work from the (async) spill keeps the
+        ``finally``-close discipline intact while still surfacing the rows
+        that used to be discarded here.
 
         ``context`` carries the dispatcher's per-call extras --
         ``op_id``, ``operator_sub``, ``source_kind``, ``target_id``,
-        ``pagination_hint`` (when the op registered one). The reducer
-        reads ``pagination_hint`` to build
-        :attr:`FetchMore.native_pagination`; the rest of the context is
-        currently informational (future routing decisions can read it
-        without breaking the contract).
+        ``tenant_id``, ``pagination_hint`` (when the op registered one).
+        The reducer reads ``pagination_hint`` to build
+        :attr:`FetchMore.native_pagination` and ``tenant_id`` /
+        ``operator_sub`` to spill; the rest is informational.
         """
         table_rows = _normalize_rows(rows)
         sample_from_tail = _sample_from_tail(context)
@@ -268,15 +340,92 @@ class JsonFluxReducer:
         finally:
             engine.close()
 
-        fetch_more = _build_fetch_more(context)
-        handle_id = uuid.uuid4()
-        sample_rows_tuple = tuple(sample_rows) if sample_rows else None
-        handle = ResultHandle(
-            handle_id=handle_id,
-            summary_md=f"{total_rows} rows materialized as a JSONFlux handle.\n\n{summary_md}",
-            schema_=schema_,
+        return _MaterializedSet(
+            handle_id=uuid.uuid4(),
             total_rows=total_rows,
-            sample_rows=sample_rows_tuple,
+            schema_=schema_,
+            summary_md=summary_md,
+            sample_rows=sample_rows,
+            full_rows=table_rows,
+        )
+
+    async def _spill(
+        self,
+        materialized: _MaterializedSet,
+        context: dict[str, Any] | None,
+    ) -> int | None:
+        """Persist the full materialized rows to the read-back store.
+
+        Returns the number of rows actually stored (so :meth:`_assemble`
+        can build the drill-in rationale and flag a capped tail), or
+        ``None`` when the spill was skipped or failed: no ``tenant_id`` /
+        ``operator_sub`` in context (e.g. a non-dispatch reduce), or the
+        store rejected/could-not-store the rows. The reducer never raises
+        from here -- the store itself is fail-open, and a missing tenant
+        is a skip, not an error.
+        """
+        if not context:
+            return None
+        tenant_raw = context.get("tenant_id")
+        operator_sub = context.get("operator_sub")
+        if not tenant_raw or not operator_sub:
+            return None
+        try:
+            tenant_id = UUID(str(tenant_raw))
+        except (ValueError, TypeError):
+            return None
+
+        store = self._store if self._store is not None else get_result_handle_store()
+        max_rows = (
+            self._max_spill_rows
+            if self._max_spill_rows is not None
+            else get_settings().result_handle_max_spill_rows
+        )
+        stored = await store.spill(
+            tenant_id=tenant_id,
+            operator_sub=str(operator_sub),
+            handle_id=materialized.handle_id,
+            op_id=context.get("op_id"),
+            rows=materialized.full_rows,
+            total_rows=materialized.total_rows,
+            ttl_seconds=self._ttl_seconds,
+            max_rows=max_rows,
+        )
+        if not stored:
+            return None
+        return min(materialized.total_rows, max_rows)
+
+    def _assemble(
+        self,
+        materialized: _MaterializedSet,
+        envelope_key: str | None,
+        context: dict[str, Any] | None,
+        spilled_rows: int | None,
+    ) -> tuple[dict[str, Any], ResultHandle]:
+        """Build the inline summary + the :class:`ResultHandle`.
+
+        ``spilled_rows`` is the count :meth:`_spill` persisted (``None``
+        when nothing was spilled); it decides whether the handle's
+        drill-in branch is ``available=True`` (pointing at
+        ``result_query``) or stays on the unavailable workaround branch.
+        """
+        total_rows = materialized.total_rows
+        fetch_more = _build_fetch_more(
+            context,
+            handle_id=materialized.handle_id,
+            total_rows=total_rows,
+            spilled_rows=spilled_rows,
+            ttl_seconds=self._ttl_seconds,
+        )
+        sample_rows = materialized.sample_rows
+        handle = ResultHandle(
+            handle_id=materialized.handle_id,
+            summary_md=(
+                f"{total_rows} rows materialized as a JSONFlux handle.\n\n{materialized.summary_md}"
+            ),
+            schema_=materialized.schema_,
+            total_rows=total_rows,
+            sample_rows=tuple(sample_rows) if sample_rows else None,
             ttl_seconds=self._ttl_seconds,
             fetch_more=fetch_more,
         )
@@ -441,21 +590,29 @@ def _serialize(payload: Any) -> bytes:
         return str(payload).encode("utf-8", "replace")
 
 
-def _build_fetch_more(context: dict[str, Any] | None) -> FetchMore:
+def _build_fetch_more(
+    context: dict[str, Any] | None,
+    *,
+    handle_id: UUID,
+    total_rows: int,
+    spilled_rows: int | None,
+    ttl_seconds: int,
+) -> FetchMore:
     """Build the :class:`FetchMore` envelope from the reducer's *context*.
 
-    G0.15-T8 (#1219). The contract is **always shipped** on a
-    reducing-response handle so the agent never has to guess whether
-    the envelope teaches it how to fetch more rows. Two branches:
+    G0.15-T8 (#1219) + G0.20-T7 (#1507). The contract is **always
+    shipped** on a reducing-response handle so the agent never has to
+    guess whether the envelope teaches it how to fetch more rows. Two
+    branches:
 
-    * ``drill_in.available`` is always ``False`` in this meho version --
-      no MCP tool / resource URI / REST route / CLI verb addresses the
-      handle. The rationale string surfaces the workaround verbatim
-      (re-call with narrower params via ``native_pagination``). When
-      a future Task ships the drill-in surface, it flips
-      ``available=True`` and populates ``mcp_resource_uri`` /
-      ``mcp_tool`` / ``example_call`` / ``expires_at`` in the same
-      envelope -- no consumer needs to re-parse.
+    * ``drill_in`` reflects whether the full set was spilled to the
+      read-back store. When ``spilled_rows`` is not ``None`` (the spill
+      succeeded), ``available=True`` and the envelope names the
+      ``result_query`` MCP tool, a ready-to-adapt ``example_call``, and
+      the handle's ``expires_at`` so an agent can page beyond the inline
+      sample without a discovery dance. When the spill was skipped or
+      failed, ``available=False`` and the rationale surfaces the
+      narrower-params workaround verbatim.
     * ``native_pagination`` is populated from the op's
       :class:`PaginationHint` (registered under
       ``llm_instructions.pagination_hint`` and threaded through the
@@ -476,12 +633,46 @@ def _build_fetch_more(context: dict[str, Any] | None) -> FetchMore:
     hint as a :class:`PaginationHint` literal there, not as a free
     dict).
     """
-    drill_in = FetchMoreDrillIn(
-        available=False,
-        rationale=_DRILL_IN_UNAVAILABLE_RATIONALE,
+    drill_in = _build_drill_in(
+        handle_id=handle_id,
+        total_rows=total_rows,
+        spilled_rows=spilled_rows,
+        ttl_seconds=ttl_seconds,
     )
     native = _native_pagination_from_context(context)
     return FetchMore(drill_in=drill_in, native_pagination=native)
+
+
+def _build_drill_in(
+    *,
+    handle_id: UUID,
+    total_rows: int,
+    spilled_rows: int | None,
+    ttl_seconds: int,
+) -> FetchMoreDrillIn:
+    """Build the drill-in branch: available when the set was spilled.
+
+    ``spilled_rows is None`` -> the spill was skipped or failed, so the
+    branch is ``available=False`` with the narrower-params workaround.
+    Otherwise the branch names the ``result_query`` tool, a first-page
+    ``example_call``, and the handle's ``expires_at`` (now + the spill
+    TTL).
+    """
+    if spilled_rows is None:
+        return FetchMoreDrillIn(
+            available=False,
+            rationale=_DRILL_IN_UNAVAILABLE_RATIONALE,
+        )
+    return FetchMoreDrillIn(
+        available=True,
+        rationale=_drill_in_available_rationale(handle_id, spilled_rows, total_rows),
+        mcp_tool=_RESULT_QUERY_TOOL,
+        example_call={
+            "tool": _RESULT_QUERY_TOOL,
+            "args": {"handle_id": str(handle_id), "offset": 0, "limit": 50},
+        },
+        expires_at=datetime.now(UTC) + timedelta(seconds=ttl_seconds),
+    )
 
 
 def _native_pagination_from_context(

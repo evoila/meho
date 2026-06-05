@@ -33,12 +33,22 @@ from meho_backplane.docs_search.service import (
     build_docs_scope,
     search_docs,
 )
+from meho_backplane.docs_search.synthesis import (
+    NO_GROUNDED_ANSWER,
+    DocsAnswer,
+    DocsSynthesisError,
+    synthesize_docs_answer,
+)
 
 __all__ = [
+    "NO_GROUNDED_ANSWER",
+    "DocsAnswer",
     "DocsChunk",
     "DocsScope",
     "DocsSearchResult",
+    "DocsSynthesisError",
     "MissingDocsFilterError",
     "build_docs_scope",
     "search_docs",
+    "synthesize_docs_answer",
 ]

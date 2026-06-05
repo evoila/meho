@@ -1,14 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``search_docs`` — capability-gated vendor-document meta-tool (G4.5-T4).
+"""``search_docs`` / ``ask_docs`` — capability-gated vendor-document tools.
 
 The MCP face of the federated vendor-document corpus the ops team runs
-(Initiative #1518, the ``meho-docs`` add-on). It is the third consumer of
-the shared :func:`~meho_backplane.docs_search.search_docs` service — the
-REST route (T3, #1521) and the CLI verb (T5, #1524) are the others — so
-the REQUIRE_FILTERS posture and the cited-chunk shape are defined exactly
-once and never re-derived per surface.
+(Initiative #1518, the ``meho-docs`` add-on). Two sibling tools share the
+same gate, the same REQUIRE_FILTERS posture, and the same shared
+:func:`~meho_backplane.docs_search.search_docs` retrieval service:
+
+* ``search_docs`` (G4.5-T4, #1523) — returns the ranked **cited chunks**.
+  The third consumer of the shared service alongside the REST route (T3,
+  #1521) and the CLI verb (T5, #1524).
+* ``ask_docs`` (G4.5-T7, #1526) — the synthesis fast-follow: runs the
+  *same* retrieval, then composes a single **grounded, cited answer** over
+  those chunks via :func:`~meho_backplane.docs_search.synthesize_docs_answer`
+  and returns ``{answer, citations[]}``. No claim without a citation; an
+  empty retrieval returns "no grounded answer", never a hallucinated one;
+  an unconfigured synthesis model fails closed (``-32603``, the MCP
+  analogue of 503). It is read-class — it composes over retrieved chunks,
+  it never mutates the corpus — so it keeps ``op_class="read"``.
+
+Defining both here keeps the REQUIRE_FILTERS posture and the cited-chunk
+shape in one place, never re-derived per surface.
 
 Capability gate (vs. the role gate)
 ===================================
@@ -78,6 +91,7 @@ from meho_backplane.docs_search import (
     MissingDocsFilterError,
     build_docs_scope,
     search_docs,
+    synthesize_docs_answer,
 )
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -222,4 +236,143 @@ register_mcp_tool(
         required_capability=_DOCS_CAPABILITY,
     ),
     handler=_search_docs_handler,
+)
+
+
+async def _ask_docs_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Answer a vendor-document question with a grounded, cited answer.
+
+    The synthesis fast-follow to ``search_docs``: it runs the **same**
+    shared retrieval (so the REQUIRE_FILTERS gate, corpus federation, and
+    forwarded-JWT audit are enforced in exactly one place), then composes a
+    single answer grounded strictly in the retrieved chunks via
+    :func:`~meho_backplane.docs_search.synthesize_docs_answer`. Returns
+    ``{answer, citations[]}`` where every citation is a chunk the retrieval
+    returned and the model relied on — no claim without a citation.
+
+    Error arms mirror ``search_docs`` exactly, plus the synthesis arm:
+
+    * **Missing/blank product or version** —
+      :class:`~meho_backplane.docs_search.MissingDocsFilterError` from
+      :func:`build_docs_scope` re-raised as :class:`McpInvalidParamsError`
+      (``-32602``, the MCP analogue of the route's 422). The inputSchema's
+      ``required`` list catches this first for a schema-validating client.
+    * **Corpus unavailable** —
+      :class:`~meho_backplane.auth.corpus.CorpusUnavailable` is *not*
+      caught; it bubbles to ``-32603`` (a down upstream is a server fault).
+    * **Synthesis model unconfigured / unreachable** —
+      :class:`~meho_backplane.operations.ingest.LlmClientUnavailable` (and
+      :class:`~meho_backplane.docs_search.DocsSynthesisError` for a model
+      that ran but broke the grounding contract) are likewise *not* caught;
+      they bubble to ``-32603``. We never degrade to an ungrounded answer —
+      a fail-closed 503-analogue is the correct posture for a grounded-
+      reference add-on. An empty retrieval is handled inside the synthesis
+      helper, which returns a deterministic "no grounded answer" *without*
+      calling the model.
+    """
+    query: str = arguments["query"]
+    product: str = arguments["product"]
+    version: str = arguments["version"]
+    limit: int = int(arguments.get("limit", _DEFAULT_SEARCH_LIMIT))
+
+    try:
+        scope = build_docs_scope(product, version)
+    except MissingDocsFilterError as exc:
+        raise McpInvalidParamsError(f"ask_docs: {exc}") from exc
+
+    retrieval = await search_docs(operator, query, scope=scope, limit=limit)
+    answer = await synthesize_docs_answer(query, retrieval)
+    return {
+        "answer": answer.answer,
+        "citations": [chunk.model_dump(mode="json") for chunk in answer.citations],
+    }
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="ask_docs",
+        description=(
+            "Answer a vendor-reference question with a SYNTHESIZED, CITED "
+            "answer composed over the vendor-document corpus (product "
+            "manuals, KB articles, design / reference guides) — e.g. 'What "
+            "are the NSX 9.0 config maximums for logical switches?'. "
+            "This is the answer-shaped sibling of `search_docs`: "
+            "`search_docs` returns the raw ranked chunks; `ask_docs` "
+            "composes them into one grounded answer and returns the chunks "
+            "it cited. "
+            "REQUIRES `product` AND `version`: they are a hard binary "
+            "scope (the question is rejected without both), NOT a ranking "
+            "hint. "
+            "Use this for VENDOR REFERENCE when you want a composed answer "
+            "rather than chunks to read yourself; use `search_docs` for the "
+            "raw chunks, `search_knowledge` for how THIS team does "
+            "something (lab conventions, known-good runbooks, "
+            "post-incident learnings), and `search_memory` for "
+            "cross-session state. "
+            "Returns `{answer, citations[]}`: the answer is grounded "
+            "STRICTLY in the corpus (no claim without a citation), and "
+            "every citation is one of the cited chunks (chunk text, "
+            "`source_url`, `chunk_id`, `document_id`). If the corpus has "
+            "nothing in scope, the answer is 'no grounded answer' — never "
+            "a guess. "
+            "Limit (chunks retrieved to ground on) defaults to 10; cap is 50."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000,
+                    "description": (
+                        "Free-form vendor-reference question. Forwarded to "
+                        "the corpus verbatim for retrieval and to the "
+                        "synthesis model; never logged in the clear (the "
+                        "audit row stores only its SHA-256 hash)."
+                    ),
+                },
+                "product": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": (
+                        "Vendor product to scope to (e.g. 'nsx', 'vcenter'). "
+                        "MANDATORY binary scope, not a hint — a question "
+                        "without it is rejected with INVALID_PARAMS while "
+                        "the REQUIRE_FILTERS posture is on."
+                    ),
+                },
+                "version": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": (
+                        "Product version to scope to (e.g. '9.0'). "
+                        "MANDATORY binary scope alongside `product` — "
+                        "both are required to bound the search to one "
+                        "product / version slice."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": _MAX_SEARCH_LIMIT,
+                    "default": _DEFAULT_SEARCH_LIMIT,
+                    "description": (
+                        "Maximum number of ranked cited chunks to retrieve "
+                        "and ground the answer on."
+                    ),
+                },
+            },
+            "required": ["query", "product", "version"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.OPERATOR,
+        op_class=_OP_CLASS_READ,
+        required_capability=_DOCS_CAPABILITY,
+    ),
+    handler=_ask_docs_handler,
 )

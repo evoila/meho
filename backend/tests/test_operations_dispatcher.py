@@ -1947,6 +1947,81 @@ async def test_park_without_builder_uses_identifier_default(
         assert "preview" not in row.proposed_effect
 
 
+@pytest.mark.asyncio
+async def test_park_merges_permission_preflight_onto_identifier_default(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked write with a registered permission preflight stores its banner.
+
+    G0.20-T4 (#1504): a credential-class write has no preview (suppressed),
+    but its capability-only permission preflight still runs and is merged
+    under ``proposed_effect["permission_preflight"]`` — so the reviewer
+    sees "this write will be denied" at park time, alongside the
+    identifier-only default (op identity is preserved).
+    """
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._preview import (
+        _PERMISSION_PREFLIGHTS,
+        PreviewContext,
+        register_permission_preflight,
+    )
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": f"secret/data/{ctx.params.get('path', '?')}",
+            "required": ["create", "update"],
+            "granted": ["read"],
+            "will_be_denied": True,
+            "principal_sub": ctx.operator.sub,
+        }
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.preflight_op",
+        handler=_module_handler_returning_dict,
+        summary="Op with a registered permission preflight.",
+        description="Parks for approval; the preflight flags a will-be-denied write.",
+        parameter_schema={"type": "object"},
+        safety_level="caution",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    register_permission_preflight("vault.kv.preflight_op", _preflight)
+    try:
+        result = await dispatch(
+            operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+            connector_id="vault-1.x",
+            op_id="vault.kv.preflight_op",
+            target=target,
+            params={"path": "meho/test/x"},
+        )
+        assert result.status == "awaiting_approval"
+        approval_request_id = UUID(result.extras["approval_request_id"])
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as fresh:
+            row = await fresh.get(ApprovalRequest, approval_request_id)
+            assert row is not None
+            # Identifier default is preserved, with the preflight merged in.
+            assert row.proposed_effect["op_id"] == "vault.kv.preflight_op"
+            assert row.proposed_effect["connector_id"] == "vault-1.x"
+            assert row.proposed_effect["target_id"] == str(target.id)
+            preflight = row.proposed_effect["permission_preflight"]
+            assert preflight["will_be_denied"] is True
+            assert preflight["required"] == ["create", "update"]
+            assert preflight["granted"] == ["read"]
+            # No raw secret material — only the capability banner.
+            assert "data" not in row.proposed_effect
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.preflight_op", None)
+
+
 # ---------------------------------------------------------------------------
 # compute_params_hash
 # ---------------------------------------------------------------------------

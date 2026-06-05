@@ -291,6 +291,126 @@ Expected outcomes:
   kubeconfig out of every log event and every `OperationResult` — the
   policy doc's job is to keep it out of *Vault's* logs too (HMAC).
 
+## 6. KV-v2 write surface — the `meho-mcp` write policy (v0.10.0+)
+
+§2–§5 cover the **read** path every connector needs. v0.10.0 added a
+KV-v2 **write** surface — `vault.kv.put` (new version, wholesale
+replace), `vault.kv.patch` (merge fields onto the current version), and
+`vault.kv.delete` (soft-delete versions)
+([`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)).
+These ops register `requires_approval=True`, so a human/operator write
+parks for a four-eyes review before it executes. **The review is wasted
+if the write then hits Vault `permission denied`** — the templated §2
+policy grants only `read`, with no `create`/`update` on the write path,
+so a freshly-provisioned `meho-mcp` role denies every KV write.
+
+This section documents the write-capability stanza the role needs, and a
+copy-paste `sys/capabilities-self` command to verify a token can write a
+path **before** an operator approves the parked write.
+
+### 6.1 Write-capability policy stanza
+
+Like the §2 reads, KV-v2 writes are scoped per operator through ACL
+policy templating. KV-v2 authorizes a write against the **`/data/`**
+path (the value path); `vault.kv.delete`'s version soft-delete
+(`POST <mount>/delete/<path>`) is likewise authorized by `update` on the
+data path. Add this stanza alongside the §2 read grants (it is
+*additive* — keep both):
+
+```hcl
+# Per-target connector secret WRITES, scoped to the operator's own
+# identity. <ACCESSOR> is the JWT mount accessor (resolve it as in §2).
+# `create` covers a first write to a path; `update` covers a subsequent
+# write (new version) and the version soft-delete. Vault requires BOTH
+# for an unconditional `vault.kv.put` / `vault.kv.patch`.
+path "secret/data/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
+  capabilities = ["create", "read", "update"]
+}
+```
+
+Notes:
+
+- **`create` *and* `update` are both required** for `vault.kv.put` /
+  `vault.kv.patch`. Vault treats a first write to a non-existent path as
+  `create` and a write to an existing path as `update`; an unconditional
+  write (no CAS guard) can be either, so the policy must grant both or
+  the write fails the first time the path's existence flips. `read` is
+  carried here too so the §2 read grant and this write grant can collapse
+  into one stanza if you prefer (the connector's write path does not
+  itself read the value, but keeping `read` here is harmless and avoids
+  two near-identical path blocks).
+- **`vault.kv.delete` needs only `update`** on the data path — the
+  soft-delete is a write against the version metadata, not a separate
+  `delete` capability on `/data/`. The `["create", "read", "update"]`
+  grant above already covers it.
+- **No `/metadata/` write grant is needed** for these three ops. They
+  operate on `/data/` (and the version soft-delete endpoint, authorized
+  by `update` on `/data/`); destroying versions or deleting all metadata
+  (`vault kv metadata delete`) is **not** a wired op and deliberately
+  needs no grant.
+- The **same per-operator templating constraints** from §2 apply: no
+  glob inside the rendered `{{identity...}}` segment; the trailing `/*`
+  is a literal glob in the static path portion.
+
+### 6.2 Verify a token can write a path (`sys/capabilities-self`)
+
+The backplane runs this exact check at **park time** — when a
+`vault.kv.put`/`patch`/`delete` parks for approval, the dispatcher
+probes `POST sys/capabilities-self` on the target `secret/data/<path>`
+and surfaces a `permission_preflight` banner on the approval row
+(`will_be_denied: true` when the token lacks `create`/`update`), so an
+operator is **not** asked to approve a write that Vault will then reject
+([`operations/dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py)
+`_handle_needs_approval` →
+[`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)
+`vault_kv_write_capability_preflight`). The probe returns only
+**capability names** — never a secret value — so it sidesteps the
+credential-class redaction rule that bars a value-revealing dry-run for
+a credential write.
+
+Run the same check by hand from a host holding the **operator's** Vault
+token (acquire it as in §4 — do *not* use a root/admin token, which
+would mask a missing operator grant):
+
+```bash
+# Replace <op-sub> with the operator's JWT `sub` and <target> with the
+# target name; this is the exact `/data/` path the connector writes.
+vault token capabilities "secret/data/targets/<op-sub>/<target>"
+# Expect for a writable path: create read update
+```
+
+Or, equivalently, against the raw API (what the backplane preflight
+calls — `POST /v1/sys/capabilities-self`):
+
+```bash
+vault write -format=json sys/capabilities-self \
+  paths="secret/data/targets/<op-sub>/<target>" \
+  | jq '.data.capabilities'
+# Expect: ["create","read","update"]  → the write will succeed
+# A read-only role returns: ["read"]  → the write WILL be denied
+```
+
+Expected outcomes:
+
+- **`create` + `update` present** → the parked write will execute on
+  approval; the approval row's `permission_preflight.will_be_denied` is
+  `false`.
+- **Only `read` (or `deny`)** → the write will be denied. The approval
+  row shows `will_be_denied: true` with the lacking capabilities. Fix
+  §6.1 (add the write stanza) or §3 (identity-alias mismatch), not the
+  connector.
+
+> **Reviewer-token caveat.** An *approved* re-dispatch executes under the
+> **reviewing** operator's token, not the original dispatcher's
+> ([`approvals.py`](../../backend/src/meho_backplane/api/v1/approvals.py)
+> → `resume_dispatch_after_approval`). The park-time preflight runs under
+> the **dispatching** operator's token (the only identity available at
+> park time). Both operators authenticate against the same `meho-mcp`
+> role, so they share this policy and the preflight is the right early
+> signal — but the reviewer's token must carry the §6.1 write grant too,
+> or the write fails post-approval despite a clean preflight. Verify the
+> reviewer's token with the same command above when in doubt.
+
 ## Scope note — `shared_service_account` only; `per_user`/`impersonation` deferred
 
 This runbook covers the **`shared_service_account`** auth model: one
@@ -331,5 +451,15 @@ v0.x — see the carve-out in
   read, rubric State 2): [`vmware-rest-onboarding.md`](./vmware-rest-onboarding.md)
   (G3.9-T3 #942)
 - Vault — [ACL policy templating](https://developer.hashicorp.com/vault/docs/concepts/policies)
+- Vault — [ACL policy capabilities (`create`/`update`/`read`/`delete`)](https://developer.hashicorp.com/vault/docs/concepts/policies#capabilities)
+- Vault — [`POST sys/capabilities-self`](https://developer.hashicorp.com/vault/api-docs/system/capabilities-self)
+  (returns a token's capabilities on a path; no secret material)
+- Vault — [KV v2 secrets engine API](https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2)
+  (the `/data/` write path the §6 stanza grants)
 - Vault — [JWT/OIDC auth method](https://developer.hashicorp.com/vault/docs/auth/jwt)
 - Vault — [Audit devices](https://developer.hashicorp.com/vault/docs/audit)
+- Park-time preflight implementation:
+  [`backend/src/meho_backplane/operations/dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py)
+  (`_handle_needs_approval`) +
+  [`backend/src/meho_backplane/connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)
+  (`vault_kv_write_capability_preflight`)

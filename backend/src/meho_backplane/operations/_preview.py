@@ -65,7 +65,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PreviewContext",
+    "build_permission_preflight",
     "build_proposed_effect",
+    "register_permission_preflight",
     "register_preview_builder",
 ]
 
@@ -117,8 +119,35 @@ class PreviewBuilder(Protocol):
     async def __call__(self, ctx: PreviewContext) -> dict[str, Any] | None: ...
 
 
+class PermissionPreflight(Protocol):
+    """An op's opt-in park-time permission check.
+
+    Distinct from :class:`PreviewBuilder`: a preview computes *what the
+    write would do* (request/response shape) and is therefore suppressed
+    for credential-class ops; a permission preflight checks only *whether
+    the dispatching identity is authorized to perform the write* and
+    carries **no secret material** (e.g. Vault's ``sys/capabilities-self``
+    returns capability names, never secret values). It is therefore run
+    for every op with a registered preflight regardless of sensitivity
+    class -- the credential-class suppression that gates previews does
+    **not** apply here.
+
+    Returns a redaction-safe summary dict to merge into
+    :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect`, or
+    ``None`` to decline (op isn't covered, or the probe failed soft). May
+    raise -- :func:`build_permission_preflight` treats a raise as "no
+    preflight" rather than failing the park.
+    """
+
+    async def __call__(self, ctx: PreviewContext) -> dict[str, Any] | None: ...
+
+
 #: ``op_id`` -> registered preview builder. Opt-in: absence ⇒ no preview.
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {}
+
+#: ``op_id`` -> registered permission preflight. Opt-in: absence ⇒ no
+#: preflight (and no entry in the approval row's ``permission_preflight``).
+_PERMISSION_PREFLIGHTS: dict[str, PermissionPreflight] = {}
 
 
 def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
@@ -128,6 +157,15 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PREVIEW_BUILDERS[op_id] = builder
+
+
+def register_permission_preflight(op_id: str, preflight: PermissionPreflight) -> None:
+    """Register *preflight* as the park-time permission check for *op_id*.
+
+    Idempotent re-registration overwrites -- registration happens at
+    import time so a re-import (test reload) is a no-op-equivalent.
+    """
+    _PERMISSION_PREFLIGHTS[op_id] = preflight
 
 
 async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -186,6 +224,48 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
+async def build_permission_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Run the op's park-time permission check, if one is registered.
+
+    G0.20-T4 (#1504). Looks up a preflight for ``ctx.descriptor.op_id``;
+    returns ``None`` (no entry added to the approval row) when no
+    preflight is registered, when the preflight declines, or when it
+    raises (fail-soft -- the park proceeds regardless, mirroring
+    :func:`build_proposed_effect`).
+
+    Unlike :func:`build_proposed_effect`, this hook does **not** consult
+    the credential-class suppression set: a permission preflight returns
+    only authorization metadata (capability names, never a secret value),
+    so suppressing it for credential-class ops would defeat the whole
+    point -- a Vault ``vault.kv.put`` (which *is* ``credential_write``)
+    is exactly the op whose write Vault may deny post-approval. The
+    preflight is the redaction-safe way to surface that at park time.
+
+    On success the returned dict is stored under the ``"permission_preflight"``
+    key of the approval row's ``proposed_effect`` envelope so the
+    approval surface can render a "this write will be denied" banner.
+    """
+    op_id = ctx.descriptor.op_id
+    preflight = _PERMISSION_PREFLIGHTS.get(op_id)
+    if preflight is None:
+        return None
+
+    try:
+        result = await preflight(ctx)
+    except Exception:
+        # Fail-soft: a preflight is an early-warning convenience; the park
+        # is the safety-relevant action. Never let a probe fault block it.
+        _log.warning(
+            "permission_preflight_failed",
+            op_id=op_id,
+            operator_sub=getattr(ctx.operator, "sub", None),
+            exc_info=True,
+        )
+        return None
+
+    return result
+
+
 async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview builder for ``k8s.apply`` -- the server-side-apply dry-run.
 
@@ -221,13 +301,40 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     )
 
 
-def _register_builtin_builders() -> None:
-    """Wire the in-tree preview builders. Called at import time.
+async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Permission preflight for the KV-v2 write ops (G0.20-T4 #1504).
 
-    Only ``k8s.apply`` is wired in #1437; other ops register their own
-    builders as the need arises (the hook is general).
+    Delegates to
+    :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_capability_preflight`,
+    which logs in under the operator's ``meho-mcp`` role and issues
+    ``POST sys/capabilities-self`` on the op's ``<mount>/data/<path>`` to
+    learn whether the dispatching token holds the ``create`` / ``update``
+    capability the write needs. The response carries only capability
+    names -- no secret value -- so it is redaction-safe and runs even
+    though ``vault.kv.put`` / ``vault.kv.patch`` classify as
+    ``credential_write``.
+    """
+    from meho_backplane.connectors.vault.ops import vault_kv_write_capability_preflight
+
+    return await vault_kv_write_capability_preflight(
+        ctx.operator,
+        ctx.descriptor.op_id,
+        ctx.params,
+    )
+
+
+def _register_builtin_builders() -> None:
+    """Wire the in-tree preview builders + permission preflights.
+
+    Called at import time. ``k8s.apply`` registers a side-effect-free
+    dry-run preview (#1437); the KV-v2 write ops register a
+    capability-only permission preflight (#1504) -- a different hook
+    because a credential-class op's preview is suppressed but its
+    permission check (capability names, no secret) is not.
     """
     register_preview_builder("k8s.apply", _k8s_apply_preview)
+    for _write_op in ("vault.kv.put", "vault.kv.patch", "vault.kv.delete"):
+        register_permission_preflight(_write_op, _vault_kv_write_preflight)
 
 
 _register_builtin_builders()

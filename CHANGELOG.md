@@ -117,6 +117,17 @@ connector-related release-notes line.
   module-level handler does not), so a legitimately target-less op still
   dispatches and the loud self-guard `RuntimeError` stays in place for
   genuine instance-cache faults (#1506).
+- Flag a Vault KV write (`vault.kv.put`/`patch`/`delete`) the dispatching
+  identity lacks capability for **at park time** instead of after a
+  four-eyes approval: `_handle_needs_approval` now probes
+  `POST sys/capabilities-self` on the target `<mount>/data/<path>` and
+  surfaces a `permission_preflight` banner (`will_be_denied: true` when
+  the token lacks `create`/`update`) on the approval row, so an operator
+  is not asked to approve a write Vault will then deny. The probe returns
+  only capability names — never a secret value — so it sidesteps the
+  credential-class redaction rule. Also documents the `meho-mcp` role's
+  required KV write-capability policy stanza + a `sys/capabilities-self`
+  verify command in `docs/cross-repo/connector-vault-policy.md` (#1504).
 
 ## [0.10.1] - 2026-06-04
 

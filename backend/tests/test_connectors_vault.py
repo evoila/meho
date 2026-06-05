@@ -83,11 +83,16 @@ from meho_backplane.connectors.vault import (
     VaultConnector,
     register_vault_typed_operations,
 )
-from meho_backplane.connectors.vault.ops import _KV_OP_SPECS
+from meho_backplane.connectors.vault.ops import (
+    _KV_OP_SPECS,
+    VAULT_KV_WRITE_CAPABILITIES,
+    vault_kv_write_capability_preflight,
+    vault_kv_write_target_path,
+)
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
-from ._vault_fakes import install_fake_client
+from ._vault_fakes import install_fake_client, install_fake_vault
 
 # Shared fake for hvac's non-200 health response (standby / active-perf-standby).
 # Defined once here to avoid duplicating the class body in every test that
@@ -1078,3 +1083,150 @@ def test_kv_read_ops_do_not_require_approval(op_id: str) -> None:
     """Read-only KV-v2 ops omit ``requires_approval`` (default False)."""
     by_id = {spec["op_id"]: spec for spec in _KV_OP_SPECS}
     assert by_id[op_id].get("requires_approval", False) is False, op_id
+
+
+# ---------------------------------------------------------------------------
+# Park-time write-capability preflight (G0.20-T4 #1504)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        ({"path": "meho/test/x"}, "secret/data/meho/test/x"),
+        ({"mount": "kv", "path": "meho/y"}, "kv/data/meho/y"),
+        # The handler-mirroring strip: leading slash + surrounding space.
+        ({"path": "  /meho/z  "}, "secret/data/meho/z"),
+    ],
+)
+def test_write_target_path_renders_data_path(params: dict[str, Any], expected: str) -> None:
+    """The preflight probes ``<mount>/data/<path>`` — the KV-v2 write path."""
+    assert vault_kv_write_target_path(params) == expected
+
+
+def test_write_capabilities_cover_every_write_op() -> None:
+    """Every ``requires_approval`` KV write op has a capability requirement."""
+    write_ops = {spec["op_id"] for spec in _KV_OP_SPECS if spec.get("requires_approval") is True}
+    assert write_ops == set(VAULT_KV_WRITE_CAPABILITIES)
+
+
+@pytest.mark.asyncio
+async def test_preflight_returns_none_for_non_write_op() -> None:
+    """A read op is not covered — the preflight declines (no probe, no banner)."""
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.read", {"path": "meho/x"}
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_preflight_flags_will_be_denied_for_read_only_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token with only ``read`` on the data path → ``will_be_denied=True``.
+
+    Models the exact incident #1504 chases: the ``meho-mcp`` role grants
+    read but no ``create``/``update`` on the write path. ``put`` needs
+    both, so the preflight flags the write as one that Vault will deny —
+    surfaced at park time instead of post-approval.
+    """
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {"secret/data/meho/test/x": ["read"]}
+
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.put", {"path": "meho/test/x"}
+    )
+
+    assert result is not None
+    assert result["check"] == "vault.capabilities-self"
+    assert result["path"] == "secret/data/meho/test/x"
+    assert result["required"] == ["create", "update"]
+    assert result["granted"] == ["read"]
+    assert result["will_be_denied"] is True
+    assert result["principal_sub"] == "test-operator"
+    # The probe queried capabilities-self (no token / accessor → self).
+    assert fake.sys.get_capabilities_calls == [
+        {"paths": ["secret/data/meho/test/x"], "token": None, "accessor": None}
+    ]
+    # No secret value is ever read — only the capability probe ran.
+    assert fake.secrets.kv.v2.read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_preflight_passes_for_role_with_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token holding ``create``/``update`` on the path → ``will_be_denied=False``."""
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {"secret/data/meho/test/x": ["create", "read", "update"]}
+
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.put", {"path": "meho/test/x"}
+    )
+
+    assert result is not None
+    assert result["will_be_denied"] is False
+
+
+@pytest.mark.asyncio
+async def test_preflight_delete_needs_only_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``vault.kv.delete`` authorizes against ``update`` on the data path."""
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {"secret/data/meho/v": ["read", "update"]}
+
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.delete", {"path": "meho/v", "versions": [1]}
+    )
+
+    assert result is not None
+    assert result["required"] == ["update"]
+    assert result["will_be_denied"] is False
+
+
+@pytest.mark.asyncio
+async def test_preflight_root_token_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A root-class token (capability ``root``) passes regardless of the list."""
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {"secret/data/meho/x": ["root"]}
+
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.put", {"path": "meho/x"}
+    )
+
+    assert result is not None
+    assert result["will_be_denied"] is False
+
+
+@pytest.mark.asyncio
+async def test_preflight_explicit_deny_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit ``deny`` on the path forces ``will_be_denied=True``."""
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {"secret/data/meho/x": ["create", "update", "deny"]}
+
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.put", {"path": "meho/x"}
+    )
+
+    assert result is not None
+    assert result["will_be_denied"] is True
+
+
+@pytest.mark.asyncio
+async def test_preflight_fail_soft_when_probe_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe fault (Vault unreachable / login error) degrades to no banner.
+
+    Fail-soft mirrors the ``proposed_effect`` builder contract: a missing
+    preflight must never block the park.
+    """
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.raise_on_get_capabilities = hvac.exceptions.VaultDown("sealed")
+
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.put", {"path": "meho/x"}
+    )
+
+    assert result is None

@@ -244,6 +244,49 @@ Application / AppProject — wired in
 `connectors/argocd/ops_write_preview.py`. Further connectors register
 their own builders as needed.
 
+## Permission preflight hook (#1504)
+
+The `proposed_effect` *preview* above is suppressed for credential-class
+ops — but a credential write (`vault.kv.put`) is precisely the op most
+likely to be **denied** by Vault *after* a human spends a four-eyes
+review approving it (the `meho-mcp` role grants `read` but no
+`create`/`update` on the write path). To surface that at park time
+without violating the redaction rule, `_preview.py` adds a **second**,
+parallel registry: `register_permission_preflight(op_id, preflight)` +
+`build_permission_preflight`.
+
+A permission preflight is distinct from a preview:
+
+- A **preview** says *what the write would do* (request/response shape) —
+  so it is suppressed for credential-class ops.
+- A **permission preflight** says *whether the dispatching identity is
+  authorized to perform the write* — it returns only authorization
+  metadata (Vault capability names, never a secret value), so it runs
+  for **every** registered op regardless of sensitivity class. The
+  credential-class suppression that gates previews does **not** apply.
+
+At the park point, `dispatcher._build_proposed_effect` runs **both**
+hooks and merges them: the preview (or the identifier-only default when
+there is no preview) is the base, and the preflight result is attached
+under `proposed_effect["permission_preflight"]`. Both are opt-in and
+fail-soft — a preflight that raises degrades to no banner; the park
+always proceeds.
+
+The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
+`vault.kv.delete`) register a preflight that probes
+`POST sys/capabilities-self` on the target `<mount>/data/<path>` and
+returns `{check, path, required, granted, will_be_denied, principal_sub}`
+— see
+[`docs/codebase/connectors-vault.md`](connectors-vault.md) "Park-time
+write-capability preflight" and
+[`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+§6 for the write policy + verify command. **Whose token:** the preflight
+runs under the dispatching operator's token, but the approved re-dispatch
+runs under the **reviewing** operator's token
+(`resume_dispatch_after_approval`); both share the `meho-mcp` role policy,
+so the preflight is the right early signal while the reviewer must carry
+the same grant.
+
 ## Transports
 
 ### REST (`backend/src/meho_backplane/api/v1/approvals.py`)

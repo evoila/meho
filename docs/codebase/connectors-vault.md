@@ -400,6 +400,66 @@ do not stall. The integration tests drive the gated writes via the
 approvals-API resume path (`dispatch(..., _approved=True)`), the same
 path that runs once a human approves.
 
+## Park-time write-capability preflight (G0.20-T4 #1504)
+
+A `requires_approval` KV write parks for a four-eyes review. That review
+is **wasted** if the approved write then hits Vault `permission denied` —
+the consumer incident (`claude-rdc-hetzner-dc#864`) was exactly this: the
+`meho-mcp` role's templated policy granted `read` but no
+`create`/`update` on the write path, so every approved KV write failed
+post-approval.
+
+To surface that **before** parking, `_handle_needs_approval`
+(`operations/dispatcher.py`) runs a permission preflight for the KV write
+ops. The preflight is `vault_kv_write_capability_preflight` (`ops.py`):
+it logs in exactly as the real write does
+(`vault_client_for_operator`, the `meho-mcp` role) and issues
+`POST sys/capabilities-self` on the op's `<mount>/data/<path>`
+(`client.sys.get_capabilities(paths=[...])`). It compares the granted
+capabilities against the per-op requirement in
+`VAULT_KV_WRITE_CAPABILITIES` (`put`/`patch` need `create`+`update`;
+`delete` needs `update`) and returns a redaction-safe summary:
+
+```python
+{"check": "vault.capabilities-self", "path": "secret/data/...",
+ "required": ["create", "update"], "granted": ["read"],
+ "will_be_denied": True, "principal_sub": "<dispatching-op-sub>"}
+```
+
+The dispatcher merges that under
+`ApprovalRequest.proposed_effect["permission_preflight"]`, so the
+approval surface can render a "this write will be denied" banner.
+
+Two design points keep this correct:
+
+- **It is a permission check, not a preview.** The
+  `proposed_effect` *builder* hook (`_preview.py::build_proposed_effect`)
+  is structurally **suppressed** for credential-class ops (a
+  value-revealing dry-run of a credential write would leak the secret).
+  `vault.kv.put`/`patch` classify `credential_write`, so they get **no**
+  builder preview. The preflight is a **separate** hook
+  (`_preview.py::build_permission_preflight` + a
+  `_PERMISSION_PREFLIGHTS` registry) that is **not** subject to that
+  suppression: `sys/capabilities-self` returns only capability names —
+  never a secret value — so it is redaction-safe and runs for exactly
+  the credential-class ops the preview can't cover.
+- **Whose token?** The preflight runs under the **dispatching**
+  operator's token (the only identity available at park time). An
+  *approved* re-dispatch runs under the **reviewing** operator's token
+  (`approval_queue.resume_dispatch_after_approval`). Both share the
+  `meho-mcp` role policy, so the dispatcher's answer is the right early
+  signal — but the reviewer's token must also carry the write grant.
+  The summary names the probed `principal_sub` so the caveat is auditable
+  on the row; the doc-side write policy + verify command live in
+  [`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+  §6.
+
+Fail-soft, mirroring the `proposed_effect` builder: a probe fault (Vault
+unreachable, role login error) degrades to **no banner** (the park always
+proceeds); a non-write op short-circuits to `None`. Unit + dispatcher
+integration coverage in `test_connectors_vault.py`,
+`test_operations_preview.py`, and `test_operations_dispatcher.py`.
+
 ## JSONFlux result-handle path (`vault.kv.list`)
 
 `vault.kv.list` is the only set-shaped op on the v0.2 Vault surface

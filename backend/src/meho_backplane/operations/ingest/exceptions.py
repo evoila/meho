@@ -118,7 +118,11 @@ class UnsupportedSpecError(ValueError):
     Raised for Swagger 2.0, OpenAPI 4.x, cross-document ``$ref``, and
     similar known-unsupported cases. The exception message always
     names the offending shape so the operator can decide whether to
-    file a v0.2.next request or pre-process the spec.
+    file a v0.2.next request or pre-process the spec. For Swagger 2.0
+    specifically the message also names the conversion path (convert
+    to OpenAPI 3.x via ``swagger2openapi`` / ``converter.swagger.io``
+    and re-ingest) so the operator can self-serve a 2.0-only vendor
+    surface such as Harbor 2.x (#1532).
     """
 
 

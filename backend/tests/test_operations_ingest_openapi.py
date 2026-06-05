@@ -205,8 +205,16 @@ def test_spec_source_threads_distinctly_across_two_specs(tmp_path: Path) -> None
 def test_unsupported_swagger_2_raises(tmp_path: Path) -> None:
     spec = tmp_path / "swagger.yaml"
     spec.write_text("swagger: '2.0'\ninfo: {title: x, version: '1'}\npaths: {}\n")
-    with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0"):
+    with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0") as excinfo:
         parse_openapi(str(spec))
+    # The rejection must be *actionable* — it names the conversion path
+    # (swagger2openapi / converter.swagger.io) so a 2.0-only surface
+    # such as Harbor 2.x can be onboarded without an opaque dead end
+    # (#1532). The detected version is echoed back verbatim.
+    message = str(excinfo.value)
+    assert "swagger2openapi" in message
+    assert "converter.swagger.io" in message
+    assert "'2.0'" in message
 
 
 def test_unsupported_openapi_4_raises(tmp_path: Path) -> None:
@@ -987,11 +995,17 @@ def test_read_spec_info_version_empty_version_returns_none(tmp_path: Path) -> No
 
 
 def test_read_spec_info_version_rejects_swagger_2(tmp_path: Path) -> None:
-    """Swagger 2.0 specs surface the same gate :func:`parse_openapi` enforces."""
+    """Swagger 2.0 specs surface the same gate :func:`parse_openapi` enforces.
+
+    The cross-check helper shares ``_validate_openapi_version`` with the
+    parser, so the same actionable conversion-path remedy reaches the
+    operator on the spec-vs-label fast path (#1532).
+    """
     spec = tmp_path / "spec.yaml"
     spec.write_text("swagger: '2.0'\ninfo: {title: t, version: '9.0.3'}\npaths: {}\n")
-    with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0"):
+    with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0") as excinfo:
         read_spec_info_version(str(spec))
+    assert "swagger2openapi" in str(excinfo.value)
 
 
 def test_read_spec_info_version_missing_file_raises_invalid_spec(tmp_path: Path) -> None:

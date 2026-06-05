@@ -21,9 +21,15 @@ Supported spec dialects:
 * OpenAPI 3.0.x (the vCenter / vi-json baseline at v0.2).
 * OpenAPI 3.1.x (jsonschema 2020-12-compatible; newer customer specs).
 
-Out of scope for v0.2 (per Initiative #389):
+Out of scope (no conversion performed in-process):
 
-* Swagger 2.0 — every v0.2 connector publishes OpenAPI 3.x.
+* Swagger 2.0 — rejected with an actionable :exc:`UnsupportedSpecError`
+  that names the conversion path (convert to OpenAPI 3.x with
+  ``swagger2openapi`` / ``converter.swagger.io`` and re-ingest). The
+  parser stays 3.x-only on purpose: the maintained 2.0→3.0 converters
+  are Node/web-service tools, and a hand-rolled converter is a large
+  correctness surface the operator review queue can't backstop. See
+  the Harbor 2.x ``swagger.yaml`` exemplar (#1532).
 * GraphQL SDL / WSDL / protobuf — separate parsers; v0.2.next.
 * Cross-document ``$ref`` (``$ref: "other.yaml#/..."``) — raises
   :exc:`UnsupportedSpecError`.
@@ -99,6 +105,22 @@ except AttributeError:  # pragma: no cover — PyYAML always ships SafeLoader
 # Patch level (the third digit) is accepted as-is — semver-style
 # bugfix versions never change the parser's contract.
 _SUPPORTED_OPENAPI_RE = re.compile(r"^3\.(0|1)(\.\d+)?$")
+
+# Operator-facing remediation appended to the Swagger-2.0 rejection.
+# The parser stays OpenAPI-3.x-only on purpose (no spec-conversion
+# dependency in the Python backend — the de-facto 2.0→3.0 converters
+# are Node/web-service tools, and a hand-rolled converter is a large
+# correctness surface the review queue can't backstop). Instead of a
+# bare "not supported", the rejection names the concrete conversion
+# path so the operator can self-serve: run a converter, then re-ingest
+# the OpenAPI-3.x output through the same path. ``swagger2openapi`` /
+# the hosted ``converter.swagger.io`` are the maintained converters.
+_SWAGGER_2_CONVERSION_REMEDIATION = (
+    "convert it to OpenAPI 3.x first (e.g. the swagger2openapi CLI "
+    "`npx swagger2openapi swagger.yaml -o openapi.yaml`, or the hosted "
+    "converter at https://converter.swagger.io/), then ingest the "
+    "converted 3.x document"
+)
 
 # Path-parameter placeholders look like ``{cluster}`` / ``{vm-id}`` /
 # ``{filter.names}``. Compiled once and reused per operation.
@@ -409,14 +431,18 @@ def _validate_openapi_version(spec: dict[str, Any]) -> None:
     """Confirm the spec carries a supported ``openapi`` version string.
 
     OpenAPI 3.0.x and 3.1.x are supported. Swagger 2.0 specs declare
-    ``swagger: "2.0"`` (no ``openapi`` key) and are rejected. Newer
-    specs with future major versions raise the same error.
+    ``swagger: "2.0"`` (no ``openapi`` key) and are rejected with an
+    actionable :exc:`UnsupportedSpecError` that names the conversion
+    path (a 2.0-only surface such as Harbor 2.x's ``swagger.yaml`` is
+    onboarded by converting it to OpenAPI 3.x and re-ingesting the
+    output). Newer specs with future major versions raise the same
+    error type without the conversion remedy.
     """
     if "swagger" in spec:
         version = spec.get("swagger", "<missing>")
         raise UnsupportedSpecError(
-            "Swagger 2.0 specs are not supported (v0.2.next); "
-            f"document declares swagger={version!r}"
+            f"Swagger 2.0 specs are not ingestible directly (document declares "
+            f"swagger={version!r}); {_SWAGGER_2_CONVERSION_REMEDIATION}"
         )
     raw_version = spec.get("openapi")
     if not isinstance(raw_version, str):

@@ -1003,8 +1003,12 @@ class Settings(BaseModel):
     scheduler_agent_secret_env_pattern: str = Field(default="MEHO_AGENT_SECRET_{client_id}")
     # The Vault KV-v2 *API* path (mount + ``data/`` infix + logical path)
     # where agent ``client_credentials`` secrets live. Registration writes
-    # here; the scheduler reads here. ``{client_id}`` is substituted with
-    # the sanitised identity_ref. The default addresses the ``secret/``
+    # here; the scheduler reads here -- both via ``vault_path_for_client_id``,
+    # so the two cannot diverge. ``{client_id}`` is substituted with the
+    # **sanitised, UPPER-CASED** identity_ref (non-alphanumeric chars to
+    # ``_``, then ``upper()``), e.g. ``agent:ops-writer`` ->
+    # ``secret/data/agents/AGENT_OPS_WRITER/credentials`` -- not the raw
+    # ``agent:ops-writer`` key. The default addresses the ``secret/``
     # KV-v2 mount; the leading ``secret/data/`` is the raw API path Vault's
     # HTTP surface uses, which the read/write helpers split into hvac's
     # ``(mount_point, logical_path)`` form.

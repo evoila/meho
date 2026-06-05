@@ -124,8 +124,17 @@ pod env var only when Vault yields nothing (#1478). The lookup chain:
      [`read_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)
      reads the secret from `SCHEDULER_AGENT_VAULT_PATH_PATTERN`
      (default `secret/data/agents/{client_id}/credentials`) under
-     `VAULT_SCHEDULER_TOKEN`. The raw KV-v2 API path is split into
-     hvac's `(mount_point, logical_path)` form by `split_kv_v2_api_path`.
+     `VAULT_SCHEDULER_TOKEN`. The `{client_id}` token is **not** the raw
+     `identity_ref` — `vault_path_for_client_id` substitutes the
+     **sanitised, UPPER-CASED** form (non-alphanumeric chars to `_`,
+     then `.upper()`), the same shape the env-var key uses below. For
+     `agent:ops-writer` the resolved path is
+     `secret/data/agents/AGENT_OPS_WRITER/credentials` (not a raw
+     `agent:ops-writer` key). Both the read here and the write below call
+     this one helper, so the two paths cannot diverge — an operator
+     hand-provisioning the Vault secret or policy must target the
+     sanitised path. The raw KV-v2 API path is split into hvac's
+     `(mount_point, logical_path)` form by `split_kv_v2_api_path`.
      This is the path registration writes to (see below), so an agent
      registered + defined purely over the API is schedulable with **no
      pod env var and no redeploy**. A missing path / unset token / read
@@ -148,8 +157,12 @@ The write side: registering an agent principal
 captures the Keycloak-generated client secret (`get_client_secret`) and
 persists it to Vault at `SCHEDULER_AGENT_VAULT_PATH_PATTERN`
 ([`write_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)),
-under the same scheduler service token. A Vault-write failure rolls back
-the just-created Keycloak client so registration never produces an
+under the same scheduler service token. The write resolves the path
+through the **same** `vault_path_for_client_id` helper as the read, so it
+lands on the sanitised, UPPER-CASED path (`agent:ops-writer` →
+`secret/data/agents/AGENT_OPS_WRITER/credentials`) — write and read can
+never target different keys. A Vault-write failure rolls back the
+just-created Keycloak client so registration never produces an
 unschedulable agent.
 
 `VAULT_SCHEDULER_TOKEN` is a static token bound to a narrow read/write

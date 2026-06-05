@@ -211,12 +211,22 @@ enable workflow over the T6 REST routes.
 
 ### T7 (admin MCP tools) at a glance
 
-`backend/src/meho_backplane/mcp/tools/connector_admin.py` registers
-seven MCP tools at module import:
+The admin MCP tools register at module import across two files, split
+by responsibility so neither grows past the code-quality file-size
+budget:
+
+* `backend/src/meho_backplane/mcp/tools/connector_ingest.py` — the
+  two ingest-pipeline tools (`ingest` + `ingest_status`).
+* `backend/src/meho_backplane/mcp/tools/connector_admin.py` — the six
+  review / edit / state-machine tools.
+* `backend/src/meho_backplane/mcp/tools/_connector_shared.py` — the
+  `connector_id` / `tenant_id` schema snippets, op-class strings, and
+  the JSON-safe serialiser both tool modules import.
 
 | Tool | Required role | Wraps |
 |------|---------------|-------|
-| `meho.connector.ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` |
+| `meho.connector.ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` (+ `IngestJobRegistry` on async) |
+| `meho.connector.ingest_status` | `operator` | `IngestJobRegistry.get()` |
 | `meho.connector.list` | `operator` | `list_ingested_connectors()` |
 | `meho.connector.review` | `operator` | `ReviewService.get_review_payload()` |
 | `meho.connector.edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
@@ -249,16 +259,37 @@ arguments` key-presence checks so omitted fields never reach
 indistinguishable from an omission with `arguments.get(...)`). Only
 fields the operator explicitly named are forwarded.
 
+**Async offload on the MCP path (G3.5-T2 #1531).** `meho.connector.ingest`
+carries the same #1303 async-202 offload the REST route has: with
+`async=true` (and `dry_run=false`) the handler creates a job row in the
+shared `IngestJobRegistry`, fires the pipeline off the request via
+`asyncio.create_task`, and returns an `IngestJobHandle` immediately —
+well inside the agent's tool-call deadline. The agent polls
+`meho.connector.ingest_status` with the returned `job_id` until the
+status is `succeeded` (carries the final ingestion + grouping counts)
+or `failed` (carries `error_class` + `error`). Because both surfaces
+share `get_job_registry()`, a run started over MCP is poll-able over
+the REST `GET /api/v1/connectors/ingest/jobs/{job_id}` endpoint and
+vice versa. `dry_run=true` and `async` unset keep the inline shape —
+the pipeline runs on the request and the full `IngestResponse` returns
+synchronously (no regression for small-spec / CI callers). This
+parallels the `meho.agents.run` + `meho.agents.run_status` async
+precedent (#811).
+
 The `ingest` handler additionally maps `VersionMismatchError` and
 `UncoveredVersionLabel` to JSON-RPC `-32602 Invalid Params` with
-the structured detail on `error.data` (G0.9.1-T5 #777). Both
-exceptions describe caller-input mistakes — the operator's `version`
-label disagrees with the supplied spec, or falls outside every
-registered class's advertised range — so `-32602` is the right code
-(not `-32603 Internal Error`, which the pre-fix generic catch-all
-emitted). The structured `data` payload is built by the shared
-helpers in `operations/ingest/error_envelopes.py` so the REST 422
-detail and the MCP `error.data` member share one source of truth.
+the structured detail on `error.data` (G0.9.1-T5 #777) **on the inline
+path**. Both exceptions describe caller-input mistakes — the operator's
+`version` label disagrees with the supplied spec, or falls outside
+every registered class's advertised range — so `-32602` is the right
+code (not `-32603 Internal Error`, which the pre-fix generic catch-all
+emitted). The structured `data` payload is built by the shared helpers
+in `operations/ingest/error_envelopes.py` so the REST 422 detail and
+the MCP `error.data` member share one source of truth. On the **async**
+path the handle has already returned by the time the pipeline raises,
+so the same failures surface via `error` / `error_class` on the
+`ingest_status` poll response instead (the trade-off the REST async
+path also makes).
 
 ## Key types
 
@@ -842,7 +873,7 @@ pulled in. The parser tolerates partial / underspecified docs and
 relies on T4's review queue to surface ambiguities to a human before
 operations go live.
 
-## Async ingest mode (G0.16-T1 / #1303)
+## Async ingest mode (G0.16-T1 / #1303; MCP carry G3.5-T2 / #1531)
 
 `POST /api/v1/connectors/ingest` defaults to `async=true`: the route
 fires the pipeline off the request thread via `asyncio.create_task`
@@ -906,6 +937,22 @@ exempt). A pod restart blows the registry away on purpose -- a job
 whose pod died was never going to finish. Durable cross-restart
 jobs are a v0.9 follow-up (the same migration that lands
 operator-cancellable jobs).
+
+**The MCP surface shares the offload (G3.5-T2 / #1531).** The
+`meho.connector.ingest` admin MCP tool carries the same async shape:
+`async=true` (with `dry_run=false`) creates a job in the **same**
+`IngestJobRegistry` (via `get_job_registry()`), fires the pipeline off
+the request with `asyncio.create_task`, and returns an `IngestJobHandle`
+inside the agent's tool-call deadline; the agent polls
+`meho.connector.ingest_status` (which reads the registry through the
+same accessor) until the job is `succeeded` / `failed`. Because both
+surfaces resolve the one process-wide registry, a job started over MCP
+is poll-able over `GET /api/v1/connectors/ingest/jobs/{job_id}` and
+vice versa. The MCP path defaults `async=false` (inline) so existing
+small-spec / CI callers are unaffected; it is the agent-facing surface
+that real vendor specs blocked past the tool-call timeout before this
+carry. See the "T7 (admin MCP tools) at a glance" section above for
+the per-tool wiring + the inline-vs-async error-surface split.
 
 ## LLM-client wiring
 

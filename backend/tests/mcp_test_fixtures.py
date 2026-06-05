@@ -156,6 +156,7 @@ def isolated_registry() -> Iterator[None]:
         audit,
         broadcast_overrides,
         connector_admin,
+        connector_ingest,
         docs,
         knowledge,
         meho_status,
@@ -180,6 +181,14 @@ def isolated_registry() -> Iterator[None]:
     # this fixture after the first one runs in the process.
     importlib.reload(result_query)
     importlib.reload(connector_admin)
+    # G3.5-T2 (#1531): the connector-ingest MCP tools
+    # (``meho.connector.ingest`` + ``meho.connector.ingest_status``) split
+    # out of ``connector_admin`` into their own module; they join the
+    # reload list for the same reason every other tool module does -- the
+    # autouse ``clear_registries()`` above would otherwise leave them
+    # unregistered in any test file that imports this fixture after the
+    # first one runs in the process.
+    importlib.reload(connector_ingest)
     importlib.reload(audit)
     importlib.reload(broadcast_overrides)
     # G6.4-T1 (#1091): meho.broadcast.recent (agent-facing read of recent

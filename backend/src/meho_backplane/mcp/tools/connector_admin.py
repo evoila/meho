@@ -1,19 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Admin MCP tools for the connector ingest + review pipeline (G0.7-T7).
+"""Admin MCP tools for the connector review + state-machine surface (G0.7-T7).
 
-Seven tools under the ``meho.connector.*`` namespace, deliberately
+Six tools under the ``meho.connector.*`` namespace, deliberately
 separate from the agent-surface meta-tools
 (:mod:`~meho_backplane.mcp.tools.operations`):
 
-* ``meho.connector.ingest`` — run the ingest pipeline. **tenant_admin**.
 * ``meho.connector.list`` — list ingested connectors. **operator**.
 * ``meho.connector.review`` — get the review payload. **operator**.
 * ``meho.connector.edit_group`` — edit one group. **tenant_admin**.
 * ``meho.connector.edit_op`` — edit one op override. **tenant_admin**.
 * ``meho.connector.enable`` — flip the connector to enabled. **tenant_admin**.
 * ``meho.connector.disable`` — flip the connector to disabled. **tenant_admin**.
+
+The ingest-pipeline tools (``meho.connector.ingest`` +
+``meho.connector.ingest_status``) live in the sibling
+:mod:`meho_backplane.mcp.tools.connector_ingest` module; the two files
+split the admin tools by responsibility (pipeline vs. review) so
+neither grows past the code-quality file-size budget. The shared
+``connector_id`` / ``tenant_id`` schema snippets, op-class taxonomy
+strings, and JSON-safe serialiser live in
+:mod:`meho_backplane.mcp.tools._connector_shared`.
 
 Why these are not in the agent surface
 ======================================
@@ -45,12 +53,9 @@ Each tool's handler is a thin shim that wraps the canonical
 service layer T5 (CLI) and T6 (REST routes) also consume — there
 is no parallel "admin service" class here:
 
-1. ``meho.connector.ingest`` constructs a per-call
-   :class:`IngestionPipelineService` bound to the calling
-   :class:`Operator` and calls :meth:`IngestionPipelineService.ingest`.
-2. ``meho.connector.list`` calls the
+1. ``meho.connector.list`` calls the
    :func:`list_ingested_connectors` query helper directly.
-3. Every other tool constructs :class:`ReviewService` and
+2. Every other tool constructs :class:`ReviewService` and
    delegates to its existing read / edit / state-machine methods.
 
 PATCH-style handlers (``edit_group`` / ``edit_op``) build the
@@ -73,9 +78,10 @@ Per-tool ``inputSchema`` notes
 ==============================
 
 Every schema uses ``additionalProperties: false`` (issue AC 4). The
-``connector_id`` field appears on six of the seven tools (everything
-but ``ingest``) and is documented identically across them: an operator-
-facing ``<impl_id>-<version>`` string.
+``connector_id`` field appears on all six tools and is documented
+identically across them via the shared
+:data:`~meho_backplane.mcp.tools._connector_shared._CONNECTOR_ID_DESCRIPTION`
+snippet: an operator-facing ``<impl_id>-<version>`` string.
 
 The ``tenant_id`` field is optional everywhere. ``null`` / omitted →
 the built-in scope, which is accessible only to ``tenant_admin`` per
@@ -86,26 +92,23 @@ tenant-curated connectors.
 
 from __future__ import annotations
 
-import json
-from typing import Any, Final
-from uuid import UUID
+from typing import Any
 
 import structlog
 
-from meho_backplane.api.v1.connectors_ingest import get_llm_client_factory
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools._connector_shared import (
+    _CONNECTOR_ID_DESCRIPTION,
+    _OP_CLASS_READ,
+    _OP_CLASS_WRITE,
+    _TENANT_ID_PROPERTY,
+    _coerce_tenant_id,
+    _model_dump_json_safe,
+)
 from meho_backplane.operations.ingest import (
     ConnectorStatusFilter,
-    IngestionPipelineService,
-    IngestRequest,
     ReviewService,
-    SpecSource,
-    UncoveredVersionLabel,
-    VersionMismatchError,
-    build_uncovered_version_label_detail,
-    build_version_mismatch_detail,
     list_ingested_connectors,
 )
 
@@ -114,156 +117,9 @@ __all__: list[str] = []
 _log = structlog.get_logger(__name__)
 
 
-# Op-class strings keep parity with the audit table conventions used
-# by :mod:`meho_backplane.broadcast.classify` for the credential /
-# audit / read / write taxonomy. List + review are read; the five
-# mutators are write.
-_OP_CLASS_READ: Final[str] = "read"
-_OP_CLASS_WRITE: Final[str] = "write"
-
-
-# Shared snippet documenting the connector_id format on every tool
-# that accepts one. Authored once so a future convention tweak edits
-# one string instead of six.
-_CONNECTOR_ID_DESCRIPTION: Final[str] = (
-    "Operator-facing connector identifier — '<impl_id>-<version>' "
-    "(e.g. 'vmware-rest-9.0', 'vault-1.x'). Split into the parsed "
-    "(product, version, impl_id) triple by the same rule the CLI "
-    "uses."
-)
-
-#: Optional tenant scope shared across every tool. Omit (or pass
-#: ``null``) for the built-in / global connector pool — that scope is
-#: ``tenant_admin``-only. Pass the operator's own tenant UUID to
-#: operate on tenant-curated rows.
-_TENANT_ID_PROPERTY: Final[dict[str, Any]] = {
-    "type": ["string", "null"],
-    "format": "uuid",
-    "description": (
-        "Tenant scope for this operation. Omit or pass null for "
-        "built-in / global connectors (tenant_admin only). Pass the "
-        "operator's own tenant UUID for tenant-curated rows; cross-"
-        "tenant requests are rejected."
-    ),
-}
-
-
-# ---------------------------------------------------------------------------
-# Argument coercion helpers
-# ---------------------------------------------------------------------------
-
-
-def _coerce_tenant_id(raw: Any) -> UUID | None:
-    """Convert the ``tenant_id`` argument from JSON-RPC into ``UUID | None``.
-
-    The JSON-Schema-validated value is always either a UUID string or
-    ``None``; the helper preserves ``None`` and parses the string. A
-    malformed UUID surfaces at JSON-Schema validation time (because of
-    the ``format: uuid`` annotation interpreted by
-    :mod:`jsonschema`'s format-checker chain). This helper assumes the
-    schema validator has already run.
-    """
-    if raw is None:
-        return None
-    return UUID(raw)
-
-
 # ---------------------------------------------------------------------------
 # Handler implementations
 # ---------------------------------------------------------------------------
-
-
-async def _ingest_handler(
-    operator: Operator,
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    """Run the full T1 + T2 + T3 ingest pipeline.
-
-    Translates the MCP arguments into the canonical
-    :class:`IngestRequest` (from :mod:`api_schemas`) and delegates to
-    :meth:`IngestionPipelineService.ingest`. The handler reads the
-    **active** LLM-client factory via
-    :func:`meho_backplane.api.v1.connectors_ingest.get_llm_client_factory`,
-    so it shares the production factory FastAPI lifespan startup installs
-    (:func:`~meho_backplane.operations.ingest.build_anthropic_ingest_llm_client`,
-    reusing ``settings.anthropic_api_key``) rather than pinning the
-    fail-closed default — without this, the MCP surface would 503 even on
-    a deploy where the REST / CLI surfaces group successfully (#1386). On
-    a deploy that configured no key the factory still raises
-    :class:`LlmClientUnavailable`, surfaced here as the JSON-RPC error.
-
-    The response is the canonical :class:`IngestResponse` shape the
-    REST route at ``POST /api/v1/connectors/ingest`` also returns.
-    """
-    request = IngestRequest(
-        product=arguments["product"],
-        version=arguments["version"],
-        impl_id=arguments["impl_id"],
-        specs=[SpecSource(uri=spec["uri"]) for spec in arguments["specs"]],
-        base_url=arguments.get("base_url"),
-        dry_run=bool(arguments.get("dry_run", False)),
-    )
-    # Post-validator invariant: the MCP path always constructs the
-    # explicit-quadruple shape (the JSON-Schema layer doesn't expose
-    # ``catalog_entry`` — that lives only on the REST surface today),
-    # so product/version/impl_id are guaranteed non-None. The asserts
-    # pin the invariant for mypy after the schema's optional typing
-    # widened to support the REST ``catalog_entry`` shape
-    # (G0.14-T9 / #1150).
-    assert request.product is not None
-    assert request.version is not None
-    assert request.impl_id is not None
-    tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
-    service = IngestionPipelineService(
-        operator,
-        llm_client_factory=get_llm_client_factory(),
-    )
-    # G0.9.1-T5 (#777): VersionMismatchError + UncoveredVersionLabel are
-    # caller-input validation errors (the operator's ``version`` label
-    # is incompatible with the supplied spec / not covered by any
-    # registered class) — JSON-RPC ``-32602`` Invalid Params, with the
-    # structured detail on ``error.data`` per spec §5.1. Mirrors the
-    # REST 422 envelope built by
-    # :mod:`meho_backplane.api.v1.connectors_ingest`; the shared
-    # builders in :mod:`meho_backplane.operations.ingest.error_envelopes`
-    # are the single source of truth so the wire shape can't drift.
-    # Without this, the dispatcher's generic ``except Exception`` arm in
-    # :func:`meho_backplane.mcp.server._dispatch_to_handler` would
-    # surface ``-32603 "internal error: VersionMismatchError"`` and
-    # discard the (already-detailed) exception message — opaque to the
-    # agent operator and misclassified as a server fault.
-    try:
-        result = await service.ingest(
-            product=request.product,
-            version=request.version,
-            impl_id=request.impl_id,
-            specs=request.specs,
-            base_url=request.base_url,
-            tenant_id=tenant_id,
-            dry_run=request.dry_run,
-        )
-    except VersionMismatchError as exc:
-        raise McpInvalidParamsError(
-            str(exc),
-            data=build_version_mismatch_detail(exc),
-        ) from exc
-    except UncoveredVersionLabel as exc:
-        raise McpInvalidParamsError(
-            str(exc),
-            data=build_uncovered_version_label_detail(exc),
-        ) from exc
-    ingestion_model, grouping_model = result.to_api_models()
-    # Build the canonical IngestResponse manually rather than
-    # constructing a new instance and round-tripping the inner
-    # models — Pydantic's frozen=True forbids mutation on the way
-    # back out anyway, and the explicit shape here is the same wire
-    # contract the REST router emits.
-    return {
-        "ingestion": ingestion_model.model_dump(mode="json"),
-        "grouping": (
-            grouping_model.model_dump(mode="json") if grouping_model is not None else None
-        ),
-    }
 
 
 async def _list_handler(
@@ -389,87 +245,8 @@ async def _disable_handler(
 
 
 # ---------------------------------------------------------------------------
-# Serialisation helper
-# ---------------------------------------------------------------------------
-
-
-def _model_dump_json_safe(model: Any) -> dict[str, Any]:
-    """Serialise a Pydantic model to a JSON-safe dict.
-
-    Uses ``mode="json"`` so UUIDs and datetimes serialise as strings
-    rather than native Python objects (the dispatcher's
-    :func:`json.dumps` over the response would otherwise raise
-    :class:`TypeError`). Mirrors the meho_status reference tool's
-    serialisation discipline.
-    """
-    raw = model.model_dump(mode="json")
-    # Round-trip via ``json`` to surface any latent non-serialisable
-    # field at registration time rather than at the dispatcher's
-    # ``json.dumps`` call. The cost is one extra encode/decode per
-    # tool call; the benefit is that a Pydantic field shape that
-    # ``mode="json"`` can't handle (e.g. a future ``set[UUID]``) is
-    # rejected here with the offending field named in the traceback
-    # rather than as a generic dispatcher error.
-    rehydrated: dict[str, Any] = json.loads(json.dumps(raw))
-    return rehydrated
-
-
-# ---------------------------------------------------------------------------
 # Tool registrations
 # ---------------------------------------------------------------------------
-
-
-register_mcp_tool(
-    definition=ToolDefinition(
-        name="meho.connector.ingest",
-        description=(
-            "Ingest one or more OpenAPI specs into a MEHO connector "
-            "(tenant_admin only). Parses each spec, registers the "
-            "operations into the endpoint_descriptor table, and runs the "
-            "LLM-summarised grouping pass. The connector lands in "
-            "'staged' state — operators must review groups + per-op flags "
-            "and then call meho.connector.enable before the connector's "
-            "operations become dispatchable. "
-            "Use when adding a new vendor surface (product=vmware "
-            "version=9.0 impl_id=vmware-rest specs=[...]); supports "
-            "merging multiple specs under one connector (vSphere ingests "
-            "vcenter.yaml + vi-json.yaml). "
-            "Do NOT use for typed connectors (Vault, K8s, bind9) — those "
-            "register via register_typed_operation() at connector init "
-            "and never need this tool. Pass dry_run=true to validate "
-            "specs without writing to the DB."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "product": {"type": "string", "minLength": 1, "maxLength": 64},
-                "version": {"type": "string", "minLength": 1, "maxLength": 64},
-                "impl_id": {"type": "string", "minLength": 1, "maxLength": 128},
-                "specs": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 16,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "uri": {"type": "string", "minLength": 1, "maxLength": 2048},
-                        },
-                        "required": ["uri"],
-                        "additionalProperties": False,
-                    },
-                },
-                "base_url": {"type": ["string", "null"], "maxLength": 2048},
-                "dry_run": {"type": "boolean", "default": False},
-                "tenant_id": _TENANT_ID_PROPERTY,
-            },
-            "required": ["product", "version", "impl_id", "specs"],
-            "additionalProperties": False,
-        },
-        required_role=TenantRole.TENANT_ADMIN,
-        op_class=_OP_CLASS_WRITE,
-    ),
-    handler=_ingest_handler,
-)
 
 
 register_mcp_tool(

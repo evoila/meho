@@ -178,6 +178,21 @@ connector-related release-notes line.
   (reusing the #1386 `LlmClientUnavailable` Anthropic-Messages precedent).
   Single-shot Q→cited-A only; no new REST/CLI surface (the tool is
   auto-discovered) (#1526).
+- `meho.connector.ingest` MCP tool gains an `async=true` mode + a
+  companion `meho.connector.ingest_status` poll tool (G3.5-T2),
+  carrying the #1303 REST async-202 offload to the agent-facing MCP
+  surface so a real vendor-spec ingest (e.g. SDDC Manager 9.0) returns
+  a job handle immediately instead of blocking the parse+register+LLM-
+  grouping pipeline past the agent's tool-call deadline. The async path
+  reuses the existing in-memory `IngestJobRegistry` + `run_ingest_job`,
+  so a job started over MCP is poll-able over the REST
+  `GET /api/v1/connectors/ingest/jobs/{job_id}` endpoint and vice versa;
+  the poll tool reports the run through to a terminal `succeeded`
+  (final ingestion + grouping counts) or `failed` (`error_class` +
+  `error`). `dry_run=true` and `async` unset keep the inline-return
+  shape (no regression). The ingest tools moved into a new
+  `connector_ingest` module alongside the existing `connector_admin`
+  review/edit tools (#1531).
 
 ### Fixed
 

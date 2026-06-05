@@ -207,6 +207,16 @@ connector-related release-notes line.
   dispatches through the same class), and `apply_nsx_core_curation` gains
   a `connector_id` keyword so it curates the ops the ingest actually
   landed (e.g. `nsx-rest-9.1.0.0`) (#1530).
+- The `docs:<connector-id>/<file>` spec-source shorthand is now honest:
+  it is resolved **CLI-side only** (expanded to a `file://` URI against
+  `$CLAUDE_RDC_DOCS`). Previously the schema docstring, CLI help, and a
+  CLI comment claimed the backplane resolved `docs:` natively — it never
+  did, so a bare `docs:` URI surfaced as an opaque
+  `InvalidSpecError`/`-32603` that read like a missing file. The CLI now
+  rejects an unset-`$CLAUDE_RDC_DOCS` `docs:` spec up front with a hint
+  naming the env var, and the backend rejects any `docs:` URI that
+  reaches the parser with a typed `UnsupportedSpecError` naming the
+  scheme. `https://` / `file://` specs are unaffected (#1535).
 
 ### Changed
 

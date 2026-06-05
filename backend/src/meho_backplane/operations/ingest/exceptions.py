@@ -115,14 +115,17 @@ class InvalidSpecError(ValueError):
 class UnsupportedSpecError(ValueError):
     """The document is structurally valid but ships a flavour the parser doesn't ingest.
 
-    Raised for Swagger 2.0, OpenAPI 4.x, cross-document ``$ref``, and
-    similar known-unsupported cases. The exception message always
-    names the offending shape so the operator can decide whether to
-    file a v0.2.next request or pre-process the spec. For Swagger 2.0
-    specifically the message also names the conversion path (convert
-    to OpenAPI 3.x via ``swagger2openapi`` / ``converter.swagger.io``
-    and re-ingest) so the operator can self-serve a 2.0-only vendor
-    surface such as Harbor 2.x (#1532).
+    Raised for Swagger 2.0, OpenAPI 4.x, cross-document ``$ref``, the
+    CLI-side ``docs:`` spec-source shorthand reaching the backend
+    unexpanded, and similar known-unsupported cases. The exception
+    message always names the offending shape so the operator can decide
+    whether to file a v0.2.next request or pre-process the spec. For
+    Swagger 2.0 specifically the message also names the conversion path
+    (convert to OpenAPI 3.x via ``swagger2openapi`` /
+    ``converter.swagger.io`` and re-ingest) so the operator can
+    self-serve a 2.0-only vendor surface such as Harbor 2.x (#1532). For
+    the ``docs:`` shorthand the message names ``$CLAUDE_RDC_DOCS`` as
+    the CLI-side resolution path (#1535).
     """
 
 

@@ -59,9 +59,9 @@ func newIngestCmd() *cobra.Command {
 			"  --spec accepts three URI shapes:\n" +
 			"    - file:///abs/path/to/spec.yaml          (local file)\n" +
 			"    - https://example.com/spec.yaml           (HTTP fetch)\n" +
-			"    - docs:<product-version>/<spec.yaml>      (resolves against\n" +
-			"      $CLAUDE_RDC_DOCS when set; otherwise passed through for\n" +
-			"      backplane-side resolution against its own checked-in docs)\n" +
+			"    - docs:<product-version>/<spec.yaml>      (CLI-side shorthand;\n" +
+			"      requires $CLAUDE_RDC_DOCS — expanded to a file:// URI. The\n" +
+			"      backplane does not resolve docs: URIs itself)\n" +
 			"  Repeat --spec to merge multiple specs under one connector_id\n" +
 			"  (vSphere is the canonical case: vcenter.yaml + vi-json.yaml).\n\n" +
 			"--dry-run parses + plans without writing to the DB; useful for\n" +

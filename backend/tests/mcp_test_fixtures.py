@@ -141,6 +141,7 @@ def isolated_registry() -> Iterator[None]:
     the matching ``meho://memory/{scope}/{slug}`` resource
     (``mcp.resources.memory``) join for the same reason.
     """
+    from meho_backplane.mcp.resources import docs as docs_resource
     from meho_backplane.mcp.resources import kb as kb_resource
     from meho_backplane.mcp.resources import memory as memory_resource
     from meho_backplane.mcp.resources import (
@@ -155,6 +156,7 @@ def isolated_registry() -> Iterator[None]:
         audit,
         broadcast_overrides,
         connector_admin,
+        docs,
         knowledge,
         meho_status,
         operations,
@@ -186,6 +188,13 @@ def isolated_registry() -> Iterator[None]:
     # three because they share one file by design.
     importlib.reload(broadcast_tools)
     importlib.reload(knowledge)
+    # G4.5-T4 (#1523): the capability-gated ``search_docs`` MCP tool +
+    # its companion ``meho://docs/{product}/{version}/{chunk_id}``
+    # resource join the reload list for the same reason every other MCP
+    # module does -- the autouse ``clear_registries()`` above would
+    # otherwise leave them unregistered in any test file that imports
+    # this fixture after the first one runs in the process.
+    importlib.reload(docs)
     importlib.reload(topology)
     importlib.reload(topology_create_node)
     # G12.2-T4 (#1298): the runbook template MCP tools
@@ -226,6 +235,7 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)
     importlib.reload(kb_resource)
+    importlib.reload(docs_resource)
     importlib.reload(memory_resource)
     # G7.1-T4 (#316): the tenant-conventions per-slug resource
     # (``meho://tenant/{tenant_id}/conventions/{slug}``) joins the

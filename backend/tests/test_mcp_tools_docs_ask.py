@@ -36,9 +36,12 @@ from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, CorpusUnavailable
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.docs_search.synthesis import NO_GROUNDED_ANSWER
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
@@ -49,6 +52,7 @@ from tests.mcp_test_fixtures import (
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seeded_operator_tenant,  # noqa: F401 — pytest-discovered fixture
 )
 
 _DOCS_CAPABILITY = "meho-docs"
@@ -546,3 +550,58 @@ def test_tools_call_ask_docs_rejects_extra_arguments(
     )
     assert response.status_code == 200
     assert response.json()["error"]["code"] == INVALID_PARAMS
+
+
+# ---------------------------------------------------------------------------
+# Uniform audit op_id across faces (G4.5-T8 #1549)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+async def test_tools_call_ask_docs_audit_row_carries_canonical_op_id(
+    docs_client: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,  # noqa: F811
+) -> None:
+    """G4.5-T8: the MCP ``ask_docs`` audit row's ``op_id`` is ``meho.docs.ask``.
+
+    Mirrors ``search_docs``: the handler binds the ``audit_op_id``
+    contextvar so the persisted row is filterable by the canonical, uniform
+    op_id across REST / CLI / MCP. ``op_class`` stays ``read`` (ask is a
+    read-class compose over retrieved chunks) and the raw query is recorded
+    only as ``params_hash``.
+    """
+    client, _op = docs_client
+    corpus = _fake_corpus(_SAMPLE_CHUNK)
+    stub = _StubLlmClient(
+        json.dumps(
+            {
+                "answer": "NSX 9.0 supports up to 10,000 logical switches per manager.",
+                "cited_chunk_ids": ["nsx-9.0-maximums-0007"],
+            }
+        )
+    )
+    with (
+        patch("meho_backplane.docs_search.service.search_corpus", new=corpus),
+        patch(_BUILD_LLM_CLIENT, return_value=stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call(
+                {"query": "logical switch maximums", "product": "nsx", "version": "9.0"},
+                call_id=11,
+            ),
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(select(AuditLog).order_by(AuditLog.occurred_at))
+        mcp_rows = [row for row in result.scalars().all() if row.method == "MCP"]
+    assert len(mcp_rows) == 1
+    payload = mcp_rows[0].payload
+    assert payload["op_id"] == "meho.docs.ask"
+    assert payload["op_class"] == "read"
+    assert "logical switch maximums" not in json.dumps(payload)
+    assert payload["params_hash"]

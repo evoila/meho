@@ -177,8 +177,12 @@ A `CorpusUnavailable` is **not** caught — a well-formed request against a
 down upstream is a server fault, so it bubbles to the dispatcher's
 generic catch as `-32603` Internal Error (the MCP analogue of the route's
 503). One `audit_log` row per call is written by the dispatcher with
-`op_id="search_docs"`, `op_class="read"`, and the raw arguments hashed
-into `params_hash` — never the query in the clear.
+`op_id="meho.docs.search"` (the handler binds the `audit_op_id` contextvar
+and the dispatcher lifts it into the persisted row, so the op id is the
+canonical, uniform token across REST / CLI / MCP — G4.5-T8 #1549),
+`op_class="read"`, and the raw arguments hashed into `params_hash` — never
+the query in the clear. The bare tool name still drives the broadcast
+`classify_op` path, so broadcast sensitivity is unchanged.
 
 The tool description is load-bearing routing UX (it is a prompt): it
 names the sibling tools so the agent learns the boundary — `search_docs`
@@ -202,10 +206,12 @@ synthesis failures (`LlmClientUnavailable` for an unconfigured model,
 `DocsSynthesisError` for a broken grounding contract) also bubble to
 `-32603` — never an ungrounded 200. It stays `op_class="read"`: it
 composes over retrieved chunks, it never mutates the corpus. The
-dispatcher writes one `audit_log` row per call with `op_id="ask_docs"`
-(the tool name verbatim, which `classify_op` leaves as `other` while the
-tool definition pins the row's `op_class="read"`) and the raw query hashed
-into `params_hash` — the same privacy posture as `search_docs`.
+dispatcher writes one `audit_log` row per call with `op_id="meho.docs.ask"`
+(the handler binds `audit_op_id`, lifted into the persisted row — uniform
+across REST / CLI / MCP per G4.5-T8 #1549; the bare tool name still feeds
+`classify_op`, which leaves it as `other` while the tool definition pins
+the row's `op_class="read"`) and the raw query hashed into `params_hash` —
+the same privacy posture as `search_docs`.
 
 The description routes the agent between the answer-shaped tool and the
 chunks-shaped one: `ask_docs` for a composed grounded answer, `search_docs`

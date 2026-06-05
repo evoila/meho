@@ -46,11 +46,13 @@ hit the corpus directly) buys three properties in one place:
 
 - **Central audit.** Every query lands one `audit_log` row
   (`op_class=read`), so `meho audit query` / who-touched surface it. The
-  op id depends on the face: the REST route and the CLI verb (which calls
-  the route) audit under `meho.docs.search`; the MCP `search_docs` tool
-  audits under `search_docs` (the dispatcher uses the tool name verbatim
-  — see [Audit row visible](#audit-row-visible-who-touched)). The raw
-  query is stored only as a SHA-256 hash — never in the clear.
+  op id is **uniform across all three faces**: REST, CLI, and MCP all
+  audit `search_docs` under `meho.docs.search` and `ask_docs` under
+  `meho.docs.ask`. A who-touched / `meho audit query op_id=meho.docs.search`
+  filter therefore catches every query regardless of the face it came in
+  on — including the MCP agent surface (see
+  [Audit row visible](#audit-row-visible-who-touched)). The raw query is
+  stored only as a SHA-256 hash — never in the clear.
 - **JWT federation handled once.** Operator-JWT forwarding lives in the
   backplane's corpus client, not in every consumer.
 - **Mandatory product/version scope enforced centrally.** A docs query
@@ -201,41 +203,33 @@ that array is the one source of truth for what the tenant has provisioned
 ### Audit row visible (who-touched)
 
 Every `search_docs` query — from any of the three faces — writes one
-`audit_log` row (`op_class=read`). The op id, however, **differs by
-face**, because the HTTP route and the MCP dispatcher use independent
-audit-binding conventions:
+`audit_log` row (`op_class=read`), and the op id is the **same canonical
+token regardless of face**:
 
-| Face | op id | Why |
+| Face | op id | How |
 |---|---|---|
-| REST route `POST /api/v1/search_docs` | `meho.docs.search` | The route binds the canonical op id via the chassis audit middleware (`audit_op_id="meho.docs.search"`). |
+| REST route `POST /api/v1/search_docs` | `meho.docs.search` | The route binds it via the chassis audit middleware (`audit_op_id="meho.docs.search"`). |
 | CLI verb `meho docs search` | `meho.docs.search` | The verb calls the REST route, so it shares the route's op id. |
-| MCP tool `search_docs` | `search_docs` | The MCP dispatcher audits every `tools/call` under the **tool name verbatim** — it has no HTTP path to bind, so the op id is the tool name, not the route's. |
+| MCP tool `search_docs` | `meho.docs.search` | The handler binds `audit_op_id="meho.docs.search"`; the MCP dispatcher lifts that contextvar into the persisted row's op id (G4.5-T8, #1549). The bare tool name still drives `classify_op` broadcast sensitivity, so `op_class=read` is unchanged. |
 
-So the op-id you filter on depends on where the query came from. Surface
+Because the op id is uniform, one filter catches every face — including
+the MCP agent surface, the primary place agents reach the corpus. Surface
 the rows with the audit verbs (the raw query is never stored; only its
 SHA-256 hash plus the product/version scope and hit count):
 
 ```bash
-# REST + CLI queries (op-id is a glob):
+# All search_docs queries — REST, CLI, and MCP — in one pass:
 meho audit query --op-id 'meho.docs.search' --since 24h
-
-# MCP/agent-session queries audit under the tool name:
-meho audit query --op-id 'search_docs' --since 24h
-
-# Both faces in one pass — `*` is the glob wildcard (op-id glob: `*` ↔
-# SQL `%`). `*search*` spans the route op id and the tool name because
-# both contain "search" (it also catches any other "search" op such as
-# search_knowledge / search_memory, so it is broader than docs-only):
-meho audit query --op-id '*search*' --since 24h
 
 # Or, if the corpus result cited a known target, see who touched it
 # (target-anchored — face-agnostic):
 meho audit who-touched <target> --since 24h
 ```
 
-> The MCP `ask_docs` tool (the synthesis fast-follow, G4.5-T7) follows
-> the same MCP convention: it audits under op id `ask_docs`, not
-> `meho.docs.search`. Filter `--op-id 'ask_docs'` for those rows.
+> The MCP `ask_docs` tool (the synthesis fast-follow, G4.5-T7) audits
+> uniformly too: op id `meho.docs.ask` across REST / CLI / MCP. Filter
+> `--op-id 'meho.docs.ask'` for those rows, or `--op-id 'meho.docs.*'`
+> for both search and ask.
 
 Whichever face produced it, a docs query that hit the corpus produces a
 row with `op_class=read`, the bound `product` / `version` scope, the

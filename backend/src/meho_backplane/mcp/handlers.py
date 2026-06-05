@@ -362,11 +362,14 @@ async def handle_tools_call(
         audit_id = uuid.uuid4()
         # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
         # row commits so ``broadcast_detail_origin`` lands on the
-        # row's payload. The op_id is the tool name verbatim so
-        # :func:`classify_op` matches credential / audit / read /
-        # write suffixes correctly (e.g. ``vault.kv.read`` →
-        # ``credential_read`` → aggregate-only redacted payload by
-        # default).
+        # row's payload. The broadcast / ``classify_op`` op_id is
+        # ``audit_name`` (the tool name verbatim) so :func:`classify_op`
+        # matches credential / audit / read / write suffixes correctly
+        # (e.g. ``vault.kv.read`` → ``credential_read`` → aggregate-only
+        # redacted payload by default). A handler may bind ``audit_op_id``
+        # to override only the *persisted* row's op_id (see the
+        # strip-and-merge override below); that never touches the
+        # broadcast / ``classify_op`` identity used here.
         #
         # ``resolver_params`` merges the raw tool ``arguments`` on top
         # of ``audit_payload`` so scope-matched override rules
@@ -423,6 +426,20 @@ async def handle_tools_call(
             _stripped = _k[len(_audit_prefix) :]
             if _stripped:
                 audit_payload.setdefault(_stripped, _v)
+        # G4.5-T8 (#1549): a handler may bind ``audit_op_id`` to declare a
+        # canonical, dotted op_id for the persisted row (e.g.
+        # ``meho.docs.search`` on ``search_docs``) so a who-touched /
+        # ``query_audit`` filter is transport-independent across REST / CLI
+        # / MCP. ``audit_payload["op_id"]`` is seeded to the bare tool name
+        # at dispatch entry, so the ``setdefault`` merge above can never
+        # apply it — an explicit override is required. This is the *only*
+        # ``audit_*`` key allowed to overwrite a seeded value; it changes
+        # only the persisted payload's identity, never ``audit_name`` (which
+        # still drives ``classify_op`` broadcast sensitivity and the row's
+        # path, so the read/write/credential taxonomy is unchanged).
+        _op_id_override = structlog.contextvars.get_contextvars().get("audit_op_id")
+        if isinstance(_op_id_override, str) and _op_id_override:
+            audit_payload["op_id"] = _op_id_override
         try:
             await write_mcp_audit_row(
                 audit_id=audit_id,

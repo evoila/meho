@@ -23,8 +23,8 @@ corpus directly) is what buys three properties in one place:
   no caller can accidentally run an unfiltered corpus-wide query.
 
 The same `search_docs` service backs three consumers: the REST route
-(this task, T3), the MCP tool `search_docs` (T4, #1523), and the CLI
-verb `meho docs search` (T5, #1524). They share one service so the
+(T3), the MCP tool `search_docs` (T4, #1523), and the CLI verb
+`meho docs search` (T5, #1524). They share one service so the
 REQUIRE_FILTERS gate and the cited-chunk shape are defined exactly once.
 
 ## Key types
@@ -115,6 +115,51 @@ require a new authenticated backend route plus an OpenAPI snapshot
 regen. The compiled-in + claim-probe shape achieves the same operator-
 visible outcome (absent from `--help`, non-runnable) without a backend
 change.
+### `search_docs` MCP tool (`meho_backplane.mcp.tools.docs`, T4 #1523)
+
+The agent-facing face. Registered against the G0.5 MCP registry,
+auto-discovered by `eager_import_mcp_modules` (no manifest edit).
+Carries a **second** gate beyond the `operator` role gate:
+`required_capability="meho-docs"` (G4.5-T1, #1519). A tenant that hasn't
+provisioned the `meho-docs` add-on never sees the tool in `tools/list`
+(true absence) and a `tools/call` naming it directly is rejected
+403-class before the handler runs — the gate is enforced at list time
+(`all_tools_for`) and again at call time (`handle_tools_call`).
+
+The `inputSchema` is strict JSON Schema 2020-12: `additionalProperties:
+false`, required `[query, product, version]`. That `required` list is the
+**first** line of the REQUIRE_FILTERS defence — a schema-validating
+client never reaches the service-side `build_docs_scope` check. When the
+gate-off → gate-on settings flip or a non-validating client does reach
+it, `MissingDocsFilterError` (the route's 422) maps to
+`McpInvalidParamsError` → JSON-RPC `-32602` (the MCP analogue of a 422).
+A `CorpusUnavailable` is **not** caught — a well-formed request against a
+down upstream is a server fault, so it bubbles to the dispatcher's
+generic catch as `-32603` Internal Error (the MCP analogue of the route's
+503). One `audit_log` row per call is written by the dispatcher with
+`op_id="search_docs"`, `op_class="read"`, and the raw arguments hashed
+into `params_hash` — never the query in the clear.
+
+The tool description is load-bearing routing UX (it is a prompt): it
+names the sibling tools so the agent learns the boundary — `search_docs`
+for VENDOR REFERENCE, `search_knowledge` for how THIS team does X,
+`search_memory` for cross-session state — and points to the companion
+resource for the full text of a hit on a later turn.
+
+### `meho://docs/{product}/{version}/{chunk_id}` resource (`meho_backplane.mcp.resources.docs`, T4 #1523)
+
+The fetch-by-citation companion, gated by the **same**
+`required_capability="meho-docs"`. The corpus transport (T2) is
+search-only — there is no fetch-chunk-by-id endpoint — so the handler
+recovers a chunk by **re-issuing a scoped corpus search** through the
+shared service and selecting the hit whose `chunk_id` matches the URI.
+That is why the URI carries `product` + `version`: they are the mandatory
+binary scope the re-search needs, and encoding them lets
+`build_docs_scope` enforce the same REQUIRE_FILTERS posture (belt-and-
+suspenders, since a blank segment can't match the `[^/]+` template). A
+`chunk_id` absent from the re-search collapses to `-32602` "not found"
+without distinguishing "empty scope" from "no such id", so the resource
+is not a corpus-contents oracle.
 
 ## Control flow (the REST route)
 
@@ -178,6 +223,10 @@ just makes the op name canonical for `query_audit` filtering.
 
 - Route: `backend/src/meho_backplane/api/v1/search_docs.py`.
 - Service: `backend/src/meho_backplane/docs_search/service.py`.
+- MCP tool: `backend/src/meho_backplane/mcp/tools/docs.py`.
+- MCP resource: `backend/src/meho_backplane/mcp/resources/docs.py`.
+- Capability gate (T1): `backend/src/meho_backplane/mcp/registry.py`
+  (`required_capability`, `capability_satisfied`, `all_tools_for`).
 - Transport: `backend/src/meho_backplane/auth/corpus.py`.
 - Audit binding precedent: `backend/src/meho_backplane/api/v1/retrieve.py`
   (query-hash privacy), `retrieve_eval.py` (op_id / op_class override).

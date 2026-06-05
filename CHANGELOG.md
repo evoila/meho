@@ -147,6 +147,23 @@ connector-related release-notes line.
   the backplane and corpus federation enforce the real boundary), so a
   forged claim changes only what the CLI shows, not what the server
   allows (#1524).
+- `search_docs` MCP tool + `meho://docs/{product}/{version}/{chunk_id}`
+  companion resource — the agent-facing face of the `meho-docs` add-on
+  (G4.5-T4). Both are gated by `required_capability="meho-docs"` (T1):
+  absent from `tools/list` / `resources/templates/list` for a tenant
+  without the add-on and 403-class on call, present and callable once
+  provisioned. The tool takes `query` + the **mandatory** `product` +
+  `version` binary scope (strict 2020-12 `inputSchema`,
+  `additionalProperties:false`) and federates through the shared
+  `docs_search` service (T3) to the external corpus, returning ranked
+  cited chunks; a missing/blank scope surfaces the REQUIRE_FILTERS
+  rejection as an MCP `-32602`, a down corpus as `-32603`. Its
+  description routes the agent — `search_docs` for vendor reference,
+  `search_knowledge` for how-we-do-X, `search_memory` for cross-session
+  state — and points at the companion resource, which recovers the full
+  text of a cited chunk on a later turn by re-issuing a scoped search
+  (the corpus transport is search-only). One hashed audit row per call
+  (`op_class=read`); the raw query is never logged (#1523).
 
 ## [0.11.0] - 2026-06-05
 

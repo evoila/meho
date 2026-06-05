@@ -109,6 +109,13 @@ connector-related release-notes line.
   now returns a `capabilities` array so MCP clients and the CLI read
   provisioning from one source of truth. The `meho-docs` add-on is the
   first consumer.
+- Backplane→corpus federation client for the `meho-docs` add-on: an
+  async client that forwards the operator JWT to the external
+  vendor-document corpus over HTTP, with `CORPUS_URL` / `CORPUS_AUDIENCE`
+  / `CORPUS_TIMEOUT_SECONDS` / `CORPUS_REQUIRE_FILTERS` settings and a
+  fail-closed `CorpusUnavailable` error (corpus unconfigured, unreachable,
+  or non-2xx) that the upcoming `search_docs` route maps to HTTP 503
+  (#1520). Transport only — the `search_docs` route lands separately.
 
 ## [0.11.0] - 2026-06-05
 

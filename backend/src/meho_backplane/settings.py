@@ -1052,6 +1052,26 @@ class Settings(BaseModel):
     event_drain_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
     event_drain_enabled: bool = True
     mcp_require_session_id: bool = False
+    #: Absolute URL of the external vendor-document corpus search
+    #: endpoint the ``search_docs`` add-on (G4.5 #1518) federates to via a
+    #: forwarded operator JWT. Empty ("") means the add-on is not
+    #: configured; the federation client
+    #: (:func:`~meho_backplane.auth.corpus.search_corpus`) fails closed
+    #: with :class:`~meho_backplane.auth.corpus.CorpusUnavailable` (→ 503
+    #: at the T3 route) rather than returning a silent empty result.
+    corpus_url: str = ""
+    #: Optional RFC 8707 resource indicator (``aud``) the corpus binds
+    #: the forwarded token to. Empty ("") forwards no audience.
+    corpus_audience: str = ""
+    #: Bound on the corpus HTTP request (connect / read / write), in
+    #: seconds. A slow corpus raises ``CorpusUnavailable`` rather than
+    #: blocking the event loop.
+    corpus_timeout_seconds: float = Field(default=10.0, gt=0)
+    #: Whether the ``search_docs`` route (T3, #1521) must reject a query
+    #: that carries no product/version filter (REQUIRE_FILTERS). Default
+    #: ``True`` — fail-closed scope discipline. Consumed by T3, not by the
+    #: transport in this Task.
+    corpus_require_filters: bool = True
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -1391,5 +1411,13 @@ def get_settings() -> Settings:
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),
+        ),
+        corpus_url=os.environ.get("CORPUS_URL", "").strip(),
+        corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
+        corpus_timeout_seconds=float(
+            os.environ.get("CORPUS_TIMEOUT_SECONDS", "10.0"),
+        ),
+        corpus_require_filters=parse_bool_env(
+            os.environ.get("CORPUS_REQUIRE_FILTERS", "true"),
         ),
     )

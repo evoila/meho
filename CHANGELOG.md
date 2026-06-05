@@ -179,6 +179,18 @@ connector-related release-notes line.
   Single-shot Q→cited-A only; no new REST/CLI surface (the tool is
   auto-discovered) (#1526).
 
+### Changed
+
+- Connector ingest now rejects a **Swagger 2.0** spec with an
+  *actionable* `UnsupportedSpecError` that names the conversion path —
+  convert to OpenAPI 3.x (`swagger2openapi` / `converter.swagger.io`)
+  and re-ingest the 3.x output — instead of a bare "not supported (
+  v0.2.next)". The parser stays OpenAPI-3.x-only on purpose (no
+  spec-conversion dependency pulled into the Python backend); the
+  enriched diagnostic unblocks 2.0-only vendor surfaces such as Harbor
+  2.x's `swagger.yaml` by telling the operator exactly what to do.
+  OpenAPI 3.0.x / 3.1 ingestion is unchanged (#1532).
+
 ### Documentation
 
 - Operator runbook for the `meho-docs` add-on:

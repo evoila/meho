@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the 7 admin MCP tools registered by G0.7-T7 (#407).
+"""Tests for the connector review / state-machine admin MCP tools (G0.7-T7 #407).
+
+Covers the six ``meho.connector.*`` review / edit / enable / disable
+tools. The ingest-pipeline tools (``meho.connector.ingest`` +
+``meho.connector.ingest_status``) split out into their own handler
+module (#1531) and are tested in
+``test_mcp_tools_connector_ingest.py``.
 
 Coverage matrix:
 
 * ``tools/list`` exposes the right subset of admin tools per role:
-  - ``read_only`` operator sees ZERO ``meho.connector.*`` tools.
+  - ``read_only`` operator sees ZERO of these ``meho.connector.*`` tools.
   - ``operator`` operator sees the 2 read tools (``list`` + ``review``).
-  - ``tenant_admin`` operator sees all 7 tools.
+  - ``tenant_admin`` operator sees all six review / edit tools.
 * Each tool's ``inputSchema`` is strict JSON-Schema 2020-12 with
   ``additionalProperties: false`` (#407 AC 4).
 * Tool descriptions name when to use / when not to (AI engineering
@@ -16,8 +22,6 @@ Coverage matrix:
 * ``tools/call`` dispatch to a stubbed canonical service layer:
   - ``meho.connector.list`` returns the stubbed ConnectorListItem rows.
   - ``meho.connector.review`` returns the stubbed ConnectorReviewPayload.
-  - ``meho.connector.ingest`` (tenant_admin) wires the request through
-    :class:`IngestionPipelineService`.
   - ``meho.connector.edit_group`` writes via ReviewService and only
     forwards explicitly named fields (PATCH-semantic intent).
   - ``meho.connector.enable`` flips status via ReviewService.
@@ -26,12 +30,10 @@ Coverage matrix:
   envelope) even when guessing the tool name.
 
 Why we stub the canonical service layer rather than spin up a real
-:class:`IngestionPipelineService`: the production service touches the
-DB, the embedding pipeline, and an injectable LLM client; a unit test
-that drives all three is the canary on T8 (#408). These tests are
-about the MCP handler shim — the contract under test is "the handler
-converts MCP arguments into the canonical service-layer call shape
-correctly", not "the pipeline ingests vSphere".
+:class:`ReviewService`: the production service touches the DB; a unit
+test that drives it is the canary on T8 (#408). These tests are about
+the MCP handler shim — the contract under test is "the handler converts
+MCP arguments into the canonical service-layer call shape correctly".
 """
 
 from __future__ import annotations
@@ -43,20 +45,13 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from meho_backplane.api.v1.connectors_ingest import get_llm_client_factory
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.operations.ingest import (
     ConnectorListItem,
     ConnectorReviewGroup,
     ConnectorReviewPayload,
-    GroupingResult,
-    IngestionPipelineResult,
-    IngestionResult,
-    UncoveredVersionLabel,
-    VersionMismatchError,
 )
 from tests.mcp_test_fixtures import (
-    OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
@@ -66,43 +61,6 @@ from tests.mcp_test_fixtures import (
 # ---------------------------------------------------------------------------
 # Canonical service-layer stubs (T6's #488 surface)
 # ---------------------------------------------------------------------------
-
-
-class _FakeIngestionPipelineService:
-    """Records every ingest call + returns a canned IngestionPipelineResult."""
-
-    def __init__(self, operator: Operator, **kwargs: Any) -> None:
-        self.operator = operator
-        self.init_kwargs = kwargs
-        self.ingest_calls: list[dict[str, Any]] = []
-
-    async def ingest(self, **kwargs: Any) -> IngestionPipelineResult:
-        self.ingest_calls.append(kwargs)
-        connector_id = f"{kwargs['impl_id']}-{kwargs['version']}"
-        ingestion = IngestionResult(
-            inserted_count=10,
-            updated_count=0,
-            skipped_count=0,
-            connector_registered=True,
-            operations_grouped=False,
-        )
-        grouping = (
-            None
-            if kwargs.get("dry_run")
-            else GroupingResult(
-                connector_id=connector_id,
-                groups_created=3,
-                operations_assigned=10,
-                operations_unassigned=0,
-                llm_call_count=2,
-                llm_duration_ms=123.4,
-            )
-        )
-        return IngestionPipelineResult(
-            connector_id=connector_id,
-            ingestion=ingestion,
-            grouping=grouping,
-        )
 
 
 class _FakeReviewService:
@@ -172,25 +130,15 @@ class _FakeReviewService:
 def stubbed_services(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
     """Patch the canonical service classes the MCP handlers construct.
 
-    The handler module resolved :class:`IngestionPipelineService` and
-    :class:`ReviewService` at import time from
-    :mod:`meho_backplane.operations.ingest`, and
+    The handler module resolved :class:`ReviewService` at import time
+    from :mod:`meho_backplane.operations.ingest`, and
     :func:`list_ingested_connectors` similarly. Patching those names
     on the handler module's local reference is the cleanest seam —
     subsequent constructor / function calls inside the handlers
     resolve to the fakes for the duration of the fixture.
     """
-    captured_pipeline: list[_FakeIngestionPipelineService] = []
     captured_review: list[_FakeReviewService] = []
     captured_list_calls: list[dict[str, Any]] = []
-
-    def _pipeline_factory(
-        operator: Operator,
-        **kwargs: Any,
-    ) -> _FakeIngestionPipelineService:
-        instance = _FakeIngestionPipelineService(operator, **kwargs)
-        captured_pipeline.append(instance)
-        return instance
 
     def _review_factory(operator: Operator, **_kwargs: Any) -> _FakeReviewService:
         instance = _FakeReviewService(operator)
@@ -218,12 +166,10 @@ def stubbed_services(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]
 
     import meho_backplane.mcp.tools.connector_admin as ca_mod
 
-    monkeypatch.setattr(ca_mod, "IngestionPipelineService", _pipeline_factory)
     monkeypatch.setattr(ca_mod, "ReviewService", _review_factory)
     monkeypatch.setattr(ca_mod, "list_ingested_connectors", _fake_list_ingested_connectors)
 
     yield {
-        "pipeline": captured_pipeline,
         "review": captured_review,
         "list_calls": captured_list_calls,
     }
@@ -234,8 +180,12 @@ def stubbed_services(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
+# The review / edit / state-machine tools this module owns. The
+# ingest-pipeline tools (``meho.connector.ingest`` +
+# ``meho.connector.ingest_status``) moved to
+# ``test_mcp_tools_connector_ingest.py`` alongside their handler module
+# (#1531); they're asserted there, not here.
 _ADMIN_TOOL_NAMES = {
-    "meho.connector.ingest",
     "meho.connector.list",
     "meho.connector.review",
     "meho.connector.edit_group",
@@ -466,103 +416,6 @@ def test_call_meho_connector_review_dispatches_to_review_service(
 
     [review] = stubbed_services["review"]
     assert review.review_calls == [("vmware-rest-9.0", None)]
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.TENANT_ADMIN],
-    indirect=True,
-)
-def test_call_meho_connector_ingest_threads_specs_through(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    stubbed_services: dict[str, Any],
-) -> None:
-    """Ingest tool forwards specs + flags + tenant_id to the pipeline service."""
-    client, _op = client_with_operator
-    response = post_mcp(
-        client,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "meho.connector.ingest",
-                "arguments": {
-                    "product": "vmware",
-                    "version": "9.0",
-                    "impl_id": "vmware-rest",
-                    "specs": [
-                        {"uri": "docs:vcenter-9.0/vcenter.yaml"},
-                        {"uri": "docs:vcenter-9.0/vi-json.yaml"},
-                    ],
-                    "dry_run": True,
-                    "tenant_id": str(OPERATOR_TENANT_ID),
-                },
-            },
-        },
-    )
-    assert response.status_code == 200
-    payload = _unwrap_text_content(response.json())
-    # The canonical IngestResponse shape: nested ingestion + grouping.
-    assert payload["ingestion"]["connector_id"] == "vmware-rest-9.0"
-    assert payload["ingestion"]["inserted_count"] == 10
-    # Dry-run path: no grouping result.
-    assert payload["grouping"] is None
-
-    [pipeline] = stubbed_services["pipeline"]
-    [call_kwargs] = pipeline.ingest_calls
-    assert call_kwargs["product"] == "vmware"
-    assert call_kwargs["version"] == "9.0"
-    assert call_kwargs["impl_id"] == "vmware-rest"
-    assert call_kwargs["tenant_id"] == OPERATOR_TENANT_ID
-    assert call_kwargs["dry_run"] is True
-    assert len(call_kwargs["specs"]) == 2
-    assert call_kwargs["specs"][0].uri == "docs:vcenter-9.0/vcenter.yaml"
-    assert call_kwargs["specs"][1].uri == "docs:vcenter-9.0/vi-json.yaml"
-    # The MCP tool reads the *active* lifespan-wired factory holder via
-    # get_llm_client_factory() rather than pinning the fail-closed
-    # default (#1386) — so it shares whatever REST/CLI use. The
-    # TestClient lifespan wired build_anthropic_ingest_llm_client, so the
-    # factory the pipeline received is identically the active holder. (If
-    # the tool still hardcoded default_llm_client_factory, this would now
-    # fail, since lifespan changed the holder away from the default.)
-    assert pipeline.init_kwargs.get("llm_client_factory") is get_llm_client_factory()
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.TENANT_ADMIN],
-    indirect=True,
-)
-def test_call_meho_connector_ingest_returns_grouping_when_not_dry_run(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    stubbed_services: dict[str, Any],
-) -> None:
-    """Non-dry-run path returns both ingestion + grouping in IngestResponse."""
-    client, _op = client_with_operator
-    response = post_mcp(
-        client,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "meho.connector.ingest",
-                "arguments": {
-                    "product": "vmware",
-                    "version": "9.0",
-                    "impl_id": "vmware-rest",
-                    "specs": [{"uri": "docs:vcenter-9.0/vcenter.yaml"}],
-                    "tenant_id": str(OPERATOR_TENANT_ID),
-                },
-            },
-        },
-    )
-    assert response.status_code == 200
-    payload = _unwrap_text_content(response.json())
-    assert payload["ingestion"]["connector_id"] == "vmware-rest-9.0"
-    assert payload["grouping"]["groups_created"] == 3
-    assert payload["grouping"]["operations_assigned"] == 10
 
 
 @pytest.mark.parametrize(
@@ -818,182 +671,3 @@ def test_operator_role_cannot_call_tenant_admin_mutator(
     assert not stubbed_services["review"], (
         "operator role bypassed RBAC and reached the service layer"
     )
-
-
-# ---------------------------------------------------------------------------
-# G0.9.1-T5 (#777) — structured error envelopes on the MCP ingest path
-# ---------------------------------------------------------------------------
-
-
-class _RaisingIngestionPipelineService:
-    """A pipeline-service double whose ``ingest`` raises a pinned exception.
-
-    Used to exercise the typed-exception branches in
-    :func:`meho_backplane.mcp.tools.connector_admin._ingest_handler` without
-    spinning up the real DB-touching pipeline. Mirrors the
-    :class:`_FakeIngestionPipelineService` constructor signature so the
-    same monkeypatch seam in the production module works.
-    """
-
-    def __init__(self, exc: Exception) -> None:
-        self._exc = exc
-
-    def __call__(self, operator: Operator, **_kwargs: Any) -> _RaisingIngestionPipelineService:
-        # Reused as a factory: ``IngestionPipelineService(operator, ...)``
-        # in :mod:`connector_admin` calls this instance which returns
-        # itself, so a single fixture instance can serve one request.
-        return self
-
-    async def ingest(self, **_kwargs: Any) -> IngestionPipelineResult:
-        raise self._exc
-
-
-@pytest.fixture
-def patched_pipeline_raising_version_mismatch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> VersionMismatchError:
-    """Install a pipeline service that raises a canned :class:`VersionMismatchError`.
-
-    Returns the exception instance so the test can compare its
-    structured attributes against the wire envelope verbatim.
-    """
-    exc = VersionMismatchError(
-        kind="spec_label_mismatch",
-        requested_version="8.0",
-        spec_info_versions=[("docs:vcenter-9.0/vcenter.yaml", "9.0.3")],
-    )
-    import meho_backplane.mcp.tools.connector_admin as ca_mod
-
-    monkeypatch.setattr(ca_mod, "IngestionPipelineService", _RaisingIngestionPipelineService(exc))
-    return exc
-
-
-@pytest.fixture
-def patched_pipeline_raising_uncovered_version(
-    monkeypatch: pytest.MonkeyPatch,
-) -> UncoveredVersionLabel:
-    """Install a pipeline service that raises a canned :class:`UncoveredVersionLabel`."""
-    exc = UncoveredVersionLabel(
-        product="t9-vmware",
-        version="7.0",
-        impl_id="t9-vmware-rest",
-        candidates=[("9.0", "t9-vmware-rest", "_RangedTestConnector", ">=8.5,<10.0")],
-    )
-    import meho_backplane.mcp.tools.connector_admin as ca_mod
-
-    monkeypatch.setattr(ca_mod, "IngestionPipelineService", _RaisingIngestionPipelineService(exc))
-    return exc
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.TENANT_ADMIN],
-    indirect=True,
-)
-def test_call_meho_connector_ingest_version_mismatch_returns_invalid_params(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    patched_pipeline_raising_version_mismatch: VersionMismatchError,
-) -> None:
-    """Spec/label version mismatch surfaces as JSON-RPC ``-32602`` with structured ``data``.
-
-    AC #1 / AC #3 / AC #4. Pre-fix the dispatcher's catch-all wrapped
-    the exception as ``-32603 "internal error: VersionMismatchError"``,
-    discarding the (already-detailed) message. The fix raises
-    :class:`McpInvalidParamsError` with the shared
-    :func:`build_version_mismatch_detail` envelope on ``error.data``
-    so the operator-facing agent can self-correct without re-prompting.
-    """
-    client, _op = client_with_operator
-    response = post_mcp(
-        client,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "meho.connector.ingest",
-                "arguments": {
-                    "product": "vmware",
-                    "version": "8.0",
-                    "impl_id": "vmware-rest",
-                    "specs": [{"uri": "docs:vcenter-9.0/vcenter.yaml"}],
-                },
-            },
-        },
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert "error" in body, body
-    # Caller-input validation, not a server fault — ``-32602``, NOT ``-32603``.
-    assert body["error"]["code"] == -32602, body["error"]
-    # The rendered message names both versions so a bare-string client
-    # still gets a self-correcting hint.
-    assert "9.0.3" in body["error"]["message"]
-    assert "8.0" in body["error"]["message"]
-    # The structured ``data`` member carries the same shape the REST
-    # 422 detail uses (G0.9-T8 #740) — both routes share
-    # :func:`build_version_mismatch_detail`.
-    data = body["error"]["data"]
-    assert data["kind"] == "spec_label_mismatch"
-    assert data["requested_version"] == "8.0"
-    assert data["spec_info_versions"] == [
-        {"spec_uri": "docs:vcenter-9.0/vcenter.yaml", "info_version": "9.0.3"},
-    ]
-    assert "9.0.3" in data["message"]
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.TENANT_ADMIN],
-    indirect=True,
-)
-def test_call_meho_connector_ingest_uncovered_version_returns_invalid_params(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    patched_pipeline_raising_uncovered_version: UncoveredVersionLabel,
-) -> None:
-    """Uncovered ``version`` label surfaces as ``-32602`` with the registered ranges.
-
-    AC #2 / AC #3 / AC #4. The structured ``data`` enumerates every
-    registered class for the ``(product, impl_id)`` pair so the agent
-    picks a label inside one of the advertised ranges and retries
-    without re-prompting the operator.
-    """
-    client, _op = client_with_operator
-    response = post_mcp(
-        client,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "meho.connector.ingest",
-                "arguments": {
-                    "product": "t9-vmware",
-                    "version": "7.0",
-                    "impl_id": "t9-vmware-rest",
-                    "specs": [{"uri": "docs:vcenter-9.0/vcenter.yaml"}],
-                },
-            },
-        },
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert "error" in body, body
-    assert body["error"]["code"] == -32602, body["error"]
-    # Rendered message mentions the label + at least one supported
-    # range so the agent has the diagnostic in plain prose too.
-    assert "version='7.0'" in body["error"]["message"]
-    assert ">=8.5,<10.0" in body["error"]["message"]
-    data = body["error"]["data"]
-    assert data["product"] == "t9-vmware"
-    assert data["version"] == "7.0"
-    assert data["impl_id"] == "t9-vmware-rest"
-    assert data["registered_classes"] == [
-        {
-            "class_name": "_RangedTestConnector",
-            "version": "9.0",
-            "impl_id": "t9-vmware-rest",
-            "supported_version_range": ">=8.5,<10.0",
-        },
-    ]
-    assert "_RangedTestConnector" in data["message"]

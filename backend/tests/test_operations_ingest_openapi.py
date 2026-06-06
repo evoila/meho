@@ -37,7 +37,7 @@ from meho_backplane.operations.ingest import (
     parse_openapi,
     read_spec_info_version,
 )
-from meho_backplane.operations.ingest.openapi import _assert_fetchable_remote_url
+from meho_backplane.operations.ingest.openapi import _MAX_REDIRECTS, _assert_fetchable_remote_url
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
 PETSTORE_30 = FIXTURES / "petstore_30.yaml"
@@ -308,28 +308,27 @@ def test_parse_petstore_31_json_route() -> None:
 # -- hand-authored minimal spec (#1533 / ci-07 on-ramp) --------------------
 
 
-def test_parse_handauthored_minimal_spec_via_file_uri() -> None:
-    """A hand-authored minimal OpenAPI 3.x ingests via a ``file://`` URI.
+def test_parse_handauthored_minimal_spec_via_https() -> None:
+    """A hand-authored minimal OpenAPI 3.x ingests via an ``https://`` URL.
 
     #1533 / ci-07: for a product whose vendor publishes no OpenAPI doc
     at all (VCF Fleet / vRSLCM, Hetzner Robot), the supported on-ramp is
     to author a minimal OpenAPI 3.x covering just the needed ops and
-    pass it to ``meho connector ingest … --spec file://…``. A
-    hand-authored spec is identical to a downloaded one once it reaches
-    the parser; this test is the worked example proving the end-to-end
-    parse from a ``file://`` URI, matching the workflow documented in
+    serve it over https to ``meho connector ingest``. A hand-authored
+    spec is identical to a downloaded one once it reaches the parser;
+    this test is the worked example proving the end-to-end parse,
+    matching the workflow documented in
     ``docs/cross-repo/connector-ingestion.md`` §"Product publishes no
     OpenAPI spec".
 
-    ``Path.as_uri()`` is the cross-platform ``file://`` form the
-    operator types after ``meho connector ingest`` resolves their local
-    path; the parser's ``file`` scheme branch round-trips it through
-    ``url2pathname`` back to the on-disk file.
+    The G0.16-T8 (#95) SSRF guard makes the backend https-only, so the
+    hand-authored spec reaches the parser over the same vetted transport
+    a downloaded one does.
     """
-    file_uri = HANDAUTHORED_MINIMAL_30.as_uri()
-    assert file_uri.startswith("file://")
-
-    rows = parse_openapi(file_uri, spec_source="spec:hetzner-robot.yaml")
+    content = HANDAUTHORED_MINIMAL_30.read_bytes()
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "handauthored_minimal.yaml", content)
+        rows = parse_openapi(url, spec_source="spec:hetzner-robot.yaml")
     ops = _by_op_id(rows)
 
     assert set(ops) == {"GET:/server", "POST:/reset/{server_ip}"}
@@ -419,6 +418,42 @@ def test_non_https_scheme_raises_invalid_spec() -> None:
     """
     with pytest.raises(InvalidSpecError, match="https"):
         parse_openapi("http://example.test/spec.yaml")
+
+
+def test_spec_response_over_size_cap_streams_and_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 2xx body larger than ``_MAX_SPEC_BYTES`` raises ``InvalidSpecError``
+    naming the size limit.
+
+    Regression guard for the M1 streaming fix: the cap is enforced while the
+    body streams in (``client.stream`` + ``iter_bytes``), so an oversized
+    response aborts the read instead of being fully buffered into pod memory
+    first.
+    """
+    monkeypatch.setattr("meho_backplane.operations.ingest.openapi._MAX_SPEC_BYTES", 1024)
+    oversized = b"x" * 4096
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "oversized.yaml", oversized)
+        with pytest.raises(InvalidSpecError, match="size limit"):
+            parse_openapi(url)
+
+
+def test_redirect_chain_over_cap_raises_invalid_spec() -> None:
+    """A redirect chain longer than ``_MAX_REDIRECTS`` raises
+    ``InvalidSpecError`` naming the redirect cap.
+
+    Each hop's destination is re-validated by the SSRF guard (the autouse
+    ``getaddrinfo`` patch keeps the test hosts public); the loop exhausts its
+    hop budget before any 2xx body is served.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        for i in range(_MAX_REDIRECTS + 1):
+            router.get(f"{_FIXTURE_HOST}/r{i}").mock(
+                return_value=httpx.Response(302, headers={"location": f"{_FIXTURE_HOST}/r{i + 1}"})
+            )
+        with pytest.raises(InvalidSpecError, match="followed more than"):
+            parse_openapi(f"{_FIXTURE_HOST}/r0")
 
 
 def test_malformed_yaml_bubbles_up() -> None:

@@ -465,33 +465,39 @@ def _load_spec_bytes(spec_path_or_uri: str) -> bytes:
     current_url = spec_path_or_uri
     with httpx.Client(timeout=_HTTP_TIMEOUT, follow_redirects=False) as client:
         for _ in range(_MAX_REDIRECTS + 1):
-            response = client.get(current_url)
-            if response.has_redirect_location:
-                next_url = str(response.headers["location"])
-                # Re-validate the redirect target before following it so a
-                # 30x from a public host to a private IP is rejected here,
-                # before any socket is opened to the redirect target.
-                _assert_fetchable_remote_url(next_url)
-                current_url = next_url
-                continue
-            response.raise_for_status()
-            _reject_non_spec_content_type(
-                upstream_url=spec_path_or_uri,
-                content_type=response.headers.get("content-type"),
-            )
-            # Cap response size to guard against redirects to large
-            # internal endpoints exhausting pod memory.
-            chunks: list[bytes] = []
-            total = 0
-            for chunk in response.iter_bytes(chunk_size=65536):
-                total += len(chunk)
-                if total > _MAX_SPEC_BYTES:
-                    raise InvalidSpecError(
-                        f"spec response exceeds the {_MAX_SPEC_BYTES // (1024 * 1024)} MiB"
-                        " size limit"
-                    )
-                chunks.append(chunk)
-            return b"".join(chunks)
+            # Stream rather than buffer: ``client.get`` reads the whole
+            # body into memory before the size cap below can fire, which
+            # defeats the memory-exhaustion guard. ``stream`` lets the cap
+            # abort the read mid-flight; the ``with`` block closes the
+            # socket on the redirect ``continue``, the over-cap ``raise``,
+            # and the success ``return`` alike.
+            with client.stream("GET", current_url) as response:
+                if response.has_redirect_location:
+                    next_url = str(response.headers["location"])
+                    # Re-validate the redirect target before following it
+                    # so a 30x from a public host to a private IP is
+                    # rejected here, before a socket opens to the target.
+                    _assert_fetchable_remote_url(next_url)
+                    current_url = next_url
+                    continue
+                response.raise_for_status()
+                _reject_non_spec_content_type(
+                    upstream_url=spec_path_or_uri,
+                    content_type=response.headers.get("content-type"),
+                )
+                # Cap the body size as it streams in, so a redirect to a
+                # large internal endpoint can't exhaust pod memory.
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes(chunk_size=65536):
+                    total += len(chunk)
+                    if total > _MAX_SPEC_BYTES:
+                        raise InvalidSpecError(
+                            f"spec response exceeds the {_MAX_SPEC_BYTES // (1024 * 1024)} MiB"
+                            " size limit"
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
         raise InvalidSpecError(f"spec URI followed more than {_MAX_REDIRECTS} redirects")
 
 

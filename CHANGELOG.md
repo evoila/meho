@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### list_doc_collections catalogue discovery (#1553)
+
+- Make the doc-collection catalogue **discoverable** so an agent learns
+  which collections it may search before it searches. Add the
+  `list_doc_collections` MCP tool (`required_capability="meho-docs"`,
+  operator/read), the REST sibling `GET /api/v1/doc_collections`
+  (operator), and the `meho docs collections list` CLI verb (`--vendor` /
+  `--limit` / `--cursor` / `--json`, on the existing capability-gated
+  `collections` parent). All three read `doc_collections` tenant-scoped
+  (global + tenant rows, tenant row shadows a global key once), filter to
+  the collections the principal is **entitled** to (`meho-docs:<key>` —
+  the same per-collection key `search_docs` enforces, so every listed key
+  is one `search_docs` accepts), keyset-paginate by `collection_key`, and
+  bind the canonical `meho.docs.collections.list` audit op_id. Add an
+  `initialize.instructions` catalogue band: the MCP `initialize` preamble
+  now carries a guard-delimited `<<DOC_COLLECTIONS_AVAILABLE>>` block
+  listing the operator's entitled collections (key / vendor / products /
+  when-to-use + status), threaded via an optional `capabilities` keyword
+  on `assemble_preamble`; the band is independently token-capped (an
+  over-budget catalogue collapses to a summary pointing at
+  `list_doc_collections`) and returns empty for a non-docs tenant, so an
+  unprovisioned preamble is byte-identical to before. CLI client + OpenAPI
+  snapshot regenerated for the new list route.
+
 ### Collection-scoped doc search (#1552)
 
 - Make `collection` the mandatory binary scope on `search_docs` /

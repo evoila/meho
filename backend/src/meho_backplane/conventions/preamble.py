@@ -87,6 +87,7 @@ from meho_backplane.conventions.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantConvention
+from meho_backplane.docs_collections.preamble import assemble_doc_catalogue
 from meho_backplane.runbooks.priming import assemble_runbook_priming
 
 __all__ = [
@@ -252,6 +253,7 @@ async def assemble_preamble(
     tenant_id: UUID,
     operator_sub: str,
     *,
+    capabilities: frozenset[str] | None = None,
     max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
 ) -> PreambleResult:
     """Assemble the session preamble for *tenant_id* + *operator_sub* up to *max_tokens*.
@@ -278,6 +280,16 @@ async def assemble_preamble(
     loses priming for every session. Migration cost is one extra
     positional argument per call site.
 
+    G4.6-T4 (#1553) added the optional ``capabilities`` keyword so the
+    assembler can append a doc-collection catalogue band listing the
+    collections the operator is entitled to search (see
+    :func:`~meho_backplane.docs_collections.preamble.assemble_doc_catalogue`).
+    The parameter is **optional, default ``None``** (unlike *operator_sub*,
+    which is required) because a caller that does not pass it — the
+    conventions inclusion-feedback write path — simply omits the catalogue
+    band; a tenant entitled to no collections also omits it, so the
+    preamble stays byte-identical to its pre-T4 shape for non-docs tenants.
+
     Delegates to :func:`assemble_preamble_detailed` and discards the
     verbose fields -- the MCP read path only needs ``text`` and
     ``dropped_slugs``. The G0.14-T8 (#1149) post-write inclusion
@@ -288,6 +300,7 @@ async def assemble_preamble(
     detailed = await assemble_preamble_detailed(
         tenant_id,
         operator_sub,
+        capabilities=capabilities,
         max_tokens=max_tokens,
     )
     return PreambleResult(detailed.text, detailed.dropped_slugs)
@@ -373,6 +386,7 @@ async def assemble_preamble_detailed(
     tenant_id: UUID,
     operator_sub: str,
     *,
+    capabilities: frozenset[str] | None = None,
     max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
     session: AsyncSession | None = None,
 ) -> PreambleAssembly:
@@ -417,15 +431,26 @@ async def assemble_preamble_detailed(
     # through is not required because priming reads ``runbook_runs``
     # rows, which the conventions write transaction never touches.
     priming = await assemble_runbook_priming(operator_sub, tenant_id)
+    # G4.6-T4 (#1553): the doc-collection catalogue band. Built only when
+    # the caller threaded the operator's capabilities (the MCP
+    # ``initialize`` path); a ``None`` capability set or a tenant entitled
+    # to no collections yields ``text=""``, so the band drops cleanly and
+    # the preamble stays byte-identical to its pre-T4 shape. Like priming,
+    # it opens its own session (reads ``doc_collections``, untouched by the
+    # conventions write transaction).
+    catalogue_text = ""
+    if capabilities is not None:
+        catalogue = await assemble_doc_catalogue(capabilities, tenant_id)
+        catalogue_text = catalogue.text
 
     if not conventions:
-        # No conventions text: emit the priming text on its own if
-        # present, else the empty-string sentinel. An operator with
-        # in-progress runs in a tenant without operational
-        # conventions still receives priming -- the two bands are
-        # independent (#1316).
+        # No conventions text: emit the priming + catalogue bands on their
+        # own if present, else the empty-string sentinel. An operator with
+        # in-progress runs or entitled collections in a tenant without
+        # operational conventions still receives those bands -- the three
+        # bands are independent (#1316, #1553).
         return PreambleAssembly(
-            text=priming.text,
+            text=_combine_bands("", priming.text, catalogue_text),
             dropped_slugs=[],
             kept_slugs=[],
             token_counts={},
@@ -438,7 +463,7 @@ async def assemble_preamble_detailed(
         max_tokens,
     )
     return PreambleAssembly(
-        text=_combine_bands(_wrap_preamble(kept_blocks), priming.text),
+        text=_combine_bands(_wrap_preamble(kept_blocks), priming.text, catalogue_text),
         dropped_slugs=dropped,
         kept_slugs=kept_slugs,
         token_counts=token_counts,
@@ -467,23 +492,34 @@ async def _load_conventions(
     return await _fetch_operational_conventions(session, tenant_id)
 
 
-def _combine_bands(conventions_text: str, priming_text: str) -> str:
-    """Stitch the conventions and priming text bands into the assembled preamble.
+def _combine_bands(
+    conventions_text: str,
+    priming_text: str,
+    catalogue_text: str = "",
+) -> str:
+    """Stitch the conventions, priming, and catalogue bands into the preamble.
 
-    G12.4-T2 (#1316). Empty priming -> the assembled text is the
-    conventions text alone, byte-identical to the pre-T2 shape (no
-    trailing blank line, no separator). The separator is conditional
-    on priming having content, so an operator without in-progress
-    runs sees zero behaviour change. Tests in
-    :mod:`tests.test_conventions_preamble` pin this with a byte-shape
-    assertion against the pre-T2 wire string.
+    G12.4-T2 (#1316) added the priming band; G4.6-T4 (#1553) added the
+    doc-collection catalogue band as a third. The bands render in a fixed
+    order — conventions, then priming, then catalogue — joined by a
+    blank-line separator, with **empty bands dropped entirely** so the
+    join introduces no leading / trailing separator.
 
-    Two newlines between the conventions ``END_TENANT_CONVENTIONS>>``
-    and the priming ``<<RUNBOOK_PRIMING — CRITICAL>>`` so the two
-    bands render as separate paragraphs in the agent's context. Each
-    band carries its own delimiters; the separator is between bands,
-    not inside either.
+    Byte-identity invariants the tests pin:
+
+    * Only conventions present -> the conventions text alone, byte-identical
+      to the pre-T2 shape (no trailing blank line, no separator).
+    * Only priming present (empty conventions + empty catalogue) -> the
+      priming text alone, byte-identical to the pre-T4 priming-only shape.
+    * A non-docs tenant (``capabilities=None`` or no entitled collections)
+      passes ``catalogue_text=""`` -> the assembled text is identical to
+      its pre-T4 (conventions + priming) shape.
+
+    Two newlines between adjacent bands (e.g. conventions
+    ``END_TENANT_CONVENTIONS>>`` and priming
+    ``<<RUNBOOK_PRIMING — CRITICAL>>``) so they render as separate
+    paragraphs. Each band carries its own delimiters; the separator sits
+    between bands, never inside one.
     """
-    if not priming_text:
-        return conventions_text
-    return f"{conventions_text}\n\n{priming_text}"
+    bands = [band for band in (conventions_text, priming_text, catalogue_text) if band]
+    return "\n\n".join(bands)

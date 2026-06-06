@@ -421,6 +421,41 @@ async def _load_convention(
 # ---------------------------------------------------------------------------
 
 
+async def _compute_budget_status(operator: Operator) -> BudgetStatus:
+    """Compute the conventions preamble budget for *operator*'s tenant.
+
+    Runs the same :func:`assemble_preamble` primitive T4's MCP
+    ``initialize`` handler uses, so ``estimated_tokens`` on the list
+    response and the preamble actually delivered to agent sessions cannot
+    drift. The assembler opens its own DB session (the MCP ``initialize``
+    path is not a FastAPI request handler), adding one round-trip; that is
+    acceptable for the v0.2 budget contract and the natural unit for "what
+    the preamble actually weighs".
+
+    The ``budget_status`` arithmetic is **conventions-only**:
+    ``estimated_tokens`` measures the conventions band against
+    ``DEFAULT_MAX_PREAMBLE_TOKENS``. The other bands — priming (G12.4-T2
+    #1316, capped by ``MAX_PRIMING_BLOCKS``) and the doc-collection
+    catalogue (G4.6-T4 #1553, its own ``MAX_CATALOGUE_TOKENS``) — are not
+    charged to the conventions budget. The preamble is assembled with both
+    (``sub`` + ``capabilities``) so the list view reflects the exact wire
+    shape MCP ``initialize`` ships, then ``_conventions_text_only`` strips
+    everything after the conventions terminator before measuring — a tenant
+    with zero operational conventions reports ``estimated_tokens=0``
+    regardless of how many runs or entitled collections the operator has.
+    """
+    preamble = await assemble_preamble(
+        operator.tenant_id, operator.sub, capabilities=operator.capabilities
+    )
+    conventions_only_text = _conventions_text_only(preamble.text)
+    return BudgetStatus(
+        max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
+        estimated_tokens=estimate_tokens(conventions_only_text),
+        over_budget=bool(preamble.dropped_slugs),
+        dropped_slugs=preamble.dropped_slugs,
+    )
+
+
 @router.get("", response_model=ConventionListResponse)
 async def list_conventions(
     operator: Annotated[Operator, _require_operator],
@@ -475,38 +510,7 @@ async def list_conventions(
     )
     rows = (await session.execute(stmt)).scalars().all()
 
-    # Compute the budget status via the same primitive T4's MCP
-    # ``initialize`` handler uses, so a tenant's
-    # ``estimated_tokens`` on the list response and the preamble
-    # actually delivered to agent sessions cannot drift. The
-    # assembler opens its own DB session (it has to: the MCP
-    # ``initialize`` path is not a FastAPI request handler), which
-    # adds one round-trip on top of the list query above; that is
-    # acceptable for the v0.2 budget contract and the natural unit
-    # for "what the preamble actually weighs".
-    #
-    # G12.4-T2 (#1316) extended :func:`assemble_preamble` with the
-    # operator's ``sub`` so the assembled text can include per-run
-    # runbook priming. The ``budget_status`` arithmetic is
-    # **conventions-only**: ``estimated_tokens`` measures the
-    # conventions text band against ``DEFAULT_MAX_PREAMBLE_TOKENS``
-    # (priming has its own implicit cap via ``MAX_PRIMING_BLOCKS``
-    # and is not charged to the conventions budget per the
-    # Initiative #1199 design contract). The operator's preamble is
-    # still assembled with priming so the list view reflects the
-    # exact wire shape the MCP ``initialize`` handler ships; the
-    # priming portion is then stripped before measuring tokens so
-    # the budget signal stays honest -- a tenant with zero
-    # operational conventions reports ``estimated_tokens=0``
-    # regardless of how many runbook runs the operator has.
-    preamble = await assemble_preamble(operator.tenant_id, operator.sub)
-    conventions_only_text = _conventions_text_only(preamble.text)
-    budget_status = BudgetStatus(
-        max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
-        estimated_tokens=estimate_tokens(conventions_only_text),
-        over_budget=bool(preamble.dropped_slugs),
-        dropped_slugs=preamble.dropped_slugs,
-    )
+    budget_status = await _compute_budget_status(operator)
 
     entries = [ConventionSummary.model_validate(row) for row in rows]
     if envelope == "v2":

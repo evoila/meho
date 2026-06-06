@@ -22,11 +22,13 @@ The registry deliberately splits two kinds of field by who writes them
   liveness; the readiness probe (G4.6-T6, #1555) writes these from the
   backend on a successful probe. See [Readiness probe + lifecycle](#readiness-probe--lifecycle-g46-t6-1555).
 
-This is registry substrate plus the readiness/lifecycle layer. The
-backend-agnostic search router (T2, #1551), collection-scoped
-`search_docs` / `ask_docs` (T3, #1552), and the `list_doc_collections`
-catalogue tool and CLI (T4, #1553) build on this surface but are out of
-scope here.
+This is registry substrate plus the readiness/lifecycle layer and the
+catalogue-discovery surface. The backend-agnostic search router (T2,
+#1551) and collection-scoped `search_docs` / `ask_docs` (T3, #1552) build
+on this surface but are out of scope here; the `list_doc_collections`
+catalogue tool / REST route / CLI verb and the `initialize.instructions`
+catalogue band (T4, #1553) are documented under
+[Catalogue discovery](#catalogue-discovery-g46-t4-1553).
 
 ## Key types
 
@@ -200,11 +202,69 @@ probe route's job.
 
 ### CLI (`cli/internal/cmd/docs/collections.go`)
 
-`meho docs collections probe|enable|disable <key>` — the lifecycle face
-of the catalogue, tenant_admin-gated and capability-gated like
-`meho docs search`. `probe` renders the `BackendReadiness` block;
-`enable` / `disable` confirm the transition. The catalogue `list` verb is
-a sibling Task (T4 #1553) that adds to this same parent command.
+`meho docs collections list|probe|enable|disable <key>`. `list` (T4
+#1553, operator) is the catalogue-discovery verb; `probe` / `enable` /
+`disable` (T6 #1555, tenant_admin) are the lifecycle face. All four are
+capability-gated like `meho docs search` (hidden + refusing when the
+tenant lacks `meho-docs`). `probe` renders the `BackendReadiness` block;
+`enable` / `disable` confirm the transition. See
+[Catalogue discovery](#catalogue-discovery-g46-t4-1553) for `list`.
+
+## Catalogue discovery (G4.6-T4 #1553)
+
+The discovery face of the catalogue — three sibling fronts on one
+backplane plus a session-preamble band — so an agent learns *which*
+collections it may search before it searches. Every surface filters to
+the collections the operator is **entitled** to: it holds
+`meho-docs:<collection_key>` for them (the same per-collection key
+`search_docs` enforces at query time), so a listed key is always one
+`search_docs` will accept rather than reject with a 403.
+
+### `list_doc_collections` MCP tool (`meho_backplane.mcp.tools.doc_collections`)
+
+`required_role=OPERATOR`, `op_class='read'`,
+`required_capability='meho-docs'` — absent from `tools/list` for a tenant
+without the add-on, visible once provisioned. The handler reads
+`doc_collections` tenant-scoped (global + tenant rows), de-duplicates a
+shadowed global key in favour of the tenant row, filters to the entitled
+set, and returns `{collections: [...], next_cursor}` keyset-paginated by
+`collection_key`. Binds `audit_op_id="meho.docs.collections.list"` (the
+`meho.docs.*` family #1549 established). The summary omits the `backend`
+record by design (#1548 backend-agnostic contract).
+
+### REST `GET /api/v1/doc_collections` (`meho_backplane.api.v1.doc_collections`)
+
+The REST sibling — OPERATOR-gated, same tenant-scope + dedupe +
+entitlement filter, keyset by `collection_key`, returns
+`list[DocCollectionSummary]`, binds the same canonical audit op_id. An
+unprovisioned tenant (no `meho-docs:*` capability) gets an empty list.
+`--vendor` is an exact-match query filter.
+
+### CLI `meho docs collections list` (`cli/internal/cmd/docs/collections_list.go`)
+
+The operator-facing verb on the existing `collections` parent, mirroring
+`meho targets list` (`--vendor` / `--limit` / `--cursor` / `--json`).
+Capability-gated (the typed `addon_not_provisioned` refusal before any
+network call); renders a KEY / VENDOR / PRODUCTS / STATUS / DOCS table.
+
+### `initialize.instructions` catalogue band (`meho_backplane.docs_collections.preamble`)
+
+`assemble_doc_catalogue(...)` — the third preamble band, after the tenant
+conventions (G7.1-T4 #316) and runbook priming (G12.4-T2 #1316). It
+renders a guard-delimited `<<DOC_COLLECTIONS_AVAILABLE>> … >>` block
+listing the operator's entitled collections so an agent can pick a
+`collection` from the session preamble. Threaded into
+`assemble_preamble` / `assemble_preamble_detailed` via an **optional**
+`capabilities` keyword (the MCP `initialize` path passes
+`operator.capabilities`; the conventions write path omits it). Returns
+`text=""` — and the assembler omits the band — when the operator is
+entitled to no collection, so a non-docs tenant's preamble is
+**byte-identical** to its pre-T4 shape. The band is independently
+token-capped (`MAX_CATALOGUE_TOKENS`); over-budget it renders a summary
+form pointing at `list_doc_collections` and logs
+`doc_catalogue_band_over_budget`, mirroring the priming band. The guard
+delimiters are wrapper-emitted (never substituted from row content), so a
+malicious `when_to_use` carrying the terminator cannot escape the block.
 
 ## Dependencies
 

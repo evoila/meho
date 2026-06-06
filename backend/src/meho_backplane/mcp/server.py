@@ -319,12 +319,14 @@ async def _initialize(
     # module is already loaded by the time any handshake arrives).
     from meho_backplane.conventions.preamble import assemble_preamble
 
-    # G12.4-T2 (#1316): pass the operator's ``sub`` so the assembler
-    # can append per-run priming text for any ``in_progress`` runs
-    # assigned to this operator. An operator with no in-progress runs
-    # sees a byte-identical preamble to the pre-T2 shape (the priming
-    # helper returns ``text=""`` and the assembler omits the section).
-    preamble = await assemble_preamble(operator.tenant_id, operator.sub)
+    # ``sub`` (G12.4-T2 #1316) drives the per-run priming band;
+    # ``capabilities`` (G4.6-T4 #1553) drives the doc-collection catalogue
+    # band. An operator with no in-progress runs and no entitled collections
+    # sees a byte-identical preamble to the pre-band shape (each band helper
+    # returns ``text=""`` and the assembler omits that section).
+    preamble = await assemble_preamble(
+        operator.tenant_id, operator.sub, capabilities=operator.capabilities
+    )
     if preamble.dropped_slugs:
         # Loud, not silent -- the dropped-slug list is part of the
         # contract per the issue body's acceptance criterion. WARNING

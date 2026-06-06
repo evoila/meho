@@ -222,6 +222,29 @@ def test_vendor_filter_narrows(client: TestClient) -> None:
     assert [r["collection_key"] for r in rows] == ["netapp"]
 
 
+def test_vendor_filter_runs_after_dedupe_for_a_shadowed_key(client: TestClient) -> None:
+    """``vendor`` filters the tenant-wins row, never the shadowed global one.
+
+    A global key ``vmware`` (vendor ``A``) is shadowed by a tenant-curated
+    row for the same key under a different vendor ``B`` (the tenant row
+    wins). With the filter applied after the tenant-first dedupe,
+    ``vendor=B`` returns the tenant row for ``vmware`` while ``vendor=A``
+    does NOT — the shadowed global vendor is not searchable. The old
+    SQL-side filter leaked the global row's metadata under ``vendor=A``.
+    """
+    _seed_sync(collection_key="vmware", vendor="A")
+    _seed_sync(collection_key="vmware", vendor="B", tenant_id=_TENANT_ID)
+    caps = ["meho-docs", "meho-docs:vmware"]
+
+    by_tenant_vendor = _get(client, capabilities=caps, params={"vendor": "B"})
+    tenant_rows = by_tenant_vendor.json()  # type: ignore[attr-defined]
+    assert [r["collection_key"] for r in tenant_rows] == ["vmware"]
+    assert tenant_rows[0]["vendor"] == "B"
+
+    by_global_vendor = _get(client, capabilities=caps, params={"vendor": "A"})
+    assert by_global_vendor.json() == []  # type: ignore[attr-defined]
+
+
 def test_keyset_pagination(client: TestClient) -> None:
     """``cursor`` resumes after the last key seen."""
     for key in ("alpha", "bravo", "charlie"):
@@ -232,6 +255,28 @@ def test_keyset_pagination(client: TestClient) -> None:
     assert [r["collection_key"] for r in first.json()] == ["alpha", "bravo"]  # type: ignore[attr-defined]
 
     second = _get(client, capabilities=caps, params={"limit": 2, "cursor": "bravo"})
+    assert [r["collection_key"] for r in second.json()] == ["charlie"]  # type: ignore[attr-defined]
+
+
+def test_keyset_pagination_with_vendor_filter_after_dedupe(client: TestClient) -> None:
+    """The cursor still windows by ``collection_key`` with ``vendor`` set.
+
+    ``alpha`` and ``charlie`` share vendor ``Acme``; ``bravo`` is a
+    different vendor. A ``limit=1`` walk filtered to ``Acme`` yields
+    ``alpha`` then resumes after it — skipping the filtered-out ``bravo``
+    in SQL — to ``charlie``, terminating on the empty page.
+    """
+    _seed_sync(collection_key="alpha", vendor="Acme")
+    _seed_sync(collection_key="bravo", vendor="Other")
+    _seed_sync(collection_key="charlie", vendor="Acme")
+    caps = ["meho-docs", "meho-docs:alpha", "meho-docs:bravo", "meho-docs:charlie"]
+
+    first = _get(client, capabilities=caps, params={"vendor": "Acme", "limit": 1})
+    assert [r["collection_key"] for r in first.json()] == ["alpha"]  # type: ignore[attr-defined]
+
+    second = _get(
+        client, capabilities=caps, params={"vendor": "Acme", "limit": 1, "cursor": "alpha"}
+    )
     assert [r["collection_key"] for r in second.json()] == ["charlie"]  # type: ignore[attr-defined]
 
 

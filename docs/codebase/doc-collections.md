@@ -235,6 +235,16 @@ set, and returns `{collections: [...], next_cursor}` keyset-paginated by
 `meho.docs.*` family #1549 established). The summary omits the `backend`
 record by design (#1548 backend-agnostic contract).
 
+The optional `vendor` filter is applied **after** the tenant-first dedupe
+(in Python, over the post-dedupe tenant-wins rows), never in the
+pre-dedupe SQL `WHERE` (#1568). A tenant row may shadow a global key under
+a *different* vendor; filtering in SQL would drop the tenant row before it
+could win and surface the shadowed global row's metadata, so `vendor`
+filters the rows the principal actually sees. The keyset cursor
+(`collection_key > cursor`) stays in SQL — dedupe and the vendor filter
+both preserve `collection_key` ordering, so pagination is unaffected by
+the reorder.
+
 ### REST `GET /api/v1/doc_collections` (`meho_backplane.api.v1.doc_collections`)
 
 The REST sibling — OPERATOR-gated, same tenant-scope + dedupe +

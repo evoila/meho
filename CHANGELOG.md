@@ -116,6 +116,22 @@ connector-related release-notes line.
   terminal/retryable signal is a genuine client value and the mechanism was
   already shipped and tested by #1555.)
 
+### list_doc_collections vendor scoping (#1568)
+
+- Fix the optional `vendor` filter on `list_doc_collections` (MCP tool +
+  `GET /api/v1/doc_collections` REST route) to run **after** the
+  tenant-first dedupe instead of before it. Previously the filter was a
+  pre-dedupe SQL `WHERE`, so when a tenant-curated row shadowed a global
+  `collection_key` under a *different* vendor, filtering by the shadowed
+  global row's vendor surfaced that global row's metadata
+  (vendor/products/`when_to_use`/status) — violating the catalogue's
+  documented "tenant row wins" invariant. The filter now applies in Python
+  over the post-dedupe tenant-wins rows, so `vendor` only ever keeps or
+  drops the row the principal would actually search; the keyset cursor
+  (`collection_key > cursor`) stays in SQL and pagination is unaffected.
+  Not an entitlement leak — the returned `collection_key` set and
+  entitlement filtering are unchanged.
+
 ### Doc-collection docs + runbook (#1556)
 
 - Update the operator provisioning runbook

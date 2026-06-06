@@ -31,12 +31,18 @@ touches the raw query beyond forwarding it to the corpus.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.auth.corpus import CorpusChunk, search_corpus
 from meho_backplane.auth.operator import Operator
+from meho_backplane.docs_search.backends import resolve_backend
 from meho_backplane.settings import get_settings
+
+if TYPE_CHECKING:
+    from meho_backplane.docs_collections import DocCollection
 
 __all__ = [
     "DocsChunk",
@@ -191,45 +197,79 @@ async def search_docs(
     *,
     scope: DocsScope,
     limit: int = 10,
+    collection: DocCollection | None = None,
 ) -> DocsSearchResult:
-    """Search the external corpus for *operator* within *scope*.
+    """Search a doc collection's backend for *operator* within *scope*.
 
-    Forwards the operator JWT (via T2's :func:`search_corpus`) so the
-    corpus authenticates + audits the call as the operator, scopes the
-    search to the binary product+version filter, and projects the cited
-    chunks into MEHO's surface. The query itself is never logged here —
-    only its presence is implied; the route binds the SHA-256 hash to the
-    audit row.
+    Resolves *collection* to its concrete search backend via the
+    backend-agnostic router
+    (:func:`~meho_backplane.docs_search.backends.resolve_backend`) and
+    calls ``backend.search(...)`` — so one collection can sit on a
+    managed RAG and another on the JWT-forward corpus behind this one
+    entrypoint, and the agent never sees which backend answered. The
+    operator JWT is forwarded by the adapter (for the JWT-forward corpus
+    backend), the search is scoped to the binary product+version filter,
+    and the cited chunks are projected into MEHO's surface. The query
+    itself is never logged here — only its presence is implied; the route
+    binds the SHA-256 hash to the audit row.
+
+    ``collection=None`` is the **legacy single-collection** path: a
+    deploy that has not yet adopted the ``doc_collections`` registry
+    federates every query to the one global ``corpus_url`` via the
+    re-homed :func:`~meho_backplane.auth.corpus.search_corpus` transport.
+    The collection-scoped request param that makes *collection* mandatory
+    is T3 (#1552); T2 ships the router with this additive, non-breaking
+    seam so the legacy path keeps working unchanged.
 
     Args:
-        operator: The verified operator whose JWT is forwarded to the corpus.
+        operator: The verified operator whose JWT is forwarded to the
+            backend.
         query: The free-text search query.
         scope: The validated binary product+version scope from
             :func:`build_docs_scope`.
         limit: Maximum number of chunks to request.
+        collection: The resolved doc collection to search, or ``None`` for
+            the legacy single-collection corpus path.
 
     Returns:
-        A :class:`DocsSearchResult` carrying the corpus's ranked cited chunks.
+        A :class:`DocsSearchResult` carrying the backend's ranked cited
+        chunks.
 
     Raises:
-        CorpusUnavailable: propagated unchanged from
-            :func:`~meho_backplane.auth.corpus.search_corpus` when the
-            corpus is unconfigured, unreachable, or returns a non-2xx /
-            malformed response. The route maps it to HTTP 503.
+        CorpusUnavailable: when the collection routes to no registered
+            backend, or the chosen backend is unconfigured, unreachable,
+            or returns a non-2xx / malformed response. The route maps it
+            to HTTP 503 (the backend id never appears in the 503).
     """
     filters = scope.as_filters()
-    response = await search_corpus(
-        operator,
-        query,
-        metadata_filters=filters or None,
-        limit=limit,
-    )
+    if collection is None:
+        # Legacy single-collection deploy: federate to the one global
+        # corpus through the module-level transport seam. Kept distinct
+        # from the routed path so the pre-registry behaviour (and the
+        # callers patching ``service.search_corpus``) is untouched until
+        # T3 makes ``collection`` mandatory.
+        response = await search_corpus(
+            operator,
+            query,
+            metadata_filters=filters or None,
+            limit=limit,
+        )
+    else:
+        resolved = resolve_backend(collection)
+        response = await resolved.backend.search(
+            operator,
+            query,
+            backend_ref=resolved.ref,
+            metadata_filters=filters or None,
+            limit=limit,
+        )
     chunks = [_project_chunk(c) for c in response.chunks]
     _log.info(
         "docs_search_completed",
         operator_sub=operator.sub,
         product=scope.product,
         version=scope.version,
+        collection_key=collection.collection_key if collection is not None else None,
         hit_count=len(chunks),
     )
     return DocsSearchResult(chunks=chunks)

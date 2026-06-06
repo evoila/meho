@@ -41,18 +41,62 @@ fails closed rather than degrading to an ungrounded answer.
 
 ### `search_corpus(...)` (`meho_backplane.auth.corpus`, T2 #1520)
 
-The transport. An async `httpx` client that POSTs a search request to
-`settings.corpus_url` carrying `Authorization: Bearer <operator.raw_jwt>`,
-bounded by `settings.corpus_timeout_seconds`. Models the corpus's
-response behind a small frozen Pydantic adapter (`CorpusChunk` /
-`CorpusSearchResponse`, `extra="ignore"` so additive corpus fields are
-absorbed silently while a dropped consumed field fails loudly).
+The transport. An async `httpx` client that POSTs a search request to a
+corpus URL carrying `Authorization: Bearer <operator.raw_jwt>`, bounded
+by `settings.corpus_timeout_seconds`. The URL and RFC 8707 audience are
+optional overrides (`corpus_url=` / `audience=`); `None` falls back to
+the global `settings.corpus_url` / `settings.corpus_audience` — the
+seam the `corpus-http` backend uses to pass a per-collection endpoint
+(see the router below). Models the corpus's response behind a small
+frozen Pydantic adapter (`CorpusChunk` / `CorpusSearchResponse`,
+`extra="ignore"` so additive corpus fields are absorbed silently while a
+dropped consumed field fails loudly).
 
-Fail-closed by construction: an unconfigured (`corpus_url` unset),
-unreachable, non-2xx, or malformed-response corpus all collapse to one
-typed `CorpusUnavailable`. The exception carries the upstream HTTP
-status (when the failure was a non-2xx response) but **never** the
-response body — a corpus error page cannot leak through.
+Fail-closed by construction: an unconfigured (no URL), unreachable,
+non-2xx, or malformed-response corpus all collapse to one typed
+`CorpusUnavailable`. The exception carries the upstream HTTP status (when
+the failure was a non-2xx response) but **never** the response body — a
+corpus error page cannot leak through.
+
+### Backend-agnostic search router (`meho_backplane.docs_search.backends`, T2 #1551)
+
+The `collection → backend` router that keeps MEHO a backplane, not a
+vector DB: one collection can sit on a managed RAG and another on the
+JWT-forward corpus **behind the same `search_docs`**, and the agent never
+sees which backend answered. Four pieces, modelled on the connector
+registry (`connectors/registry.py`) **minus the version tie-break ladder**
+(a collection binds to exactly one backend by construction, #1548):
+
+- `SearchBackend` (`backends/base.py`) — the adapter ABC. One required
+  `async search(operator, query, *, backend_ref, metadata_filters, limit)
+  -> CorpusSearchResponse` (the same shape as the re-homed transport, so
+  the seam swap is behaviour-preserving) plus a `probe()` forward seam
+  for the readiness probe (T6 #1555) that defaults to raising rather than
+  claiming "ready". A class-level `backend_type` string is the routing
+  discriminator.
+- `CorpusHttpBackend` (`backends/corpus_http.py`,
+  `backend_type="corpus-http"`) — the **first** concrete adapter. It
+  wraps `search_corpus` (the well-tested transport, not a copy of the
+  httpx body) and resolves the per-collection endpoint / audience from
+  the collection's `backend.ref` (keys `endpoint`/`url` and `audience`),
+  falling back to the legacy `corpus_url` / `corpus_audience` globals for
+  an unmigrated single-collection deploy. It fronts whatever the ops
+  corpus proxies; a direct managed-RAG adapter with its own
+  service-account auth is a deliberate **later Task**, not built here.
+- the registry (`backends/registry.py`) — a `dict[str, SearchBackend]`
+  with `register_backend(type, impl)` / `get_backend(type)` /
+  `all_backends()`. Importing the package self-registers `corpus-http`.
+  Duplicate registration of a type raises (a programming bug, not a
+  runtime condition).
+- `resolve_backend(collection)` / `resolve_backend_or_label(collection)`
+  (`backends/resolver.py`) — the router. Reads `collection.backend["type"]`
+  and does a direct dict lookup. The raising form drops into the
+  `search_docs` seam (an unknown / malformed type → `CorpusUnavailable`,
+  the **existing** 503 arm — no new error taxonomy, and the backend id
+  never reaches the agent). The `(impl, label, msg)` labelled form is the
+  non-raising sibling (mirroring `resolve_connector_or_label`) the T5
+  fan-out and T6 readiness probe branch on. `collection=None` routes to
+  `corpus-http` with no ref — the legacy single-collection path.
 
 ### `build_docs_scope(product, version)` (`meho_backplane.docs_search.service`)
 
@@ -67,12 +111,19 @@ renders the `{key: scalar}` `metadata_filters` shape — a **binary
 containment scope**, never a ranking weight (the #1178 / #1177
 decision).
 
-### `search_docs(operator, query, *, scope, limit)` (`meho_backplane.docs_search.service`)
+### `search_docs(operator, query, *, scope, limit, collection=None)` (`meho_backplane.docs_search.service`)
 
-The shared service. Calls `search_corpus` with the binary scope and
-projects the corpus's `CorpusChunk`s into MEHO's own `DocsChunk` surface
-(chunk text + source citation + score), decoupling the public response
-from the corpus wire contract. Propagates `CorpusUnavailable` unchanged.
+The shared service and the **router seam**. With a `collection`, it
+resolves the backend via `resolve_backend(collection)` and calls
+`backend.search(...)`; without one (`collection=None`, the legacy
+single-collection deploy) it federates to the global corpus via
+`search_corpus` directly. Either way it projects the backend's
+`CorpusChunk`s into MEHO's own `DocsChunk` surface (chunk text + source
+citation + score), decoupling the public response from the wire contract,
+and propagates `CorpusUnavailable` unchanged. The `collection` kwarg is
+additive and optional in T2 — T3 (#1552) threads the request param and
+makes it mandatory; the backend id never appears in the request or the
+projected response.
 
 ### `synthesize_docs_answer(query, retrieval, *, llm_client=None)` (`meho_backplane.docs_search.synthesis`, T7 #1526)
 
@@ -295,7 +346,11 @@ just makes the op name canonical for `query_audit` filtering.
 ## References
 
 - Route: `backend/src/meho_backplane/api/v1/search_docs.py`.
-- Service: `backend/src/meho_backplane/docs_search/service.py`.
+- Service (router seam): `backend/src/meho_backplane/docs_search/service.py`.
+- Backend router (T2 #1551): `backend/src/meho_backplane/docs_search/backends/`
+  (`base.py` ABC, `corpus_http.py` first adapter, `registry.py`,
+  `resolver.py`). Registry/ABC/resolver precedent:
+  `backend/src/meho_backplane/connectors/` (registry + base + resolver).
 - Synthesis (`ask_docs`): `backend/src/meho_backplane/docs_search/synthesis.py`.
 - MCP tools (`search_docs` + `ask_docs`): `backend/src/meho_backplane/mcp/tools/docs.py`.
 - Fail-closed LLM client precedent (#1386):

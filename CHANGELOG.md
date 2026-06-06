@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Backend-agnostic search router (#1551)
+
+- Add a `collection → backend{type, ref}` search router so one doc
+  collection can sit on a managed RAG and another on the JWT-forward
+  corpus behind the same `search_docs`, with the backend never appearing
+  in the request or response. New `docs_search/backends/` package: a
+  `SearchBackend` ABC (with a `probe()` seam for the later readiness
+  Task), a tiny `dict[type, SearchBackend]` registry, and
+  `resolve_backend` / `resolve_backend_or_label` (direct type lookup, no
+  tie-break ladder; unknown/unconfigured type → the existing 503 arm).
+  The single-corpus client is re-homed as the first `corpus-http`
+  adapter, resolving its endpoint/audience per collection from
+  `backend.ref` with the legacy `corpus_url` fallback for an unmigrated
+  single-collection deploy. The `search_docs` service routes through the
+  router via an additive, optional `collection` argument; threading a
+  mandatory collection request param is a downstream Task.
+
 ### Doc-collection registry (#1550)
 
 - Add the `doc_collections` table (collections-as-data) — one row per

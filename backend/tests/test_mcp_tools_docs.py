@@ -1,34 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the capability-gated ``search_docs`` MCP tool (G4.5-T4, #1523).
+"""Tests for the collection-scoped ``search_docs`` MCP tool (G4.6-T3, #1552).
 
-Covers every acceptance criterion in the task body:
+Covers the collection-scoped contract layered on the G4.5-T4 capability gate:
 
 * ``search_docs`` is registered with ``required_capability="meho-docs"``;
-  it is **absent** from ``tools/list`` for a tenant without the
+  it is **absent** from ``tools/list`` for a tenant without the base
   capability and **present** for one with it (T1's gate, #1519).
-* ``tools/call search_docs`` from an unprovisioned tenant → 403-class
-  error (the handler never runs); from a provisioned tenant with
-  product+version → cited chunks; missing/blank product or version →
-  the T3 422 surfaced as an MCP ``-32602`` error.
 * ``inputSchema`` is strict (``additionalProperties: false``, required
-  ``[query, product, version]``); the MEHO-internal RBAC + capability
-  fields are stripped from the wire shape.
-* The handler calls the shared docs-search service with the operator's
-  forwarded identity and the validated binary scope.
-* The description names the sibling tools (``search_knowledge`` /
-  ``search_memory``) and points to the companion resource.
+  ``[query, collection]``, product/version demoted to optional).
+* ``tools/call search_docs`` from a tenant lacking the base ``meho-docs``
+  capability → 403-class error (the handler never runs); a missing
+  ``collection`` → ``-32602``.
+* **Per-collection entitlement (#1552):** a tenant with the base
+  ``meho-docs`` capability but lacking ``meho-docs:<collection>`` → a
+  403-class ``-32602`` even though the tool is visible; with it → the
+  query routes to the collection's backend.
+* **Collection scope routing:** the query reaches the resolved backend
+  with the optional product/version refinements as ``metadata_filters``;
+  an unknown collection → ``-32602``, a not-ready collection → ``-32603``.
+* The audit row carries the canonical ``op_id="meho.docs.search"`` plus
+  ``audit_collection``; the raw query is recorded only as a hash.
 
-The shared docs-search service (T3, #1521) federates to an **external**
-corpus; these unit tests mock
-:func:`meho_backplane.docs_search.service.search_corpus` so the wire
-shape + scope plumbing are exercised without a live corpus. PG-real /
-live-corpus coverage is out of scope for the unit suite.
+The ``corpus-http`` backend wraps the JWT-forward transport; these unit
+tests mock
+:func:`meho_backplane.docs_search.backends.corpus_http.search_corpus` so
+the wire shape + scope plumbing are exercised without a live corpus.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -45,16 +48,25 @@ from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
-from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seed_doc_collection,
     seeded_operator_tenant,  # noqa: F401 — pytest-discovered fixture
 )
 
 _DOCS_CAPABILITY = "meho-docs"
+#: Per-collection entitlement key for the seeded ``vmware`` collection.
+_VMWARE_CAP = "meho-docs:vmware"
+#: A provisioned + vmware-entitled capability set.
+_ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
+
+#: The corpus-http backend's transport seam — the function the
+#: ``corpus-http`` adapter actually calls. Patching here exercises the
+#: full router → backend → transport path.
+_CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
 
 
 async def _mcp_audit_rows() -> list[AuditLog]:
@@ -63,6 +75,17 @@ async def _mcp_audit_rows() -> list[AuditLog]:
     async with sessionmaker() as session:
         result = await session.execute(select(AuditLog).order_by(AuditLog.occurred_at))
         return [row for row in result.scalars().all() if row.method == "MCP"]
+
+
+def _seed_collection_sync(**kwargs: Any) -> None:
+    """Run :func:`seed_doc_collection` to completion from a sync test.
+
+    ``asyncio.run`` spins a fresh loop for the one-shot DB write; the
+    file-backed SQLite engine the autouse ``_default_database_url`` fixture
+    pins works across loops, so the row is visible to the subsequent
+    ``TestClient`` request (which runs its own loop).
+    """
+    asyncio.run(seed_doc_collection(**kwargs))
 
 
 def _operator(
@@ -88,10 +111,8 @@ def docs_client(
 ) -> Iterator[tuple[TestClient, Operator]]:
     """``TestClient`` whose operator's capability set is parametrised.
 
-    The production ``search_docs`` tool is registered by the lifespan's
-    eager import (it lives in ``mcp/tools/docs.py``); this fixture only
-    pins the operator. Provision the ``meho-docs`` capability with
-    ``@pytest.mark.parametrize("docs_client", [frozenset({"meho-docs"})], indirect=True)``;
+    Provision the capability set with
+    ``@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)``;
     default is the empty set (unprovisioned).
     """
     capabilities: frozenset[str] = getattr(request, "param", frozenset())
@@ -134,14 +155,14 @@ _SAMPLE_CHUNK = CorpusChunk(
 
 
 # ---------------------------------------------------------------------------
-# tools/list shape + capability gate (AC1, AC3)
+# tools/list shape + capability gate (visibility)
 # ---------------------------------------------------------------------------
 
 
 def test_search_docs_absent_from_tools_list_for_unprovisioned_tenant(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC1: an operator without ``meho-docs`` never sees the tool (true absence)."""
+    """An operator without the base ``meho-docs`` never sees the tool."""
     client, _op = docs_client
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert response.status_code == 200
@@ -150,14 +171,16 @@ def test_search_docs_absent_from_tools_list_for_unprovisioned_tenant(
 
 
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_search_docs_present_with_strict_schema_for_provisioned_tenant(
+def test_search_docs_present_with_strict_collection_schema(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC1 + AC3: the tool appears once provisioned, with a strict 2020-12 schema.
+    """The tool appears once provisioned, with a strict collection-scoped schema.
 
-    Required ``[query, product, version]``, ``additionalProperties:
-    false``, and the MEHO-internal RBAC + capability fields stripped by
-    :meth:`ToolDefinition.to_wire`.
+    Required ``[query, collection]``, ``additionalProperties: false``,
+    product/version demoted to optional, and the MEHO-internal RBAC +
+    capability fields stripped by :meth:`ToolDefinition.to_wire`. Tool
+    visibility rides only the base ``meho-docs`` capability — the
+    per-collection entitlement is enforced at call time, not at list time.
     """
     client, _op = docs_client
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -168,9 +191,9 @@ def test_search_docs_present_with_strict_schema_for_provisioned_tenant(
     tool = tools_by_name["search_docs"]
     schema = tool["inputSchema"]
     assert schema["type"] == "object"
-    assert schema["required"] == ["query", "product", "version"]
+    assert schema["required"] == ["query", "collection"]
     assert schema["additionalProperties"] is False
-    assert set(schema["properties"]) == {"query", "product", "version", "limit"}
+    assert set(schema["properties"]) == {"query", "collection", "product", "version", "limit"}
     assert schema["properties"]["limit"]["default"] == 10
     assert schema["properties"]["limit"]["maximum"] == 50
     # Wire shape never leaks the server-side gating fields.
@@ -180,35 +203,27 @@ def test_search_docs_present_with_strict_schema_for_provisioned_tenant(
 
 
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_search_docs_description_names_siblings_and_companion_resource(
+def test_search_docs_description_names_collection_and_siblings(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC: the description names what / when / when-NOT and the sibling tools.
-
-    Loose substring assertions so prose can evolve without churn; the
-    load-bearing routing hints (vendor reference vs. how-we-do-X vs.
-    cross-session state) and the companion-resource pointer must stay.
-    """
+    """The description names the collection scope, the sibling tools, and the resource."""
     client, _op = docs_client
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
     desc = tools_by_name["search_docs"]["description"]
 
-    # What: vendor-document corpus search.
-    assert "vendor-document corpus" in desc or "vendor document" in desc.lower()
-    # When-NOT: routes to the sibling tools.
+    assert "collection" in desc.lower()
+    assert "list_doc_collections" in desc
     assert "search_knowledge" in desc
     assert "search_memory" in desc
-    # Mandatory binary scope is called out, not a hint.
-    assert "product" in desc and "version" in desc
-    # Companion resource pointer for the full text on a later turn.
-    assert "meho://docs/" in desc
+    # Companion resource pointer now carries the collection segment.
+    assert "meho://docs/{collection}/" in desc
     assert "resources/read" in desc
 
 
 def test_search_docs_hidden_from_provisioned_read_only_operator() -> None:
     """The capability does not relax the role gate: read_only never sees it."""
-    op = _operator(role=TenantRole.READ_ONLY, capabilities=frozenset({_DOCS_CAPABILITY}))
+    op = _operator(role=TenantRole.READ_ONLY, capabilities=_ENTITLED)
 
     async def _fake_verify() -> Operator:
         return op
@@ -224,25 +239,16 @@ def test_search_docs_hidden_from_provisioned_read_only_operator() -> None:
 
 
 # ---------------------------------------------------------------------------
-# tools/call — capability gate (AC2)
+# tools/call — base capability gate (visibility re-check)
 # ---------------------------------------------------------------------------
 
 
 def test_tools_call_search_docs_403_when_unprovisioned(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC2: naming the tool directly still 403s when the capability is absent.
-
-    The capability re-check in the dispatcher fires before the handler,
-    so an unprovisioned tenant that learned the name cannot reach the
-    corpus. Surfaces as INVALID_PARAMS with a ``forbidden`` / ``capability``
-    message (the JSON-RPC projection of a 403).
-    """
+    """Naming the tool directly still 403s when the base capability is absent."""
     client, _op = docs_client
-    with patch(
-        "meho_backplane.docs_search.service.search_corpus",
-        new=_fake_corpus(_SAMPLE_CHUNK),
-    ) as spy:
+    with patch(_CORPUS_SEAM, new=_fake_corpus(_SAMPLE_CHUNK)) as spy:
         response = post_mcp(
             client,
             {
@@ -251,7 +257,7 @@ def test_tools_call_search_docs_403_when_unprovisioned(
                 "method": "tools/call",
                 "params": {
                     "name": "search_docs",
-                    "arguments": {"query": "nsx maximums", "product": "nsx", "version": "9.0"},
+                    "arguments": {"query": "nsx maximums", "collection": "vmware"},
                 },
             },
         )
@@ -260,29 +266,26 @@ def test_tools_call_search_docs_403_when_unprovisioned(
     assert body["error"]["code"] == INVALID_PARAMS
     assert "forbidden" in body["error"]["message"].lower()
     assert "capability" in body["error"]["message"].lower()
-    # The handler never reached the corpus.
     assert "query" not in spy.captured  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
-# tools/call — provisioned happy path (AC2 positive)
+# tools/call — per-collection entitlement (#1552)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_tools_call_search_docs_returns_cited_chunks(
+def test_tools_call_search_docs_403_when_not_entitled_to_collection(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC2: a provisioned operator with product+version gets cited chunks.
+    """A tenant with base ``meho-docs`` but not ``meho-docs:vmware`` → 403-class.
 
-    Pins the wire round-trip: the handler projects the corpus chunk into
-    MEHO's ``DocsChunk`` surface, the dispatcher JSON-encodes it into
-    ``content[0].text``, and the binary scope reaches the corpus as
-    ``metadata_filters``.
+    The tool is visible (base capability present), but the per-collection
+    entitlement gate rejects the query before it reaches the backend.
     """
-    client, op = docs_client
-    fake = _fake_corpus(_SAMPLE_CHUNK)
-    with patch("meho_backplane.docs_search.service.search_corpus", new=fake):
+    client, _op = docs_client
+    _seed_collection_sync()
+    with patch(_CORPUS_SEAM, new=_fake_corpus(_SAMPLE_CHUNK)) as spy:
         response = post_mcp(
             client,
             {
@@ -291,8 +294,48 @@ def test_tools_call_search_docs_returns_cited_chunks(
                 "method": "tools/call",
                 "params": {
                     "name": "search_docs",
+                    "arguments": {"query": "config maximums", "collection": "vmware"},
+                },
+            },
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "entitled" in body["error"]["message"].lower()
+    assert "query" not in spy.captured  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# tools/call — entitled happy path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_routes_to_collection_backend(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """An entitled operator's query routes to the collection's backend with refinements.
+
+    The handler resolves the ``vmware`` collection, routes through the
+    ``corpus-http`` backend, and the optional product/version refinements
+    reach the transport as ``metadata_filters``. The backend id is absent
+    from the response.
+    """
+    client, op = docs_client
+    _seed_collection_sync()
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
                     "arguments": {
                         "query": "config maximums",
+                        "collection": "vmware",
                         "product": "nsx",
                         "version": "9.0",
                         "limit": 5,
@@ -304,15 +347,12 @@ def test_tools_call_search_docs_returns_cited_chunks(
     body = response.json()
     assert body["result"]["isError"] is False
     payload = json.loads(body["result"]["content"][0]["text"])
-    assert "chunks" in payload
     assert len(payload["chunks"]) == 1
     chunk = payload["chunks"][0]
     assert chunk["chunk_id"] == "nsx-9.0-maximums-0007"
-    assert chunk["content"].startswith("NSX 9.0 supports")
-    assert chunk["source_url"].endswith("/maximums")
+    # The backend id never appears in the response.
+    assert "backend" not in json.dumps(payload)
 
-    # The binary product+version scope reached the corpus as filters, and
-    # the operator's identity was forwarded (never a caller-supplied one).
     captured = fake.captured  # type: ignore[attr-defined]
     assert captured["query"] == "config maximums"
     assert captured["limit"] == 5
@@ -320,26 +360,53 @@ def test_tools_call_search_docs_returns_cited_chunks(
     assert captured["operator"].tenant_id == op.tenant_id
 
 
-# ---------------------------------------------------------------------------
-# tools/call — REQUIRE_FILTERS surfaces as an MCP error (AC2)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_tools_call_search_docs_missing_version_rejected_by_schema(
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_collection_only_omits_refinements(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """A missing required ``version`` fails inputSchema validation → -32602.
+    """Product/version are optional: a collection-only query still succeeds.
 
-    The strict schema catches the missing mandatory scope before the
-    handler runs — the first line of the REQUIRE_FILTERS defence.
+    With no product/version, no ``metadata_filters`` reach the backend
+    (the collection alone scopes the query).
     """
+    client, _op = docs_client
+    _seed_collection_sync()
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {"query": "anything", "collection": "vmware"},
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    # No product/version → no metadata_filters forwarded.
+    assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# tools/call — collection-scope rejection arms
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_missing_collection_rejected_by_schema(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A missing required ``collection`` fails inputSchema validation → -32602."""
     client, _op = docs_client
     response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",
-            "id": 4,
+            "id": 6,
             "method": "tools/call",
             "params": {
                 "name": "search_docs",
@@ -351,41 +418,61 @@ def test_tools_call_search_docs_missing_version_rejected_by_schema(
     assert response.json()["error"]["code"] == INVALID_PARAMS
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_tools_call_search_docs_blank_version_surfaces_service_422_as_mcp_error(
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_unknown_collection_is_invalid_params(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """A blank-after-strip ``version`` passes the schema but the service rejects it.
-
-    ``minLength: 1`` admits a single space; the shared
-    ``build_docs_scope`` treats blank-after-strip as absent and raises
-    ``MissingDocsFilterError`` (the route's 422), which the handler maps
-    to ``-32602`` — the MCP analogue. The corpus is never called.
-    """
+    """An unknown collection key → -32602 (invalid argument, not a server fault)."""
     client, _op = docs_client
+    # No collection seeded → resolve fails.
     fake = _fake_corpus(_SAMPLE_CHUNK)
-    with patch("meho_backplane.docs_search.service.search_corpus", new=fake):
+    with patch(_CORPUS_SEAM, new=fake):
         response = post_mcp(
             client,
             {
                 "jsonrpc": "2.0",
-                "id": 5,
+                "id": 7,
                 "method": "tools/call",
                 "params": {
                     "name": "search_docs",
-                    "arguments": {"query": "x", "product": "nsx", "version": " "},
+                    "arguments": {"query": "x", "collection": "nope"},
                 },
             },
         )
     assert response.status_code == 200
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "version" in body["error"]["message"].lower()
-    # The REQUIRE_FILTERS rejection short-circuits before the corpus call.
+    assert "unknown collection" in body["error"]["message"].lower()
     assert "query" not in fake.captured  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_not_ready_collection_is_internal_error(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A known + entitled but not-``ready`` collection → -32603 (server-side condition)."""
+    client, _op = docs_client
+    _seed_collection_sync(status="rebuilding")
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {"query": "x", "collection": "vmware"},
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == INTERNAL_ERROR
+    assert "query" not in fake.captured  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_tools_call_search_docs_rejects_extra_arguments(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
@@ -395,14 +482,13 @@ def test_tools_call_search_docs_rejects_extra_arguments(
         client,
         {
             "jsonrpc": "2.0",
-            "id": 6,
+            "id": 9,
             "method": "tools/call",
             "params": {
                 "name": "search_docs",
                 "arguments": {
                     "query": "x",
-                    "product": "nsx",
-                    "version": "9.0",
+                    "collection": "vmware",
                     "tenant_id": "smuggled",
                 },
             },
@@ -413,35 +499,31 @@ def test_tools_call_search_docs_rejects_extra_arguments(
 
 
 # ---------------------------------------------------------------------------
-# tools/call — corpus unavailable surfaces as INTERNAL_ERROR (not -32602)
+# tools/call — backend unavailable surfaces as INTERNAL_ERROR (not -32602)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_tools_call_search_docs_corpus_unavailable_is_internal_error(
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_backend_unavailable_is_internal_error(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """A down corpus is a server fault → ``-32603``, not invalid params.
-
-    The well-formed request is not the client's fault; the typed
-    ``CorpusUnavailable`` is not caught in the handler and bubbles to the
-    dispatcher's generic catch (the MCP analogue of the route's 503).
-    """
+    """A down backend is a server fault → ``-32603``, not invalid params."""
     client, _op = docs_client
+    _seed_collection_sync()
 
     async def _down(_op: Operator, _query: str, **_kwargs: Any) -> CorpusSearchResponse:
         raise CorpusUnavailable("corpus_url is not configured")
 
-    with patch("meho_backplane.docs_search.service.search_corpus", new=_down):
+    with patch(_CORPUS_SEAM, new=_down):
         response = post_mcp(
             client,
             {
                 "jsonrpc": "2.0",
-                "id": 7,
+                "id": 10,
                 "method": "tools/call",
                 "params": {
                     "name": "search_docs",
-                    "arguments": {"query": "x", "product": "nsx", "version": "9.0"},
+                    "arguments": {"query": "x", "collection": "vmware"},
                 },
             },
         )
@@ -450,79 +532,35 @@ def test_tools_call_search_docs_corpus_unavailable_is_internal_error(
 
 
 # ---------------------------------------------------------------------------
-# Settings hygiene — the gate-off path keeps the corpus reachable
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_tools_call_search_docs_gate_off_allows_partial_scope(
-    docs_client: tuple[TestClient, Operator],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With ``corpus_require_filters`` off, a blank version degrades to optional.
-
-    The schema's ``minLength: 1`` still requires the key be present and
-    non-empty per the wire contract, but a blank-after-strip value no
-    longer trips REQUIRE_FILTERS — it simply widens the corpus query
-    (only ``product`` reaches ``metadata_filters``).
-    """
-    monkeypatch.setenv("CORPUS_REQUIRE_FILTERS", "false")
-    get_settings.cache_clear()
-    client, _op = docs_client
-    fake = _fake_corpus()
-    try:
-        with patch("meho_backplane.docs_search.service.search_corpus", new=fake):
-            response = post_mcp(
-                client,
-                {
-                    "jsonrpc": "2.0",
-                    "id": 8,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "search_docs",
-                        "arguments": {"query": "x", "product": "nsx", "version": " "},
-                    },
-                },
-            )
-    finally:
-        get_settings.cache_clear()
-    assert response.status_code == 200
-    assert response.json()["result"]["isError"] is False
-    # Only the non-blank product survived into the corpus filter.
-    assert fake.captured["metadata_filters"] == {"product": "nsx"}  # type: ignore[attr-defined]
-
-
-# ---------------------------------------------------------------------------
-# Uniform audit op_id across faces (G4.5-T8 #1549)
+# Uniform audit op_id + collection across faces (#1549 / #1552)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-async def test_tools_call_search_docs_audit_row_carries_canonical_op_id(
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+async def test_tools_call_search_docs_audit_row_carries_op_id_and_collection(
     docs_client: tuple[TestClient, Operator],
     seeded_operator_tenant: None,  # noqa: F811
 ) -> None:
-    """G4.5-T8: the MCP audit row's ``op_id`` is the canonical ``meho.docs.search``.
+    """The MCP audit row's ``op_id`` is canonical and carries ``collection``.
 
-    The DoD requires every ``search_docs`` audit row — REST, CLI, *and*
-    MCP — be filterable by ``op_id="meho.docs.search"``. The handler binds
-    the ``audit_op_id`` contextvar; the dispatcher lifts it into the
-    persisted row, overriding the bare tool name. ``op_class`` stays
-    ``read`` (declared on the ToolDefinition) and the raw query is recorded
-    only as ``params_hash``, never in the clear.
+    The handler binds the ``audit_op_id`` and ``audit_collection``
+    contextvars; the dispatcher lifts them into the persisted row.
+    ``op_class`` stays ``read`` and the raw query is recorded only as a
+    hash, never in the clear.
     """
     client, _op = docs_client
-    with patch("meho_backplane.docs_search.service.search_corpus", new=_fake_corpus(_SAMPLE_CHUNK)):
+    await seed_doc_collection()
+    with patch(_CORPUS_SEAM, new=_fake_corpus(_SAMPLE_CHUNK)):
         response = post_mcp(
             client,
             {
                 "jsonrpc": "2.0",
-                "id": 9,
+                "id": 11,
                 "method": "tools/call",
                 "params": {
                     "name": "search_docs",
-                    "arguments": {"query": "config maximums", "product": "nsx", "version": "9.0"},
+                    "arguments": {"query": "config maximums", "collection": "vmware"},
                 },
             },
         )
@@ -534,38 +572,32 @@ async def test_tools_call_search_docs_audit_row_carries_canonical_op_id(
     payload = rows[0].payload
     assert payload["op_id"] == "meho.docs.search"
     assert payload["op_class"] == "read"
-    # The raw query is hashed, never recorded in the clear.
+    assert payload["collection"] == "vmware"
     assert "config maximums" not in json.dumps(payload)
     assert payload["params_hash"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 async def test_query_audit_op_id_filter_catches_mcp_search_docs(
     docs_client: tuple[TestClient, Operator],
     seeded_operator_tenant: None,  # noqa: F811
 ) -> None:
-    """G4.5-T8 AC2: a ``query_audit`` ``op_id`` filter returns the MCP call.
-
-    Before the fix the MCP row landed under the bare tool name
-    ``search_docs``, so a who-touched / ``query_audit`` filter on
-    ``op_id="meho.docs.search"`` caught REST + CLI but missed every MCP
-    call — the primary agent surface. This pins that the MCP face is now in
-    the trail under the canonical op_id.
-    """
+    """A ``query_audit`` ``op_id`` filter returns the MCP collection-scoped call."""
     from meho_backplane.audit_query import AuditQueryFilters, query_audit
 
     client, _op = docs_client
-    with patch("meho_backplane.docs_search.service.search_corpus", new=_fake_corpus(_SAMPLE_CHUNK)):
+    await seed_doc_collection()
+    with patch(_CORPUS_SEAM, new=_fake_corpus(_SAMPLE_CHUNK)):
         response = post_mcp(
             client,
             {
                 "jsonrpc": "2.0",
-                "id": 10,
+                "id": 12,
                 "method": "tools/call",
                 "params": {
                     "name": "search_docs",
-                    "arguments": {"query": "nsx maximums", "product": "nsx", "version": "9.0"},
+                    "arguments": {"query": "nsx maximums", "collection": "vmware"},
                 },
             },
         )

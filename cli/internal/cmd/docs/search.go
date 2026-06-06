@@ -18,31 +18,33 @@ import (
 
 // newSearchCmd returns the `meho docs search` command.
 //
-// CLI shape (per issue #1524):
+// CLI shape (per issue #1552):
 //
-//	meho docs search <query> --product <p> --version <v> \
-//	  [--limit N] [--json] [--backplane <url>]
+//	meho docs search <query> --collection <c> \
+//	  [--product <p>] [--version <v>] [--limit N] [--json] [--backplane <url>]
 //
-// Role: operator. Calls POST /api/v1/search_docs (T3, #1521) via the
+// Role: operator. Calls POST /api/v1/search_docs (T3, #1552) via the
 // shared authed client (bearer + 401-refresh). `provisioned` carries
 // the meho-docs capability gate resolved at command-tree-build time;
 // when false the verb refuses with a typed `addon_not_provisioned`
 // error before any flag validation or network call.
 //
-// product/version are the mandatory binary scope under the backend's
-// REQUIRE_FILTERS posture. The CLI fails fast on a missing filter
-// (exit 4) before the round-trip, mirroring the route's 422 rather
-// than incurring it.
+// --collection is the mandatory binary scope: it routes the query to a
+// backend and gates per-collection entitlement. The CLI fails fast on a
+// missing --collection (exit 4) before the round-trip, mirroring the
+// route's 422 rather than incurring it. --product / --version are
+// optional refinements within the collection.
 //
 // Exit codes:
 //   - 0   search returned cleanly (incl. zero-hit result)
 //   - 2   auth_expired
 //   - 3   unreachable
-//   - 4   unexpected_response (missing --product/--version,
-//     out-of-range --limit, a 422/503 from the route)
+//   - 4   unexpected_response (missing --collection, out-of-range
+//     --limit, a 422/503 from the route)
 //   - 5   insufficient_role / addon_not_provisioned
 func newSearchCmd(provisioned bool) *cobra.Command {
 	var (
+		collection        string
 		product           string
 		version           string
 		limit             int
@@ -51,13 +53,14 @@ func newSearchCmd(provisioned bool) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
-		Short: "Search the vendor-document corpus (mandatory --product + --version)",
+		Short: "Search a vendor-document collection (mandatory --collection)",
 		Long: "search calls POST /api/v1/search_docs and renders the " +
-			"ranked cited chunks as a text table. --product and " +
-			"--version are mandatory: they are the binary scope the " +
-			"backend's REQUIRE_FILTERS posture enforces (a docs query " +
-			"without both is rejected rather than run as an unfiltered " +
-			"corpus query). The query routes through the backplane so it " +
+			"ranked cited chunks as a text table. --collection is " +
+			"mandatory: it is the binary scope that routes the query to a " +
+			"collection's backend and gates per-collection entitlement (a " +
+			"docs query without it is rejected rather than run unscoped). " +
+			"--product and --version are optional refinements within the " +
+			"collection. The query routes through the backplane so it " +
 			"is audited centrally; the raw query is never logged (only " +
 			"its hash). --json emits the raw SearchDocsResponse with the " +
 			"full DocsChunk shape (chunk id, document id, score, source " +
@@ -68,6 +71,7 @@ func newSearchCmd(provisioned bool) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSearch(cmd, searchOptions{
 				Query:             args[0],
+				Collection:        collection,
 				Product:           product,
 				Version:           version,
 				Limit:             limit,
@@ -78,10 +82,12 @@ func newSearchCmd(provisioned bool) *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().StringVar(&collection, "collection", "",
+		"collection key to search (required; e.g. vmware)")
 	cmd.Flags().StringVar(&product, "product", "",
-		"vendor product to scope the search to (required)")
+		"optional vendor-product refinement within the collection")
 	cmd.Flags().StringVar(&version, "version", "",
-		"product version to scope the search to (required)")
+		"optional product-version refinement within the collection")
 	cmd.Flags().IntVar(&limit, "limit", 0,
 		"max chunks to return (1..50, server default 10 when omitted)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
@@ -92,10 +98,11 @@ func newSearchCmd(provisioned bool) *cobra.Command {
 }
 
 type searchOptions struct {
-	Query   string
-	Product string
-	Version string
-	Limit   int
+	Query      string
+	Collection string
+	Product    string
+	Version    string
+	Limit      int
 	// Changed mirrors `cobra.Command.Flags().Changed("limit")` for the
 	// "operator-supplied 0 is an error; default-0 means 'use the
 	// server default'" gate. Threaded as a field rather than re-read
@@ -126,13 +133,14 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 			opts.JSONOut,
 		)
 	}
-	// REQUIRE_FILTERS, client-side: both product and version are
-	// mandatory. Fail fast with the same constraint the route would
+	// Collection scope, client-side: --collection is the mandatory
+	// binary scope. Fail fast with the same constraint the route would
 	// 422 on, so operators see it locally without a round-trip.
-	if opts.Product == "" || opts.Version == "" {
+	// --product / --version are optional refinements (no client gate).
+	if opts.Collection == "" {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
-			output.Unexpected("search requires both --product and --version (the mandatory binary scope)"),
+			output.Unexpected("search requires --collection (the mandatory binary scope)"),
 			opts.JSONOut,
 		)
 	}
@@ -180,18 +188,26 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 }
 
 // buildSearchBody assembles the typed POST body for /api/v1/search_docs.
-// product/version flow as the binary scope (typed as *string on the
-// wire; non-empty by the time this is reached). Limit only lands on
-// the wire when the operator passed a positive --limit — the generated
-// field tag is `omitempty`, so a nil pointer keeps the JSON key absent
-// and the backend's Field(ge=1, le=50, default=10) applies.
+// collection is the mandatory binary scope (non-empty by the time this is
+// reached); product/version are optional refinements and only land on the
+// wire when the operator supplied them (the generated field tags are
+// `omitempty`, so a nil pointer keeps the JSON key absent and the backend
+// treats the refinement as unset). Limit only lands when the operator
+// passed a positive --limit — same omitempty contract, so the backend's
+// Field(ge=1, le=50, default=10) applies on absence.
 func buildSearchBody(opts searchOptions) api.SearchDocsRequest {
-	product := opts.Product
-	version := opts.Version
+	collection := opts.Collection
 	body := api.SearchDocsRequest{
-		Query:   opts.Query,
-		Product: &product,
-		Version: &version,
+		Query:      opts.Query,
+		Collection: &collection,
+	}
+	if opts.Product != "" {
+		product := opts.Product
+		body.Product = &product
+	}
+	if opts.Version != "" {
+		version := opts.Version
+		body.Version = &version
 	}
 	if opts.Limit > 0 {
 		limit := opts.Limit

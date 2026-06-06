@@ -1,26 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Shared ``search_docs`` retrieval service (G4.5-T3 #1521).
+"""Shared ``search_docs`` retrieval service (G4.5-T3 #1521, G4.6-T3 #1552).
 
 The ``meho-docs`` add-on (Initiative #1518) federates vendor-document
 queries through the backplane to the external corpus the ops team runs
 (T2, :mod:`meho_backplane.auth.corpus`). This package is the **one**
-shared entrypoint that surface — :func:`search_docs` — used by both the
-REST route (``POST /api/v1/search_docs``, T3) and the future MCP tool
-(T4, #1523) / CLI verb (T5, #1524). Keeping the scope-validation,
-corpus call, and cited-chunk projection in a service module (rather than
-inline in the route) is what lets T4/T5 reuse the exact same posture
-without re-implementing the REQUIRE_FILTERS gate or the citation shape.
+shared entrypoint that surface — :func:`search_docs` — used by the REST
+route (``POST /api/v1/search_docs``), the MCP ``search_docs`` / ``ask_docs``
+tools, and the CLI verb. Keeping the scope-validation, backend call, and
+cited-chunk projection in a service module (rather than inline in the
+route) is what lets every surface reuse the exact same posture without
+re-implementing the binary-scope gate or the citation shape.
 
-The mandatory product+version filter — a **binary scope**, never a
-ranking weight (the #1178 / #1177 decision) — is enforced here:
-:func:`build_docs_scope` rejects a missing/blank ``product`` or
-``version`` with :class:`MissingDocsFilterError`, which the route renders as
-HTTP 422 (fail-closed). Enforcement is gated by
-``settings.corpus_require_filters`` (default on); the central audit
-binding (``op_id="meho.docs.search"``) stays in the route, next to the
-``audit_*`` contextvars the chassis middleware lifts into the row.
+The mandatory ``collection`` scope — the binary router / entitlement key
+(G4.6-T3 #1552), never a ranking weight (the #1178 / #1177 decision) — is
+enforced here: :func:`build_docs_scope` rejects a missing/blank
+``collection`` with :class:`MissingDocsFilterError`, which the route
+renders as HTTP 422 (fail-closed) and the MCP face as ``-32602``.
+``product`` / ``version`` are optional refinements within the chosen
+collection. :func:`resolve_entitled_ready_collection` is the shared gate
+that turns the ``collection`` key into its registry row, enforces the
+per-collection ``meho-docs:<key>`` entitlement, and checks readiness; the
+central audit binding (``op_id="meho.docs.search"`` + ``audit_collection``)
+stays in each surface, next to the ``audit_*`` contextvars the chassis
+middleware lifts into the row.
 """
 
 from __future__ import annotations
@@ -29,6 +33,14 @@ from meho_backplane.docs_search.backends import (
     SearchBackend,
     resolve_backend,
     resolve_backend_or_label,
+)
+from meho_backplane.docs_search.collection_access import (
+    CollectionAccessError,
+    CollectionForbiddenError,
+    CollectionNotReadyError,
+    UnknownCollectionError,
+    collection_capability_key,
+    resolve_entitled_ready_collection,
 )
 from meho_backplane.docs_search.service import (
     DocsChunk,
@@ -47,6 +59,9 @@ from meho_backplane.docs_search.synthesis import (
 
 __all__ = [
     "NO_GROUNDED_ANSWER",
+    "CollectionAccessError",
+    "CollectionForbiddenError",
+    "CollectionNotReadyError",
     "DocsAnswer",
     "DocsChunk",
     "DocsScope",
@@ -54,9 +69,12 @@ __all__ = [
     "DocsSynthesisError",
     "MissingDocsFilterError",
     "SearchBackend",
+    "UnknownCollectionError",
     "build_docs_scope",
+    "collection_capability_key",
     "resolve_backend",
     "resolve_backend_or_label",
+    "resolve_entitled_ready_collection",
     "search_docs",
     "synthesize_docs_answer",
 ]

@@ -3731,21 +3731,22 @@ type ScheduledTriggerStatus string
 
 // SearchDocsRequest POST body for “/api/v1/search_docs“.
 //
-// “product“ / “version“ are the **mandatory binary scope** under
-// the REQUIRE_FILTERS posture -- they are typed optional here so a
-// missing value is rejected by the service with a route-shaped 422
-// naming the absent key(s), rather than Pydantic's generic
-// “field_required“ (which would not say *why* the scope is mandatory
-// or honour the “corpus_require_filters“ gate-off path).
+// “collection“ is the **mandatory binary scope** (G4.6-T3 #1552) -- it
+// is typed optional here so a missing value is rejected by the service
+// with a route-shaped 422 naming the absent key (carrying *why* the
+// collection is mandatory), rather than Pydantic's generic
+// “field_required“. “product“ / “version“ are **optional
+// refinements** within the chosen collection.
 //
 // “extra="forbid"“ rejects unknown fields at 422 so a client sending
 // a pre-rename key fails loud rather than running with the defaults --
 // the same posture every public v1 request schema ships under.
 type SearchDocsRequest struct {
-	Limit   *int    `json:"limit,omitempty"`
-	Product *string `json:"product"`
-	Query   string  `json:"query"`
-	Version *string `json:"version"`
+	Collection *string `json:"collection"`
+	Limit      *int    `json:"limit,omitempty"`
+	Product    *string `json:"product"`
+	Query      string  `json:"query"`
+	Version    *string `json:"version"`
 }
 
 // SearchDocsResponse Successful response shape for “/api/v1/search_docs“.

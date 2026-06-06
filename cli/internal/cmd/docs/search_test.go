@@ -211,8 +211,7 @@ func TestRunSearchRefusesWhenUnprovisioned(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
 		Query:       "x",
-		Product:     "vmware",
-		Version:     "9.0",
+		Collection:  "vmware",
 		Provisioned: false,
 	})
 	if err == nil {
@@ -234,8 +233,7 @@ func TestRunSearchRefusalIsBeforeNetwork(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
 		Query:             "x",
-		Product:           "vmware",
-		Version:           "9.0",
+		Collection:        "vmware",
 		Provisioned:       false,
 		BackplaneOverride: "http://127.0.0.1:0",
 	})
@@ -251,7 +249,7 @@ func TestRunSearchRefusalIsBeforeNetwork(t *testing.T) {
 
 func TestRunSearchRejectsEmptyQuery(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{Query: "", Product: "vmware", Version: "9.0", Provisioned: true})
+	err := runSearch(cmd, searchOptions{Query: "", Collection: "vmware", Provisioned: true})
 	if err == nil {
 		t.Fatalf("expected error for empty query")
 	}
@@ -260,34 +258,23 @@ func TestRunSearchRejectsEmptyQuery(t *testing.T) {
 	}
 }
 
-func TestRunSearchRejectsMissingProduct(t *testing.T) {
+func TestRunSearchRejectsMissingCollection(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{Query: "x", Version: "9.0", Provisioned: true})
+	err := runSearch(cmd, searchOptions{Query: "x", Provisioned: true})
 	if err == nil {
-		t.Fatalf("expected error for missing --product")
+		t.Fatalf("expected error for missing --collection")
 	}
 	if got := exitCodeOf(t, err); got != output.ExitUnexpected {
 		t.Errorf("expected exit %d; got %d", output.ExitUnexpected, got)
 	}
-	if !strings.Contains(stderr.String(), "--product and --version") {
-		t.Errorf("expected filter hint; got %q", stderr.String())
-	}
-}
-
-func TestRunSearchRejectsMissingVersion(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{Query: "x", Product: "vmware", Provisioned: true})
-	if err == nil {
-		t.Fatalf("expected error for missing --version")
-	}
-	if !strings.Contains(stderr.String(), "--product and --version") {
-		t.Errorf("expected filter hint; got %q", stderr.String())
+	if !strings.Contains(stderr.String(), "--collection") {
+		t.Errorf("expected collection hint; got %q", stderr.String())
 	}
 }
 
 func TestRunSearchRejectsOutOfRangeLimit(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{Query: "x", Product: "vmware", Version: "9.0", Limit: 51, Provisioned: true})
+	err := runSearch(cmd, searchOptions{Query: "x", Collection: "vmware", Limit: 51, Provisioned: true})
 	if err == nil {
 		t.Fatalf("expected error for over-budget limit")
 	}
@@ -299,7 +286,7 @@ func TestRunSearchRejectsOutOfRangeLimit(t *testing.T) {
 func TestRunSearchRejectsExplicitZeroLimit(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
-		Query: "x", Product: "vmware", Version: "9.0",
+		Query: "x", Collection: "vmware",
 		Limit: 0, Changed: true, Provisioned: true,
 	})
 	if err == nil {
@@ -340,14 +327,17 @@ func TestRunSearchHappyPath(t *testing.T) {
 
 	cmd, stdout, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
-		Query: "nsx config maximums", Product: "vmware", Version: "9.0",
+		Query: "nsx config maximums", Collection: "vmware", Product: "nsx", Version: "9.0",
 		Provisioned: true, BackplaneOverride: srv.URL,
 	})
 	if err != nil {
 		t.Fatalf("runSearch: %v; stderr=%s", err, stderr.String())
 	}
-	if bodyOnWire.Product == nil || *bodyOnWire.Product != "vmware" {
-		t.Errorf("expected product=vmware on wire; got %+v", bodyOnWire)
+	if bodyOnWire.Collection == nil || *bodyOnWire.Collection != "vmware" {
+		t.Errorf("expected collection=vmware on wire; got %+v", bodyOnWire)
+	}
+	if bodyOnWire.Product == nil || *bodyOnWire.Product != "nsx" {
+		t.Errorf("expected product=nsx on wire; got %+v", bodyOnWire)
 	}
 	if bodyOnWire.Version == nil || *bodyOnWire.Version != "9.0" {
 		t.Errorf("expected version=9.0 on wire; got %+v", bodyOnWire)
@@ -362,6 +352,41 @@ func TestRunSearchHappyPath(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q in %q", want, stdout.String())
 		}
+	}
+}
+
+// TestRunSearchOmitsAbsentRefinements proves --product / --version are
+// optional refinements: with --collection set but neither refinement
+// supplied, the wire body carries collection only (the omitempty pointer
+// tags keep product/version absent so the backend treats them as unset).
+func TestRunSearchOmitsAbsentRefinements(t *testing.T) {
+	var bodyOnWire api.SearchDocsRequest
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/search_docs", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		readJSONBodyOf(t, raw, &bodyOnWire)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.SearchDocsResponse{Chunks: nil})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL, "eyJ.test.token")
+
+	cmd, _, stderr := newRunCmd(t)
+	if err := runSearch(cmd, searchOptions{
+		Query: "x", Collection: "vmware",
+		Provisioned: true, BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runSearch: %v; stderr=%s", err, stderr.String())
+	}
+	if bodyOnWire.Collection == nil || *bodyOnWire.Collection != "vmware" {
+		t.Errorf("expected collection=vmware on wire; got %+v", bodyOnWire)
+	}
+	if bodyOnWire.Product != nil {
+		t.Errorf("expected product absent on wire; got %q", *bodyOnWire.Product)
+	}
+	if bodyOnWire.Version != nil {
+		t.Errorf("expected version absent on wire; got %q", *bodyOnWire.Version)
 	}
 }
 
@@ -380,7 +405,7 @@ func TestRunSearchSendsLimitWhenSet(t *testing.T) {
 
 	cmd, _, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
-		Query: "x", Product: "vmware", Version: "9.0",
+		Query: "x", Collection: "vmware",
 		Limit: 25, Provisioned: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
@@ -402,7 +427,7 @@ func TestRunSearchZeroHits(t *testing.T) {
 
 	cmd, stdout, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
-		Query: "obscure", Product: "vmware", Version: "9.0",
+		Query: "obscure", Collection: "vmware",
 		Provisioned: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
@@ -434,7 +459,7 @@ func TestRunSearchJSONHappyPath(t *testing.T) {
 
 	cmd, stdout, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
-		Query: "x", Product: "vmware", Version: "9.0",
+		Query: "x", Collection: "vmware",
 		JSONOut: true, Provisioned: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
@@ -466,7 +491,7 @@ func TestRunSearchRendersAbsentScoreAsDash(t *testing.T) {
 
 	cmd, stdout, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
-		Query: "x", Product: "vmware", Version: "9.0",
+		Query: "x", Collection: "vmware",
 		Provisioned: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
@@ -498,14 +523,20 @@ func TestRunSearchMaps403(t *testing.T) {
 
 func TestRunSearchMaps422(t *testing.T) {
 	assertStatusMapping(t, http.StatusUnprocessableEntity,
-		`{"detail":"missing required filters: product, version"}`,
-		output.ExitUnexpected, "missing required filters")
+		`{"detail":"unknown doc collection 'nope'"}`,
+		output.ExitUnexpected, "unknown doc collection")
+}
+
+func TestRunSearchMaps409NotReady(t *testing.T) {
+	assertStatusMapping(t, http.StatusConflict,
+		`{"detail":"doc collection 'vmware' is not ready (status='rebuilding')"}`,
+		output.ExitUnexpected, "not ready")
 }
 
 func TestRunSearchMaps503(t *testing.T) {
 	assertStatusMapping(t, http.StatusServiceUnavailable,
-		`{"detail":"corpus unreachable"}`,
-		output.ExitUnexpected, "corpus is unavailable")
+		`{"detail":"backend unreachable"}`,
+		output.ExitUnexpected, "backend is unavailable")
 }
 
 func assertStatusMapping(t *testing.T, status int, body string, wantExit int, wantSubstr string) {
@@ -522,7 +553,7 @@ func assertStatusMapping(t *testing.T, status int, body string, wantExit int, wa
 
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
-		Query: "x", Product: "vmware", Version: "9.0",
+		Query: "x", Collection: "vmware",
 		Provisioned: true, BackplaneOverride: srv.URL,
 	})
 	if err == nil {

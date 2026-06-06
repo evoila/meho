@@ -1,29 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``POST /api/v1/search_docs`` -- federated vendor-document retrieval.
+"""``POST /api/v1/search_docs`` -- collection-scoped vendor-document retrieval.
 
-G4.5-T3 (#1521) of Initiative #1518 (the ``meho-docs`` add-on). The
-route is the REST face of the shared
-:func:`~meho_backplane.docs_search.search_docs` service: it federates a
-free-text query through the backplane to the external vendor-document
-corpus the ops team runs (T2, :mod:`meho_backplane.auth.corpus`) rather
-than hitting the corpus directly. Routing through the backplane is what
+G4.6-T3 (#1552) of Initiative #1548 (the doc-collection catalogue),
+building on G4.5-T3 (#1521). The route is the REST face of the shared
+:func:`~meho_backplane.docs_search.search_docs` service: it routes a
+free-text query to the named collection's backend (T2 #1551) rather than
+hitting any one corpus directly. Routing through the backplane is what
 lands every query in the audit trail, forwards the operator JWT once,
-and enforces the mandatory product/version posture centrally.
+enforces per-collection entitlement, and records the collection scope
+centrally.
 
-REQUIRE_FILTERS (the binary scope)
-----------------------------------
+Collection scope (the binary scope)
+-----------------------------------
 
-``product`` AND ``version`` are **mandatory** -- a request missing
-either is rejected **422** (fail-closed) by
+``collection`` is **mandatory** -- a request missing or blanking it is
+rejected **422** (fail-closed) by
 :func:`~meho_backplane.docs_search.build_docs_scope` rather than
-forwarded as an unfiltered corpus query. The filter is a **binary
-scope** passed verbatim to the corpus (the #1178 / #1177 decision:
-containment, not RRF weighting) -- it is never expressed as a ranking
-weight. Enforcement is gated by ``settings.corpus_require_filters``
-(default on); with the gate off the filter degrades to optional and the
-corpus owns the policy.
+forwarded as an unscoped query. ``collection`` is the binary scope: it
+routes the query to a backend and gates entitlement, but it is a
+router / entitlement key, NOT a metadata filter (it never reaches the
+backend's per-chunk ``metadata`` containment query). ``product`` /
+``version`` demote to **optional refinements** within the chosen
+collection -- present, they ride ``metadata_filters`` (binary
+containment, the #1178 / #1177 decision, never a ranking weight); absent,
+the collection alone scopes the query.
+
+Per-collection entitlement + readiness
+--------------------------------------
+
+After the scope parses, :func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`
+runs the shared gate: it resolves ``collection`` to its registry row
+(tenant-first), enforces the ``meho-docs:<collection>`` capability
+(403 on a miss -- the collection exists but the tenant is not entitled),
+and checks the registry ``status`` (409 when the collection is not
+``ready``). An unknown collection is 422 (an invalid argument).
 
 RBAC + tenant scoping
 ---------------------
@@ -46,15 +58,18 @@ payload:
   filter on ``payload->>'op_id' = 'meho.docs.search'``.
 * ``audit_op_class = "read"`` -- this is a read operation. The broadcast
   payload for ``read`` is full-detail, which is safe here because the
-  bound payload is *only* the hash + binary scope + hit count -- the
-  **raw query is never bound** (only its SHA-256 digest), so nothing
-  operator-sensitive can leak through the feed.
+  bound payload is *only* the hash + scope + hit count -- the **raw query
+  is never bound** (only its SHA-256 digest), so nothing operator-sensitive
+  can leak through the feed.
 * ``audit_query_hash`` -- SHA-256 hex of the UTF-8 query; the raw query
   is never stored.
-* ``audit_product`` / ``audit_version`` -- the binary scope (these are
-  the operator-chosen product/version, not tenant-shaped identifiers, so
-  they are recorded in the clear for who-touched attribution).
-* ``audit_hit_count`` -- bound after the corpus returns.
+* ``audit_collection`` -- the collection scope (the operator-chosen
+  collection key, the binary router / entitlement scope, recorded in the
+  clear for who-touched attribution; builds on #1549 so a row is
+  filterable by both op_id and collection).
+* ``audit_product`` / ``audit_version`` -- the optional refinements, when
+  present (operator-chosen, not tenant-shaped identifiers).
+* ``audit_hit_count`` -- bound after the backend returns.
 
 Corpus-unavailable contract
 ---------------------------
@@ -81,18 +96,26 @@ Out of scope (per the Initiative body)
 from __future__ import annotations
 
 import hashlib
+from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.corpus import CorpusUnavailable
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.db.engine import get_session
+from meho_backplane.docs_collections import DocCollection
 from meho_backplane.docs_search import (
+    CollectionForbiddenError,
+    CollectionNotReadyError,
     DocsChunk,
     MissingDocsFilterError,
+    UnknownCollectionError,
     build_docs_scope,
+    resolve_entitled_ready_collection,
     search_docs,
 )
 
@@ -111,12 +134,12 @@ _require_operator = Depends(require_role(TenantRole.OPERATOR))
 class SearchDocsRequest(BaseModel):
     """POST body for ``/api/v1/search_docs``.
 
-    ``product`` / ``version`` are the **mandatory binary scope** under
-    the REQUIRE_FILTERS posture -- they are typed optional here so a
-    missing value is rejected by the service with a route-shaped 422
-    naming the absent key(s), rather than Pydantic's generic
-    ``field_required`` (which would not say *why* the scope is mandatory
-    or honour the ``corpus_require_filters`` gate-off path).
+    ``collection`` is the **mandatory binary scope** (G4.6-T3 #1552) -- it
+    is typed optional here so a missing value is rejected by the service
+    with a route-shaped 422 naming the absent key (carrying *why* the
+    collection is mandatory), rather than Pydantic's generic
+    ``field_required``. ``product`` / ``version`` are **optional
+    refinements** within the chosen collection.
 
     ``extra="forbid"`` rejects unknown fields at 422 so a client sending
     a pre-rename key fails loud rather than running with the defaults --
@@ -126,6 +149,7 @@ class SearchDocsRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     query: str = Field(min_length=1, max_length=2000)
+    collection: str | None = Field(default=None, max_length=128)
     product: str | None = Field(default=None, max_length=128)
     version: str | None = Field(default=None, max_length=128)
     limit: int = Field(default=10, ge=1, le=50)
@@ -157,21 +181,72 @@ def _compute_query_hash(query: str) -> str:
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
 
+async def _resolve_collection_or_http_error(
+    session: AsyncSession,
+    operator: Operator,
+    collection_key: str,
+) -> DocCollection:
+    """Run the shared resolve + entitle + readiness gate, mapping to HTTP.
+
+    Each typed access failure maps to its own status: an unknown collection
+    → 422 (an invalid ``collection`` argument, carrying the catalogue of
+    visible keys), not entitled → 403 (the collection exists; the tenant
+    lacks ``meho-docs:<collection>``), not ready → 409 (the backend is not
+    answerable yet).
+    """
+    try:
+        return await resolve_entitled_ready_collection(session, operator, collection_key)
+    except UnknownCollectionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error": "unknown_collection",
+                "collection": exc.collection_key,
+                "known_collections": exc.known_keys,
+            },
+        ) from exc
+    except CollectionForbiddenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except CollectionNotReadyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
 @router.post(
     "/search_docs",
     response_model=SearchDocsResponse,
     responses={
+        403: {
+            "description": (
+                "The tenant is not entitled to the named collection -- it "
+                "lacks the ``meho-docs:<collection>`` capability even "
+                "though it can see the add-on. The collection exists; the "
+                "principal just cannot search it."
+            ),
+        },
+        409: {
+            "description": (
+                "The named collection is known and entitled but not "
+                "``ready`` (provisioning / rebuilding / disabled) -- its "
+                "backend is not answerable yet."
+            ),
+        },
         422: {
             "description": (
-                "The mandatory binary product+version scope is absent "
-                "(REQUIRE_FILTERS). A docs query without both filters is "
-                "rejected rather than forwarded as an unfiltered corpus "
-                "query."
+                "The mandatory ``collection`` scope is absent / blank, or "
+                "names no collection visible to the tenant. A docs query "
+                "without a routable collection is rejected rather than "
+                "forwarded as an unscoped query."
             ),
         },
         503: {
             "description": (
-                "The external corpus is unavailable -- unconfigured, "
+                "The collection's backend is unavailable -- unconfigured, "
                 "unreachable, or returned a non-2xx / malformed response. "
                 "Fail-closed; never an empty 200."
             ),
@@ -180,28 +255,29 @@ def _compute_query_hash(query: str) -> str:
 )
 async def search_docs_endpoint(
     body: SearchDocsRequest,
-    operator: Operator = _require_operator,
+    operator: Annotated[Operator, _require_operator],
+    session: Annotated[AsyncSession, Depends(get_session)],
 ) -> SearchDocsResponse:
-    """Federate a vendor-document query to the corpus, returning cited chunks.
+    """Route a vendor-document query to a collection's backend, returning cited chunks.
 
-    Enforces the mandatory binary product+version scope (422 when the
-    REQUIRE_FILTERS gate is on and either is absent), forwards the
-    operator JWT to the corpus via the shared
-    :func:`~meho_backplane.docs_search.search_docs` service, and binds
-    the central ``meho.docs.search`` audit row. ``read_only`` operators
-    get 403 via :func:`require_role` before reaching this handler.
+    Enforces the mandatory ``collection`` binary scope (422 when absent),
+    resolves it to its backend via the shared
+    :func:`~meho_backplane.docs_search.search_docs` service, enforces the
+    per-collection ``meho-docs:<collection>`` entitlement (403) and
+    readiness (409), and binds the central ``meho.docs.search`` audit row.
+    ``read_only`` operators get 403 via :func:`require_role` before
+    reaching this handler.
 
-    The audit contextvars are bound **before** the corpus call so a
-    handler exception (including the :class:`CorpusUnavailable` → 503
-    branch) still produces an audit row with the query identity + binary
-    scope preserved. The raw query is never bound -- only its SHA-256
-    hash.
+    The audit contextvars are bound **before** the entitlement / backend
+    call so a handler exception (the entitlement 403, readiness 409, or
+    :class:`CorpusUnavailable` 503 branch) still produces an audit row
+    with the query identity + collection scope preserved. The raw query is
+    never bound -- only its SHA-256 hash.
     """
     # Validate the binary scope first; a 422 here must NOT bind an audit
-    # row implying a corpus call happened. The scope build is the
-    # REQUIRE_FILTERS gate.
+    # row implying a backend call happened. ``collection`` is mandatory.
     try:
-        scope = build_docs_scope(body.product, body.version)
+        scope = build_docs_scope(body.collection, body.product, body.version)
     except MissingDocsFilterError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -210,33 +286,41 @@ async def search_docs_endpoint(
 
     log = structlog.get_logger()
     # Pre-bind everything the audit middleware lifts into
-    # ``audit_log.payload``. ``hit_count`` is bound after the corpus
-    # returns; the rest are known up-front so a handler exception (e.g.
-    # the corpus 503 branch) still records the query identity + scope.
-    # The raw query is never bound -- only its SHA-256 hash.
+    # ``audit_log.payload``. ``hit_count`` is bound after the backend
+    # returns; the rest are known up-front so a handler exception (the
+    # entitlement / readiness / backend branches) still records the query
+    # identity + scope. The raw query is never bound -- only its SHA-256
+    # hash.
     structlog.contextvars.bind_contextvars(
         audit_op_id="meho.docs.search",
         audit_op_class="read",
         audit_query_hash=_compute_query_hash(body.query),
+        audit_collection=scope.collection_key,
         audit_product=scope.product,
         audit_version=scope.version,
     )
+
+    # Resolve + entitle + readiness gate (each typed failure → its own HTTP
+    # status; see :func:`_resolve_collection_or_http_error`).
+    collection = await _resolve_collection_or_http_error(session, operator, scope.collection_key)
 
     try:
         result = await search_docs(
             operator,
             body.query,
             scope=scope,
+            collection=collection,
             limit=body.limit,
         )
     except CorpusUnavailable as exc:
-        # Fail-closed: an unconfigured / unreachable / non-2xx corpus is
-        # 503, never an empty 200. The transport guarantees the corpus
+        # Fail-closed: an unconfigured / unreachable / non-2xx backend is
+        # 503, never an empty 200. The transport guarantees the backend
         # response body is never on the exception, so nothing leaks
-        # through the detail.
+        # through the detail (and the backend id stays server-side).
         log.warning(
-            "search_docs_corpus_unavailable",
+            "search_docs_backend_unavailable",
             operator_sub=operator.sub,
+            collection=scope.collection_key,
             product=scope.product,
             version=scope.version,
             corpus_status=exc.status,
@@ -251,6 +335,7 @@ async def search_docs_endpoint(
         "search_docs_endpoint_completed",
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
+        collection=scope.collection_key,
         product=scope.product,
         version=scope.version,
         hit_count=len(result.chunks),

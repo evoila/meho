@@ -109,6 +109,7 @@ def _stream_key(tenant_id: object) -> str:
     return f"meho:feed:{tenant_id}"
 
 
+# code-quality-allow: pre-existing SSE generator size/complexity; type-only redis-8 XREAD fix
 async def _ui_feed_generator(
     *,
     tenant_id: object,
@@ -196,8 +197,12 @@ async def _ui_feed_generator(
             if entries:
                 # redis-py returns ``[[stream_key, [(entry_id, fields), ...]], ...]``;
                 # we query exactly one stream, so ``entries[0][1]`` is
-                # this tenant's ``(entry_id, fields_dict)`` list.
-                _key, items = entries[0]
+                # this tenant's ``(entry_id, fields_dict)`` list. redis 8's
+                # stub widens the XREAD return type beyond an int-indexable
+                # outer list, so launder it to the known RESP2 shape here --
+                # exactly as ``_consume_xread_batch`` does for the API route.
+                typed_entries: list[tuple[str, list[tuple[str, dict[str, str]]]]] = entries  # type: ignore[assignment]
+                _key, items = typed_entries[0]
                 if items:
                     # Advance past EVERY consumed entry before the yield
                     # loop so a fully-filtered batch still moves the

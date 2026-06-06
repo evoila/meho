@@ -36,9 +36,12 @@ from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, CorpusUnavailable
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
@@ -48,9 +51,18 @@ from tests.mcp_test_fixtures import (
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seeded_operator_tenant,  # noqa: F401 — pytest-discovered fixture
 )
 
 _DOCS_CAPABILITY = "meho-docs"
+
+
+async def _mcp_audit_rows() -> list[AuditLog]:
+    """Read every MCP-method ``audit_log`` row, oldest first."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(select(AuditLog).order_by(AuditLog.occurred_at))
+        return [row for row in result.scalars().all() if row.method == "MCP"]
 
 
 def _operator(
@@ -478,3 +490,94 @@ def test_tools_call_search_docs_gate_off_allows_partial_scope(
     assert response.json()["result"]["isError"] is False
     # Only the non-blank product survived into the corpus filter.
     assert fake.captured["metadata_filters"] == {"product": "nsx"}  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Uniform audit op_id across faces (G4.5-T8 #1549)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+async def test_tools_call_search_docs_audit_row_carries_canonical_op_id(
+    docs_client: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,  # noqa: F811
+) -> None:
+    """G4.5-T8: the MCP audit row's ``op_id`` is the canonical ``meho.docs.search``.
+
+    The DoD requires every ``search_docs`` audit row — REST, CLI, *and*
+    MCP — be filterable by ``op_id="meho.docs.search"``. The handler binds
+    the ``audit_op_id`` contextvar; the dispatcher lifts it into the
+    persisted row, overriding the bare tool name. ``op_class`` stays
+    ``read`` (declared on the ToolDefinition) and the raw query is recorded
+    only as ``params_hash``, never in the clear.
+    """
+    client, _op = docs_client
+    with patch("meho_backplane.docs_search.service.search_corpus", new=_fake_corpus(_SAMPLE_CHUNK)):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {"query": "config maximums", "product": "nsx", "version": "9.0"},
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+
+    rows = await _mcp_audit_rows()
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["op_id"] == "meho.docs.search"
+    assert payload["op_class"] == "read"
+    # The raw query is hashed, never recorded in the clear.
+    assert "config maximums" not in json.dumps(payload)
+    assert payload["params_hash"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+async def test_query_audit_op_id_filter_catches_mcp_search_docs(
+    docs_client: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,  # noqa: F811
+) -> None:
+    """G4.5-T8 AC2: a ``query_audit`` ``op_id`` filter returns the MCP call.
+
+    Before the fix the MCP row landed under the bare tool name
+    ``search_docs``, so a who-touched / ``query_audit`` filter on
+    ``op_id="meho.docs.search"`` caught REST + CLI but missed every MCP
+    call — the primary agent surface. This pins that the MCP face is now in
+    the trail under the canonical op_id.
+    """
+    from meho_backplane.audit_query import AuditQueryFilters, query_audit
+
+    client, _op = docs_client
+    with patch("meho_backplane.docs_search.service.search_corpus", new=_fake_corpus(_SAMPLE_CHUNK)):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {"query": "nsx maximums", "product": "nsx", "version": "9.0"},
+                },
+            },
+        )
+    assert response.status_code == 200
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await query_audit(
+            AuditQueryFilters(op_id="meho.docs.search"),
+            tenant_id=OPERATOR_TENANT_ID,
+            session=session,
+        )
+    assert len(result.rows) == 1
+    assert result.rows[0].op_id == "meho.docs.search"
+    assert result.rows[0].op_class == "read"

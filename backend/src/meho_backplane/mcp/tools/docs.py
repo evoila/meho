@@ -69,22 +69,29 @@ Audit + tenant scoping
 ======================
 
 The dispatcher in :mod:`meho_backplane.mcp.handlers` writes exactly one
-``audit_log`` row per ``tools/call`` with ``op_id="search_docs"`` and the
-``op_class="read"`` declared below, and hashes the raw arguments into
-``params_hash`` — so the query is recorded only as a hash, never in the
-clear, matching the route's ``meho.docs.search`` privacy posture. (The
-route's ``meho.docs.search`` op_id is an HTTP-path concern bound by the
-chassis middleware; the MCP audit op_id is the tool name verbatim so
-``classify_op`` resolves the ``.search`` → ``read`` sensitivity class
-correctly.) Tenant scoping rides the operator's forwarded JWT: the
-service hands ``operator.raw_jwt`` to the corpus, which authenticates and
-audits the call as the operator; there is no tool argument that names a
-tenant.
+``audit_log`` row per ``tools/call`` with the ``op_class="read"`` declared
+below, and hashes the raw arguments into ``params_hash`` — so the query is
+recorded only as a hash, never in the clear, matching the route's
+``meho.docs.search`` privacy posture. The op_id on that row is the
+**canonical, uniform** ``meho.docs.search`` / ``meho.docs.ask`` — the same
+token the REST route and the CLI verb bind (G4.5-T8 #1549) — so a
+who-touched / ``query_audit`` filter on ``op_id="meho.docs.*"`` is
+transport-independent and catches the MCP face (the primary agent surface)
+alongside REST + CLI. Each handler binds it via the ``audit_op_id``
+contextvar, which the dispatcher lifts into the persisted row's payload
+op_id. The bare tool name (``search_docs`` / ``ask_docs``) is still what
+the broadcast path passes to ``classify_op``, so the read-class broadcast
+sensitivity is unchanged — only the persisted audit identity is unified.
+Tenant scoping rides the operator's forwarded JWT: the service hands
+``operator.raw_jwt`` to the corpus, which authenticates and audits the
+call as the operator; there is no tool argument that names a tenant.
 """
 
 from __future__ import annotations
 
 from typing import Any, Final
+
+import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.docs_search import (
@@ -116,6 +123,17 @@ _OP_CLASS_READ: Final[str] = "read"
 _DEFAULT_SEARCH_LIMIT: Final[int] = 10
 _MAX_SEARCH_LIMIT: Final[int] = 50
 
+#: Canonical audit op_ids — the SAME tokens the REST route binds
+#: (:func:`meho_backplane.api.v1.search_docs` binds ``meho.docs.search``)
+#: and the CLI verb carries, so a who-touched / ``query_audit`` filter on
+#: ``op_id="meho.docs.*"`` is transport-independent across REST / CLI / MCP
+#: (G4.5-T8 #1549). Bound into the ``audit_op_id`` contextvar, which the
+#: dispatcher lifts into the persisted ``audit_log.payload`` op_id; the
+#: broadcast / ``classify_op`` op_id stays the bare tool name, so the
+#: read-class broadcast sensitivity is unchanged.
+_SEARCH_OP_ID: Final[str] = "meho.docs.search"
+_ASK_OP_ID: Final[str] = "meho.docs.ask"
+
 
 async def _search_docs_handler(
     operator: Operator,
@@ -145,6 +163,14 @@ async def _search_docs_handler(
       route's 503): a well-formed request against a down upstream is a
       server-side fault, not invalid params.
     """
+    # Bind the canonical op_id so the persisted audit row is filterable by
+    # ``op_id="meho.docs.search"`` the same way the REST + CLI faces are
+    # (G4.5-T8 #1549). The dispatcher lifts ``audit_op_id`` into the row's
+    # payload op_id; ``op_class="read"`` (declared on the ToolDefinition)
+    # and the broadcast / ``classify_op`` op_id (the bare tool name) are
+    # unchanged. Bound up-front so a handler exception still records the
+    # canonical identity on the row.
+    structlog.contextvars.bind_contextvars(audit_op_id=_SEARCH_OP_ID)
     query: str = arguments["query"]
     product: str = arguments["product"]
     version: str = arguments["version"]
@@ -273,6 +299,11 @@ async def _ask_docs_handler(
       helper, which returns a deterministic "no grounded answer" *without*
       calling the model.
     """
+    # Same canonical-op_id binding as ``search_docs`` — ``ask_docs`` audit
+    # rows are filterable by ``op_id="meho.docs.ask"`` across all three
+    # faces (G4.5-T8 #1549). ``op_class`` stays ``read``; ask is a
+    # read-class compose over retrieved chunks.
+    structlog.contextvars.bind_contextvars(audit_op_id=_ASK_OP_ID)
     query: str = arguments["query"]
     product: str = arguments["product"]
     version: str = arguments["version"]

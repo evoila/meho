@@ -344,10 +344,14 @@ func renderRequestError(
 //   - 401 → auth_expired (token rejected / refresh impossible).
 //   - 403 → insufficient_role (read_only operator, OR the tenant is not
 //     entitled to the named collection — it lacks the
-//     `meho-docs:<collection>` capability).
+//     `meho-docs:<collection>` capability), UNLESS the body carries the
+//     structured `detail.error == "collection_disabled"` marker, in which
+//     case it is unexpected wrapping a "collection is disabled" detail (an
+//     operator hid the collection — a terminal readiness rejection, not a
+//     role/entitlement miss).
 //   - 409 → unexpected wrapping the not-ready detail (the collection is
-//     known + entitled but its backend is provisioning / rebuilding /
-//     disabled).
+//     known + entitled but transiently provisioning / rebuilding — a
+//     disabled collection is the terminal 403 above, not a 409).
 //   - 422 → unexpected wrapping the collection-scope detail (missing
 //     --collection — the CLI fails fast before the call, so a 422 here
 //     means an unknown collection or a contract drift worth surfacing)
@@ -373,6 +377,15 @@ func renderHTTPStatus(
 			jsonOut,
 		)
 	case http.StatusForbidden:
+		if isDisabledCollection(bodyStr) {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf(
+					"the doc collection is disabled: %s",
+					decodeDetailString(bodyStr),
+				)),
+				jsonOut,
+			)
+		}
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.InsufficientRole(decodeDetailString(bodyStr)),
 			jsonOut,
@@ -426,6 +439,26 @@ func decodeDetailString(body string) string {
 		}
 	}
 	return strings.TrimSpace(body)
+}
+
+// isDisabledCollection reports whether a 403 body carries the structured
+// `detail.error == "collection_disabled"` marker the search route attaches
+// when an operator has disabled the collection. A disabled collection is a
+// terminal readiness rejection (not an entitlement/role miss), so the 403
+// renderer surfaces it distinctly rather than as `insufficient_role`. The
+// entitlement-miss 403 carries a plain-string `detail`, so it never matches.
+func isDisabledCollection(body string) bool {
+	var outer detailEnvelope
+	if err := json.Unmarshal([]byte(body), &outer); err != nil {
+		return false
+	}
+	var inner struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(outer.Detail, &inner); err != nil {
+		return false
+	}
+	return inner.Error == "collection_disabled"
 }
 
 // truncate cuts s to maxLen runes, appending an ellipsis when

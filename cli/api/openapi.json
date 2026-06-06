@@ -409,7 +409,7 @@
           "docs"
         ],
         "summary": "Search Docs Endpoint",
-        "description": "Route a vendor-document query to one or more collections, returning cited chunks.\n\nTwo scopes, mutually exclusive (a 422 when both are supplied):\n\n* **Single** (``collection``) -- the T3 path: resolve to one backend,\n  enforce the per-collection ``meho-docs:<collection>`` entitlement (403)\n  and readiness (409), and search that one collection.\n* **Fan-out** (``collections=[\u2026]`` or ``collection=\"all\"``, G4.6-T5\n  #1554) -- query every entitled, ready collection in scope on its own\n  backend and RRF-merge the ranked lists. Non-entitled / not-ready\n  collections are dropped (logged); an empty resolved set is a 403.\n\nBoth bind the central ``meho.docs.search`` audit row, with\n``audit_collection`` carrying the queried collection (single) or the\nsorted, comma-joined queried set (fan-out) so who-touched attributes the\nquery either way. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler. The raw query is never\nbound -- only its SHA-256 hash.",
+        "description": "Route a vendor-document query to one or more collections, returning cited chunks.\n\nTwo scopes, mutually exclusive (a 422 when both are supplied):\n\n* **Single** (``collection``) -- the T3 path: resolve to one backend,\n  enforce the per-collection ``meho-docs:<collection>`` entitlement (403)\n  and readiness (terminal ``disabled`` \u2192 403, transient\n  ``provisioning`` / ``rebuilding`` \u2192 409), and search that one\n  collection.\n* **Fan-out** (``collections=[\u2026]`` or ``collection=\"all\"``, G4.6-T5\n  #1554) -- query every entitled, ready collection in scope on its own\n  backend and RRF-merge the ranked lists. Non-entitled / not-ready\n  collections are dropped (logged); an empty resolved set is a 403.\n\nBoth bind the central ``meho.docs.search`` audit row, with\n``audit_collection`` carrying the queried collection (single) or the\nsorted, comma-joined queried set (fan-out) so who-touched attributes the\nquery either way. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler. The raw query is never\nbound -- only its SHA-256 hash.",
         "operationId": "search_docs_endpoint_api_v1_search_docs_post",
         "parameters": [
           {
@@ -445,10 +445,10 @@
             }
           },
           "403": {
-            "description": "The tenant is not entitled to the named collection -- it lacks the ``meho-docs:<collection>`` capability even though it can see the add-on. The collection exists; the principal just cannot search it."
+            "description": "Terminal rejection of an otherwise-resolvable collection, in one of two forms (both 403, distinguished by the ``detail.error`` field): the tenant is not entitled to the named collection -- it lacks the ``meho-docs:<collection>`` capability even though it can see the add-on -- or the collection has been ``disabled`` by an operator (``detail.error='collection_disabled'``). Neither is retryable: the collection exists but the principal cannot search it, or an operator switched it off."
           },
           "409": {
-            "description": "The named collection is known and entitled but not ``ready`` (provisioning / rebuilding / disabled) -- its backend is not answerable yet."
+            "description": "The named collection is known and entitled but transiently not ``ready`` (provisioning / rebuilding) -- its backend is not answerable yet. Retryable once the rebuild finishes. A ``disabled`` collection is the terminal 403 above, not a 409."
           },
           "422": {
             "description": "The mandatory ``collection`` scope is absent / blank, names no collection visible to the tenant, or both a single ``collection`` and a fan-out ``collections`` / ``collection='all'`` scope were supplied (they are mutually exclusive). A docs query without a routable collection is rejected rather than forwarded as an unscoped query."
@@ -659,7 +659,7 @@
           "docs"
         ],
         "summary": "Disable Collection Endpoint",
-        "description": "Hide a collection from search (\u2192 ``disabled``).\n\nIdempotent and lifecycle-guarded \u2014 same shape as the enable handler.\nA disabled collection fails ``search_docs`` typed (403) via the T3\nsearch-time guard rather than returning an empty result.",
+        "description": "Hide a collection from search (\u2192 ``disabled``).\n\nIdempotent and lifecycle-guarded \u2014 same shape as the enable handler.\nA disabled collection fails ``search_docs`` typed with a **terminal**\nrejection (REST 403 ``detail.error='collection_disabled'`` / MCP\n``-32602``), distinct from the retryable 409 a ``provisioning`` /\n``rebuilding`` collection returns, via the shared\n:func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`\ngate \u2014 never an empty result.",
         "operationId": "disable_collection_endpoint_api_v1_doc_collections__collection_key__disable_post",
         "parameters": [
           {

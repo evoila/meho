@@ -15,10 +15,12 @@ Coverage matrix (Task #1555 acceptance criteria):
   ``ready`` → ``rebuilding`` when it is not; a forbidden move (a probe
   against a ``disabled`` row) raises ``DocCollectionStateError`` (409).
   Enable / disable are idempotent and guarded.
-* **Search-time guard** — ``ensure_collection_searchable`` (the T6
-  mechanism T3 #1552 wires into the route): ``ready`` passes,
-  ``rebuilding`` / ``provisioning`` → 409 (retryable), ``disabled`` →
-  403; never an empty pass-through.
+* **Search-time readiness** — no longer a guard in this module; the
+  single ``resolve_entitled_ready_collection`` gate (#1567) makes the
+  rejection (``ready`` passes, ``rebuilding`` / ``provisioning`` → 409
+  retryable, ``disabled`` → 403 terminal; never an empty pass-through).
+  Its route- / tool-level outcomes are asserted in
+  ``test_search_docs_route`` and ``test_mcp_tools_docs``.
 * **Per-project rebuild serialization** — two concurrent probes against
   the same backend endpoint serialize inside the adapter (the lock is
   held across the corpus round-trip); probes against different endpoints
@@ -55,10 +57,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import DocCollection
 from meho_backplane.docs_collections import (
-    DocCollectionDisabledError,
-    DocCollectionNotReadyError,
     DocCollectionStateError,
-    ensure_collection_searchable,
     probe_collection,
     set_collection_enabled,
 )
@@ -230,35 +229,12 @@ def test_apply_operator_transition_enable_only_from_disabled() -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Search-time guard (the T6 mechanism T3 #1552 wires in)
-# ---------------------------------------------------------------------------
-
-
-def test_ensure_searchable_passes_for_ready() -> None:
-    ensure_collection_searchable(collection_key="vmware", status=STATUS_READY)  # no raise
-
-
-@pytest.mark.parametrize("status", [STATUS_REBUILDING, STATUS_PROVISIONING])
-def test_ensure_searchable_409_for_not_ready(status: str) -> None:
-    with pytest.raises(DocCollectionNotReadyError) as exc:
-        ensure_collection_searchable(collection_key="vmware", status=status)
-    assert exc.value.status_code == 409
-    assert exc.value.detail["retryable"] is True
-    assert exc.value.detail["status"] == status
-
-
-def test_ensure_searchable_403_for_disabled() -> None:
-    with pytest.raises(DocCollectionDisabledError) as exc:
-        ensure_collection_searchable(collection_key="vmware", status=STATUS_DISABLED)
-    assert exc.value.status_code == 403
-    assert exc.value.detail["retryable"] is False
-
-
-def test_ensure_searchable_fails_closed_on_unknown_status() -> None:
-    """A status outside the enum is treated as not-ready, never waved through."""
-    with pytest.raises(DocCollectionNotReadyError):
-        ensure_collection_searchable(collection_key="vmware", status="bogus")
+# NOTE: the search-time readiness rejection (``ready`` passes,
+# ``provisioning`` / ``rebuilding`` → retryable, ``disabled`` → terminal)
+# is no longer a separate guard in this module — it is the single
+# ``resolve_entitled_ready_collection`` gate (G4.6 #1567). Its distinguishable
+# 403-vs-409 (REST) and -32602-vs--32603 (MCP) outcomes are asserted at the
+# route / tool level: see ``test_search_docs_route`` and ``test_mcp_tools_docs``.
 
 
 # ---------------------------------------------------------------------------

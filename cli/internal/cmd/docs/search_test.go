@@ -516,9 +516,20 @@ func firstChunkRow(t *testing.T, table string) string {
 // --- HTTP status mapping ---------------------------------------------
 
 func TestRunSearchMaps403(t *testing.T) {
+	// A plain-string 403 detail is a role / entitlement miss → insufficient_role.
 	assertStatusMapping(t, http.StatusForbidden,
 		`{"detail":"operator role required"}`,
 		output.ExitInsufficientRole, "operator role required")
+}
+
+func TestRunSearchMaps403DisabledCollection(t *testing.T) {
+	// A 403 carrying the structured `collection_disabled` marker is a
+	// terminal readiness rejection (an operator hid the collection), not a
+	// role/entitlement miss — surfaced as unexpected (#1567), distinct from
+	// the insufficient_role path above.
+	assertStatusMapping(t, http.StatusForbidden,
+		`{"detail":{"error":"collection_disabled","collection":"vmware","retryable":false}}`,
+		output.ExitUnexpected, "collection is disabled")
 }
 
 func TestRunSearchMaps422(t *testing.T) {
@@ -528,6 +539,8 @@ func TestRunSearchMaps422(t *testing.T) {
 }
 
 func TestRunSearchMaps409NotReady(t *testing.T) {
+	// A 409 is the transient (provisioning / rebuilding) not-ready state —
+	// retryable, distinct from the terminal disabled 403 above (#1567).
 	assertStatusMapping(t, http.StatusConflict,
 		`{"detail":"doc collection 'vmware' is not ready (status='rebuilding')"}`,
 		output.ExitUnexpected, "not ready")

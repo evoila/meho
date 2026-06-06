@@ -37,11 +37,13 @@ Why a probe **route** rather than an implicit probe-on-search: a probe
 talks to the managed-RAG backend (latency + serialized rebuilds), so it
 is an explicit operator/ops action that refreshes the cached liveness the
 search path then reads cheaply — exactly the ``probe_target`` →
-``Target.fingerprint`` → dispatch split. Collection-scoped search wiring
-(the ``status != 'ready'`` typed failure) lives in T3 (#1552), which
-calls the
-:func:`~meho_backplane.docs_collections.lifecycle.ensure_collection_searchable`
-guard this Task ships.
+``Target.fingerprint`` → dispatch split. The collection-scoped search path
+reads that cached ``status`` in its shared resolve + entitle + readiness
+gate (:func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`),
+which fails typed against a not-``ready`` collection — branching a terminal
+``disabled`` collection (403) from the transient ``provisioning`` /
+``rebuilding`` states (409). The readiness rejection lives there, not on
+these write routes.
 
 RBAC + tenancy
 --------------
@@ -280,8 +282,12 @@ async def disable_collection_endpoint(
     """Hide a collection from search (→ ``disabled``).
 
     Idempotent and lifecycle-guarded — same shape as the enable handler.
-    A disabled collection fails ``search_docs`` typed (403) via the T3
-    search-time guard rather than returning an empty result.
+    A disabled collection fails ``search_docs`` typed with a **terminal**
+    rejection (REST 403 ``detail.error='collection_disabled'`` / MCP
+    ``-32602``), distinct from the retryable 409 a ``provisioning`` /
+    ``rebuilding`` collection returns, via the shared
+    :func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`
+    gate — never an empty result.
     """
     collection = await resolve_doc_collection(session, collection_key, operator.tenant_id)
     await set_collection_enabled(session, collection, enabled=False)

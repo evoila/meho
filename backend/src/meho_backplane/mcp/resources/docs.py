@@ -48,22 +48,28 @@ taken from the returned chunks.
 Rejection arms
 ==============
 
-* **Blank scope segment / unknown / not-entitled collection** (all
-  ``-32602`` INVALID_PARAMS) —
+* **Blank scope segment / unknown / not-entitled / disabled collection**
+  (all ``-32602`` INVALID_PARAMS) —
   :class:`~meho_backplane.docs_search.MissingDocsFilterError`,
-  :class:`~meho_backplane.docs_search.UnknownCollectionError`, and
-  :class:`~meho_backplane.docs_search.CollectionForbiddenError` map to
-  :class:`McpInvalidParamsError`.
+  :class:`~meho_backplane.docs_search.UnknownCollectionError`,
+  :class:`~meho_backplane.docs_search.CollectionForbiddenError`, and
+  :class:`~meho_backplane.docs_search.CollectionDisabledError` map to
+  :class:`McpInvalidParamsError`. A disabled collection is a terminal,
+  client-actionable rejection (an operator hid it), so it joins the
+  ``-32602`` lane rather than bubbling to the retryable ``-32603`` a
+  transiently not-ready collection lands on.
 * **Chunk not found in the scope** (``-32602``) — the re-search returned no
   chunk whose ``chunk_id`` matches. Collapses to "docs chunk not found"
   without revealing whether the scope is empty or the id is simply absent,
   so the resource is not a probe oracle for the collection contents.
 
-A not-ready collection (:class:`~meho_backplane.docs_search.CollectionNotReadyError`)
-or an unavailable backend (:class:`~meho_backplane.auth.corpus.CorpusUnavailable`)
-is *not* caught here: it bubbles to the dispatcher's generic catch and
-surfaces as ``-32603`` Internal Error — the read was well-formed; the
-backend is down / not serving.
+A *transiently* not-ready collection
+(:class:`~meho_backplane.docs_search.CollectionNotReadyError` —
+``provisioning`` / ``rebuilding``) or an unavailable backend
+(:class:`~meho_backplane.auth.corpus.CorpusUnavailable`) is *not* caught
+here: it bubbles to the dispatcher's generic catch and surfaces as
+``-32603`` Internal Error — the read was well-formed; the backend is down /
+not serving yet (retryable).
 
 Response shape
 ==============
@@ -85,6 +91,7 @@ import structlog
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.docs_search import (
+    CollectionDisabledError,
     CollectionForbiddenError,
     MissingDocsFilterError,
     UnknownCollectionError,
@@ -134,8 +141,9 @@ async def _docs_chunk_handler(
     structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
 
     # Resolve + entitle + readiness gate (the same shared gate the tools
-    # run). Unknown / not-entitled collections map to -32602; a not-ready
-    # collection bubbles to -32603 via the dispatcher's generic catch.
+    # run). Unknown / not-entitled / disabled collections map to -32602
+    # (terminal, client-actionable); a transiently not-ready collection
+    # bubbles to -32603 via the dispatcher's generic catch (retryable).
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         try:
@@ -149,6 +157,11 @@ async def _docs_chunk_handler(
             ) from exc
         except CollectionForbiddenError as exc:
             raise McpInvalidParamsError(f"docs chunk: {exc}") from exc
+        except CollectionDisabledError as exc:
+            raise McpInvalidParamsError(
+                f"docs chunk: {exc}",
+                data={"reason": "collection_disabled"},
+            ) from exc
 
     # The transport is search-only, so recover the chunk by re-searching
     # the bound scope and matching on the exact id. The chunk_id doubles

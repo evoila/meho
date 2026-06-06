@@ -97,6 +97,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.docs_collections import DocCollection
 from meho_backplane.docs_search import (
+    CollectionDisabledError,
     CollectionForbiddenError,
     CollectionScope,
     ConflictingCollectionScopeError,
@@ -190,11 +191,17 @@ async def _resolve_collection_or_error(
       projected to the 403-class audit status by the dispatcher): the same
       403-projected path the static capability gate uses. The collection
       exists; the tenant lacks ``meho-docs:<collection>``.
+    * **Disabled** — :class:`~meho_backplane.docs_search.CollectionDisabledError`
+      → :class:`McpInvalidParamsError` (``-32602``): an operator hid the
+      collection from service. This is a **terminal**, client-actionable
+      rejection (the agent must not retry), so it maps to the spec's
+      "invalid params" lane like the entitlement miss — distinct from the
+      retryable not-ready ``-32603`` below.
     * **Not ready** — :class:`~meho_backplane.docs_search.CollectionNotReadyError`
-      is *not* caught here: a known + entitled collection whose backend is
-      not yet serving is a server-side condition (the MCP analogue of the
-      route's 409/503), so it bubbles to the dispatcher's generic catch as
-      ``-32603``.
+      is *not* caught here: a known + entitled collection that is
+      transiently ``provisioning`` / ``rebuilding`` is a server-side,
+      **retryable** condition (the MCP analogue of the route's 409/503), so
+      it bubbles to the dispatcher's generic catch as ``-32603``.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -207,6 +214,11 @@ async def _resolve_collection_or_error(
             ) from exc
         except CollectionForbiddenError as exc:
             raise McpInvalidParamsError(f"{tool}: {exc}") from exc
+        except CollectionDisabledError as exc:
+            raise McpInvalidParamsError(
+                f"{tool}: {exc}",
+                data={"reason": "collection_disabled"},
+            ) from exc
 
 
 def _parse_scope_or_invalid_params(tool: str, arguments: dict[str, Any]) -> CollectionScope:
@@ -262,12 +274,14 @@ async def _search_docs_handler(
     call as the operator.
 
     Error arms: a conflicting (both single + fan-out) scope, a missing/blank
-    or unknown / not-entitled single ``collection``, or a fan-out that
-    resolves to no entitled, ready collection → ``-32602``; a not-ready
-    single collection or an unavailable
+    or unknown / not-entitled / ``disabled`` single ``collection``, or a
+    fan-out that resolves to no entitled, ready collection → ``-32602``
+    (all client-actionable, terminal — a disabled collection carries
+    ``error.data.reason='collection_disabled'``); a *transiently* not-ready
+    single collection (``provisioning`` / ``rebuilding``) or an unavailable
     :class:`~meho_backplane.auth.corpus.CorpusUnavailable` backend bubbles to
     ``-32603`` (a well-formed request against a backend that is down / not
-    serving is a server-side fault, not invalid params).
+    serving yet is a server-side, retryable fault, not invalid params).
     """
     # Bind the canonical op_id so the persisted audit row is filterable by
     # ``op_id="meho.docs.search"`` the same way the REST + CLI faces are
@@ -473,17 +487,21 @@ async def _ask_docs_handler(
     * **Fan-out attempt** (``collections`` / ``collection="all"``) — mapped
       to :class:`McpInvalidParamsError` (``-32602``): ``ask_docs`` is
       single-collection only.
-    * **Missing/blank or unknown / not-entitled ``collection``** — mapped to
-      :class:`McpInvalidParamsError` (``-32602``) by
+    * **Missing/blank or unknown / not-entitled / disabled ``collection``**
+      — mapped to :class:`McpInvalidParamsError` (``-32602``) by
       :func:`_build_scope_or_invalid_params` /
       :func:`_resolve_collection_or_error` (the MCP analogue of the route's
-      422 / 403). The inputSchema's ``required`` list catches the missing
-      case first for a schema-validating client.
-    * **Not-ready collection / corpus unavailable** —
-      :class:`~meho_backplane.docs_search.CollectionNotReadyError` and
+      422 / 403). A disabled collection carries
+      ``error.data.reason='collection_disabled'`` — a terminal,
+      client-actionable rejection distinct from the retryable not-ready
+      ``-32603`` below. The inputSchema's ``required`` list catches the
+      missing case first for a schema-validating client.
+    * **Transiently not-ready collection / corpus unavailable** —
+      :class:`~meho_backplane.docs_search.CollectionNotReadyError`
+      (``provisioning`` / ``rebuilding``) and
       :class:`~meho_backplane.auth.corpus.CorpusUnavailable` are *not*
-      caught; they bubble to ``-32603`` (a down / not-serving backend is a
-      server fault).
+      caught; they bubble to ``-32603`` (a down / not-serving-yet backend is
+      a server fault the agent can retry).
     * **Synthesis model unconfigured / unreachable** —
       :class:`~meho_backplane.operations.ingest.LlmClientUnavailable` (and
       :class:`~meho_backplane.docs_search.DocsSynthesisError` for a model

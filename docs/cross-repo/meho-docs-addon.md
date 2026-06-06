@@ -350,11 +350,16 @@ entitled to** (`meho-docs:<key>`), so every key shown is one
 - **Entitlement** — searching a collection the tenant is not entitled to
   (`meho-docs:<key>` missing) → **403** / `-32602`, even though the tool
   stays visible via the base `meho-docs` gate.
-- **Readiness** — a collection whose `status` is not `ready`
-  (`provisioning` / `rebuilding` / `disabled`) → **409** / `-32603`
-  (CLI exit 4, "not ready"). The wired search path treats every
-  non-`ready` status uniformly: `disabled` is not a 403 — an operator
-  hiding a collection is a readiness state, not an entitlement miss.
+- **Readiness** — a collection whose `status` is not `ready` is rejected,
+  branching on the *kind* of not-ready (#1567): a *transient*
+  `provisioning` / `rebuilding` collection → **409** / `-32603` (CLI exit
+  4, "not ready") — retryable once the rebuild finishes; a `disabled`
+  collection → **403** (`detail.error='collection_disabled'`) / `-32602`
+  (CLI exit 4, "collection is disabled") — terminal, an operator hid it,
+  so a client must not retry. The split is deliberate: a disabled
+  collection is *not* an entitlement miss (the entitlement-miss 403 carries
+  a plain-string detail), it is a terminal readiness state distinct from
+  the retryable rebuild.
 
 ```bash
 # Single collection — the common path. --collection is mandatory.

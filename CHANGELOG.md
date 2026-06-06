@@ -90,6 +90,32 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Disabled-collection search contract (#1567)
+
+- Reconcile the disabled-collection `search_docs` contract so code, the
+  OpenAPI response descriptions, the `disable` endpoint docstring, and the
+  CLI `disable` help all agree, and restore the operationally load-bearing
+  **terminal/retryable** split the design intended (the shipped code had
+  collapsed every non-`ready` status to a single 409, while two docstrings
+  and the CLI help still claimed a 403). Searching a **`disabled`**
+  collection now returns a **terminal** rejection — HTTP **403** with a
+  structured `detail.error="collection_disabled"` (MCP **`-32602`** with
+  `error.data.reason="collection_disabled"`) — distinct from a
+  **transient** `provisioning`/`rebuilding` collection, which stays a
+  **retryable** HTTP **409** (MCP **`-32603`**), so a client knows to back
+  off and retry a rebuild but not a deliberately-disabled collection. The
+  decision is made in **exactly one** readiness gate
+  (`resolve_entitled_ready_collection`, shared by the REST route, the
+  `search_docs`/`ask_docs` MCP tools, and the docs-chunk resource); the
+  unwired duplicate guard (`ensure_collection_searchable` +
+  `DocCollectionDisabledError`/`DocCollectionNotReadyError` in
+  `docs_collections.lifecycle`) is removed. The `meho docs search` CLI
+  renders the disabled 403 as a distinct "collection is disabled" error
+  rather than the misleading `insufficient_role`. (Option A of the issue —
+  honor the designed split — chosen over Option B's 409-for-all because the
+  terminal/retryable signal is a genuine client value and the mechanism was
+  already shipped and tested by #1555.)
+
 ### Doc-collection docs + runbook (#1556)
 
 - Update the operator provisioning runbook
@@ -104,7 +130,9 @@ connector-related release-notes line.
   record (`corpus-http` adapter + the legacy `corpus_url` fallback) and
   bringing it to readiness through the **probe → enable** lifecycle
   (`provisioning`/`rebuilding` → `ready`; `disable` → not-ready, so
-  search returns 409 like any other non-`ready` status);
+  search fails typed — a terminal 403 for `disabled`, a retryable 409
+  for `provisioning`/`rebuilding`, see the contract reconciliation in
+  #1567);
   **discovery** (`list_doc_collections` / `GET /api/v1/doc_collections` /
   `meho docs collections list` + the `initialize.instructions`
   `<<DOC_COLLECTIONS_AVAILABLE>>` band); the **search contract**

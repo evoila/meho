@@ -9,15 +9,14 @@ downstream tasks can import from ``meho_backplane.docs_collections``
 without knowing the internal module split. The backend-agnostic search
 router (T2 #1551), collection-scoped search (T3 #1552), and the catalogue
 tool / CLI (T4 #1553) all build on this surface; the probe / enable /
-disable routes and the search-time readiness guard build on the
-``lifecycle`` + ``service`` modules (T6 #1555).
+disable routes build on the ``lifecycle`` + ``service`` modules (T6
+#1555). The search-time readiness rejection is the access gate's
+(:func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`),
+not this package's — ``lifecycle`` owns only the write-side status machine.
 """
 
 from meho_backplane.docs_collections.lifecycle import (
-    DocCollectionDisabledError,
-    DocCollectionNotReadyError,
     DocCollectionStateError,
-    ensure_collection_searchable,
 )
 from meho_backplane.docs_collections.resolver import (
     DocCollectionNotFoundError,
@@ -35,12 +34,9 @@ from meho_backplane.docs_collections.service import (
 
 __all__ = [
     "DocCollection",
-    "DocCollectionDisabledError",
     "DocCollectionNotFoundError",
-    "DocCollectionNotReadyError",
     "DocCollectionStateError",
     "DocCollectionSummary",
-    "ensure_collection_searchable",
     "probe_collection",
     "project_doc_collection_to_summary",
     "resolve_doc_collection",

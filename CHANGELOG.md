@@ -103,7 +103,8 @@ connector-related release-notes line.
   substrate); seeding a collection with its `backend{type, ref}` routing
   record (`corpus-http` adapter + the legacy `corpus_url` fallback) and
   bringing it to readiness through the **probe → enable** lifecycle
-  (`provisioning`/`rebuilding` → `ready`; `disable` → 403 on search);
+  (`provisioning`/`rebuilding` → `ready`; `disable` → not-ready, so
+  search returns 409 like any other non-`ready` status);
   **discovery** (`list_doc_collections` / `GET /api/v1/doc_collections` /
   `meho docs collections list` + the `initialize.instructions`
   `<<DOC_COLLECTIONS_AVAILABLE>>` band); the **search contract**

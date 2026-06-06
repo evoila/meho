@@ -268,7 +268,9 @@ meho docs collections probe vmware
 
 ```bash
 # Hide a collection from search (-> disabled). search_docs then fails
-# typed (403) against it rather than returning an empty result.
+# typed (409, "not ready") against it rather than returning an empty
+# result -- uniform with provisioning/rebuilding, since disabled is just
+# another not-ready status on the wired search path.
 meho docs collections disable vmware
 
 # Return a disabled collection to service (-> provisioning); a follow-up
@@ -348,9 +350,11 @@ entitled to** (`meho-docs:<key>`), so every key shown is one
 - **Entitlement** — searching a collection the tenant is not entitled to
   (`meho-docs:<key>` missing) → **403** / `-32602`, even though the tool
   stays visible via the base `meho-docs` gate.
-- **Readiness** — a collection whose `status` is not `ready`:
-  `provisioning` / `rebuilding` → **409** (retryable) / `-32603`;
-  `disabled` → **403**.
+- **Readiness** — a collection whose `status` is not `ready`
+  (`provisioning` / `rebuilding` / `disabled`) → **409** / `-32603`
+  (CLI exit 4, "not ready"). The wired search path treats every
+  non-`ready` status uniformly: `disabled` is not a 403 — an operator
+  hiding a collection is a readiness state, not an entitlement miss.
 
 ```bash
 # Single collection — the common path. --collection is mandatory.

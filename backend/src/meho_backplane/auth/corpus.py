@@ -26,6 +26,19 @@ Pydantic adapter (:class:`CorpusChunk` / :class:`CorpusSearchResponse`)
 that can be pinned without churning the call sites. The route, the
 mandatory REQUIRE_FILTERS posture, and the central audit binding are
 **out of scope here** — they land in T3.
+
+G4.6-T2 (#1551) re-homes this transport behind the backend-agnostic
+search router: :class:`~meho_backplane.docs_search.backends.corpus_http.CorpusHttpBackend`
+wraps :func:`search_corpus` as the first
+:class:`~meho_backplane.docs_search.backends.base.SearchBackend` adapter,
+passing a per-collection ``corpus_url`` / ``audience`` resolved from the
+collection's ``backend.ref``. The optional ``corpus_url`` / ``audience``
+overrides on :func:`search_corpus` are the seam for that — ``None`` keeps
+the legacy global-settings behaviour for an unmigrated single-collection
+deploy. The wire adapters (:class:`CorpusChunk` /
+:class:`CorpusSearchResponse`) and the one typed
+:class:`CorpusUnavailable` stay here, imported by the adapter and every
+other consumer.
 """
 
 from __future__ import annotations
@@ -110,17 +123,19 @@ async def search_corpus(
     *,
     metadata_filters: dict[str, Any] | None = None,
     limit: int = 10,
+    corpus_url: str | None = None,
+    audience: str | None = None,
 ) -> CorpusSearchResponse:
     """Search the external corpus as *operator*, returning cited chunks.
 
-    POSTs a JSON search request to ``settings.corpus_url`` with
+    POSTs a JSON search request to *corpus_url* with
     ``Authorization: Bearer <operator.raw_jwt>`` so the corpus
     authenticates and audits the call as the operator. The request is
     bounded by ``settings.corpus_timeout_seconds`` across connect / read
     / write so a slow or hung corpus raises rather than blocking the
-    event loop. ``settings.corpus_audience`` (RFC 8707), when set, is
-    forwarded as the requested resource indicator; the corpus may use it
-    to bind the token to itself.
+    event loop. *audience* (RFC 8707), when set, is forwarded as the
+    requested resource indicator; the corpus may use it to bind the
+    token to itself.
 
     Args:
         operator: The verified operator whose JWT is forwarded.
@@ -131,32 +146,42 @@ async def search_corpus(
             by the consuming route (T3, #1521), **not** here — this
             transport forwards whatever filters it is given.
         limit: Maximum number of chunks to request.
+        corpus_url: The corpus search endpoint. ``None`` falls back to
+            ``settings.corpus_url`` — the single-collection deploy that
+            predates the per-collection backend router (T2 #1551). The
+            ``corpus-http`` backend adapter passes the collection's
+            ``backend.ref`` endpoint here so each collection can federate
+            to its own corpus.
+        audience: The RFC 8707 resource indicator to forward. ``None``
+            falls back to ``settings.corpus_audience``; an empty string
+            forwards no audience.
 
     Raises:
-        CorpusUnavailable: when ``corpus_url`` is unset (unconfigured),
+        CorpusUnavailable: when *corpus_url* is unset (unconfigured),
             the corpus is unreachable / times out, or it returns a
             non-2xx status. The upstream status is carried on the
             exception (``status``) for non-2xx responses; the raw
             response body is never included.
     """
     settings = get_settings()
-    corpus_url = settings.corpus_url
-    if not corpus_url:
+    resolved_url = corpus_url if corpus_url is not None else settings.corpus_url
+    if not resolved_url:
         # Fail-closed: an unconfigured corpus is unavailable, not empty.
         raise CorpusUnavailable("corpus_url is not configured")
+    resolved_audience = audience if audience is not None else settings.corpus_audience
 
     payload: dict[str, Any] = {"query": query, "limit": limit}
     if metadata_filters:
         payload["metadata_filters"] = metadata_filters
-    if settings.corpus_audience:
-        payload["audience"] = settings.corpus_audience
+    if resolved_audience:
+        payload["audience"] = resolved_audience
 
     headers = {"Authorization": f"Bearer {operator.raw_jwt}"}
     timeout = httpx.Timeout(settings.corpus_timeout_seconds)
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(corpus_url, json=payload, headers=headers)
+            response = await client.post(resolved_url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         # ConnectError / TimeoutException / any transport failure — the
         # corpus is unreachable. Log the cause by type (never the JWT or

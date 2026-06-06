@@ -25,6 +25,11 @@ binding (``op_id="meho.docs.search"``) stays in the route, next to the
 
 from __future__ import annotations
 
+from meho_backplane.docs_search.backends import (
+    SearchBackend,
+    resolve_backend,
+    resolve_backend_or_label,
+)
 from meho_backplane.docs_search.service import (
     DocsChunk,
     DocsScope,
@@ -48,7 +53,10 @@ __all__ = [
     "DocsSearchResult",
     "DocsSynthesisError",
     "MissingDocsFilterError",
+    "SearchBackend",
     "build_docs_scope",
+    "resolve_backend",
+    "resolve_backend_or_label",
     "search_docs",
     "synthesize_docs_answer",
 ]

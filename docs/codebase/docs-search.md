@@ -158,6 +158,41 @@ resolves the backend via `resolve_backend(collection)`, calls
 `CorpusUnavailable` unchanged. The backend id never appears in the request
 or the projected response (the backend-agnostic contract).
 
+### Cross-collection fan-out (`meho_backplane.docs_search.fanout`, T5 #1554)
+
+`search_docs` (the surface, **not** `ask_docs`) accepts an opt-in
+cross-collection scope alongside the single-collection path: an explicit
+`collections=[a, b]` list, or the `collection="all"` sentinel (every
+entitled, ready collection). Three pieces back it:
+
+- **`parse_collection_scope(collection, collections)`** classifies the
+  request into a single scope, a fan-out (explicit keys or the `all`
+  sentinel), or an *empty* scope (which falls through to
+  `build_docs_scope`'s mandatory-scope 422). The single and fan-out scopes
+  are mutually exclusive — supplying both is a 422 / `-32602`.
+- **`resolve_entitled_ready_collections(session, operator, *, requested_keys)`**
+  (in `collection_access`) enumerates the tenant-visible collections
+  (tenant rows override global on key collision), keeps only those the
+  operator is entitled to (`meho-docs:<key>`) **and** that are `ready`, and
+  **drops the rest with a logged reason** (`not_entitled` / `not_ready` /
+  `unknown`) — no silent total truncation. An empty resolved set raises
+  `NoEntitledReadyCollectionError` (→ 403 / `-32602`).
+- **`search_docs_fanout(operator, query, *, collections, limit)`** queries
+  each collection independently on its own backend (concurrently, bounded
+  by a semaphore so a wide `all` fan-out cannot open unbounded backend
+  connections), tags every chunk with its source `collection`, and merges
+  the per-collection ranked lists with **`rrf_merge`** — reciprocal-rank
+  fusion keyed on `(collection, chunk_id)` using the house `RRF_K=60`.
+  Raw backend scores are never consulted (they are not comparable across
+  backends / embedding models), so the merge is purely rank-based and
+  deterministic. A fan-out is fail-closed: any one backend's
+  `CorpusUnavailable` fails the whole query (503 / `-32603`) rather than
+  returning a partial fused list. The audit row's `audit_collection` is the
+  sorted, comma-joined queried set.
+
+`ask_docs` stays single-collection permanently (#1548 decision 2) and
+rejects both fan-out shapes before any retrieval.
+
 ### `synthesize_docs_answer(query, retrieval, *, llm_client=None)` (`meho_backplane.docs_search.synthesis`, T7 #1526)
 
 The synthesis step `ask_docs` runs *after* `search_docs` retrieval. It

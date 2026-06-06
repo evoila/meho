@@ -114,6 +114,27 @@ connector-related release-notes line.
   unprovisioned preamble is byte-identical to before. CLI client + OpenAPI
   snapshot regenerated for the new list route.
 
+### Cross-collection fan-out (#1554)
+
+- Add opt-in **cross-collection fan-out** to `search_docs` (REST, MCP,
+  and `meho docs search`): pass an explicit `collections=[a, b]` list
+  (repeat `--collection` on the CLI) or the `collection="all"` sentinel
+  (`--collection all`) to query several entitled collections at once. Each
+  collection is searched independently on its own backend, and the per-
+  collection ranked lists are merged by **reciprocal-rank fusion** (the
+  house `RRF_K=60`) — never a raw-score sort, since scores are not
+  comparable across backends/embedding models. Every returned chunk is
+  tagged with its source `collection` for provenance. The fan-out resolves
+  to **only entitled, ready** collections — non-entitled and not-ready
+  members are dropped (logged, never silently truncated); an empty
+  resolved set → 403 / `-32602`. A single `collection` and the fan-out
+  scope are mutually exclusive (→ 422 / `-32602`). The audit row's
+  `audit_collection` records the sorted, comma-joined queried set so
+  who-touched attributes the fan-out. `ask_docs` stays single-collection
+  only and rejects the fan-out shapes. CLI client regenerated for the new
+  `collections` request field and the `DocsChunk.collection` provenance
+  field.
+
 ### Collection-scoped doc search (#1552)
 
 - Make `collection` the mandatory binary scope on `search_docs` /

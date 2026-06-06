@@ -40,7 +40,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from sqlalchemy import select
 
+from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections import (
     DocCollection,
     DocCollectionNotFoundError,
@@ -56,9 +58,11 @@ __all__ = [
     "CollectionAccessError",
     "CollectionForbiddenError",
     "CollectionNotReadyError",
+    "NoEntitledReadyCollectionError",
     "UnknownCollectionError",
     "collection_capability_key",
     "resolve_entitled_ready_collection",
+    "resolve_entitled_ready_collections",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -142,6 +146,34 @@ class CollectionNotReadyError(CollectionAccessError):
         self.status = status
 
 
+class NoEntitledReadyCollectionError(CollectionAccessError):
+    """A cross-collection fan-out resolved to zero answerable collections.
+
+    Raised by :func:`resolve_entitled_ready_collections` (T5 #1554) when the
+    requested fan-out set — an explicit ``collections=[…]`` list or the
+    ``all`` sentinel — names no collection the tenant is both entitled to
+    (``meho-docs:<key>``) **and** that is ``ready``. Distinct from
+    :class:`CollectionForbiddenError` (a *single* named collection the
+    tenant cannot search): here the *set* collapsed to empty after dropping
+    non-entitled / not-ready members, so there is nothing to fan out across.
+    Surfaces map this to a 403-class rejection (REST 403, MCP ``-32602``) —
+    a well-formed request that the tenant has no answerable collection for.
+
+    ``requested`` is the (sorted, de-duplicated) keys the caller asked for
+    (empty for the ``all`` sentinel, where the tenant simply has no entitled
+    ready collection at all) so the surface can render *why* nothing
+    matched without re-deriving the set.
+    """
+
+    def __init__(self, requested: list[str]) -> None:
+        self.requested = requested
+        named = ", ".join(requested) if requested else "all entitled collections"
+        super().__init__(
+            f"no entitled, ready doc collection in fan-out scope ({named})",
+            collection_key="",
+        )
+
+
 def collection_capability_key(collection_key: str) -> str:
     """Return the per-collection entitlement capability key.
 
@@ -221,3 +253,132 @@ async def resolve_entitled_ready_collection(
         raise CollectionNotReadyError(row.collection_key, row.status)
 
     return DocCollection.model_validate(row, from_attributes=True)
+
+
+def _visible_rows_by_key(
+    rows: list[DocCollectionORM],
+    tenant_id: Any,
+) -> dict[str, DocCollectionORM]:
+    """Collapse tenant-visible rows to one per ``collection_key``, tenant-first.
+
+    Mirrors :func:`~meho_backplane.docs_collections.resolve_doc_collection`'s
+    tenant-then-global preference, applied across the whole catalogue: a key
+    that exists both as a global row and a tenant-curated row resolves to the
+    tenant row (the override), so the fan-out sees each key exactly once.
+    """
+    by_key: dict[str, DocCollectionORM] = {}
+    # Two passes so the tenant row deterministically wins regardless of the
+    # DB's row order: seed globals first, then let tenant rows overwrite.
+    for row in rows:
+        if row.tenant_id is None:
+            by_key[row.collection_key] = row
+    for row in rows:
+        if row.tenant_id == tenant_id:
+            by_key[row.collection_key] = row
+    return by_key
+
+
+def _keep_if_entitled_ready(operator: Operator, row: DocCollectionORM) -> bool:
+    """Whether *row* survives the fan-out's entitlement + readiness filter.
+
+    Returns ``True`` when *operator* carries the ``meho-docs:<key>``
+    capability **and** the row is ``ready``. A drop is logged with its
+    reason (``not_entitled`` / ``not_ready``) so the fan-out never silently
+    truncates the set without a trace (#1554 acceptance).
+    """
+    capability = collection_capability_key(row.collection_key)
+    if capability not in operator.capabilities:
+        _log.info(
+            "doc_collection_fanout_dropped",
+            tenant_id=str(operator.tenant_id),
+            collection_key=row.collection_key,
+            reason="not_entitled",
+        )
+        return False
+    if row.status != _READY_STATUS:
+        _log.info(
+            "doc_collection_fanout_dropped",
+            tenant_id=str(operator.tenant_id),
+            collection_key=row.collection_key,
+            reason="not_ready",
+            status=row.status,
+        )
+        return False
+    return True
+
+
+async def resolve_entitled_ready_collections(
+    session: AsyncSession,
+    operator: Operator,
+    *,
+    requested_keys: list[str] | None,
+) -> list[DocCollection]:
+    """Resolve a cross-collection fan-out scope to its answerable collections.
+
+    The fan-out analogue of :func:`resolve_entitled_ready_collection` (T5
+    #1554, ``search_docs`` only). Resolves *requested_keys* (an explicit
+    ``collections=[…]`` list) or — when ``requested_keys is None`` (the
+    ``all`` sentinel) — every collection visible to the tenant, then keeps
+    only those the operator is **entitled** to (``meho-docs:<key>``) and that
+    are **ready**. Non-entitled and not-ready members are dropped from the
+    set rather than failing the whole query (no silent *total* truncation:
+    each drop is logged with its reason so an operator can see why a
+    collection did not contribute), per the #1554 acceptance criteria. The
+    returned list is **sorted by ``collection_key``** so the fan-out order —
+    and the derived ``audit_collection`` set — is deterministic.
+
+    Args:
+        session: Active async DB session.
+        operator: The verified operator (``tenant_id`` scopes the catalogue
+            read; ``capabilities`` gates per-collection entitlement).
+        requested_keys: The explicit keys to fan out across (deduplicated
+            by the caller), or ``None`` for the ``all`` sentinel (every
+            visible collection).
+
+    Returns:
+        The entitled, ready :class:`DocCollection` read shapes, sorted by
+        ``collection_key``.
+
+    Raises:
+        NoEntitledReadyCollectionError: the scope resolved to zero entitled,
+            ready collections (every requested member was unknown,
+            non-entitled, or not-ready, or the tenant has no entitled ready
+            collection at all under ``all``).
+    """
+    stmt = select(DocCollectionORM).where(
+        (DocCollectionORM.tenant_id == operator.tenant_id) | (DocCollectionORM.tenant_id.is_(None))
+    )
+    if requested_keys is not None:
+        stmt = stmt.where(DocCollectionORM.collection_key.in_(requested_keys))
+    result = await session.execute(stmt)
+    by_key = _visible_rows_by_key(list(result.scalars().all()), operator.tenant_id)
+
+    # An explicit key that resolved to no visible row is dropped-and-logged
+    # too — the same "no silent truncation" contract the entitlement /
+    # readiness drops honour, so an operator who typos a key in a fan-out
+    # list sees it named rather than silently missing from the result.
+    if requested_keys is not None:
+        for missing in sorted(set(requested_keys) - by_key.keys()):
+            _log.info(
+                "doc_collection_fanout_dropped",
+                tenant_id=str(operator.tenant_id),
+                collection_key=missing,
+                reason="unknown",
+            )
+
+    entitled_ready: list[DocCollection] = [
+        DocCollection.model_validate(by_key[key], from_attributes=True)
+        for key in sorted(by_key)
+        if _keep_if_entitled_ready(operator, by_key[key])
+    ]
+
+    if not entitled_ready:
+        raise NoEntitledReadyCollectionError(sorted(requested_keys or []))
+
+    _log.info(
+        "doc_collection_fanout_resolved",
+        tenant_id=str(operator.tenant_id),
+        scope="all" if requested_keys is None else "explicit",
+        queried=[c.collection_key for c in entitled_ready],
+    )
+    return entitled_ready

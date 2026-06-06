@@ -316,6 +316,44 @@ def test_tools_call_ask_docs_missing_collection_rejected_by_schema(
     assert response.json()["error"]["code"] == INVALID_PARAMS
 
 
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_rejects_all_sentinel(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """``ask_docs`` rejects the ``collection='all'`` fan-out sentinel → -32602.
+
+    ``all`` passes the inputSchema (a valid ``collection`` string), so the
+    rejection is the handler's single-collection-only guard — its message
+    names *why* (#1554): cross-collection synthesis is permanently out of
+    scope for ``ask_docs``.
+    """
+    client, _op = docs_client
+    response = post_mcp(client, _ask_call({"query": "x", "collection": "all"}, call_id=4))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "single-collection" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_rejects_collections_array_by_schema(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """``ask_docs`` rejects an explicit ``collections`` list → -32602 (#1554).
+
+    ``collections`` is absent from the ``ask_docs`` inputSchema (which sets
+    ``additionalProperties: false``), so a schema-validating client is
+    rejected at the schema layer — ``ask_docs`` is single-collection only and
+    never grows the fan-out argument.
+    """
+    client, _op = docs_client
+    response = post_mcp(
+        client, _ask_call({"query": "x", "collection": "vmware", "collections": ["n"]}, call_id=5)
+    )
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == INVALID_PARAMS
+
+
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
 def test_tools_call_ask_docs_403_when_not_entitled_to_collection(
     docs_client: tuple[TestClient, Operator],

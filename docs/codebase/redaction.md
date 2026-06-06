@@ -120,7 +120,7 @@ production traffic cannot reach that branch.
 | `authorization_header` | `Authorization: Bearer ...` / `Basic ...` header lines |
 | `bearer_token` | Bare `Bearer <opaque>` outside an Authorization header |
 | `jwt` | `ey<base64url>.<base64url>.<base64url>` three-segment tokens |
-| `api_key` | Labelled credential pairs (`api_key=`, `password:`, `client_secret=`...) |
+| `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value |
 | `kubeconfig` | YAML kubeconfig blobs (`apiVersion: v1` + `kind: Config`) |
 | `uuid` | RFC 4122 canonical 8-4-4-4-12 hex |
 | `ipv4` | Dotted-quad with 0-255 per-octet bounds |

@@ -998,6 +998,33 @@ type AuthConfigResponse struct {
 // AuthModel Per-target identity model per v0.1-spec L447-454.
 type AuthModel string
 
+// BackendReadiness Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).
+//
+// The liveness snapshot a probe reads back from a collection's backend.
+// The collection-probe route persists “doc_count“ / “last_ingested_at“
+// / “readiness“ onto the “doc_collections“ row and transitions
+// “status“ from this result **on success only** — modelled on
+// :class:`~meho_backplane.connectors.schemas.FingerprintResult`, which
+// “probe_target“ caches onto “Target.fingerprint“ the same way.
+//
+// “index_built“ is the managed-RAG footgun this surface exists to
+// hide: a managed-RAG ANN index answers searches only once it has been
+// explicitly (re)built, and rebuilds serialize per project. “False“
+// means the backend is reachable but the index is not yet answerable —
+// the probe maps it to “status='rebuilding'“ / “'provisioning'“ so
+// the search path can fail typed rather than return a silent empty 200.
+//
+// Frozen so a persisted snapshot cannot be mutated after the probe
+// reads it. “detail“ is the free-form JSON the “readiness“ column
+// stores verbatim for operator diagnostics (never agent-facing).
+type BackendReadiness struct {
+	Detail         *map[string]interface{} `json:"detail,omitempty"`
+	DocCount       *int                    `json:"doc_count"`
+	IndexBuilt     bool                    `json:"index_built"`
+	LastIngestedAt *time.Time              `json:"last_ingested_at"`
+	Reachable      bool                    `json:"reachable"`
+}
+
 // BaselineMetricsOverride Per-surface baseline metrics supplied by the caller.
 //
 // Criterion 4 (MEHO ≥ baseline) needs side-by-side numbers from a
@@ -5182,6 +5209,21 @@ type ListHistoryApiV1ConventionsSlugHistoryGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams defines parameters for DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost.
+type DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostParams defines parameters for EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePost.
+type EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams defines parameters for ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePost.
+type ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // FeedEndpointApiV1FeedGetParams defines parameters for FeedEndpointApiV1FeedGet.
 type FeedEndpointApiV1FeedGetParams struct {
 	// OpClass Filter by event op_class.
@@ -6843,6 +6885,15 @@ type ClientInterface interface {
 	// ListHistoryApiV1ConventionsSlugHistoryGet request
 	ListHistoryApiV1ConventionsSlugHistoryGet(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost request
+	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePost request
+	EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePost(ctx context.Context, collectionKey string, params *EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePost request
+	ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePost(ctx context.Context, collectionKey string, params *ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -8048,6 +8099,42 @@ func (c *Client) UpdateConventionApiV1ConventionsSlugPatch(ctx context.Context, 
 
 func (c *Client) ListHistoryApiV1ConventionsSlugHistoryGet(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListHistoryApiV1ConventionsSlugHistoryGetRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostRequest(c.Server, collectionKey, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePost(ctx context.Context, collectionKey string, params *EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostRequest(c.Server, collectionKey, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePost(ctx context.Context, collectionKey string, params *ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostRequest(c.Server, collectionKey, params)
 	if err != nil {
 		return nil, err
 	}
@@ -12760,6 +12847,153 @@ func NewListHistoryApiV1ConventionsSlugHistoryGetRequest(server string, slug str
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostRequest generates requests for DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost
+func NewDisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostRequest(server string, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/doc_collections/%s/disable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostRequest generates requests for EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePost
+func NewEnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostRequest(server string, collectionKey string, params *EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/doc_collections/%s/enable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostRequest generates requests for ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePost
+func NewProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostRequest(server string, collectionKey string, params *ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/doc_collections/%s/probe", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -20087,6 +20321,15 @@ type ClientWithResponsesInterface interface {
 	// ListHistoryApiV1ConventionsSlugHistoryGetWithResponse request
 	ListHistoryApiV1ConventionsSlugHistoryGetWithResponse(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*ListHistoryApiV1ConventionsSlugHistoryGetResponse, error)
 
+	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request
+	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error)
+
+	// EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostWithResponse request
+	EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostWithResponse(ctx context.Context, collectionKey string, params *EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostParams, reqEditors ...RequestEditorFn) (*EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse, error)
+
+	// ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostWithResponse request
+	ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostWithResponse(ctx context.Context, collectionKey string, params *ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams, reqEditors ...RequestEditorFn) (*ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse, error)
+
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
 
@@ -21614,6 +21857,73 @@ func (r ListHistoryApiV1ConventionsSlugHistoryGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ListHistoryApiV1ConventionsSlugHistoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *BackendReadiness
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -24773,6 +25083,33 @@ func (c *ClientWithResponses) ListHistoryApiV1ConventionsSlugHistoryGetWithRespo
 	return ParseListHistoryApiV1ConventionsSlugHistoryGetResponse(rsp)
 }
 
+// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request returning *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse
+func (c *ClientWithResponses) DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error) {
+	rsp, err := c.DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx, collectionKey, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse(rsp)
+}
+
+// EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostWithResponse request returning *EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse
+func (c *ClientWithResponses) EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostWithResponse(ctx context.Context, collectionKey string, params *EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostParams, reqEditors ...RequestEditorFn) (*EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse, error) {
+	rsp, err := c.EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePost(ctx, collectionKey, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse(rsp)
+}
+
+// ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostWithResponse request returning *ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse
+func (c *ClientWithResponses) ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostWithResponse(ctx context.Context, collectionKey string, params *ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams, reqEditors ...RequestEditorFn) (*ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse, error) {
+	rsp, err := c.ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePost(ctx, collectionKey, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse(rsp)
+}
+
 // FeedEndpointApiV1FeedGetWithResponse request returning *FeedEndpointApiV1FeedGetResponse
 func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error) {
 	rsp, err := c.FeedEndpointApiV1FeedGet(ctx, params, reqEditors...)
@@ -27672,6 +28009,91 @@ func ParseListHistoryApiV1ConventionsSlugHistoryGetResponse(rsp *http.Response) 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest []ConventionHistoryEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse parses an HTTP response from a DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse call
+func ParseDisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse(rsp *http.Response) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse parses an HTTP response from a EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostWithResponse call
+func ParseEnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse(rsp *http.Response) (*EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnablePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse parses an HTTP response from a ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostWithResponse call
+func ParseProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse(rsp *http.Response) (*ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest BackendReadiness
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

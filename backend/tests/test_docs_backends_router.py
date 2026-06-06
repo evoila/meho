@@ -387,10 +387,16 @@ async def test_adapter_blank_ref_endpoint_uses_legacy(monkeypatch: pytest.Monkey
     assert str(captured[0].url) == _CORPUS_URL
 
 
-async def test_adapter_does_not_implement_probe_yet() -> None:
-    """``probe`` is a T6 seam — it must fail loudly, not claim ready."""
+async def test_base_probe_seam_fails_loudly_when_unimplemented() -> None:
+    """An adapter that does not override ``probe`` raises, never claims ready.
+
+    T6 (#1555) implements ``probe`` on ``CorpusHttpBackend``; the base
+    seam still fails loudly for an adapter (here ``_FakeBackend``) that
+    has not gained a liveness check, so it can never silently report
+    "ready" — the contract the base default guards.
+    """
     with pytest.raises(NotImplementedError):
-        await CorpusHttpBackend().probe()
+        await _FakeBackend().probe(_make_operator())
 
 
 # ---------------------------------------------------------------------------

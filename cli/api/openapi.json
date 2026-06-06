@@ -459,6 +459,172 @@
         }
       }
     },
+    "/api/v1/doc_collections/{collection_key}/probe": {
+      "post": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Probe Collection Endpoint",
+        "description": "Probe a collection's backend and persist its liveness on success.\n\nResolves the collection tenant-first, reads its backend's typed\nreadiness (forwarding the operator JWT under the operator identity),\nand on success persists ``readiness`` / ``doc_count`` /\n``last_ingested_at`` + the ``status`` transition onto the row. A\nfailed probe is mapped to 503 and leaves the row unchanged: the\n``get_session`` transaction rolls back on the raise, so nothing the\nservice flushed survives.",
+        "operationId": "probe_collection_endpoint_api_v1_doc_collections__collection_key__probe_post",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackendReadiness"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No collection with this key is visible to the tenant."
+          },
+          "409": {
+            "description": "The probe's readiness implies a status the lifecycle forbids from the collection's current state (e.g. probing a disabled collection)."
+          },
+          "503": {
+            "description": "The collection's backend is unavailable \u2014 unconfigured, unreachable, non-2xx / malformed, or routes to no registered backend. Fail-closed; the row's cached liveness is left untouched (success-only write-back)."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/doc_collections/{collection_key}/enable": {
+      "post": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Enable Collection Endpoint",
+        "description": "Return a disabled collection to service (\u2192 ``provisioning``).\n\nIdempotent: re-enabling an already-live collection writes nothing and\nreturns 204. A forbidden source state raises 409 via the lifecycle\nguard. A follow-up probe promotes the re-enabled collection to\n``ready`` once its index confirms.",
+        "operationId": "enable_collection_endpoint_api_v1_doc_collections__collection_key__enable_post",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No collection with this key is visible to the tenant."
+          },
+          "409": {
+            "description": "Enable is forbidden from the collection's current state."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/doc_collections/{collection_key}/disable": {
+      "post": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Disable Collection Endpoint",
+        "description": "Hide a collection from search (\u2192 ``disabled``).\n\nIdempotent and lifecycle-guarded \u2014 same shape as the enable handler.\nA disabled collection fails ``search_docs`` typed (403) via the T3\nsearch-time guard rather than returning an empty result.",
+        "operationId": "disable_collection_endpoint_api_v1_doc_collections__collection_key__disable_post",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No collection with this key is visible to the tenant."
+          },
+          "409": {
+            "description": "Disable is forbidden from the collection's current state."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -10789,6 +10955,41 @@
         ],
         "title": "AuthModel",
         "description": "Per-target identity model per v0.1-spec L447-454."
+      },
+      "BackendReadiness": {
+        "properties": {
+          "reachable": {
+            "type": "boolean",
+            "title": "Reachable"
+          },
+          "index_built": {
+            "type": "boolean",
+            "title": "Index Built"
+          },
+          "doc_count": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Doc Count"
+          },
+          "last_ingested_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Ingested At"
+          },
+          "detail": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reachable",
+          "index_built"
+        ],
+        "title": "BackendReadiness",
+        "description": "Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).\n\nThe liveness snapshot a probe reads back from a collection's backend.\nThe collection-probe route persists ``doc_count`` / ``last_ingested_at``\n/ ``readiness`` onto the ``doc_collections`` row and transitions\n``status`` from this result **on success only** \u2014 modelled on\n:class:`~meho_backplane.connectors.schemas.FingerprintResult`, which\n``probe_target`` caches onto ``Target.fingerprint`` the same way.\n\n``index_built`` is the managed-RAG footgun this surface exists to\nhide: a managed-RAG ANN index answers searches only once it has been\nexplicitly (re)built, and rebuilds serialize per project. ``False``\nmeans the backend is reachable but the index is not yet answerable \u2014\nthe probe maps it to ``status='rebuilding'`` / ``'provisioning'`` so\nthe search path can fail typed rather than return a silent empty 200.\n\nFrozen so a persisted snapshot cannot be mutated after the probe\nreads it. ``detail`` is the free-form JSON the ``readiness`` column\nstores verbatim for operator diagnostics (never agent-facing)."
       },
       "BaselineMetricsOverride": {
         "properties": {

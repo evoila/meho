@@ -120,6 +120,7 @@ func newRootCmdWithGate(provisioned bool) *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newSearchCmd(provisioned))
+	cmd.AddCommand(newCollectionsCmd(provisioned))
 	return cmd
 }
 

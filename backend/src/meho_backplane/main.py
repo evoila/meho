@@ -78,6 +78,7 @@ from meho_backplane.api.v1.connectors_ingest import (
     set_llm_client_factory,
 )
 from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
+from meho_backplane.api.v1.doc_collections import router as api_v1_doc_collections_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
@@ -109,6 +110,7 @@ from meho_backplane.broadcast import (
 from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
+from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
@@ -276,6 +278,10 @@ async def _run_lifespan_startup() -> None:
     register_probe("vault", vault_readiness_probe)
     register_probe("db", db_migration_probe)
     register_probe("broadcast", broadcast_readiness_probe)
+    # G4.6-T6 (#1555) — coarse "each configured search backend reachable"
+    # gate. Synchronous config read (no live round-trip); the
+    # per-collection liveness round-trip is the explicit probe route.
+    register_probe("docs_backends", docs_backends_readiness_probe)
     # Eager engine construction (G2.3-T2 #258); validates ``DATABASE_URL``
     # at startup so first-request latency doesn't absorb the pool build.
     get_engine()
@@ -593,6 +599,12 @@ app.include_router(api_v1_retrieve_retire_router)
 # `audit_op_class` contextvar overrides. The MCP tool (T4) and CLI verb
 # (T5) reuse the same `docs_search.search_docs` service this route fronts.
 app.include_router(api_v1_search_docs_router)
+# G4.6-T6 (#1555) — doc-collection readiness probe + lifecycle. Tenant-
+# admin-gated probe (success-only write-back of liveness onto the row,
+# mirroring probe_target → Target.fingerprint) + enable/disable
+# transitions. The collection-scoped search wiring that reads the
+# probe-written status lands in T3 (#1552).
+app.include_router(api_v1_doc_collections_router)
 # G0.3-T3 (#254) — targets CRUD surface. All 5 routes are tenant-scoped
 # via the JWT's tenant_id claim; cross-tenant reads are impossible.
 # G9.1-T5 (#453) extends this router with GET /api/v1/targets/discover

@@ -24,7 +24,7 @@ that imports :func:`resolve_backend` has a populated registry without a
 separate eager-import step.
 """
 
-from meho_backplane.docs_search.backends.base import SearchBackend
+from meho_backplane.docs_search.backends.base import BackendReadiness, SearchBackend
 from meho_backplane.docs_search.backends.corpus_http import (
     CORPUS_HTTP_BACKEND_TYPE,
     CorpusHttpBackend,
@@ -43,6 +43,7 @@ from meho_backplane.docs_search.backends.resolver import (
 
 __all__ = [
     "CORPUS_HTTP_BACKEND_TYPE",
+    "BackendReadiness",
     "BackendRef",
     "CorpusHttpBackend",
     "ResolvedBackend",

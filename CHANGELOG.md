@@ -112,6 +112,27 @@ connector-related release-notes line.
   surfaces enforce one policy. CLI client regenerated for the new
   `collection` request field.
 
+### Doc-collection readiness probe + lifecycle (#1555)
+
+- Make the doc-collection catalogue carry **backend readiness** so the
+  router hides managed-RAG operational footguns. Fill in the
+  `SearchBackend.probe(operator, *, backend_ref)` seam to return a typed
+  `BackendReadiness` (reachable / index-built / doc count / last ingest);
+  the `corpus-http` adapter reads it from the corpus `/status` endpoint
+  and serializes concurrent rebuilds **per project** inside the adapter
+  (an `asyncio.Lock` keyed on the corpus endpoint — no substrate
+  scheduler). New tenant_admin-gated routes
+  `POST /api/v1/doc_collections/{key}/probe|enable|disable`: the probe
+  **writes liveness back onto the row on success only** (a failed probe
+  leaves it untouched, the `probe_target` split) and transitions the
+  lifecycle `status` (`provisioning`/`rebuilding` → `ready` once the
+  index is built); enable/disable are idempotent and guarded (forbidden
+  transition → 409). A coarse `/ready` check reports each configured
+  search backend reachable. New `meho docs collections probe|enable|disable`
+  CLI verbs. The search-time "not-ready → typed 409/403" guard
+  (`ensure_collection_searchable`) ships here; wiring it into the
+  `search_docs` route is a downstream Task (#1552).
+
 ### Backend-agnostic search router (#1551)
 
 - Add a `collection → backend{type, ref}` search router so one doc

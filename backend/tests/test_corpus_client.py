@@ -23,7 +23,10 @@ import structlog
 import meho_backplane.auth.corpus as corpus_mod
 from meho_backplane.auth.corpus import (
     CorpusSearchResponse,
+    CorpusStatusResponse,
     CorpusUnavailable,
+    corpus_status,
+    derive_status_url,
     search_corpus,
 )
 from meho_backplane.auth.operator import Operator
@@ -279,3 +282,84 @@ async def test_forwarded_jwt_never_logged(monkeypatch: pytest.MonkeyPatch) -> No
     assert _JWT not in serialised
     # The failure is still observable by status.
     assert any(event.get("status") == 503 for event in logs)
+
+
+# ---------------------------------------------------------------------------
+# corpus_status (T6 #1555 readiness transport)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("search_url", "expected"),
+    [
+        ("https://corpus.test/v1/search", "https://corpus.test/v1/status"),
+        ("https://corpus.test/v1/search/", "https://corpus.test/v1/status"),
+        ("https://corpus.test/corpus", "https://corpus.test/corpus/status"),
+        ("https://corpus.test/search?x=1", "https://corpus.test/status"),
+    ],
+)
+def test_derive_status_url(search_url: str, expected: str) -> None:
+    """The readiness URL is the search URL with its tail swapped to status."""
+    assert derive_status_url(search_url) == expected
+
+
+@pytest.mark.asyncio
+async def test_corpus_status_gets_status_url_with_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """corpus_status GETs the derived status URL forwarding the operator JWT."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    captured: list[httpx.Request] = []
+    response = httpx.Response(
+        200,
+        json={
+            "index_built": True,
+            "doc_count": 17000,
+            "last_ingested_at": "2026-06-01T12:00:00Z",
+        },
+    )
+    transport = _transport_capturing(captured, response)
+    _patch_async_client(monkeypatch, transport, [])
+
+    result = await corpus_status(_make_operator())
+
+    assert isinstance(result, CorpusStatusResponse)
+    assert result.index_built is True
+    assert result.doc_count == 17000
+    assert len(captured) == 1
+    assert captured[0].method == "GET"
+    assert str(captured[0].url) == derive_status_url(_CORPUS_URL)
+    assert captured[0].headers["Authorization"] == f"Bearer {_JWT}"
+
+
+@pytest.mark.asyncio
+async def test_corpus_status_unconfigured_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty corpus_url is unavailable, not silently 'no readiness'."""
+    _pin_settings(monkeypatch, corpus_url="")
+    with pytest.raises(CorpusUnavailable):
+        await corpus_status(_make_operator())
+
+
+@pytest.mark.asyncio
+async def test_corpus_status_non_2xx_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-2xx status collapses to CorpusUnavailable carrying the status."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    transport = _transport_capturing([], httpx.Response(500, text="boom"))
+    _patch_async_client(monkeypatch, transport, [])
+
+    with pytest.raises(CorpusUnavailable) as exc:
+        await corpus_status(_make_operator())
+    assert exc.value.status == 500
+    # The corpus error body never leaks through the typed error.
+    assert "boom" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_corpus_status_malformed_body_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 2xx body missing the required index_built fails parse → unavailable."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    transport = _transport_capturing([], httpx.Response(200, json={"doc_count": 5}))
+    _patch_async_client(monkeypatch, transport, [])
+
+    with pytest.raises(CorpusUnavailable):
+        await corpus_status(_make_operator())

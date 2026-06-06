@@ -28,23 +28,70 @@ collection's ``backend.ref`` and is passed to :meth:`search` per call, so
 a single ``CorpusHttpBackend`` instance serves every collection routed to
 the ``corpus-http`` type.
 
-:meth:`probe` is a forward seam for the readiness probe (T6 #1555). It
-defaults to raising :class:`NotImplementedError` so an adapter that has
-not implemented readiness reporting fails loudly rather than silently
-claiming "ready"; T6 overrides it on the adapters that gain a liveness
-endpoint.
+:meth:`probe` is the readiness seam (T6 #1555): it queries the backend
+for index readiness, ``doc_count``, and ``last_ingested_at`` and returns
+a typed :class:`BackendReadiness`. The base method defaults to raising
+:class:`NotImplementedError` so an adapter that has not implemented
+readiness reporting fails loudly rather than silently claiming "ready";
+:class:`~meho_backplane.docs_search.backends.corpus_http.CorpusHttpBackend`
+overrides it. The collection-probe route persists the result onto the
+``doc_collections`` row **on success only**, the same write-back split
+``probe_target`` + ``Target.fingerprint`` use.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.auth.corpus import CorpusSearchResponse
 from meho_backplane.auth.operator import Operator
 
-__all__ = ["SearchBackend"]
+__all__ = ["BackendReadiness", "SearchBackend"]
+
+
+class BackendReadiness(BaseModel):
+    """Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).
+
+    The liveness snapshot a probe reads back from a collection's backend.
+    The collection-probe route persists ``doc_count`` / ``last_ingested_at``
+    / ``readiness`` onto the ``doc_collections`` row and transitions
+    ``status`` from this result **on success only** — modelled on
+    :class:`~meho_backplane.connectors.schemas.FingerprintResult`, which
+    ``probe_target`` caches onto ``Target.fingerprint`` the same way.
+
+    ``index_built`` is the managed-RAG footgun this surface exists to
+    hide: a managed-RAG ANN index answers searches only once it has been
+    explicitly (re)built, and rebuilds serialize per project. ``False``
+    means the backend is reachable but the index is not yet answerable —
+    the probe maps it to ``status='rebuilding'`` / ``'provisioning'`` so
+    the search path can fail typed rather than return a silent empty 200.
+
+    Frozen so a persisted snapshot cannot be mutated after the probe
+    reads it. ``detail`` is the free-form JSON the ``readiness`` column
+    stores verbatim for operator diagnostics (never agent-facing).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Backend reachable at all (transport succeeded). ``False`` is the
+    #: 503 arm — distinct from reachable-but-index-not-built.
+    reachable: bool
+    #: Managed-RAG index built and answerable. ``False`` while a rebuild
+    #: is in flight or the corpus was registered but never ingested.
+    index_built: bool
+    #: Documents the backend reports for this collection; ``None`` when
+    #: the backend does not expose a count.
+    doc_count: int | None = None
+    #: Last successful ingest the backend reports; ``None`` when unknown.
+    last_ingested_at: datetime | None = None
+    #: Free-form per-backend diagnostics persisted to the ``readiness``
+    #: JSON column verbatim (e.g. ``{"probe_method": "status-endpoint"}``).
+    detail: Mapping[str, Any] = Field(default_factory=dict)
 
 
 class SearchBackend(ABC):
@@ -114,13 +161,56 @@ class SearchBackend(ABC):
 
     async def probe(
         self,
+        operator: Operator,
+        *,
         backend_ref: Mapping[str, Any] | None = None,
-    ) -> Mapping[str, Any]:
-        """Report this backend's readiness for *backend_ref* (T6 #1555 seam).
+    ) -> BackendReadiness:
+        """Report this backend's readiness for *backend_ref* (T6 #1555).
 
-        Not implemented in T2. Defaults to raising so an adapter without
-        a liveness endpoint fails loudly rather than silently claiming
-        "ready"; the readiness probe Task (T6 #1555) overrides it on the
-        adapters that gain a liveness check.
+        Queries the backend for index readiness, ``doc_count``, and
+        ``last_ingested_at`` (or a HEAD / status call) and returns a typed
+        :class:`BackendReadiness`. The signature mirrors :meth:`search`:
+        the collection's row is resolved to ``backend_ref`` by the router
+        before the call, so the adapter depends only on the backend
+        routing detail and never on the ``doc_collections`` ORM shape.
+
+        The collection-probe route persists the result onto the row **on
+        success only** (the ``probe_target`` / ``Target.fingerprint``
+        write-back split). A probe that *raises* leaves the row's cached
+        liveness untouched.
+
+        Args:
+            operator: The verified operator. An adapter that probes an
+                operator-audited backend forwards ``operator.raw_jwt``;
+                an adapter with its own service credentials (a later
+                Task) uses *operator* only for scoping / logging.
+            backend_ref: The collection's ``backend.ref`` routing detail
+                (endpoint, audience, index id, …). ``None`` selects the
+                adapter's legacy / default configuration.
+
+        Returns:
+            A :class:`BackendReadiness` snapshot the route persists.
+
+        Raises:
+            NotImplementedError: the base default — an adapter without a
+                liveness check fails loudly rather than silently claiming
+                "ready". Concrete adapters override this.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement readiness probing")
+
+    def is_configured(self) -> bool:
+        """Whether this backend has the minimum config to answer at all.
+
+        The **coarse** liveness signal the ``/ready`` backend-reachability
+        probe (T6 #1555) consults — a cheap, synchronous, credential-free
+        check (e.g. "is the corpus URL set?"), *not* a live round-trip to
+        the backend (that would need an operator JWT and would hammer the
+        backend on every readiness poll). Defaults to ``True`` so an
+        adapter with no external configuration (an in-process backend) is
+        reachable by construction; adapters that depend on an external
+        endpoint override this to report whether it is configured.
+
+        The per-collection liveness round-trip is :meth:`probe`; this is
+        the deploy-level "is the backend wired at all" gate.
+        """
+        return True

@@ -43,7 +43,9 @@ other consumer.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
@@ -55,7 +57,10 @@ from meho_backplane.settings import get_settings
 __all__ = [
     "CorpusChunk",
     "CorpusSearchResponse",
+    "CorpusStatusResponse",
     "CorpusUnavailable",
+    "corpus_status",
+    "derive_status_url",
     "search_corpus",
 ]
 
@@ -214,3 +219,121 @@ async def search_corpus(
         # broken contract; fail closed without echoing the payload.
         _log.warning("corpus_response_invalid_schema")
         raise CorpusUnavailable("corpus response did not match the expected schema") from exc
+
+
+class CorpusStatusResponse(BaseModel):
+    """Parsed corpus readiness response — the liveness the probe reads back.
+
+    The consumer-side adapter over the corpus's ``/status`` contract (the
+    readiness sibling of :class:`CorpusSearchResponse`). The probe Task
+    (T6 #1555) reads ``index_built`` / ``doc_count`` / ``last_ingested_at``
+    here and the collection-probe route persists them onto the
+    ``doc_collections`` row on success. ``extra="ignore"`` absorbs corpus
+    fields MEHO does not consume; a dropped consumed field fails parse
+    rather than silently degrading — surfaced as :class:`CorpusUnavailable`.
+
+    ``index_built`` is the managed-RAG footgun: ``False`` means the corpus
+    is reachable but its ANN index is not yet answerable (a rebuild is in
+    flight, or the corpus was registered but never ingested), so the
+    search path can fail typed instead of returning an empty 200. Frozen.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    index_built: bool
+    doc_count: int | None = None
+    last_ingested_at: datetime | None = None
+
+
+def derive_status_url(search_url: str) -> str:
+    """Derive the corpus readiness URL from its *search_url*.
+
+    The corpus exposes its readiness check as a sibling of the search
+    endpoint: the final path segment ``search`` is swapped for ``status``
+    (``https://corpus/v1/search`` → ``https://corpus/v1/status``). A URL
+    whose final segment is not ``search`` gets ``status`` appended as a
+    child segment so an unconventional layout still resolves to a single
+    deterministic readiness URL. Query string and fragment are dropped —
+    they are search-request shape, never part of the status endpoint.
+    """
+    parts = urlsplit(search_url)
+    path = parts.path.rstrip("/")
+    if path.rsplit("/", 1)[-1] == "search":
+        new_path = path[: -len("search")] + "status"
+    else:
+        new_path = f"{path}/status"
+    return urlunsplit((parts.scheme, parts.netloc, new_path, "", ""))
+
+
+async def corpus_status(
+    operator: Operator,
+    *,
+    corpus_url: str | None = None,
+    audience: str | None = None,
+) -> CorpusStatusResponse:
+    """Read the external corpus's readiness as *operator* (T6 #1555).
+
+    GETs the corpus readiness endpoint (:func:`derive_status_url` of the
+    search URL) with ``Authorization: Bearer <operator.raw_jwt>`` so the
+    corpus authenticates and audits the probe as the operator — the same
+    forward-the-JWT contract as :func:`search_corpus`. Bounded by
+    ``settings.corpus_timeout_seconds``; every fail-closed branch
+    collapses to one :class:`CorpusUnavailable` so the probe route never
+    persists a partial / stale liveness snapshot.
+
+    Args:
+        operator: The verified operator whose JWT is forwarded.
+        corpus_url: The corpus *search* endpoint (the readiness URL is
+            derived from it). ``None`` falls back to ``settings.corpus_url``
+            — the legacy single-collection deploy. The ``corpus-http``
+            backend adapter passes the collection's ``backend.ref``
+            endpoint so each collection probes its own corpus.
+        audience: The RFC 8707 resource indicator to forward as a query
+            param. ``None`` falls back to ``settings.corpus_audience``; an
+            empty string forwards none.
+
+    Raises:
+        CorpusUnavailable: when *corpus_url* is unset (unconfigured), the
+            corpus is unreachable / times out, returns a non-2xx status,
+            or returns a body that does not match
+            :class:`CorpusStatusResponse`. The upstream status rides on
+            the exception (``status``) for non-2xx; the raw body is never
+            attached.
+    """
+    settings = get_settings()
+    resolved_url = corpus_url if corpus_url is not None else settings.corpus_url
+    if not resolved_url:
+        # Fail-closed: an unconfigured corpus has no readiness to report.
+        raise CorpusUnavailable("corpus_url is not configured")
+    status_url = derive_status_url(resolved_url)
+    resolved_audience = audience if audience is not None else settings.corpus_audience
+
+    params = {"audience": resolved_audience} if resolved_audience else None
+    headers = {"Authorization": f"Bearer {operator.raw_jwt}"}
+    timeout = httpx.Timeout(settings.corpus_timeout_seconds)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(status_url, params=params, headers=headers)
+    except httpx.HTTPError as exc:
+        _log.warning("corpus_status_unreachable", error=type(exc).__name__)
+        raise CorpusUnavailable(f"corpus unreachable: {type(exc).__name__}") from exc
+
+    if response.status_code // 100 != 2:
+        _log.warning("corpus_status_request_failed", status=response.status_code)
+        raise CorpusUnavailable(
+            f"corpus returned HTTP {response.status_code}",
+            status=response.status_code,
+        )
+
+    try:
+        body: Any = response.json()
+    except ValueError as exc:
+        _log.warning("corpus_status_response_not_json")
+        raise CorpusUnavailable("corpus returned a non-JSON body") from exc
+
+    try:
+        return CorpusStatusResponse.model_validate(body)
+    except ValueError as exc:
+        _log.warning("corpus_status_response_invalid_schema")
+        raise CorpusUnavailable("corpus status response did not match the expected schema") from exc

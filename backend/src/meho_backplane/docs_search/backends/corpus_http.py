@@ -34,16 +34,40 @@ on the collection's ``backend.ref`` and is passed per call:
 A ``backend.ref`` that names neither (and a deploy whose legacy
 ``corpus_url`` is also empty) is **unconfigured** and fails closed with
 :class:`CorpusUnavailable` — the same 503 arm as today, no new taxonomy.
+
+Readiness + per-project rebuild serialization (T6 #1555)
+-------------------------------------------------------
+
+:meth:`probe` reads the corpus's readiness (:func:`corpus_status`) and
+maps it to a typed
+:class:`~meho_backplane.docs_search.backends.base.BackendReadiness`.
+
+The managed-RAG "rebuilds serialize per project" constraint lives
+**inside this adapter** — a per-project :class:`asyncio.Lock` the probe
+holds while it talks to the corpus — rather than as a substrate-level
+scheduler (substrate minimalism, #1177). The lock key is the resolved
+corpus endpoint, so two concurrent probes against the *same* project's
+backend serialize while probes against *different* projects run
+concurrently; the serialized state is surfaced to operators via the
+``status='rebuilding'`` column the probe route writes, not via a new
+queue primitive.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any
 
-from meho_backplane.auth.corpus import CorpusSearchResponse, search_corpus
+from meho_backplane.auth.corpus import (
+    CorpusSearchResponse,
+    corpus_status,
+    search_corpus,
+)
 from meho_backplane.auth.operator import Operator
-from meho_backplane.docs_search.backends.base import SearchBackend
+from meho_backplane.docs_search.backends.base import BackendReadiness, SearchBackend
+from meho_backplane.settings import get_settings
 
 __all__ = ["CORPUS_HTTP_BACKEND_TYPE", "CorpusHttpBackend"]
 
@@ -65,6 +89,18 @@ class CorpusHttpBackend(SearchBackend):
     """
 
     backend_type = CORPUS_HTTP_BACKEND_TYPE
+
+    def __init__(self) -> None:
+        # Per-project rebuild serialization. One lock per resolved corpus
+        # endpoint (a project's backend), minted on first use. A
+        # ``defaultdict`` rather than an explicit pre-seed because the set
+        # of collections is operator-data, not known at construction; the
+        # adapter is a process-singleton so this map is per-process,
+        # exactly the scope "serialize per project" needs (no cross-pod
+        # coordination — that would be the substrate scheduler #1177 rules
+        # out). The map only grows with the number of distinct endpoints,
+        # which is bounded by the collection count.
+        self._project_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def search(
         self,
@@ -90,6 +126,60 @@ class CorpusHttpBackend(SearchBackend):
             corpus_url=endpoint,
             audience=audience,
         )
+
+    async def probe(
+        self,
+        operator: Operator,
+        *,
+        backend_ref: Mapping[str, Any] | None = None,
+    ) -> BackendReadiness:
+        """Read this collection's corpus readiness, serialized per project.
+
+        Resolves the endpoint / audience from *backend_ref* (legacy
+        globals when absent) and reads the corpus's readiness via
+        :func:`~meho_backplane.auth.corpus.corpus_status`, holding the
+        per-project lock for the resolved endpoint so two concurrent
+        probes against the same project's backend serialize (the
+        "rebuilds serialize per project" constraint, in-adapter). A
+        reachable corpus whose ANN index is not yet built maps to
+        ``index_built=False`` so the probe route writes ``rebuilding`` /
+        ``provisioning`` rather than ``ready``.
+
+        Propagates :class:`~meho_backplane.auth.corpus.CorpusUnavailable`
+        on every fail-closed branch (unconfigured / unreachable / non-2xx
+        / malformed) so the route persists nothing on a failed probe
+        (success-only write-back).
+        """
+        endpoint, audience = _resolve_endpoint_audience(backend_ref)
+        # Key the serialization lock on the resolved project endpoint. The
+        # empty-string key covers the legacy single-collection deploy (one
+        # global corpus) so even its concurrent probes serialize.
+        lock_key = endpoint or ""
+        async with self._project_locks[lock_key]:
+            status = await corpus_status(
+                operator,
+                corpus_url=endpoint,
+                audience=audience,
+            )
+        return BackendReadiness(
+            reachable=True,
+            index_built=status.index_built,
+            doc_count=status.doc_count,
+            last_ingested_at=status.last_ingested_at,
+            detail={"probe_method": "corpus-status"},
+        )
+
+    def is_configured(self) -> bool:
+        """Whether the corpus endpoint is configured at the deploy level.
+
+        The coarse ``/ready`` signal: ``settings.corpus_url`` set. This is
+        the legacy global endpoint — a deploy with per-collection
+        ``backend.ref`` endpoints but no global ``corpus_url`` still routes
+        per-collection at search time, but the deploy-level reachability
+        gate keys off the global config the unmigrated path needs. A
+        credential-free, synchronous check: no JWT, no round-trip.
+        """
+        return bool(get_settings().corpus_url)
 
 
 def _resolve_endpoint_audience(

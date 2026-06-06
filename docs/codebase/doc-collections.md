@@ -72,7 +72,7 @@ columns. `DocCollectionSummary` is the short shape for the catalogue
 list — it carries the identification + routing-decision fields plus the
 operator-facing liveness fields but **omits `backend`** (the backend is
 resolved server-side and never appears in a catalogue response, the
-#1548 backend-agnostic contract) and `extras`.
+backend-agnostic contract from #1548) and `extras`.
 
 There are no `Create` / `Update` write schemas — v1 collections are
 operator-managed seed. When an import API lands it adds them here.

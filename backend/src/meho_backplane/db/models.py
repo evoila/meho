@@ -1123,12 +1123,15 @@ class DocCollection(Base):
     # (T4) and the initialize.instructions catalogue band.
     when_to_use: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Operator-set ``{type, ref}`` backend routing record (the T2 router
-    # key). JSONB on PG, generic JSON (text) on SQLite. NOT NULL — every
-    # collection binds to exactly one backend.
+    # key). JSONB on PG, generic JSON (text) on SQLite. NOT NULL with no
+    # default — every collection must bind to exactly one backend, so a
+    # writer has to supply ``{type, ref}`` explicitly. Unlike
+    # ``products`` / ``extras`` / ``readiness`` (where empty is a valid
+    # state), an empty ``backend`` is a routing-broken row, so there is
+    # no silent ``{}`` fallback at the ORM or migration layer.
     backend: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,
-        default=dict,
     )
     status: Mapped[str] = mapped_column(
         Text,

@@ -147,12 +147,16 @@ def upgrade() -> None:
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column("when_to_use", sa.Text(), nullable=True),
         # Operator-set {type, ref} backend routing record (the T2 router
-        # key). NOT NULL — every collection binds to exactly one backend.
+        # key). NOT NULL with no server_default — every collection must
+        # bind to exactly one backend, so a writer has to supply
+        # ``{type, ref}`` explicitly. Unlike ``products`` / ``extras``
+        # (empty is valid there), an empty ``backend`` is a routing-broken
+        # row, so there is no silent ``{}`` fallback. The table is new, so
+        # there are no existing rows to backfill.
         sa.Column(
             "backend",
             json_type,
             nullable=False,
-            server_default=sa.text("'{}'::jsonb") if is_postgres else sa.text("'{}'"),
         ),
         # Lifecycle enum — bounded by the CHECK constraint below.
         sa.Column(

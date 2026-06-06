@@ -10,9 +10,10 @@ Coverage matrix (Task #1550 acceptance criteria):
   ``backend.{type,ref}``, ``products``, ``status``,
   ``last_ingested_at``, ``doc_count``, and the probe-written
   ``readiness`` JSON. Drives the ORM ``default=`` machinery (uuid,
-  created_at, updated_at, status, backend, extras) against the SQLite
-  dev/test driver where the migration's PG server-side defaults are
-  no-ops.
+  created_at, updated_at, status, extras) against the SQLite dev/test
+  driver where the migration's PG server-side defaults are no-ops.
+  ``backend`` is NOT NULL with no default — a row that omits it is
+  rejected, not silently ``{}``-filled.
 * Dual partial unique indexes — a global row (``tenant_id=NULL``) and a
   tenant-curated row with the same ``collection_key`` coexist; a second
   global row with the same key collides; a second tenant row with the
@@ -75,6 +76,12 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+# A valid ``{type, ref}`` routing record for tests where the backend value
+# is incidental (uniqueness / resolution / CHECK coverage). ``backend`` is
+# NOT NULL with no default, so every inserted row must supply one.
+_BACKEND: dict[str, object] = {"type": "vertex-rag", "ref": "corpora/c"}
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +152,11 @@ async def test_doc_collection_defaults_fire_when_optional_fields_omitted() -> No
     """A minimal :class:`DocCollection` gets the ORM column defaults.
 
     ``tenant_id`` defaults to NULL (global), ``products`` to ``[]``,
-    ``status`` to ``provisioning``, ``backend`` / ``extras`` to ``{}``,
-    and the probe-written liveness fields to NULL.
+    ``status`` to ``provisioning``, ``extras`` to ``{}``, and the
+    probe-written liveness fields to NULL. ``backend`` is supplied
+    explicitly: it is NOT NULL with no default (a routing record is
+    required content, not an empty-meaningful escape hatch), so it is not
+    part of the defaults that fire on omission.
     """
     sessionmaker = get_sessionmaker()
     collection_id = uuid.uuid4()
@@ -157,6 +167,7 @@ async def test_doc_collection_defaults_fire_when_optional_fields_omitted() -> No
                 id=collection_id,
                 collection_key="minimal",
                 vendor="Acme",
+                backend={"type": "vertex-rag", "ref": "corpora/c"},
             )
         )
         await session.commit()
@@ -171,12 +182,36 @@ async def test_doc_collection_defaults_fire_when_optional_fields_omitted() -> No
     assert row.products == []
     assert row.description is None
     assert row.when_to_use is None
-    assert row.backend == {}
+    assert row.backend == {"type": "vertex-rag", "ref": "corpora/c"}
     assert row.status == "provisioning"
     assert row.last_ingested_at is None
     assert row.doc_count is None
     assert row.readiness is None
     assert row.extras == {}
+
+
+@pytest.mark.asyncio
+async def test_doc_collection_backend_required_when_omitted() -> None:
+    """Omitting ``backend`` is rejected — NOT NULL with no default.
+
+    ``backend`` carries the ``{type, ref}`` routing record the T2 router
+    (#1551) resolves server-side; an empty ``{}`` is a routing-broken
+    row, so the column has no ORM ``default`` and no migration
+    ``server_default``. A writer that omits it must hit the NOT NULL
+    constraint rather than silently persist an empty object.
+    """
+    sessionmaker = get_sessionmaker()
+
+    async with sessionmaker() as session:
+        session.add(
+            DocCollection(
+                id=uuid.uuid4(),
+                collection_key="no-backend",
+                vendor="Acme",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
 
 
 @pytest.mark.asyncio
@@ -190,6 +225,7 @@ async def test_doc_collection_status_check_rejects_unknown_value() -> None:
                 id=uuid.uuid4(),
                 collection_key="bad-status",
                 vendor="Acme",
+                backend=_BACKEND,
                 status="archived",  # not in the CHECK IN(...) set
             )
         )
@@ -215,7 +251,12 @@ async def test_global_and_tenant_row_same_key_coexist() -> None:
 
     async with sessionmaker() as session:
         session.add(
-            DocCollection(id=uuid.uuid4(), collection_key="vmware", vendor="VMware (global)")
+            DocCollection(
+                id=uuid.uuid4(),
+                collection_key="vmware",
+                vendor="VMware (global)",
+                backend=_BACKEND,
+            )
         )
         session.add(
             DocCollection(
@@ -223,6 +264,7 @@ async def test_global_and_tenant_row_same_key_coexist() -> None:
                 tenant_id=tenant_id,
                 collection_key="vmware",
                 vendor="VMware (tenant)",
+                backend=_BACKEND,
             )
         )
         # Must not raise — different uniqueness scopes.
@@ -249,11 +291,25 @@ async def test_duplicate_global_key_rejected() -> None:
     sessionmaker = get_sessionmaker()
 
     async with sessionmaker() as session:
-        session.add(DocCollection(id=uuid.uuid4(), collection_key="dup-global", vendor="A"))
+        session.add(
+            DocCollection(
+                id=uuid.uuid4(),
+                collection_key="dup-global",
+                vendor="A",
+                backend=_BACKEND,
+            )
+        )
         await session.commit()
 
     async with sessionmaker() as session:
-        session.add(DocCollection(id=uuid.uuid4(), collection_key="dup-global", vendor="B"))
+        session.add(
+            DocCollection(
+                id=uuid.uuid4(),
+                collection_key="dup-global",
+                vendor="B",
+                backend=_BACKEND,
+            )
+        )
         with pytest.raises(IntegrityError):
             await session.commit()
 
@@ -271,6 +327,7 @@ async def test_duplicate_tenant_key_rejected() -> None:
                 tenant_id=tenant_id,
                 collection_key="dup-tenant",
                 vendor="A",
+                backend=_BACKEND,
             )
         )
         await session.commit()
@@ -282,6 +339,7 @@ async def test_duplicate_tenant_key_rejected() -> None:
                 tenant_id=tenant_id,
                 collection_key="dup-tenant",
                 vendor="B",
+                backend=_BACKEND,
             )
         )
         with pytest.raises(IntegrityError):
@@ -297,10 +355,22 @@ async def test_same_key_allowed_across_tenants() -> None:
 
     async with sessionmaker() as session:
         session.add(
-            DocCollection(id=uuid.uuid4(), tenant_id=tenant_a, collection_key="shared", vendor="A")
+            DocCollection(
+                id=uuid.uuid4(),
+                tenant_id=tenant_a,
+                collection_key="shared",
+                vendor="A",
+                backend=_BACKEND,
+            )
         )
         session.add(
-            DocCollection(id=uuid.uuid4(), tenant_id=tenant_b, collection_key="shared", vendor="B")
+            DocCollection(
+                id=uuid.uuid4(),
+                tenant_id=tenant_b,
+                collection_key="shared",
+                vendor="B",
+                backend=_BACKEND,
+            )
         )
         await session.commit()
 
@@ -326,7 +396,12 @@ async def test_resolve_prefers_tenant_row_over_global() -> None:
 
     async with sessionmaker() as session:
         session.add(
-            DocCollection(id=uuid.uuid4(), collection_key="vmware", vendor="VMware (global)")
+            DocCollection(
+                id=uuid.uuid4(),
+                collection_key="vmware",
+                vendor="VMware (global)",
+                backend=_BACKEND,
+            )
         )
         session.add(
             DocCollection(
@@ -334,6 +409,7 @@ async def test_resolve_prefers_tenant_row_over_global() -> None:
                 tenant_id=tenant_id,
                 collection_key="vmware",
                 vendor="VMware (tenant)",
+                backend=_BACKEND,
             )
         )
         await session.commit()
@@ -353,7 +429,12 @@ async def test_resolve_falls_back_to_global_when_no_tenant_row() -> None:
 
     async with sessionmaker() as session:
         session.add(
-            DocCollection(id=uuid.uuid4(), collection_key="vmware", vendor="VMware (global)")
+            DocCollection(
+                id=uuid.uuid4(),
+                collection_key="vmware",
+                vendor="VMware (global)",
+                backend=_BACKEND,
+            )
         )
         await session.commit()
 
@@ -374,7 +455,11 @@ async def test_resolve_ignores_other_tenants_row() -> None:
     async with sessionmaker() as session:
         session.add(
             DocCollection(
-                id=uuid.uuid4(), tenant_id=tenant_b, collection_key="private", vendor="B-only"
+                id=uuid.uuid4(),
+                tenant_id=tenant_b,
+                collection_key="private",
+                vendor="B-only",
+                backend=_BACKEND,
             )
         )
         await session.commit()
@@ -391,7 +476,14 @@ async def test_resolve_unknown_key_raises_typed_not_found() -> None:
     tenant_id = uuid.uuid4()
 
     async with sessionmaker() as session:
-        session.add(DocCollection(id=uuid.uuid4(), collection_key="vmware", vendor="VMware"))
+        session.add(
+            DocCollection(
+                id=uuid.uuid4(),
+                collection_key="vmware",
+                vendor="VMware",
+                backend=_BACKEND,
+            )
+        )
         await session.commit()
 
     async with sessionmaker() as session:

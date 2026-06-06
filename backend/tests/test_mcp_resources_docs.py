@@ -1,29 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the ``meho://docs/{...}`` companion resource (G4.5-T4, #1523).
+"""Tests for the ``meho://docs/{...}`` companion resource (G4.6-T3, #1552).
 
-Covers the resource-side acceptance criteria:
+Covers the collection-scoped resource acceptance criteria:
 
-* ``meho://docs/{product}/{version}/{chunk_id}`` is registered, gated by
-  the SAME ``required_capability="meho-docs"`` as the ``search_docs`` tool:
-  absent from ``resources/templates/list`` and 403-on-read for a tenant
-  without the capability; present + readable for one with it.
-* ``resources/read`` recovers the cited chunk's text (the corpus transport
-  has no fetch-by-id endpoint, so the handler re-issues a scoped search
-  and matches on ``chunk_id``).
-* A ``(product, version, chunk_id)`` that doesn't resolve collapses to
-  INVALID_PARAMS "not found" without leaking corpus contents.
-* The MEHO-internal RBAC + capability fields are stripped from the wire.
+* ``meho://docs/{collection}/{product}/{version}/{chunk_id}`` is
+  registered, gated by the SAME ``required_capability="meho-docs"`` as the
+  ``search_docs`` tool: absent from ``resources/templates/list`` and
+  403-on-read for a tenant without the base capability; present for one
+  with it.
+* **Per-collection entitlement (#1552):** a tenant with base ``meho-docs``
+  but not ``meho-docs:<collection>`` → 403-class read even though the
+  template is visible.
+* ``resources/read`` recovers the cited chunk's text (the backend has no
+  fetch-by-id endpoint, so the handler re-issues a scoped search and
+  matches on ``chunk_id``).
+* A ``(collection, product, version, chunk_id)`` that doesn't resolve
+  collapses to INVALID_PARAMS "not found" without leaking collection
+  contents.
 
-The shared docs-search service federates to an external corpus; these
-unit tests mock
-:func:`meho_backplane.docs_search.service.search_corpus` so the read
-plumbing is exercised without a live corpus.
+The ``corpus-http`` backend wraps the JWT-forward transport; these unit
+tests mock
+:func:`meho_backplane.docs_search.backends.corpus_http.search_corpus` so
+the read plumbing is exercised without a live corpus.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -42,10 +47,25 @@ from tests.mcp_test_fixtures import (
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seed_doc_collection,
 )
 
 _DOCS_CAPABILITY = "meho-docs"
-_DOCS_URI = "meho://docs/nsx/9.0/nsx-9.0-maximums-0007"
+#: Per-collection entitlement key for the seeded ``vmware`` collection.
+_VMWARE_CAP = "meho-docs:vmware"
+#: A provisioned + vmware-entitled capability set.
+_ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
+#: URI now carries the leading ``{collection}`` segment.
+_DOCS_URI = "meho://docs/vmware/nsx/9.0/nsx-9.0-maximums-0007"
+_DOCS_TEMPLATE = "meho://docs/{collection}/{product}/{version}/{chunk_id}"
+
+#: The corpus-http backend's transport seam.
+_CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
+
+
+def _seed_collection_sync(**kwargs: Any) -> None:
+    """Run :func:`seed_doc_collection` to completion from a sync test."""
+    asyncio.run(seed_doc_collection(**kwargs))
 
 
 def _operator(
@@ -122,14 +142,18 @@ def test_docs_resource_absent_from_templates_list_when_unprovisioned(
     )
     assert response.status_code == 200
     templates = {t["uriTemplate"] for t in response.json()["result"]["resourceTemplates"]}
-    assert "meho://docs/{product}/{version}/{chunk_id}" not in templates
+    assert _DOCS_TEMPLATE not in templates
 
 
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
 def test_docs_resource_present_with_stripped_wire_fields_when_provisioned(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """The template appears once provisioned; wire shape drops the gating fields."""
+    """The template appears once provisioned; wire shape drops the gating fields.
+
+    Visibility rides only the base ``meho-docs`` capability — the
+    per-collection entitlement is enforced at read time, not list time.
+    """
     client, _op = docs_client
     response = post_mcp(
         client,
@@ -137,7 +161,7 @@ def test_docs_resource_present_with_stripped_wire_fields_when_provisioned(
     )
     assert response.status_code == 200
     templates = {t["uriTemplate"]: t for t in response.json()["result"]["resourceTemplates"]}
-    template = templates.get("meho://docs/{product}/{version}/{chunk_id}")
+    template = templates.get(_DOCS_TEMPLATE)
     assert template is not None
     assert template["mimeType"] == "text/markdown"
     assert "required_role" not in template
@@ -159,7 +183,7 @@ def test_resources_read_docs_403_when_unprovisioned(
     """
     client, _op = docs_client
     fake = _fake_corpus(_SAMPLE_CHUNK)
-    with patch("meho_backplane.docs_search.service.search_corpus", new=fake):
+    with patch(_CORPUS_SEAM, new=fake):
         response = post_mcp(
             client,
             {
@@ -182,24 +206,26 @@ def test_resources_read_docs_403_when_unprovisioned(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_resources_read_docs_returns_matching_chunk_text(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """A provisioned read recovers the chunk whose id matches the URI.
+    """An entitled read recovers the chunk whose id matches the URI.
 
-    The handler rebuilds the binary scope from the URI segments,
-    re-issues a scoped corpus search, and returns the exact-id match —
-    even when the corpus returns sibling chunks alongside it.
+    The handler rebuilds the binary scope from the URI segments, runs the
+    resolve + entitle + readiness gate, re-issues a scoped search on the
+    collection's backend, and returns the exact-id match — even when the
+    backend returns sibling chunks alongside it.
     """
     client, op = docs_client
+    _seed_collection_sync()
     other = CorpusChunk(
         chunk_id="nsx-9.0-maximums-0008",
         document_id="nsx-9.0-config-maximums",
         content="An unrelated sibling chunk.",
     )
     fake = _fake_corpus(other, _SAMPLE_CHUNK)
-    with patch("meho_backplane.docs_search.service.search_corpus", new=fake):
+    with patch(_CORPUS_SEAM, new=fake):
         response = post_mcp(
             client,
             {
@@ -219,32 +245,63 @@ def test_resources_read_docs_returns_matching_chunk_text(
     assert chunk["content"].startswith("NSX 9.0 supports")
     assert chunk["source_url"].endswith("/maximums")
 
-    # The binary scope reached the corpus and the operator identity was forwarded.
+    # The optional product/version refinements reached the backend and the
+    # operator identity was forwarded.
     captured = fake.captured  # type: ignore[attr-defined]
     assert captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}
     assert captured["operator"].tenant_id == op.tenant_id
 
 
-# ---------------------------------------------------------------------------
-# resources/read — not-found collapse + corpus-down internal error
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+def test_resources_read_docs_403_when_not_entitled_to_collection(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A tenant with base ``meho-docs`` but not ``meho-docs:vmware`` → 403-class read.
+
+    The template is visible (base capability), but the per-collection
+    entitlement gate rejects the read before the backend re-search.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "resources/read",
+                "params": {"uri": _DOCS_URI},
+            },
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "entitled" in body["error"]["message"].lower()
+    assert "query" not in fake.captured  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# resources/read — not-found collapse + backend-down internal error
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_resources_read_docs_unknown_chunk_collapses_to_not_found(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
     """A chunk id absent from the re-search collapses to INVALID_PARAMS not-found.
 
     The message never distinguishes "empty scope" from "no such id" so
-    the resource can't be used as a corpus-contents oracle.
+    the resource can't be used as a collection-contents oracle.
     """
     client, _op = docs_client
-    # The corpus returns only a non-matching chunk.
+    _seed_collection_sync()
+    # The backend returns only a non-matching chunk.
     fake = _fake_corpus(
         CorpusChunk(chunk_id="some-other-id", document_id="d", content="x"),
     )
-    with patch("meho_backplane.docs_search.service.search_corpus", new=fake):
+    with patch(_CORPUS_SEAM, new=fake):
         response = post_mcp(
             client,
             {
@@ -260,17 +317,18 @@ def test_resources_read_docs_unknown_chunk_collapses_to_not_found(
     assert "not found" in body["error"]["message"].lower()
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_resources_read_docs_corpus_unavailable_is_internal_error(
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_resources_read_docs_backend_unavailable_is_internal_error(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """A down corpus surfaces as ``-32603`` Internal Error, not invalid params."""
+    """A down backend surfaces as ``-32603`` Internal Error, not invalid params."""
     client, _op = docs_client
+    _seed_collection_sync()
 
     async def _down(_op: Operator, _query: str, **_kwargs: Any) -> CorpusSearchResponse:
         raise CorpusUnavailable("corpus unreachable: ConnectError")
 
-    with patch("meho_backplane.docs_search.service.search_corpus", new=_down):
+    with patch(_CORPUS_SEAM, new=_down):
         response = post_mcp(
             client,
             {

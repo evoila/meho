@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Collection-scoped doc search (#1552)
+
+- Make `collection` the mandatory binary scope on `search_docs` /
+  `ask_docs` across all three surfaces (REST `POST /api/v1/search_docs`,
+  the MCP tools + the `meho://docs/{collection}/{product}/{version}/{chunk_id}`
+  resource, and `meho docs search --collection`). The query routes to the
+  named collection's backend via the T2 router; `product` / `version`
+  demote to optional metadata refinements within the collection (omitting
+  them still succeeds). A missing/blank `collection` → 422 / `-32602`; an
+  unknown collection → 422 / `-32602`. Add **per-collection entitlement**
+  (reusing the `meho-docs` capability substrate, zero new tables): a
+  principal may search a collection only when its tenant holds the
+  `meho-docs:<collection>` capability — a miss → 403 / `-32602` even
+  though the tool stays visible via the base `meho-docs` gate. A
+  not-`ready` collection → 409 / `-32603`. Each call's audit row carries
+  `audit_collection` alongside the canonical `meho.docs.search` /
+  `meho.docs.ask` op_id (#1549), so rows are filterable by both op_id and
+  collection; the raw query stays hashed. The shared resolve + entitle +
+  readiness gate lives in `docs_search/collection_access.py` so all
+  surfaces enforce one policy. CLI client regenerated for the new
+  `collection` request field.
+
 ### Backend-agnostic search router (#1551)
 
 - Add a `collection → backend{type, ref}` search router so one doc

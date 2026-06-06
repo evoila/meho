@@ -94,9 +94,15 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.docs_collections import DocCollection
 from meho_backplane.docs_search import (
+    CollectionForbiddenError,
+    DocsScope,
     MissingDocsFilterError,
+    UnknownCollectionError,
     build_docs_scope,
+    resolve_entitled_ready_collection,
     search_docs,
     synthesize_docs_answer,
 )
@@ -135,53 +141,100 @@ _SEARCH_OP_ID: Final[str] = "meho.docs.search"
 _ASK_OP_ID: Final[str] = "meho.docs.ask"
 
 
+def _build_scope_or_invalid_params(tool: str, arguments: dict[str, Any]) -> DocsScope:
+    """Build the binary scope from *arguments* or raise ``-32602``.
+
+    ``collection`` is the mandatory binary scope (T3 #1552); ``product`` /
+    ``version`` are optional refinements. A missing/blank ``collection``
+    raises :class:`MissingDocsFilterError`, re-raised here as
+    :class:`McpInvalidParamsError` so the dispatcher emits the spec-correct
+    ``-32602`` (the MCP analogue of the route's 422). The inputSchema's
+    ``required`` list catches this first for a schema-validating client;
+    this arm covers a non-validating client.
+    """
+    collection: str = arguments["collection"]
+    product: str | None = arguments.get("product")
+    version: str | None = arguments.get("version")
+    try:
+        return build_docs_scope(collection, product, version)
+    except MissingDocsFilterError as exc:
+        raise McpInvalidParamsError(f"{tool}: {exc}") from exc
+
+
+async def _resolve_collection_or_error(
+    operator: Operator,
+    scope: DocsScope,
+    *,
+    tool: str,
+) -> DocCollection:
+    """Resolve + entitle + readiness-check the scoped collection.
+
+    Opens its own DB session (the MCP dispatcher does not thread one), runs
+    the shared :func:`~meho_backplane.docs_search.resolve_entitled_ready_collection`
+    gate, and maps the typed access errors onto the MCP wire:
+
+    * **Unknown collection** → :class:`McpInvalidParamsError` (``-32602``):
+      a ``collection`` argument naming no visible collection is invalid
+      params, not a server fault. The catalogue of visible keys rides
+      ``error.data`` so the agent can self-correct.
+    * **Not entitled** → :class:`McpInvalidParamsError` (``-32602``,
+      projected to the 403-class audit status by the dispatcher): the same
+      403-projected path the static capability gate uses. The collection
+      exists; the tenant lacks ``meho-docs:<collection>``.
+    * **Not ready** — :class:`~meho_backplane.docs_search.CollectionNotReadyError`
+      is *not* caught here: a known + entitled collection whose backend is
+      not yet serving is a server-side condition (the MCP analogue of the
+      route's 409/503), so it bubbles to the dispatcher's generic catch as
+      ``-32603``.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        try:
+            return await resolve_entitled_ready_collection(session, operator, scope.collection_key)
+        except UnknownCollectionError as exc:
+            raise McpInvalidParamsError(
+                f"{tool}: unknown collection {exc.collection_key!r}",
+                data={"known_collections": exc.known_keys},
+            ) from exc
+        except CollectionForbiddenError as exc:
+            raise McpInvalidParamsError(f"{tool}: {exc}") from exc
+
+
 async def _search_docs_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Federate a vendor-document query through the shared docs-search service.
+    """Route a vendor-document query through the shared docs-search service.
 
-    Validates the mandatory product+version binary scope, then delegates
-    to :func:`~meho_backplane.docs_search.search_docs` — the same service
-    the REST route fronts — forwarding the operator's JWT so the corpus
+    Validates the mandatory ``collection`` binary scope, resolves +
+    entitles + readiness-checks the collection, then delegates to
+    :func:`~meho_backplane.docs_search.search_docs` — the same service the
+    REST route fronts — forwarding the operator's JWT so the backend
     authenticates and audits the call as the operator.
 
-    Two error arms:
-
-    * **Missing/blank product or version** —
-      :class:`~meho_backplane.docs_search.MissingDocsFilterError` from
-      :func:`build_docs_scope` (when REQUIRE_FILTERS is on) is re-raised
-      as :class:`McpInvalidParamsError` so the dispatcher emits the
-      spec-correct ``-32602`` (the MCP analogue of the route's 422). The
-      inputSchema's ``required`` list catches this first for a
-      schema-validating client; this arm covers the gate-off → gate-on
-      flip and non-validating clients.
-    * **Corpus unavailable** — the typed
-      :class:`~meho_backplane.auth.corpus.CorpusUnavailable` is *not*
-      caught here. It bubbles to the dispatcher's generic catch and
-      surfaces as ``-32603`` Internal Error (the MCP analogue of the
-      route's 503): a well-formed request against a down upstream is a
-      server-side fault, not invalid params.
+    Error arms (see :func:`_build_scope_or_invalid_params` /
+    :func:`_resolve_collection_or_error`): a missing/blank or unknown /
+    not-entitled ``collection`` → ``-32602``; a not-ready collection or an
+    unavailable :class:`~meho_backplane.auth.corpus.CorpusUnavailable`
+    backend bubbles to ``-32603`` (a well-formed request against a backend
+    that is down / not serving is a server-side fault, not invalid params).
     """
-    # Bind the canonical op_id so the persisted audit row is filterable by
-    # ``op_id="meho.docs.search"`` the same way the REST + CLI faces are
-    # (G4.5-T8 #1549). The dispatcher lifts ``audit_op_id`` into the row's
-    # payload op_id; ``op_class="read"`` (declared on the ToolDefinition)
-    # and the broadcast / ``classify_op`` op_id (the bare tool name) are
-    # unchanged. Bound up-front so a handler exception still records the
-    # canonical identity on the row.
+    # Bind the canonical op_id + collection scope so the persisted audit row
+    # is filterable by ``op_id="meho.docs.search"`` and ``collection`` the
+    # same way the REST + CLI faces are (G4.5-T8 #1549, G4.6-T3 #1552). The
+    # dispatcher lifts the ``audit_*`` contextvars into the row's payload;
+    # ``op_class="read"`` (declared on the ToolDefinition) and the broadcast
+    # / ``classify_op`` op_id (the bare tool name) are unchanged. Bound
+    # up-front so a handler exception still records the canonical identity.
     structlog.contextvars.bind_contextvars(audit_op_id=_SEARCH_OP_ID)
     query: str = arguments["query"]
-    product: str = arguments["product"]
-    version: str = arguments["version"]
     limit: int = int(arguments.get("limit", _DEFAULT_SEARCH_LIMIT))
 
-    try:
-        scope = build_docs_scope(product, version)
-    except MissingDocsFilterError as exc:
-        raise McpInvalidParamsError(f"search_docs: {exc}") from exc
+    scope = _build_scope_or_invalid_params("search_docs", arguments)
+    structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
+    collection = await _resolve_collection_or_error(operator, scope, tool="search_docs")
 
-    result = await search_docs(operator, query, scope=scope, limit=limit)
+    result = await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
     return {
         "chunks": [chunk.model_dump(mode="json") for chunk in result.chunks],
     }
@@ -191,13 +244,15 @@ register_mcp_tool(
     definition=ToolDefinition(
         name="search_docs",
         description=(
-            "Search the vendor-document corpus (product manuals, KB "
+            "Search a vendor-document collection (product manuals, KB "
             "articles, design / reference guides) for an authoritative "
             "vendor fact — e.g. 'NSX config maximums for 9.0' or "
             "'vCenter 8.0 supported snapshot depth'. "
-            "REQUIRES `product` AND `version`: they are a hard binary "
-            "scope (the query is rejected without both), NOT a ranking "
-            "hint. "
+            "REQUIRES `collection`: it is the hard binary scope (the query "
+            "is rejected without it), naming WHICH corpus to search and "
+            "gating entitlement — pick it from `list_doc_collections`. "
+            "`product` and `version` are OPTIONAL refinements within that "
+            "collection, not a ranking hint. "
             "Use this for VENDOR REFERENCE — what the documentation says. "
             "Use `search_knowledge` instead for how THIS team does "
             "something (lab conventions, known-good runbooks, "
@@ -207,8 +262,8 @@ register_mcp_tool(
             "Returns ranked cited chunks: each carries the chunk text, a "
             "`source_url` citation, a `chunk_id`, and a `document_id`. "
             "For the full text of a hit on a later turn (when you kept "
-            "only the citation), read `meho://docs/{product}/{version}/"
-            "{chunk_id}` via `resources/read`. "
+            "only the citation), read `meho://docs/{collection}/{product}/"
+            "{version}/{chunk_id}` via `resources/read`. "
             "Limit defaults to 10; cap is 50."
         ),
         inputSchema={
@@ -220,8 +275,20 @@ register_mcp_tool(
                     "maxLength": 2000,
                     "description": (
                         "Free-form vendor-reference query. Forwarded to the "
-                        "corpus verbatim; never logged in the clear (the "
-                        "audit row stores only its SHA-256 hash)."
+                        "collection's backend verbatim; never logged in the "
+                        "clear (the audit row stores only its SHA-256 hash)."
+                    ),
+                },
+                "collection": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": (
+                        "Collection key to search (e.g. 'vmware'). MANDATORY "
+                        "binary scope — it routes the query to a backend and "
+                        "gates per-collection entitlement; a query without "
+                        "it is rejected with INVALID_PARAMS. Pick it from "
+                        "`list_doc_collections`."
                     ),
                 },
                 "product": {
@@ -229,10 +296,9 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "Vendor product to scope to (e.g. 'nsx', 'vcenter'). "
-                        "MANDATORY binary scope, not a hint — a query "
-                        "without it is rejected with INVALID_PARAMS while "
-                        "the REQUIRE_FILTERS posture is on."
+                        "OPTIONAL vendor-product refinement within the "
+                        "collection (e.g. 'nsx', 'vcenter'). Narrows the "
+                        "search; omit it to search the whole collection."
                     ),
                 },
                 "version": {
@@ -240,10 +306,9 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "Product version to scope to (e.g. '9.0'). "
-                        "MANDATORY binary scope alongside `product` — "
-                        "both are required to bound the search to one "
-                        "product / version slice."
+                        "OPTIONAL product-version refinement (e.g. '9.0'). "
+                        "Narrows the search alongside `product`; omit it to "
+                        "search the whole collection."
                     ),
                 },
                 "limit": {
@@ -254,7 +319,7 @@ register_mcp_tool(
                     "description": "Maximum number of ranked cited chunks to return.",
                 },
             },
-            "required": ["query", "product", "version"],
+            "required": ["query", "collection"],
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
@@ -272,23 +337,27 @@ async def _ask_docs_handler(
     """Answer a vendor-document question with a grounded, cited answer.
 
     The synthesis fast-follow to ``search_docs``: it runs the **same**
-    shared retrieval (so the REQUIRE_FILTERS gate, corpus federation, and
-    forwarded-JWT audit are enforced in exactly one place), then composes a
-    single answer grounded strictly in the retrieved chunks via
+    shared retrieval (so the collection scope gate, per-collection
+    entitlement, backend routing, and forwarded-JWT audit are enforced in
+    exactly one place), then composes a single answer grounded strictly in
+    the retrieved chunks via
     :func:`~meho_backplane.docs_search.synthesize_docs_answer`. Returns
     ``{answer, citations[]}`` where every citation is a chunk the retrieval
     returned and the model relied on — no claim without a citation.
 
     Error arms mirror ``search_docs`` exactly, plus the synthesis arm:
 
-    * **Missing/blank product or version** —
-      :class:`~meho_backplane.docs_search.MissingDocsFilterError` from
-      :func:`build_docs_scope` re-raised as :class:`McpInvalidParamsError`
-      (``-32602``, the MCP analogue of the route's 422). The inputSchema's
-      ``required`` list catches this first for a schema-validating client.
-    * **Corpus unavailable** —
-      :class:`~meho_backplane.auth.corpus.CorpusUnavailable` is *not*
-      caught; it bubbles to ``-32603`` (a down upstream is a server fault).
+    * **Missing/blank or unknown / not-entitled ``collection``** — mapped to
+      :class:`McpInvalidParamsError` (``-32602``) by
+      :func:`_build_scope_or_invalid_params` /
+      :func:`_resolve_collection_or_error` (the MCP analogue of the route's
+      422 / 403). The inputSchema's ``required`` list catches the missing
+      case first for a schema-validating client.
+    * **Not-ready collection / corpus unavailable** —
+      :class:`~meho_backplane.docs_search.CollectionNotReadyError` and
+      :class:`~meho_backplane.auth.corpus.CorpusUnavailable` are *not*
+      caught; they bubble to ``-32603`` (a down / not-serving backend is a
+      server fault).
     * **Synthesis model unconfigured / unreachable** —
       :class:`~meho_backplane.operations.ingest.LlmClientUnavailable` (and
       :class:`~meho_backplane.docs_search.DocsSynthesisError` for a model
@@ -299,22 +368,20 @@ async def _ask_docs_handler(
       helper, which returns a deterministic "no grounded answer" *without*
       calling the model.
     """
-    # Same canonical-op_id binding as ``search_docs`` — ``ask_docs`` audit
-    # rows are filterable by ``op_id="meho.docs.ask"`` across all three
-    # faces (G4.5-T8 #1549). ``op_class`` stays ``read``; ask is a
-    # read-class compose over retrieved chunks.
+    # Same canonical-op_id + collection binding as ``search_docs`` —
+    # ``ask_docs`` audit rows are filterable by ``op_id="meho.docs.ask"``
+    # and ``collection`` across all faces (G4.5-T8 #1549, G4.6-T3 #1552).
+    # ``op_class`` stays ``read``; ask is a read-class compose over
+    # retrieved chunks.
     structlog.contextvars.bind_contextvars(audit_op_id=_ASK_OP_ID)
     query: str = arguments["query"]
-    product: str = arguments["product"]
-    version: str = arguments["version"]
     limit: int = int(arguments.get("limit", _DEFAULT_SEARCH_LIMIT))
 
-    try:
-        scope = build_docs_scope(product, version)
-    except MissingDocsFilterError as exc:
-        raise McpInvalidParamsError(f"ask_docs: {exc}") from exc
+    scope = _build_scope_or_invalid_params("ask_docs", arguments)
+    structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
+    collection = await _resolve_collection_or_error(operator, scope, tool="ask_docs")
 
-    retrieval = await search_docs(operator, query, scope=scope, limit=limit)
+    retrieval = await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
     answer = await synthesize_docs_answer(query, retrieval)
     return {
         "answer": answer.answer,
@@ -327,16 +394,18 @@ register_mcp_tool(
         name="ask_docs",
         description=(
             "Answer a vendor-reference question with a SYNTHESIZED, CITED "
-            "answer composed over the vendor-document corpus (product "
+            "answer composed over a vendor-document collection (product "
             "manuals, KB articles, design / reference guides) — e.g. 'What "
             "are the NSX 9.0 config maximums for logical switches?'. "
             "This is the answer-shaped sibling of `search_docs`: "
             "`search_docs` returns the raw ranked chunks; `ask_docs` "
             "composes them into one grounded answer and returns the chunks "
             "it cited. "
-            "REQUIRES `product` AND `version`: they are a hard binary "
-            "scope (the question is rejected without both), NOT a ranking "
-            "hint. "
+            "REQUIRES `collection`: it is the hard binary scope (the "
+            "question is rejected without it), naming WHICH corpus to "
+            "search and gating entitlement — pick it from "
+            "`list_doc_collections`. `product` and `version` are OPTIONAL "
+            "refinements within that collection, not a ranking hint. "
             "Use this for VENDOR REFERENCE when you want a composed answer "
             "rather than chunks to read yourself; use `search_docs` for the "
             "raw chunks, `search_knowledge` for how THIS team does "
@@ -344,9 +413,9 @@ register_mcp_tool(
             "post-incident learnings), and `search_memory` for "
             "cross-session state. "
             "Returns `{answer, citations[]}`: the answer is grounded "
-            "STRICTLY in the corpus (no claim without a citation), and "
+            "STRICTLY in the collection (no claim without a citation), and "
             "every citation is one of the cited chunks (chunk text, "
-            "`source_url`, `chunk_id`, `document_id`). If the corpus has "
+            "`source_url`, `chunk_id`, `document_id`). If the collection has "
             "nothing in scope, the answer is 'no grounded answer' — never "
             "a guess. "
             "Limit (chunks retrieved to ground on) defaults to 10; cap is 50."
@@ -360,9 +429,21 @@ register_mcp_tool(
                     "maxLength": 2000,
                     "description": (
                         "Free-form vendor-reference question. Forwarded to "
-                        "the corpus verbatim for retrieval and to the "
-                        "synthesis model; never logged in the clear (the "
-                        "audit row stores only its SHA-256 hash)."
+                        "the collection's backend verbatim for retrieval and "
+                        "to the synthesis model; never logged in the clear "
+                        "(the audit row stores only its SHA-256 hash)."
+                    ),
+                },
+                "collection": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": (
+                        "Collection key to ground the answer on (e.g. "
+                        "'vmware'). MANDATORY binary scope — it routes "
+                        "retrieval to a backend and gates per-collection "
+                        "entitlement; a question without it is rejected with "
+                        "INVALID_PARAMS. Pick it from `list_doc_collections`."
                     ),
                 },
                 "product": {
@@ -370,10 +451,9 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "Vendor product to scope to (e.g. 'nsx', 'vcenter'). "
-                        "MANDATORY binary scope, not a hint — a question "
-                        "without it is rejected with INVALID_PARAMS while "
-                        "the REQUIRE_FILTERS posture is on."
+                        "OPTIONAL vendor-product refinement within the "
+                        "collection (e.g. 'nsx', 'vcenter'). Narrows "
+                        "retrieval; omit it to ground on the whole collection."
                     ),
                 },
                 "version": {
@@ -381,10 +461,9 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "Product version to scope to (e.g. '9.0'). "
-                        "MANDATORY binary scope alongside `product` — "
-                        "both are required to bound the search to one "
-                        "product / version slice."
+                        "OPTIONAL product-version refinement (e.g. '9.0'). "
+                        "Narrows retrieval alongside `product`; omit it to "
+                        "ground on the whole collection."
                     ),
                 },
                 "limit": {
@@ -398,7 +477,7 @@ register_mcp_tool(
                     ),
                 },
             },
-            "required": ["query", "product", "version"],
+            "required": ["query", "collection"],
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,

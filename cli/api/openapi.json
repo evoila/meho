@@ -409,7 +409,7 @@
           "docs"
         ],
         "summary": "Search Docs Endpoint",
-        "description": "Federate a vendor-document query to the corpus, returning cited chunks.\n\nEnforces the mandatory binary product+version scope (422 when the\nREQUIRE_FILTERS gate is on and either is absent), forwards the\noperator JWT to the corpus via the shared\n:func:`~meho_backplane.docs_search.search_docs` service, and binds\nthe central ``meho.docs.search`` audit row. ``read_only`` operators\nget 403 via :func:`require_role` before reaching this handler.\n\nThe audit contextvars are bound **before** the corpus call so a\nhandler exception (including the :class:`CorpusUnavailable` \u2192 503\nbranch) still produces an audit row with the query identity + binary\nscope preserved. The raw query is never bound -- only its SHA-256\nhash.",
+        "description": "Route a vendor-document query to a collection's backend, returning cited chunks.\n\nEnforces the mandatory ``collection`` binary scope (422 when absent),\nresolves it to its backend via the shared\n:func:`~meho_backplane.docs_search.search_docs` service, enforces the\nper-collection ``meho-docs:<collection>`` entitlement (403) and\nreadiness (409), and binds the central ``meho.docs.search`` audit row.\n``read_only`` operators get 403 via :func:`require_role` before\nreaching this handler.\n\nThe audit contextvars are bound **before** the entitlement / backend\ncall so a handler exception (the entitlement 403, readiness 409, or\n:class:`CorpusUnavailable` 503 branch) still produces an audit row\nwith the query identity + collection scope preserved. The raw query is\nnever bound -- only its SHA-256 hash.",
         "operationId": "search_docs_endpoint_api_v1_search_docs_post",
         "parameters": [
           {
@@ -444,11 +444,17 @@
               }
             }
           },
+          "403": {
+            "description": "The tenant is not entitled to the named collection -- it lacks the ``meho-docs:<collection>`` capability even though it can see the add-on. The collection exists; the principal just cannot search it."
+          },
+          "409": {
+            "description": "The named collection is known and entitled but not ``ready`` (provisioning / rebuilding / disabled) -- its backend is not answerable yet."
+          },
           "422": {
-            "description": "The mandatory binary product+version scope is absent (REQUIRE_FILTERS). A docs query without both filters is rejected rather than forwarded as an unfiltered corpus query."
+            "description": "The mandatory ``collection`` scope is absent / blank, or names no collection visible to the tenant. A docs query without a routable collection is rejected rather than forwarded as an unscoped query."
           },
           "503": {
-            "description": "The external corpus is unavailable -- unconfigured, unreachable, or returned a non-2xx / malformed response. Fail-closed; never an empty 200."
+            "description": "The collection's backend is unavailable -- unconfigured, unreachable, or returned a non-2xx / malformed response. Fail-closed; never an empty 200."
           }
         }
       }
@@ -14789,6 +14795,12 @@
             "minLength": 1,
             "title": "Query"
           },
+          "collection": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Collection"
+          },
           "product": {
             "type": "string",
             "maxLength": 128,
@@ -14815,7 +14827,7 @@
           "query"
         ],
         "title": "SearchDocsRequest",
-        "description": "POST body for ``/api/v1/search_docs``.\n\n``product`` / ``version`` are the **mandatory binary scope** under\nthe REQUIRE_FILTERS posture -- they are typed optional here so a\nmissing value is rejected by the service with a route-shaped 422\nnaming the absent key(s), rather than Pydantic's generic\n``field_required`` (which would not say *why* the scope is mandatory\nor honour the ``corpus_require_filters`` gate-off path).\n\n``extra=\"forbid\"`` rejects unknown fields at 422 so a client sending\na pre-rename key fails loud rather than running with the defaults --\nthe same posture every public v1 request schema ships under."
+        "description": "POST body for ``/api/v1/search_docs``.\n\n``collection`` is the **mandatory binary scope** (G4.6-T3 #1552) -- it\nis typed optional here so a missing value is rejected by the service\nwith a route-shaped 422 naming the absent key (carrying *why* the\ncollection is mandatory), rather than Pydantic's generic\n``field_required``. ``product`` / ``version`` are **optional\nrefinements** within the chosen collection.\n\n``extra=\"forbid\"`` rejects unknown fields at 422 so a client sending\na pre-rename key fails loud rather than running with the defaults --\nthe same posture every public v1 request schema ships under."
       },
       "SearchDocsResponse": {
         "properties": {

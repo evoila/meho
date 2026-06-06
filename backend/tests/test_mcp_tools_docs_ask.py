@@ -1,34 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the capability-gated ``ask_docs`` MCP tool (G4.5-T7, #1526).
+"""Tests for the collection-scoped ``ask_docs`` MCP tool (G4.6-T3, #1552).
 
 ``ask_docs`` is the synthesis fast-follow to ``search_docs``: it runs the
-same T3 retrieval, then composes a grounded, cited answer over the
-retrieved chunks. These tests cover every acceptance criterion in the
-task body:
+same retrieval, then composes a grounded, cited answer over the retrieved
+chunks. These tests cover the collection-scoped contract on top of the
+synthesis invariants:
 
 * ``ask_docs`` carries ``required_capability="meho-docs"`` — **absent**
-  from ``tools/list`` and **403** on ``tools/call`` for an unprovisioned
-  tenant (the same T1 gate, #1519, as ``search_docs``).
-* Missing/blank ``product`` or ``version`` → ``-32602`` (REQUIRE_FILTERS,
-  via T3).
+  from ``tools/list`` and **403** on ``tools/call`` for a tenant without
+  the base capability (the same gate as ``search_docs``).
+* Strict schema: required ``[query, collection]``, product/version optional.
+* Missing ``collection`` → ``-32602``; a tenant lacking
+  ``meho-docs:<collection>`` → 403-class ``-32602`` (per-collection
+  entitlement, #1552).
 * Returns ``{answer, citations[]}`` where every citation resolves to a
   chunk the underlying retrieval returned; an answer with **zero**
   retrieved chunks returns "no grounded answer", never a hallucinated one.
 * Synthesis model unconfigured / unreachable → ``-32603`` (fail-closed,
   the MCP analogue of 503), never an ungrounded answer.
 
-Two seams are mocked so no network is touched: the corpus
-(``meho_backplane.docs_search.service.search_corpus``, the retrieval side)
-and the synthesis client (``build_anthropic_ingest_llm_client``, the LLM
-side). The audit row is written by the dispatcher with ``op_class="read"``
-from the tool definition and the raw query hashed — the same path
-``search_docs`` exercises, verified by its own suite.
+Two seams are mocked so no network is touched: the corpus transport
+(``meho_backplane.docs_search.backends.corpus_http.search_corpus``, the
+retrieval side, reached via the collection's resolved backend) and the
+synthesis client (``build_anthropic_ingest_llm_client``, the LLM side).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -52,15 +53,29 @@ from tests.mcp_test_fixtures import (
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seed_doc_collection,
     seeded_operator_tenant,  # noqa: F401 — pytest-discovered fixture
 )
 
 _DOCS_CAPABILITY = "meho-docs"
+#: Per-collection entitlement key for the seeded ``vmware`` collection.
+_VMWARE_CAP = "meho-docs:vmware"
+#: A provisioned + vmware-entitled capability set.
+_ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
 
 #: Where the synthesis helper resolves its default LLM client. Patching
 #: here lets a test pin a deterministic stub or assert the fail-closed
 #: factory propagates.
 _BUILD_LLM_CLIENT = "meho_backplane.docs_search.synthesis.build_anthropic_ingest_llm_client"
+
+#: The corpus-http backend's transport seam — the function the
+#: ``corpus-http`` adapter actually calls.
+_CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
+
+
+def _seed_collection_sync(**kwargs: Any) -> None:
+    """Run :func:`seed_doc_collection` to completion from a sync test."""
+    asyncio.run(seed_doc_collection(**kwargs))
 
 
 def _operator(
@@ -190,10 +205,10 @@ def test_ask_docs_absent_from_tools_list_for_unprovisioned_tenant(
 
 
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_ask_docs_present_with_strict_schema_for_provisioned_tenant(
+def test_ask_docs_present_with_strict_collection_schema(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC1: the tool appears once provisioned, with a strict 2020-12 schema."""
+    """The tool appears once provisioned, with a strict collection-scoped schema."""
     client, _op = docs_client
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert response.status_code == 200
@@ -203,9 +218,9 @@ def test_ask_docs_present_with_strict_schema_for_provisioned_tenant(
     tool = tools_by_name["ask_docs"]
     schema = tool["inputSchema"]
     assert schema["type"] == "object"
-    assert schema["required"] == ["query", "product", "version"]
+    assert schema["required"] == ["query", "collection"]
     assert schema["additionalProperties"] is False
-    assert set(schema["properties"]) == {"query", "product", "version", "limit"}
+    assert set(schema["properties"]) == {"query", "collection", "product", "version", "limit"}
     assert schema["properties"]["limit"]["default"] == 10
     assert schema["properties"]["limit"]["maximum"] == 50
     # Wire shape never leaks the server-side gating fields.
@@ -215,7 +230,7 @@ def test_ask_docs_present_with_strict_schema_for_provisioned_tenant(
 
 
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_ask_docs_description_names_search_docs_sibling(
+def test_ask_docs_description_names_collection_and_sibling(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
     """The description routes between the answer tool and the chunks tool."""
@@ -228,14 +243,15 @@ def test_ask_docs_description_names_search_docs_sibling(
     assert "search_docs" in desc
     assert "search_knowledge" in desc
     assert "search_memory" in desc
-    # The mandatory binary scope and the no-guess posture are called out.
-    assert "product" in desc and "version" in desc
+    # The mandatory collection scope and the no-guess posture are called out.
+    assert "collection" in desc.lower()
+    assert "list_doc_collections" in desc
     assert "no grounded answer" in desc.lower() or "no claim without a citation" in desc.lower()
 
 
 def test_ask_docs_hidden_from_provisioned_read_only_operator() -> None:
     """The capability does not relax the role gate: read_only never sees it."""
-    op = _operator(role=TenantRole.READ_ONLY, capabilities=frozenset({_DOCS_CAPABILITY}))
+    op = _operator(role=TenantRole.READ_ONLY, capabilities=_ENTITLED)
 
     async def _fake_verify() -> Operator:
         return op
@@ -267,12 +283,12 @@ def test_tools_call_ask_docs_403_when_unprovisioned(
     corpus = _fake_corpus(_SAMPLE_CHUNK)
     stub = _StubLlmClient('{"answer": "x", "cited_chunk_ids": []}')
     with (
-        patch("meho_backplane.docs_search.service.search_corpus", new=corpus),
+        patch(_CORPUS_SEAM, new=corpus),
         patch(_BUILD_LLM_CLIENT, return_value=stub),
     ):
         response = post_mcp(
             client,
-            _ask_call({"query": "nsx maximums", "product": "nsx", "version": "9.0"}, call_id=2),
+            _ask_call({"query": "nsx maximums", "collection": "vmware"}, call_id=2),
         )
     assert response.status_code == 200
     body = response.json()
@@ -285,15 +301,15 @@ def test_tools_call_ask_docs_403_when_unprovisioned(
 
 
 # ---------------------------------------------------------------------------
-# tools/call — REQUIRE_FILTERS (AC2)
+# tools/call — collection-scope rejection arms (#1552)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_tools_call_ask_docs_missing_version_rejected_by_schema(
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_missing_collection_rejected_by_schema(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC2: a missing required ``version`` fails inputSchema validation → -32602."""
+    """A missing required ``collection`` fails inputSchema validation → -32602."""
     client, _op = docs_client
     response = post_mcp(client, _ask_call({"query": "x", "product": "nsx"}, call_id=3))
     assert response.status_code == 200
@@ -301,31 +317,30 @@ def test_tools_call_ask_docs_missing_version_rejected_by_schema(
 
 
 @pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_tools_call_ask_docs_blank_version_surfaces_service_422_as_mcp_error(
+def test_tools_call_ask_docs_403_when_not_entitled_to_collection(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC2: a blank-after-strip ``version`` trips REQUIRE_FILTERS in T3 → -32602.
+    """A tenant with base ``meho-docs`` but not ``meho-docs:vmware`` → 403-class.
 
-    ``minLength: 1`` admits a single space; the shared ``build_docs_scope``
-    treats blank-after-strip as absent and raises ``MissingDocsFilterError``
-    (the route's 422), which the handler maps to ``-32602``. Neither the
-    corpus nor the synthesis model is called.
+    The per-collection entitlement gate rejects the question before either
+    retrieval or synthesis runs.
     """
     client, _op = docs_client
+    _seed_collection_sync()
     corpus = _fake_corpus(_SAMPLE_CHUNK)
     stub = _StubLlmClient('{"answer": "x", "cited_chunk_ids": []}')
     with (
-        patch("meho_backplane.docs_search.service.search_corpus", new=corpus),
+        patch(_CORPUS_SEAM, new=corpus),
         patch(_BUILD_LLM_CLIENT, return_value=stub),
     ):
         response = post_mcp(
             client,
-            _ask_call({"query": "x", "product": "nsx", "version": " "}, call_id=4),
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=4),
         )
     assert response.status_code == 200
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "version" in body["error"]["message"].lower()
+    assert "entitled" in body["error"]["message"].lower()
     assert "query" not in corpus.captured  # type: ignore[attr-defined]
     assert stub.captured == {}
 
@@ -335,18 +350,20 @@ def test_tools_call_ask_docs_blank_version_surfaces_service_422_as_mcp_error(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_tools_call_ask_docs_returns_grounded_cited_answer(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC3: a provisioned operator gets ``{answer, citations[]}`` over retrieved chunks.
+    """An entitled operator gets ``{answer, citations[]}`` over retrieved chunks.
 
-    Pins the full round-trip: retrieval forwards the binary scope to the
-    corpus, the synthesis model composes an answer citing one of the two
-    retrieved chunks, and every returned citation resolves to a retrieved
-    chunk. The retrieved evidence reached the synthesis prompt.
+    Pins the full round-trip: retrieval routes to the ``vmware``
+    collection's backend with the optional refinements as
+    ``metadata_filters``, the synthesis model composes an answer citing one
+    of the two retrieved chunks, and every returned citation resolves to a
+    retrieved chunk. The retrieved evidence reached the synthesis prompt.
     """
     client, op = docs_client
+    _seed_collection_sync()
     corpus = _fake_corpus(_SAMPLE_CHUNK, _SECOND_CHUNK)
     stub = _StubLlmClient(
         json.dumps(
@@ -357,7 +374,7 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
         )
     )
     with (
-        patch("meho_backplane.docs_search.service.search_corpus", new=corpus),
+        patch(_CORPUS_SEAM, new=corpus),
         patch(_BUILD_LLM_CLIENT, return_value=stub),
     ):
         response = post_mcp(
@@ -365,6 +382,7 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
             _ask_call(
                 {
                     "query": "How many logical switches does NSX 9.0 support?",
+                    "collection": "vmware",
                     "product": "nsx",
                     "version": "9.0",
                     "limit": 5,
@@ -384,7 +402,8 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     assert citation["chunk_id"] == "nsx-9.0-maximums-0007"
     assert citation["source_url"].endswith("/maximums")
 
-    # The binary scope reached the corpus and the operator identity was forwarded.
+    # The optional refinements reached the backend and the operator identity
+    # was forwarded.
     assert corpus.captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}  # type: ignore[attr-defined]
     assert corpus.captured["limit"] == 5  # type: ignore[attr-defined]
     assert corpus.captured["operator"].tenant_id == op.tenant_id  # type: ignore[attr-defined]
@@ -398,27 +417,28 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_tools_call_ask_docs_zero_chunks_returns_no_grounded_answer(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC3: an empty retrieval returns "no grounded answer" without calling the model.
+    """An empty retrieval returns "no grounded answer" without calling the model.
 
     The empty-evidence path is the one answer path that must NOT invoke the
     synthesis model — there is nothing to ground on, so a model call could
     only hallucinate. Citations are empty.
     """
     client, _op = docs_client
+    _seed_collection_sync()
     corpus = _fake_corpus()  # zero chunks
     stub = _StubLlmClient('{"answer": "should never be used", "cited_chunk_ids": []}')
     with (
-        patch("meho_backplane.docs_search.service.search_corpus", new=corpus),
+        patch(_CORPUS_SEAM, new=corpus),
         patch(_BUILD_LLM_CLIENT, return_value=stub),
     ):
         response = post_mcp(
             client,
             _ask_call(
-                {"query": "obscure unanswerable thing", "product": "nsx", "version": "9.0"},
+                {"query": "obscure unanswerable thing", "collection": "vmware"},
                 call_id=6,
             ),
         )
@@ -438,7 +458,7 @@ def test_tools_call_ask_docs_zero_chunks_returns_no_grounded_answer(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_tools_call_ask_docs_unconfigured_model_is_internal_error(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
@@ -451,18 +471,19 @@ def test_tools_call_ask_docs_unconfigured_model_is_internal_error(
     return an ungrounded answer when the model is missing.
     """
     client, _op = docs_client
+    _seed_collection_sync()
     corpus = _fake_corpus(_SAMPLE_CHUNK)
 
     def _fail_closed() -> Any:
         raise LlmClientUnavailable("no ANTHROPIC_API_KEY configured")
 
     with (
-        patch("meho_backplane.docs_search.service.search_corpus", new=corpus),
+        patch(_CORPUS_SEAM, new=corpus),
         patch(_BUILD_LLM_CLIENT, side_effect=_fail_closed),
     ):
         response = post_mcp(
             client,
-            _ask_call({"query": "x", "product": "nsx", "version": "9.0"}, call_id=7),
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=7),
         )
     assert response.status_code == 200
     assert response.json()["error"]["code"] == INTERNAL_ERROR
@@ -473,28 +494,29 @@ def test_tools_call_ask_docs_unconfigured_model_is_internal_error(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_tools_call_ask_docs_fabricated_citation_is_internal_error(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """AC3: a model citing a chunk_id outside the retrieved set fails closed.
+    """A model citing a chunk_id outside the retrieved set fails closed.
 
     An unverifiable citation breaks the no-claim-without-a-REAL-citation
     contract, so the synthesis raises ``DocsSynthesisError`` rather than
     returning an answer with a fabricated reference. Surfaces as ``-32603``.
     """
     client, _op = docs_client
+    _seed_collection_sync()
     corpus = _fake_corpus(_SAMPLE_CHUNK)
     stub = _StubLlmClient(
         json.dumps({"answer": "Fabricated.", "cited_chunk_ids": ["does-not-exist-9999"]})
     )
     with (
-        patch("meho_backplane.docs_search.service.search_corpus", new=corpus),
+        patch(_CORPUS_SEAM, new=corpus),
         patch(_BUILD_LLM_CLIENT, return_value=stub),
     ):
         response = post_mcp(
             client,
-            _ask_call({"query": "x", "product": "nsx", "version": "9.0"}, call_id=8),
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=8),
         )
     assert response.status_code == 200
     assert response.json()["error"]["code"] == INTERNAL_ERROR
@@ -505,24 +527,25 @@ def test_tools_call_ask_docs_fabricated_citation_is_internal_error(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-def test_tools_call_ask_docs_corpus_unavailable_is_internal_error(
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_backend_unavailable_is_internal_error(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """A down corpus is a server fault → ``-32603``, mirroring ``search_docs``."""
+    """A down backend is a server fault → ``-32603``, mirroring ``search_docs``."""
     client, _op = docs_client
+    _seed_collection_sync()
 
     async def _down(_op: Operator, _query: str, **_kwargs: Any) -> CorpusSearchResponse:
         raise CorpusUnavailable("corpus_url is not configured")
 
     stub = _StubLlmClient('{"answer": "x", "cited_chunk_ids": []}')
     with (
-        patch("meho_backplane.docs_search.service.search_corpus", new=_down),
+        patch(_CORPUS_SEAM, new=_down),
         patch(_BUILD_LLM_CLIENT, return_value=stub),
     ):
         response = post_mcp(
             client,
-            _ask_call({"query": "x", "product": "nsx", "version": "9.0"}, call_id=9),
+            _ask_call({"query": "x", "collection": "vmware"}, call_id=9),
         )
     assert response.status_code == 200
     assert response.json()["error"]["code"] == INTERNAL_ERROR
@@ -535,7 +558,7 @@ def test_tools_call_ask_docs_corpus_unavailable_is_internal_error(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_tools_call_ask_docs_rejects_extra_arguments(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
@@ -544,7 +567,7 @@ def test_tools_call_ask_docs_rejects_extra_arguments(
     response = post_mcp(
         client,
         _ask_call(
-            {"query": "x", "product": "nsx", "version": "9.0", "tenant_id": "smuggled"},
+            {"query": "x", "collection": "vmware", "tenant_id": "smuggled"},
             call_id=10,
         ),
     )
@@ -558,20 +581,21 @@ def test_tools_call_ask_docs_rejects_extra_arguments(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
-async def test_tools_call_ask_docs_audit_row_carries_canonical_op_id(
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+async def test_tools_call_ask_docs_audit_row_carries_op_id_and_collection(
     docs_client: tuple[TestClient, Operator],
     seeded_operator_tenant: None,  # noqa: F811
 ) -> None:
-    """G4.5-T8: the MCP ``ask_docs`` audit row's ``op_id`` is ``meho.docs.ask``.
+    """The MCP ``ask_docs`` audit row's ``op_id`` is ``meho.docs.ask`` + carries ``collection``.
 
-    Mirrors ``search_docs``: the handler binds the ``audit_op_id``
-    contextvar so the persisted row is filterable by the canonical, uniform
-    op_id across REST / CLI / MCP. ``op_class`` stays ``read`` (ask is a
-    read-class compose over retrieved chunks) and the raw query is recorded
-    only as ``params_hash``.
+    Mirrors ``search_docs``: the handler binds the ``audit_op_id`` and
+    ``audit_collection`` contextvars so the persisted row is filterable by
+    the canonical, uniform op_id and the collection across REST / CLI / MCP.
+    ``op_class`` stays ``read`` (ask is a read-class compose over retrieved
+    chunks) and the raw query is recorded only as ``params_hash``.
     """
     client, _op = docs_client
+    await seed_doc_collection()
     corpus = _fake_corpus(_SAMPLE_CHUNK)
     stub = _StubLlmClient(
         json.dumps(
@@ -582,13 +606,13 @@ async def test_tools_call_ask_docs_audit_row_carries_canonical_op_id(
         )
     )
     with (
-        patch("meho_backplane.docs_search.service.search_corpus", new=corpus),
+        patch(_CORPUS_SEAM, new=corpus),
         patch(_BUILD_LLM_CLIENT, return_value=stub),
     ):
         response = post_mcp(
             client,
             _ask_call(
-                {"query": "logical switch maximums", "product": "nsx", "version": "9.0"},
+                {"query": "logical switch maximums", "collection": "vmware"},
                 call_id=11,
             ),
         )
@@ -603,5 +627,6 @@ async def test_tools_call_ask_docs_audit_row_carries_canonical_op_id(
     payload = mcp_rows[0].payload
     assert payload["op_id"] == "meho.docs.ask"
     assert payload["op_class"] == "read"
+    assert payload["collection"] == "vmware"
     assert "logical switch maximums" not in json.dumps(payload)
     assert payload["params_hash"]

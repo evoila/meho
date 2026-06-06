@@ -18,9 +18,12 @@ corpus directly) is what buys three properties in one place:
   it (the raw query is hashed, never stored).
 - **JWT federation handled once.** The operator JWT forwarding lives in
   the T2 client, not in every consumer.
-- **Mandatory product/version posture enforced centrally.** A docs query
-  without a binary product+version scope is rejected — fail-closed — so
-  no caller can accidentally run an unfiltered corpus-wide query.
+- **Mandatory collection scope + per-collection entitlement enforced
+  centrally.** A docs query without a `collection` is rejected —
+  fail-closed — and a tenant may only search collections it holds the
+  `meho-docs:<collection>` capability for, so no caller can run an
+  unscoped query or reach a collection it isn't entitled to. `product` /
+  `version` are optional refinements within the chosen collection.
 
 The same `search_docs` service backs four consumers: the REST route
 (T3), the MCP tool `search_docs` (T4, #1523), the CLI verb
@@ -98,32 +101,62 @@ registry (`connectors/registry.py`) **minus the version tie-break ladder**
   fan-out and T6 readiness probe branch on. `collection=None` routes to
   `corpus-http` with no ref — the legacy single-collection path.
 
-### `build_docs_scope(product, version)` (`meho_backplane.docs_search.service`)
+### `build_docs_scope(collection, product=None, version=None)` (`meho_backplane.docs_search.service`)
 
-The REQUIRE_FILTERS gate. When `settings.corpus_require_filters` is on
-(the default), both `product` and `version` must be non-blank; either
-missing raises `MissingDocsFilter` (HTTP 422 at the route). With the
-gate off, the scope degrades to optional — present keys still scope the
-query, absent keys widen it (the corpus owns the policy in that mode).
-Blank-after-strip values are treated as absent so `product=" "` cannot
-smuggle past the gate. Returns a frozen `DocsScope` whose `as_filters()`
-renders the `{key: scalar}` `metadata_filters` shape — a **binary
-containment scope**, never a ranking weight (the #1178 / #1177
-decision).
+The binary-scope gate (G4.6-T3 #1552, the **scope inversion**).
+`collection` is the **mandatory** binary scope — a missing or blank value
+raises `MissingDocsFilterError` (HTTP 422 at the route, `-32602` at the
+MCP face), **unconditionally** (it is no longer gated by
+`settings.corpus_require_filters`, which governed the old product+version
+gate). `product` / `version` demote to **optional refinements** within
+the chosen collection: present, they ride `as_filters()`; absent, the
+collection alone scopes the query. Blank-after-strip values are treated
+as absent so `collection=" "` cannot smuggle past the gate. Returns a
+frozen `DocsScope` carrying `collection_key` plus the optional
+refinements; `as_filters()` renders **only** the refinements into the
+`{key: scalar}` `metadata_filters` shape — a **binary containment
+scope**, never a ranking weight (the #1178 / #1177 decision).
+`collection_key` is deliberately **excluded** from `as_filters()`: it is
+a router / entitlement key, not a per-chunk metadata field.
 
-### `search_docs(operator, query, *, scope, limit, collection=None)` (`meho_backplane.docs_search.service`)
+### `resolve_entitled_ready_collection(session, operator, collection_key)` (`meho_backplane.docs_search.collection_access`)
 
-The shared service and the **router seam**. With a `collection`, it
-resolves the backend via `resolve_backend(collection)` and calls
-`backend.search(...)`; without one (`collection=None`, the legacy
-single-collection deploy) it federates to the global corpus via
-`search_corpus` directly. Either way it projects the backend's
-`CorpusChunk`s into MEHO's own `DocsChunk` surface (chunk text + source
-citation + score), decoupling the public response from the wire contract,
-and propagates `CorpusUnavailable` unchanged. The `collection` kwarg is
-additive and optional in T2 — T3 (#1552) threads the request param and
-makes it mandatory; the backend id never appears in the request or the
-projected response.
+The **shared gate** every collection-scoped surface (the REST route, the
+`search_docs` / `ask_docs` tools, the docs-chunk resource) runs after
+parsing the `collection` key and before calling `search_docs`. Three
+policies, defined once so they cannot drift per surface:
+
+- **Resolution** — `resolve_doc_collection` (T1 #1550, tenant-first) turns
+  the key into its registry row. An unknown key → `UnknownCollectionError`
+  (carrying the catalogue of visible keys for a "did you mean…?" hint),
+  mapped to 422 / `-32602`.
+- **Per-collection entitlement** (reuses the G4.5-T1 capability substrate,
+  zero new tables) — the operator must carry the
+  `meho-docs:<collection_key>` capability key (built by
+  `collection_capability_key`). The static `required_capability="meho-docs"`
+  gate still governs *visibility* (tool / template absence when the add-on
+  isn't provisioned); this finer gate governs *which collections* an
+  entitled tenant may query. A miss → `CollectionForbiddenError`, mapped to
+  403 / `-32602` (the 403-projected dispatcher path).
+- **Readiness** — a collection whose registry `status` is not `"ready"`
+  → `CollectionNotReadyError`, mapped to 409 (REST) / `-32603` (MCP,
+  server-side condition). The richer reachability *probe* is T6 (#1555);
+  T3 reads only the `status` column.
+
+The checks run resolve → entitle → readiness so the rejection is the most
+specific true one. Returns the frozen `DocCollection` read shape.
+
+### `search_docs(operator, query, *, scope, collection, limit=10)` (`meho_backplane.docs_search.service`)
+
+The shared service and the **router seam**. `collection` is now
+**required**: the caller (route / handler) has already resolved + entitled
++ readiness-checked it via `resolve_entitled_ready_collection`. It
+resolves the backend via `resolve_backend(collection)`, calls
+`backend.search(...)` with the optional product/version refinements as
+`metadata_filters`, projects the backend's `CorpusChunk`s into MEHO's own
+`DocsChunk` surface (chunk text + source citation + score), and propagates
+`CorpusUnavailable` unchanged. The backend id never appears in the request
+or the projected response (the backend-agnostic contract).
 
 ### `synthesize_docs_answer(query, retrieval, *, llm_client=None)` (`meho_backplane.docs_search.synthesis`, T7 #1526)
 
@@ -155,19 +188,24 @@ The client is injectable so tests pin a deterministic stub; production
 reuses the spec-ingestion grouping pass's Anthropic key + model, so no new
 settings are introduced.
 
-### `POST /api/v1/search_docs` (`meho_backplane.api.v1.search_docs`, T3 #1521)
+### `POST /api/v1/search_docs` (`meho_backplane.api.v1.search_docs`, T3 #1552)
 
 The REST face. `operator` role minimum (`read_only` → 403). Validates
-the scope first (422 before any audit binding), then binds the audit
-contextvars and calls the service.
+the `collection` scope first (422 before any audit binding), binds the
+audit contextvars (including `audit_collection`), runs the shared
+`resolve_entitled_ready_collection` gate (unknown → 422, not entitled →
+403, not ready → 409), then calls the service. Takes a
+`Depends(get_session)` DB session for the resolve.
 
-### `meho docs search` (`cli/internal/cmd/docs`, T5 #1524)
+### `meho docs search` (`cli/internal/cmd/docs`, T5 / T3 #1552)
 
-The operator-facing CLI verb. `meho docs search <query> --product <p>
---version <v> [--limit N] [--json]` POSTs to `/api/v1/search_docs` via
-the shared generated authed client (bearer + lazy 401-refresh), mirrors
-the route's REQUIRE_FILTERS gate client-side (a missing `--product` or
-`--version` is rejected before the round-trip), and renders the cited
+The operator-facing CLI verb. `meho docs search <query> --collection <c>
+[--product <p>] [--version <v>] [--limit N] [--json]` POSTs to
+`/api/v1/search_docs` via the shared generated authed client (bearer +
+lazy 401-refresh), mirrors the route's collection gate client-side (a
+missing `--collection` is rejected before the round-trip; `--product` /
+`--version` are optional refinements), maps the 403 (not entitled) / 409
+(not ready) / 422 (unknown collection) statuses, and renders the cited
 chunks as a text table or raw JSON. It consumes the generated
 `api.SearchDocsRequest` / `api.SearchDocsResponse` / `api.DocsChunk`
 types directly — no hand-typed copies of the backend schemas.
@@ -218,12 +256,16 @@ provisioned the `meho-docs` add-on never sees the tool in `tools/list`
 (`all_tools_for`) and again at call time (`handle_tools_call`).
 
 The `inputSchema` is strict JSON Schema 2020-12: `additionalProperties:
-false`, required `[query, product, version]`. That `required` list is the
-**first** line of the REQUIRE_FILTERS defence — a schema-validating
-client never reaches the service-side `build_docs_scope` check. When the
-gate-off → gate-on settings flip or a non-validating client does reach
-it, `MissingDocsFilterError` (the route's 422) maps to
-`McpInvalidParamsError` → JSON-RPC `-32602` (the MCP analogue of a 422).
+false`, required `[query, collection]` (product/version demoted to
+optional). That `required` list is the **first** line of the
+collection-scope defence — a schema-validating client never reaches the
+service-side `build_docs_scope` check. When a non-validating client does
+reach it, `MissingDocsFilterError` maps to `McpInvalidParamsError` →
+JSON-RPC `-32602` (the MCP analogue of a 422). The handler then runs the
+shared `resolve_entitled_ready_collection` gate: an unknown / not-entitled
+collection maps to `-32602` (the per-collection entitlement is enforced at
+**call** time, since the collection key is a tool argument, not known at
+list time), and a not-ready collection bubbles to `-32603`.
 A `CorpusUnavailable` is **not** caught — a well-formed request against a
 down upstream is a server fault, so it bubbles to the dispatcher's
 generic catch as `-32603` Internal Error (the MCP analogue of the route's
@@ -245,14 +287,17 @@ resource for the full text of a hit on a later turn.
 
 The synthesis sibling, registered alongside `search_docs` in the **same**
 module and carrying the **same** `required_capability="meho-docs"` gate,
-the same `operator` role minimum, and the same strict `inputSchema`
-(`additionalProperties: false`, required `[query, product, version]`,
-`limit` default 10 / cap 50). It is absent from `tools/list` and 403-class
-on `tools/call` for an unprovisioned tenant exactly like `search_docs`.
+the same `operator` role minimum, the same per-collection entitlement, and
+the same strict `inputSchema` (`additionalProperties: false`, required
+`[query, collection]`, product/version optional, `limit` default 10 / cap
+50). It is absent from `tools/list` and 403-class on `tools/call` for an
+unprovisioned tenant exactly like `search_docs`.
 
 The handler mirrors `search_docs`'s error arms and adds the synthesis arm:
-`build_docs_scope` enforces REQUIRE_FILTERS (`MissingDocsFilterError` →
-`-32602`); `CorpusUnavailable` from retrieval bubbles to `-32603`; and the
+`build_docs_scope` + the shared gate enforce the collection scope
+(`MissingDocsFilterError` / unknown / not-entitled → `-32602`);
+`CorpusUnavailable` from retrieval and a not-ready collection bubble to
+`-32603`; and the
 synthesis failures (`LlmClientUnavailable` for an unconfigured model,
 `DocsSynthesisError` for a broken grounding contract) also bubble to
 `-32603` — never an ungrounded 200. It stays `op_class="read"`: it
@@ -269,39 +314,45 @@ chunks-shaped one: `ask_docs` for a composed grounded answer, `search_docs`
 for the raw chunks to read itself, `search_knowledge` / `search_memory`
 for the non-vendor corpora.
 
-### `meho://docs/{product}/{version}/{chunk_id}` resource (`meho_backplane.mcp.resources.docs`, T4 #1523)
+### `meho://docs/{collection}/{product}/{version}/{chunk_id}` resource (`meho_backplane.mcp.resources.docs`, T3 #1552)
 
 The fetch-by-citation companion, gated by the **same**
-`required_capability="meho-docs"`. The corpus transport (T2) is
-search-only — there is no fetch-chunk-by-id endpoint — so the handler
-recovers a chunk by **re-issuing a scoped corpus search** through the
-shared service and selecting the hit whose `chunk_id` matches the URI.
-That is why the URI carries `product` + `version`: they are the mandatory
-binary scope the re-search needs, and encoding them lets
-`build_docs_scope` enforce the same REQUIRE_FILTERS posture (belt-and-
-suspenders, since a blank segment can't match the `[^/]+` template). A
-`chunk_id` absent from the re-search collapses to `-32602` "not found"
-without distinguishing "empty scope" from "no such id", so the resource
-is not a corpus-contents oracle.
+`required_capability="meho-docs"` plus the **per-collection**
+`meho-docs:<collection>` entitlement (enforced in the handler via the
+shared gate). The backend (T2) is search-only — there is no
+fetch-chunk-by-id endpoint — so the handler recovers a chunk by
+**re-issuing a scoped search** through the shared service and selecting
+the hit whose `chunk_id` matches the URI. That is why the URI carries the
+leading `collection` segment (plus the optional `product` / `version`):
+`collection` is the mandatory binary scope the re-search needs to route +
+entitle, and encoding it lets `build_docs_scope` enforce the same
+collection posture (belt-and-suspenders, since a blank segment can't match
+the `[^/]+` template). A blank / unknown / not-entitled collection →
+`-32602`; a `chunk_id` absent from the re-search collapses to `-32602`
+"not found" without distinguishing "empty scope" from "no such id", so the
+resource is not a collection-contents oracle.
 
 ## Control flow (the REST route)
 
 1. `require_role(TenantRole.OPERATOR)` gates the request (`read_only` →
    403, unauthenticated → 401) before the handler runs.
-2. `build_docs_scope(product, version)` enforces REQUIRE_FILTERS. A
-   `MissingDocsFilter` → HTTP 422; the corpus is never called. (A 422
-   here binds no audit context — it does not imply a corpus call
-   happened.)
-3. The handler binds the `audit_*` contextvars **before** the corpus
-   call: `audit_op_id="meho.docs.search"`, `audit_op_class="read"`,
+2. `build_docs_scope(collection, product, version)` enforces the
+   mandatory `collection` scope. A `MissingDocsFilterError` → HTTP 422;
+   no backend is called. (A 422 here binds no audit context.)
+3. The handler binds the `audit_*` contextvars **before** the gate /
+   backend call: `audit_op_id="meho.docs.search"`, `audit_op_class="read"`,
    `audit_query_hash` (SHA-256 of the UTF-8 query — the raw query is
-   never bound), `audit_product`, `audit_version`. `AuditMiddleware`
-   strips the `audit_` prefix and merges these into `audit_log.payload`,
-   so a handler exception still produces an attributable row.
-4. `search_docs(...)` forwards the operator JWT to the corpus and
-   returns the cited chunks. `CorpusUnavailable` → HTTP 503
+   never bound), `audit_collection`, `audit_product`, `audit_version`.
+   `AuditMiddleware` strips the `audit_` prefix and merges these into
+   `audit_log.payload`, so an entitlement / readiness / backend exception
+   still produces an attributable row.
+4. `resolve_entitled_ready_collection(session, operator, collection_key)`
+   resolves + entitles + readiness-checks the collection: unknown → 422,
+   not entitled → 403, not ready → 409.
+5. `search_docs(..., collection=...)` routes to the collection's backend
+   and returns the cited chunks. `CorpusUnavailable` → HTTP 503
    (fail-closed; never an empty 200).
-5. On success, `audit_hit_count` is bound and the cited chunks are
+6. On success, `audit_hit_count` is bound and the cited chunks are
    returned as `SearchDocsResponse`.
 
 ### Why `op_class="read"` is safe for the broadcast feed
@@ -347,6 +398,10 @@ just makes the op name canonical for `query_audit` filtering.
 
 - Route: `backend/src/meho_backplane/api/v1/search_docs.py`.
 - Service (router seam): `backend/src/meho_backplane/docs_search/service.py`.
+- Collection-access gate (resolve + entitle + readiness, T3 #1552):
+  `backend/src/meho_backplane/docs_search/collection_access.py`.
+- Doc-collections registry + resolver (T1 #1550):
+  `backend/src/meho_backplane/docs_collections/`.
 - Backend router (T2 #1551): `backend/src/meho_backplane/docs_search/backends/`
   (`base.py` ABC, `corpus_http.py` first adapter, `registry.py`,
   `resolver.py`). Registry/ABC/resolver precedent:

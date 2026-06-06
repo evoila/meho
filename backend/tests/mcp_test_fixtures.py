@@ -50,7 +50,7 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Tenant
+from meho_backplane.db.models import DocCollection, Tenant
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.registry import clear_registries
@@ -63,8 +63,41 @@ __all__ = [
     "isolated_registry",
     "post_mcp",
     "required_settings_env",
+    "seed_doc_collection",
     "seeded_operator_tenant",
 ]
+
+
+async def seed_doc_collection(
+    *,
+    collection_key: str = "vmware",
+    status: str = "ready",
+    backend: dict[str, Any] | None = None,
+    tenant_id: UUID | None = None,
+) -> None:
+    """Insert a global :class:`DocCollection` row for collection-scoped tests.
+
+    Defaults to a ``ready`` ``vmware`` collection bound to the
+    ``corpus-http`` backend (no ``ref`` → the legacy global corpus URL the
+    transport mock stands in for). Pass ``status="rebuilding"`` to exercise
+    the not-ready arm, or a ``tenant_id`` to make it tenant-curated. The
+    ``backend`` record is NOT NULL with no default, so a valid ``{type}``
+    is always supplied.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(
+            DocCollection(
+                tenant_id=tenant_id,
+                collection_key=collection_key,
+                vendor="VMware by Broadcom",
+                products=["vsphere", "nsx"],
+                description="VMware vendor docs.",
+                when_to_use="VMware product questions.",
+                backend=backend if backend is not None else {"type": "corpus-http"},
+                status=status,
+            ),
+        )
 
 
 #: UUID pinned for the fixture operator's ``tenant_id``. Used by every

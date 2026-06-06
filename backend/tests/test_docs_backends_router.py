@@ -413,7 +413,7 @@ async def test_search_docs_routes_through_resolved_backend(_restore_registry: No
     result = await search_docs(
         _make_operator(),
         "how do I configure NSX",
-        scope=DocsScope(product="vmware", version="9.0"),
+        scope=DocsScope(collection_key="vmware", product="vmware", version="9.0"),
         limit=7,
         collection=collection,
     )
@@ -450,6 +450,6 @@ async def test_search_docs_unroutable_collection_raises(_restore_registry: None)
         await search_docs(
             _make_operator(),
             "q",
-            scope=DocsScope(product="vmware", version="9.0"),
+            scope=DocsScope(collection_key="vmware", product="vmware", version="9.0"),
             collection=collection,
         )

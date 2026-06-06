@@ -73,6 +73,7 @@ def mint_token(
     tenant_id: str = DEFAULT_TENANT_ID,
     tenant_role: str = DEFAULT_TENANT_ROLE,
     audience: str | None = None,
+    capabilities: list[str] | None = None,
 ) -> str:
     """Mint a happy-path JWT signed by *private_key*.
 
@@ -85,6 +86,11 @@ def mint_token(
     don't change. The MCP acceptance suite passes the canonical MCP
     resource URI here so the same minter can produce tokens for both
     audiences without forking a parallel helper.
+
+    ``capabilities`` populates the ``capabilities`` JWT claim the backend's
+    ``_extract_capabilities`` reads onto ``Operator.capabilities`` (G4.5-T1
+    add-on / G4.6-T3 per-collection entitlement). ``None`` omits the claim
+    entirely so pre-capability call sites are unchanged.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -104,6 +110,8 @@ def mint_token(
             payload["name"] = name
         if email is not None:
             payload["email"] = email
+        if capabilities is not None:
+            payload["capabilities"] = capabilities
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}
         token: bytes | str = jwt.encode(header, payload, private_key)
         return token.decode("ascii") if isinstance(token, bytes) else token

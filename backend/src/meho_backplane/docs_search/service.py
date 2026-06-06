@@ -6,14 +6,18 @@
 Two responsibilities, both shared across the REST route (T3), the MCP
 tool (T4), and the CLI verb (T5):
 
-1. :func:`build_docs_scope` — enforce the **mandatory** product+version
-   filter as a binary scope. When ``settings.corpus_require_filters`` is
-   on (the default), a missing or blank ``product`` / ``version`` raises
-   :class:`MissingDocsFilterError`, which the route renders HTTP 422
-   (fail-closed). The filter is a scope passed verbatim to the corpus —
-   never a ranking weight (#1178 / #1177). With the gate **off**, the
-   filter degrades to optional: present keys still scope, absent keys
-   simply widen the search (the corpus is the policy owner in that mode).
+1. :func:`build_docs_scope` — enforce the **mandatory** ``collection``
+   binary scope (T3 #1552). ``collection`` is the single hard-required
+   scope: a missing or blank value raises :class:`MissingDocsFilterError`,
+   which the route renders HTTP 422 (fail-closed) and the MCP face renders
+   ``-32602``. ``product`` / ``version`` demote to **optional refinements**
+   within the chosen collection — present, they ride
+   :meth:`DocsScope.as_filters` as ``metadata_filters``; absent, the
+   collection alone scopes the query. The filters are scopes passed
+   verbatim to the backend, never ranking weights (#1178 / #1177). The
+   ``collection`` key is a **router / entitlement key**, not a metadata
+   filter — it is kept out of :meth:`DocsScope.as_filters` so it never
+   leaks into the backend's per-chunk ``metadata`` containment query.
 
 2. :func:`search_docs` — call T2's :func:`~meho_backplane.auth.corpus.search_corpus`
    with the operator's forwarded JWT and the binary scope, then project
@@ -36,10 +40,9 @@ from typing import TYPE_CHECKING
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.auth.corpus import CorpusChunk, search_corpus
+from meho_backplane.auth.corpus import CorpusChunk
 from meho_backplane.auth.operator import Operator
 from meho_backplane.docs_search.backends import resolve_backend
-from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.docs_collections import DocCollection
@@ -55,53 +58,68 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: The two binary-scope keys forwarded to the corpus as
-#: ``metadata_filters``. Both are mandatory under the REQUIRE_FILTERS
-#: posture; the corpus keys its per-chunk ``metadata`` off these names.
+#: The optional refinement keys forwarded to the backend as
+#: ``metadata_filters`` within the chosen collection. Both are optional
+#: under the collection-scoped posture (T3 #1552); the backend keys its
+#: per-chunk ``metadata`` off these names.
 _PRODUCT_KEY = "product"
 _VERSION_KEY = "version"
 
+#: The mandatory binary-scope key. ``collection`` is the router /
+#: entitlement key (T3 #1552) — required on every query, but **not** a
+#: metadata filter (it never reaches :meth:`DocsScope.as_filters`).
+_COLLECTION_KEY = "collection"
+
 
 class MissingDocsFilterError(ValueError):
-    """Raised when a mandatory ``product`` / ``version`` filter is absent.
+    """Raised when the mandatory ``collection`` scope is absent or blank.
 
-    The REQUIRE_FILTERS posture is fail-closed: a docs query without a
-    binary product+version scope is rejected rather than forwarded as an
-    unfiltered corpus query (which would scan the whole vendor corpus and
-    defeat the per-product/version scoping the add-on exists to enforce).
-    The route maps this to HTTP 422. ``missing`` lists which key(s) were
-    absent or blank so the caller's error detail can name them without
-    re-deriving the gap.
+    The collection-scoped posture is fail-closed: a docs query without a
+    ``collection`` is rejected rather than forwarded as an unscoped query
+    (which would have no backend to route to and defeat the per-collection
+    entitlement the catalogue exists to enforce). The route maps this to
+    HTTP 422; the MCP face maps it to ``-32602``. ``missing`` lists which
+    key(s) were absent or blank so the caller's error detail can name them
+    without re-deriving the gap.
     """
 
     def __init__(self, missing: list[str]) -> None:
         self.missing = missing
         joined = ", ".join(missing)
         super().__init__(
-            f"search_docs requires a binary {joined} filter "
-            "(product and version are mandatory scopes, not ranking weights)"
+            f"search_docs requires a {joined} scope "
+            "(collection is the mandatory binary scope, not a ranking weight)"
         )
 
 
 class DocsScope(BaseModel):
-    """The validated binary product+version scope for a docs query.
+    """The validated binary scope for a docs query.
 
-    Frozen value object built by :func:`build_docs_scope`. :meth:`as_filters`
-    renders it into the ``{key: scalar}`` ``metadata_filters`` shape the
-    corpus federation client (T2) forwards verbatim — the same containment
-    contract the local retrieval substrate uses (PG ``metadata @>`` ),
-    mirrored on the corpus side. Only positively-set keys are emitted, so
-    the gate-off path can carry a partial scope without injecting ``None``
-    values the corpus would have to special-case.
+    Frozen value object built by :func:`build_docs_scope`. ``collection_key``
+    is the mandatory router / entitlement key; ``product`` / ``version`` are
+    the optional refinements within that collection. :meth:`as_filters`
+    renders **only** the optional refinements into the ``{key: scalar}``
+    ``metadata_filters`` shape the backend forwards verbatim — the same
+    containment contract the local retrieval substrate uses (PG
+    ``metadata @>`` ), mirrored on the backend side. ``collection_key`` is
+    deliberately **excluded** from :meth:`as_filters`: it routes and gates
+    the query, it is not a per-chunk metadata field. Only positively-set
+    refinement keys are emitted, so a query with no product/version carries
+    no spurious ``None`` values the backend would have to special-case.
     """
 
     model_config = ConfigDict(frozen=True)
 
+    collection_key: str
     product: str | None = Field(default=None)
     version: str | None = Field(default=None)
 
     def as_filters(self) -> dict[str, str]:
-        """Render the scope as a ``{key: scalar}`` corpus filter dict."""
+        """Render the optional refinements as a ``{key: scalar}`` filter dict.
+
+        ``collection_key`` is intentionally not included — it is a router /
+        entitlement key, not a metadata filter.
+        """
         filters: dict[str, str] = {}
         if self.product is not None:
             filters[_PRODUCT_KEY] = self.product
@@ -143,41 +161,49 @@ class DocsSearchResult(BaseModel):
     chunks: list[DocsChunk] = Field(default_factory=list)
 
 
-def build_docs_scope(product: str | None, version: str | None) -> DocsScope:
-    """Validate the binary product+version scope, fail-closed under the gate.
+def build_docs_scope(
+    collection: str | None,
+    product: str | None = None,
+    version: str | None = None,
+) -> DocsScope:
+    """Validate the binary ``collection`` scope, fail-closed.
 
-    When ``settings.corpus_require_filters`` is on (the default), **both**
-    ``product`` and ``version`` must be non-blank; either missing raises
-    :class:`MissingDocsFilterError` (HTTP 422 at the route). With the gate off,
-    the scope degrades to optional — whatever is provided still scopes the
-    corpus query, whatever is absent simply widens it. Blank-after-strip
-    values are treated as absent so a ``product=" "`` cannot smuggle past
-    the mandatory gate.
+    ``collection`` is the **mandatory** binary scope (T3 #1552): a missing
+    or blank value raises :class:`MissingDocsFilterError` (HTTP 422 at the
+    route, ``-32602`` at the MCP face), unconditionally — this is not gated
+    by ``settings.corpus_require_filters`` (the legacy product+version gate),
+    because every collection-scoped query *must* name a collection to route
+    and entitle on. ``product`` / ``version`` are **optional refinements**
+    within the chosen collection: whatever is provided rides
+    :meth:`DocsScope.as_filters` as ``metadata_filters``, whatever is absent
+    simply widens the search inside the collection. Blank-after-strip values
+    are treated as absent so a ``collection=" "`` cannot smuggle past the
+    mandatory gate.
 
     Args:
-        product: The vendor product to scope to (e.g. ``"vmware"``).
-        version: The product version to scope to (e.g. ``"9.0"``).
+        collection: The mandatory collection key to route + entitle on
+            (e.g. ``"vmware"``).
+        product: The optional vendor product refinement (e.g. ``"vsphere"``).
+        version: The optional product version refinement (e.g. ``"9.0"``).
 
     Returns:
         A :class:`DocsScope` carrying the normalised (stripped) values.
 
     Raises:
-        MissingDocsFilterError: when the REQUIRE_FILTERS gate is on and either
-            ``product`` or ``version`` is missing or blank.
+        MissingDocsFilterError: when ``collection`` is missing or blank.
     """
+    norm_collection = collection.strip() if collection and collection.strip() else None
     norm_product = product.strip() if product and product.strip() else None
     norm_version = version.strip() if version and version.strip() else None
 
-    if get_settings().corpus_require_filters:
-        missing: list[str] = []
-        if norm_product is None:
-            missing.append(_PRODUCT_KEY)
-        if norm_version is None:
-            missing.append(_VERSION_KEY)
-        if missing:
-            raise MissingDocsFilterError(missing)
+    if norm_collection is None:
+        raise MissingDocsFilterError([_COLLECTION_KEY])
 
-    return DocsScope(product=norm_product, version=norm_version)
+    return DocsScope(
+        collection_key=norm_collection,
+        product=norm_product,
+        version=norm_version,
+    )
 
 
 def _project_chunk(chunk: CorpusChunk) -> DocsChunk:
@@ -196,10 +222,10 @@ async def search_docs(
     query: str,
     *,
     scope: DocsScope,
+    collection: DocCollection,
     limit: int = 10,
-    collection: DocCollection | None = None,
 ) -> DocsSearchResult:
-    """Search a doc collection's backend for *operator* within *scope*.
+    """Search *collection*'s backend for *operator* within *scope*.
 
     Resolves *collection* to its concrete search backend via the
     backend-agnostic router
@@ -208,28 +234,29 @@ async def search_docs(
     managed RAG and another on the JWT-forward corpus behind this one
     entrypoint, and the agent never sees which backend answered. The
     operator JWT is forwarded by the adapter (for the JWT-forward corpus
-    backend), the search is scoped to the binary product+version filter,
-    and the cited chunks are projected into MEHO's surface. The query
-    itself is never logged here — only its presence is implied; the route
-    binds the SHA-256 hash to the audit row.
+    backend), the search is scoped by the collection (and the optional
+    product/version refinements), and the cited chunks are projected into
+    MEHO's surface. The query itself is never logged here — only its
+    presence is implied; the route binds the SHA-256 hash to the audit
+    row.
 
-    ``collection=None`` is the **legacy single-collection** path: a
-    deploy that has not yet adopted the ``doc_collections`` registry
-    federates every query to the one global ``corpus_url`` via the
-    re-homed :func:`~meho_backplane.auth.corpus.search_corpus` transport.
-    The collection-scoped request param that makes *collection* mandatory
-    is T3 (#1552); T2 ships the router with this additive, non-breaking
-    seam so the legacy path keeps working unchanged.
+    *collection* is the **required** binary scope (T3 #1552): the caller
+    (the REST route / MCP handler) has already resolved the
+    operator-supplied ``collection`` key to its registry row via
+    :func:`~meho_backplane.docs_collections.resolve_doc_collection`,
+    enforced per-collection entitlement, and checked readiness — so by the
+    time the query reaches here, the backend binding is authoritative.
 
     Args:
         operator: The verified operator whose JWT is forwarded to the
             backend.
         query: The free-text search query.
-        scope: The validated binary product+version scope from
-            :func:`build_docs_scope`.
+        scope: The validated binary scope from :func:`build_docs_scope`
+            (carries ``collection_key`` plus the optional product/version
+            refinements).
+        collection: The resolved doc collection whose ``backend`` record
+            the router selects the search backend from.
         limit: Maximum number of chunks to request.
-        collection: The resolved doc collection to search, or ``None`` for
-            the legacy single-collection corpus path.
 
     Returns:
         A :class:`DocsSearchResult` carrying the backend's ranked cited
@@ -242,34 +269,21 @@ async def search_docs(
             to HTTP 503 (the backend id never appears in the 503).
     """
     filters = scope.as_filters()
-    if collection is None:
-        # Legacy single-collection deploy: federate to the one global
-        # corpus through the module-level transport seam. Kept distinct
-        # from the routed path so the pre-registry behaviour (and the
-        # callers patching ``service.search_corpus``) is untouched until
-        # T3 makes ``collection`` mandatory.
-        response = await search_corpus(
-            operator,
-            query,
-            metadata_filters=filters or None,
-            limit=limit,
-        )
-    else:
-        resolved = resolve_backend(collection)
-        response = await resolved.backend.search(
-            operator,
-            query,
-            backend_ref=resolved.ref,
-            metadata_filters=filters or None,
-            limit=limit,
-        )
+    resolved = resolve_backend(collection)
+    response = await resolved.backend.search(
+        operator,
+        query,
+        backend_ref=resolved.ref,
+        metadata_filters=filters or None,
+        limit=limit,
+    )
     chunks = [_project_chunk(c) for c in response.chunks]
     _log.info(
         "docs_search_completed",
         operator_sub=operator.sub,
+        collection_key=scope.collection_key,
         product=scope.product,
         version=scope.version,
-        collection_key=collection.collection_key if collection is not None else None,
         hit_count=len(chunks),
     )
     return DocsSearchResult(chunks=chunks)

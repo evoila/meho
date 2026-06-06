@@ -2,16 +2,18 @@
 // Copyright (c) 2026 evoila Group
 
 // Package docs hosts the cobra commands under `meho docs ...` for
-// G4.5-T5 (#1524) of Initiative #1518 (the meho-docs add-on). v0.11
-// ships one operator-facing verb that mirrors the `search_docs` MCP
-// tool (T4, #1523):
+// G4.5-T5 (#1524) of Initiative #1518 (the meho-docs add-on), extended
+// for collection-scoped search by G4.6-T3 (#1552). It ships one
+// operator-facing verb that mirrors the `search_docs` MCP tool:
 //
-//   - `meho docs search <query> --product <p> --version <v>
-//     [--limit N] [--json]` — federated vendor-document retrieval via
-//     POST /api/v1/search_docs (T3, #1521). Role: operator. The
-//     product+version filter is the mandatory binary scope under the
-//     backend's REQUIRE_FILTERS posture; the CLI fails fast on a
-//     missing filter before the round-trip.
+//   - `meho docs search <query> --collection <c> [--product <p>]
+//     [--version <v>] [--limit N] [--json]` — collection-scoped
+//     vendor-document retrieval via POST /api/v1/search_docs (T3,
+//     #1552). Role: operator. --collection is the mandatory binary
+//     scope (it routes to a backend and gates per-collection
+//     entitlement); the CLI fails fast on a missing --collection
+//     before the round-trip. --product / --version are optional
+//     refinements within the collection.
 //
 // Gating — true-absence-when-unprovisioned (option B, the
 // compiled-in fallback). The `meho docs` tree compiles into every
@@ -108,7 +110,8 @@ func newRootCmdWithGate(provisioned bool) *cobra.Command {
 			"`meho --help` and every verb refuses with a typed " +
 			"`addon_not_provisioned` error. Search routes through the " +
 			"backplane so every query is audited and the mandatory " +
-			"product+version scope is enforced centrally.",
+			"collection scope + per-collection entitlement are enforced " +
+			"centrally.",
 		// Hidden mirrors the absence the Initiative asks for: an
 		// unprovisioned tenant should not see the command in --help.
 		// The verb-level refusal (below) closes the "hidden but still
@@ -338,13 +341,18 @@ func renderRequestError(
 // the T3 route contract):
 //
 //   - 401 → auth_expired (token rejected / refresh impossible).
-//   - 403 → insufficient_role (read_only operator).
-//   - 422 → unexpected wrapping the REQUIRE_FILTERS detail (missing
-//     product/version — the CLI fails fast before the call, so a 422
-//     here means a contract drift worth surfacing rather than
-//     swallowing) or a too-long query / out-of-range limit.
-//   - 503 → unexpected with the corpus-unavailable detail (the
-//     external corpus is unconfigured / unreachable / non-2xx).
+//   - 403 → insufficient_role (read_only operator, OR the tenant is not
+//     entitled to the named collection — it lacks the
+//     `meho-docs:<collection>` capability).
+//   - 409 → unexpected wrapping the not-ready detail (the collection is
+//     known + entitled but its backend is provisioning / rebuilding /
+//     disabled).
+//   - 422 → unexpected wrapping the collection-scope detail (missing
+//     --collection — the CLI fails fast before the call, so a 422 here
+//     means an unknown collection or a contract drift worth surfacing)
+//     or a too-long query / out-of-range limit.
+//   - 503 → unexpected with the backend-unavailable detail (the
+//     collection's backend is unconfigured / unreachable / non-2xx).
 //   - Other non-2xx → unexpected with the raw body.
 func renderHTTPStatus(
 	cmd *cobra.Command,
@@ -373,10 +381,18 @@ func renderHTTPStatus(
 			output.Unexpected(fmt.Sprintf("invalid request: %s", decodeDetailString(bodyStr))),
 			jsonOut,
 		)
+	case http.StatusConflict:
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"the doc collection is not ready: %s",
+				decodeDetailString(bodyStr),
+			)),
+			jsonOut,
+		)
 	case http.StatusServiceUnavailable:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
-				"the vendor-document corpus is unavailable: %s",
+				"the collection's backend is unavailable: %s",
 				decodeDetailString(bodyStr),
 			)),
 			jsonOut,

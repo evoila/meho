@@ -24,10 +24,17 @@ readiness) are defined once and cannot drift per surface:
    actually query. A miss is the typed :exc:`CollectionForbiddenError`.
 
 3. **Readiness** — a collection whose lifecycle ``status`` is not
-   ``"ready"`` (``provisioning`` / ``rebuilding`` / ``disabled``) is not
-   answerable yet; this is the typed :exc:`CollectionNotReadyError`. The
-   richer reachability *probe* is T6 (#1555); T3 reads only the registry
-   ``status`` column the T1 substrate already carries.
+   ``"ready"`` is not answerable yet, but the rejection branches on *why*:
+   a ``provisioning`` / ``rebuilding`` collection is **transiently** not
+   ready (:exc:`CollectionNotReadyError`, retryable once the rebuild
+   finishes), whereas a ``disabled`` collection is **terminally** hidden by
+   operator action (:exc:`CollectionDisabledError`, not retryable). The
+   split is operationally load-bearing — a client should back off and retry
+   a rebuilding collection but must not retry a disabled one — so the two
+   carry distinct transport shapes (409 vs 403 at REST; ``-32603`` vs
+   ``-32602`` at the MCP face). The richer reachability *probe* is T6
+   (#1555); this gate reads only the registry ``status`` column the T1
+   substrate already carries.
 
 Each surface translates these typed errors into its own transport shape
 (HTTP status at the REST route, JSON-RPC ``-32xxx`` at the MCP face) so
@@ -56,6 +63,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CollectionAccessError",
+    "CollectionDisabledError",
     "CollectionForbiddenError",
     "CollectionNotReadyError",
     "NoEntitledReadyCollectionError",
@@ -72,6 +80,15 @@ _log = structlog.get_logger(__name__)
 #: not-ready: the catalogue knows the collection but the backend is not
 #: serving it yet.
 _READY_STATUS = "ready"
+
+#: The terminal not-ready status: an operator has hidden the collection
+#: from service. Distinct from the transient ``provisioning`` /
+#: ``rebuilding`` states because a disabled collection will not become
+#: answerable on its own — a client must not retry it. Kept as a literal
+#: (rather than imported from ``docs_collections.lifecycle``) so this
+#: transport-neutral access module stays free of a lifecycle import; the
+#: string is the same ``ck_doc_collections_status`` CHECK-constraint value.
+_DISABLED_STATUS = "disabled"
 
 #: The capability-key prefix the per-collection entitlement gate keys on.
 #: ``meho-docs:<collection_key>`` reuses the G4.5-T1 capability substrate
@@ -132,10 +149,14 @@ class CollectionForbiddenError(CollectionAccessError):
 class CollectionNotReadyError(CollectionAccessError):
     """The collection is known + entitled but its backend is not serving yet.
 
-    The registry ``status`` is not ``"ready"`` (``provisioning`` /
-    ``rebuilding`` / ``disabled``). Surfaces map this to a 409/503-class
-    rejection — the request was well-formed and authorised; the collection
-    is simply not answerable at this moment.
+    The registry ``status`` is ``provisioning`` or ``rebuilding`` — a
+    **transient** not-ready state. Surfaces map this to a retryable
+    409-class rejection (REST 409, MCP ``-32603``): the request was
+    well-formed and authorised; the collection is simply not answerable at
+    *this* moment and will become so once provisioning / the rebuild
+    finishes. A ``disabled`` collection is the sibling :exc:`CollectionDisabledError`
+    (terminal) instead, so a client can tell "retry later" from "do not
+    retry".
     """
 
     def __init__(self, collection_key: str, status: str) -> None:
@@ -144,6 +165,28 @@ class CollectionNotReadyError(CollectionAccessError):
             collection_key=collection_key,
         )
         self.status = status
+
+
+class CollectionDisabledError(CollectionAccessError):
+    """The collection is known + entitled but an operator has disabled it.
+
+    The registry ``status`` is ``disabled`` — a **terminal** not-ready
+    state: the collection is hidden from service by deliberate operator
+    action, not a transient rebuild, so it will not become answerable on
+    its own. Surfaces map this to a terminal rejection distinct from the
+    retryable :exc:`CollectionNotReadyError` (REST 403, MCP ``-32602``) so a
+    client backs off permanently rather than polling a collection that an
+    operator chose to take out of service. It is *not* the entitlement-miss
+    :exc:`CollectionForbiddenError` — the tenant holds
+    ``meho-docs:<collection_key>``; the collection itself is switched off.
+    """
+
+    def __init__(self, collection_key: str) -> None:
+        super().__init__(
+            f"doc collection {collection_key!r} is disabled",
+            collection_key=collection_key,
+        )
+        self.status = _DISABLED_STATUS
 
 
 class NoEntitledReadyCollectionError(CollectionAccessError):
@@ -201,8 +244,14 @@ async def resolve_entitled_ready_collection(
     The checks run resolve → entitle → readiness in that order so the
     rejection is the most specific true one: a tenant gets
     ``not found`` for a key it cannot see at all, ``forbidden`` for a
-    key it can see but is not entitled to, and ``not ready`` only once
-    both of those pass.
+    key it can see but is not entitled to, and a readiness rejection only
+    once both of those pass. The readiness arm itself branches on the
+    *kind* of not-ready: a ``disabled`` collection is the terminal
+    :exc:`CollectionDisabledError`; ``provisioning`` / ``rebuilding`` (or
+    any other non-``ready`` value, fail-closed) is the retryable
+    :exc:`CollectionNotReadyError`. This is the **single** readiness gate
+    every collection-scoped search surface runs — there is no second
+    duplicate check downstream.
 
     Args:
         session: Active async DB session.
@@ -220,8 +269,11 @@ async def resolve_entitled_ready_collection(
             visible to the operator's tenant.
         CollectionForbiddenError: The tenant lacks the
             ``meho-docs:<collection_key>`` capability.
+        CollectionDisabledError: The collection's registry ``status`` is
+            ``disabled`` (terminal — an operator hid it from service).
         CollectionNotReadyError: The collection's registry ``status`` is
-            not ``"ready"``.
+            ``provisioning`` / ``rebuilding`` (or any other non-``ready``
+            value), i.e. transiently not answerable.
     """
     try:
         row = await resolve_doc_collection(session, collection_key, operator.tenant_id)
@@ -250,6 +302,10 @@ async def resolve_entitled_ready_collection(
             collection_key=row.collection_key,
             status=row.status,
         )
+        # Branch the not-ready rejection so the terminal disabled state is
+        # distinguishable from the transient rebuild states downstream.
+        if row.status == _DISABLED_STATUS:
+            raise CollectionDisabledError(row.collection_key)
         raise CollectionNotReadyError(row.collection_key, row.status)
 
     return DocCollection.model_validate(row, from_attributes=True)

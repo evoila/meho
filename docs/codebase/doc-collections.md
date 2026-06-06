@@ -164,11 +164,14 @@ The `status` column's four states form a guarded machine:
   then promotes it). A same-state re-call is the idempotent no-op.
 
 A forbidden move raises `DocCollectionStateError` (HTTP 409). The
-search-time guard `ensure_collection_searchable(collection_key, status)`
-is the **mechanism T3 (#1552) wires into the search path**: `ready`
-passes, `provisioning` / `rebuilding` → `DocCollectionNotReadyError`
-(409, retryable), `disabled` → `DocCollectionDisabledError` (403); an
-unknown status fails closed as not-ready. T6 ships the guard; T3 calls it.
+search-time readiness rejection is **not** in this module — it lives in
+the single `resolve_entitled_ready_collection` access gate (#1567), which
+branches on the *kind* of not-ready: `ready` passes, `provisioning` /
+`rebuilding` → `CollectionNotReadyError` (409 / `-32603`, retryable),
+`disabled` → `CollectionDisabledError` (403 / `-32602`, terminal); any
+other value fails closed as not-ready. This `lifecycle` module owns only
+the write-side status machine (transitions + probe mapping); the read-side
+decision is the access gate's, made exactly once.
 
 ### The probe write-back service (`meho_backplane.docs_collections.service`)
 
@@ -292,10 +295,13 @@ malicious `when_to_use` carrying the terminator cannot escape the block.
   side (out of scope per #1555). `enable` returns a collection to
   `provisioning`, not to `ready` — a probe confirms the index before
   `ready`.
-- **The search-time status check is wired by T3.** T6 ships
-  `ensure_collection_searchable`; the call site in the `search_docs`
-  route is T3's (#1552). Until T3 lands, the search path does not yet
-  fail typed on a not-ready collection.
+- **The search-time status check is the access gate's, not a separate
+  guard.** `resolve_entitled_ready_collection` (#1552, #1567) is the single
+  place readiness is decided on the search path — it resolves the key,
+  enforces entitlement, and rejects a not-ready collection, branching the
+  terminal `disabled` (403 / `-32602`) from the transient `provisioning` /
+  `rebuilding` (409 / `-32603`). There is no second `ensure_collection_searchable`
+  duplicate.
 - **No write API.** Collections are operator-managed seed for v1. An
   `import` verb (mirroring `meho targets import`) is a later add if a
   collection needs one.

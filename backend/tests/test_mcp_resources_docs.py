@@ -340,3 +340,36 @@ def test_resources_read_docs_backend_unavailable_is_internal_error(
         )
     assert response.status_code == 200
     assert response.json()["error"]["code"] == INTERNAL_ERROR
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_resources_read_docs_disabled_collection_is_invalid_params(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A ``disabled`` collection → -32602 terminal (the shared gate's #1567 split).
+
+    The resource reuses ``resolve_entitled_ready_collection``, so a disabled
+    collection is the same terminal ``-32602`` (``collection_disabled``) the
+    ``search_docs`` tool surfaces — distinct from the retryable ``-32603`` a
+    ``provisioning`` / ``rebuilding`` collection bubbles to.
+    """
+    client, _op = docs_client
+    _seed_collection_sync(status="disabled")
+
+    fake = _fake_corpus(
+        CorpusChunk(chunk_id="nsx-9.0-maximums-0007", document_id="d", content="x"),
+    )
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "resources/read",
+                "params": {"uri": _DOCS_URI},
+            },
+        )
+    assert response.status_code == 200
+    error = response.json()["error"]
+    assert error["code"] == INVALID_PARAMS
+    assert error["data"]["reason"] == "collection_disabled"

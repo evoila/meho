@@ -34,8 +34,12 @@ After the scope parses, :func:`~meho_backplane.docs_search.resolve_entitled_read
 runs the shared gate: it resolves ``collection`` to its registry row
 (tenant-first), enforces the ``meho-docs:<collection>`` capability
 (403 on a miss -- the collection exists but the tenant is not entitled),
-and checks the registry ``status`` (409 when the collection is not
-``ready``). An unknown collection is 422 (an invalid argument).
+and checks the registry ``status``. The readiness rejection branches on
+the kind of not-ready: a ``disabled`` collection is a terminal **403**
+(``detail.error='collection_disabled'`` -- an operator hid it, distinct
+from the entitlement-miss 403 and not retryable), while a transient
+``provisioning`` / ``rebuilding`` collection is a retryable **409**. An
+unknown collection is 422 (an invalid argument).
 
 RBAC + tenant scoping
 ---------------------
@@ -109,6 +113,7 @@ from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_session
 from meho_backplane.docs_collections import DocCollection
 from meho_backplane.docs_search import (
+    CollectionDisabledError,
     CollectionForbiddenError,
     CollectionNotReadyError,
     CollectionScope,
@@ -207,8 +212,12 @@ async def _resolve_collection_or_http_error(
     Each typed access failure maps to its own status: an unknown collection
     → 422 (an invalid ``collection`` argument, carrying the catalogue of
     visible keys), not entitled → 403 (the collection exists; the tenant
-    lacks ``meho-docs:<collection>``), not ready → 409 (the backend is not
-    answerable yet).
+    lacks ``meho-docs:<collection>``), disabled → 403 (an operator hid the
+    collection from service — terminal, *not* retryable), and transiently
+    not ready (``provisioning`` / ``rebuilding``) → 409 (retryable once the
+    rebuild finishes). The disabled 403 carries a structured
+    ``{"error": "collection_disabled"}`` detail so a client (and the CLI's
+    status renderer) can tell it apart from the entitlement-miss 403.
     """
     try:
         return await resolve_entitled_ready_collection(session, operator, collection_key)
@@ -225,6 +234,15 @@ async def _resolve_collection_or_http_error(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
+        ) from exc
+    except CollectionDisabledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "collection_disabled",
+                "collection": exc.collection_key,
+                "retryable": False,
+            },
         ) from exc
     except CollectionNotReadyError as exc:
         raise HTTPException(
@@ -293,17 +311,24 @@ async def _run_fanout_or_http_error(
     responses={
         403: {
             "description": (
-                "The tenant is not entitled to the named collection -- it "
-                "lacks the ``meho-docs:<collection>`` capability even "
-                "though it can see the add-on. The collection exists; the "
-                "principal just cannot search it."
+                "Terminal rejection of an otherwise-resolvable collection, "
+                "in one of two forms (both 403, distinguished by the "
+                "``detail.error`` field): the tenant is not entitled to the "
+                "named collection -- it lacks the ``meho-docs:<collection>`` "
+                "capability even though it can see the add-on -- or the "
+                "collection has been ``disabled`` by an operator "
+                "(``detail.error='collection_disabled'``). Neither is "
+                "retryable: the collection exists but the principal cannot "
+                "search it, or an operator switched it off."
             ),
         },
         409: {
             "description": (
-                "The named collection is known and entitled but not "
-                "``ready`` (provisioning / rebuilding / disabled) -- its "
-                "backend is not answerable yet."
+                "The named collection is known and entitled but transiently "
+                "not ``ready`` (provisioning / rebuilding) -- its backend is "
+                "not answerable yet. Retryable once the rebuild finishes. A "
+                "``disabled`` collection is the terminal 403 above, not a "
+                "409."
             ),
         },
         422: {
@@ -336,7 +361,9 @@ async def search_docs_endpoint(
 
     * **Single** (``collection``) -- the T3 path: resolve to one backend,
       enforce the per-collection ``meho-docs:<collection>`` entitlement (403)
-      and readiness (409), and search that one collection.
+      and readiness (terminal ``disabled`` → 403, transient
+      ``provisioning`` / ``rebuilding`` → 409), and search that one
+      collection.
     * **Fan-out** (``collections=[…]`` or ``collection="all"``, G4.6-T5
       #1554) -- query every entitled, ready collection in scope on its own
       backend and RRF-merge the ranked lists. Non-entitled / not-ready

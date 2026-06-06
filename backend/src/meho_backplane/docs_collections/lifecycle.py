@@ -38,16 +38,20 @@ idempotency the acceptance criteria require), not an error — re-enabling
 an enabled collection or re-probing a steady-state ``ready`` collection
 returns without a spurious 409.
 
-Search-time guard
------------------
+Search-time readiness
+---------------------
 
-:func:`ensure_collection_searchable` is the typed guard the
-collection-scoped search path (T3 #1552) calls to fail typed against a
-not-``ready`` collection: ``rebuilding`` / ``provisioning`` →
-:class:`DocCollectionNotReadyError` (409, retryable), ``disabled`` →
-:class:`DocCollectionDisabledError` (403). T6 ships the guard; T3 wires
-it into the ``search_docs`` route — the mechanism here, the call site
-there.
+The search path does **not** re-derive readiness here. The single
+readiness gate lives in
+:func:`~meho_backplane.docs_search.resolve_entitled_ready_collection` —
+the same gate that resolves the ``collection`` key and enforces the
+per-collection entitlement — which branches a terminal ``disabled``
+collection (:class:`~meho_backplane.docs_search.CollectionDisabledError`
+→ 403 / ``-32602``) from the transient ``provisioning`` / ``rebuilding``
+states (:class:`~meho_backplane.docs_search.CollectionNotReadyError` →
+409 / ``-32603``). This module owns the *write-side* status machine
+(transitions + probe mapping); the read-side readiness rejection is the
+access gate's, so the decision is made exactly once.
 """
 
 from __future__ import annotations
@@ -68,12 +72,9 @@ __all__ = [
     "STATUS_PROVISIONING",
     "STATUS_READY",
     "STATUS_REBUILDING",
-    "DocCollectionDisabledError",
-    "DocCollectionNotReadyError",
     "DocCollectionStateError",
     "apply_operator_transition",
     "apply_probe_transition",
-    "ensure_collection_searchable",
     "status_for_readiness",
 ]
 
@@ -137,50 +138,6 @@ class DocCollectionStateError(HTTPException):
                 "collection_key": collection_key,
                 "from_status": from_status,
                 "to_status": to_status,
-            },
-        )
-
-
-class DocCollectionNotReadyError(HTTPException):
-    """A collection cannot serve search because its index is not ready.
-
-    The typed search-time failure for a ``provisioning`` / ``rebuilding``
-    collection — HTTP **409** (a conflict with the collection's current
-    lifecycle state, retryable once the rebuild finishes), never a silent
-    empty 200. The search path (T3 #1552) raises this via
-    :func:`ensure_collection_searchable`. ``retryable=True`` distinguishes
-    it from the disabled 403 so a client can back off rather than treat it
-    as terminal.
-    """
-
-    def __init__(self, *, collection_key: str, status: str) -> None:
-        self.status = status
-        super().__init__(
-            status_code=409,
-            detail={
-                "error": "collection_not_ready",
-                "collection_key": collection_key,
-                "status": status,
-                "retryable": True,
-            },
-        )
-
-
-class DocCollectionDisabledError(HTTPException):
-    """A disabled collection cannot serve search.
-
-    The typed search-time failure for a ``disabled`` collection — HTTP
-    **403** (the collection is hidden from service by operator action, not
-    a transient state), distinct from the retryable 409 a rebuild yields.
-    """
-
-    def __init__(self, *, collection_key: str) -> None:
-        super().__init__(
-            status_code=403,
-            detail={
-                "error": "collection_disabled",
-                "collection_key": collection_key,
-                "retryable": False,
             },
         )
 
@@ -269,25 +226,3 @@ def _resolve_transition(
             to_status=to_status,
         )
     return to_status
-
-
-def ensure_collection_searchable(*, collection_key: str, status: str) -> None:
-    """Raise the typed failure when *status* cannot serve search (T6 mechanism).
-
-    The guard the collection-scoped search path (T3 #1552) calls before
-    federating a query. ``ready`` returns silently; every other state
-    raises so the route fails typed rather than returning an empty 200:
-
-    * ``provisioning`` / ``rebuilding`` → :class:`DocCollectionNotReadyError`
-      (409, retryable).
-    * ``disabled`` → :class:`DocCollectionDisabledError` (403).
-
-    T6 ships this guard; T3 wires the call into the ``search_docs`` route.
-    A status outside the known enum is treated as not-ready (fail-closed)
-    rather than waved through.
-    """
-    if status == STATUS_READY:
-        return
-    if status == STATUS_DISABLED:
-        raise DocCollectionDisabledError(collection_key=collection_key)
-    raise DocCollectionNotReadyError(collection_key=collection_key, status=status)

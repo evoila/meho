@@ -19,12 +19,16 @@ enforced here: :func:`build_docs_scope` rejects a missing/blank
 ``collection`` with :class:`MissingDocsFilterError`, which the route
 renders as HTTP 422 (fail-closed) and the MCP face as ``-32602``.
 ``product`` / ``version`` are optional refinements within the chosen
-collection. :func:`resolve_entitled_ready_collection` is the shared gate
-that turns the ``collection`` key into its registry row, enforces the
-per-collection ``meho-docs:<key>`` entitlement, and checks readiness; the
-central audit binding (``op_id="meho.docs.search"`` + ``audit_collection``)
-stays in each surface, next to the ``audit_*`` contextvars the chassis
-middleware lifts into the row.
+collection. :func:`resolve_entitled_ready_collection` is the **single**
+shared gate that turns the ``collection`` key into its registry row,
+enforces the per-collection ``meho-docs:<key>`` entitlement, and checks
+readiness — branching a terminal ``disabled`` collection
+(:class:`CollectionDisabledError` → 403 / ``-32602``) from the transient
+``provisioning`` / ``rebuilding`` states (:class:`CollectionNotReadyError`
+→ 409 / ``-32603``) so a client can tell "do not retry" from "retry
+later". The central audit binding (``op_id="meho.docs.search"`` +
+``audit_collection``) stays in each surface, next to the ``audit_*``
+contextvars the chassis middleware lifts into the row.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from meho_backplane.docs_search.backends import (
 )
 from meho_backplane.docs_search.collection_access import (
     CollectionAccessError,
+    CollectionDisabledError,
     CollectionForbiddenError,
     CollectionNotReadyError,
     NoEntitledReadyCollectionError,
@@ -69,6 +74,7 @@ from meho_backplane.docs_search.synthesis import (
 __all__ = [
     "NO_GROUNDED_ANSWER",
     "CollectionAccessError",
+    "CollectionDisabledError",
     "CollectionForbiddenError",
     "CollectionNotReadyError",
     "CollectionScope",

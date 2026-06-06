@@ -19,7 +19,10 @@ Covers the collection-scoped contract layered on the G4.5-T4 capability gate:
   query routes to the collection's backend.
 * **Collection scope routing:** the query reaches the resolved backend
   with the optional product/version refinements as ``metadata_filters``;
-  an unknown collection → ``-32602``, a not-ready collection → ``-32603``.
+  an unknown collection → ``-32602``, a *transiently* not-ready
+  (``provisioning`` / ``rebuilding``) collection → ``-32603`` (retryable),
+  a ``disabled`` collection → ``-32602`` (terminal,
+  ``error.data.reason='collection_disabled'``) (#1567).
 * The audit row carries the canonical ``op_id="meho.docs.search"`` plus
   ``audit_collection``; the raw query is recorded only as a hash.
 
@@ -463,12 +466,14 @@ def test_tools_call_search_docs_unknown_collection_is_invalid_params(
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
-def test_tools_call_search_docs_not_ready_collection_is_internal_error(
+@pytest.mark.parametrize("status", ["provisioning", "rebuilding"])
+def test_tools_call_search_docs_transiently_not_ready_is_internal_error(
     docs_client: tuple[TestClient, Operator],
+    status: str,
 ) -> None:
-    """A known + entitled but not-``ready`` collection → -32603 (server-side condition)."""
+    """A transiently not-ready collection → -32603 (retryable server-side condition)."""
     client, _op = docs_client
-    _seed_collection_sync(status="rebuilding")
+    _seed_collection_sync(status=status)
     fake = _fake_corpus(_SAMPLE_CHUNK)
     with patch(_CORPUS_SEAM, new=fake):
         response = post_mcp(
@@ -485,6 +490,41 @@ def test_tools_call_search_docs_not_ready_collection_is_internal_error(
         )
     assert response.status_code == 200
     assert response.json()["error"]["code"] == INTERNAL_ERROR
+    assert "query" not in fake.captured  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_disabled_collection_is_invalid_params(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """A ``disabled`` collection → -32602 terminal, distinct from the -32603 a rebuild yields.
+
+    The MCP analogue of the route's terminal/retryable split (#1567): a
+    disabled collection is a client-actionable terminal rejection
+    (``-32602`` carrying ``error.data.reason='collection_disabled'``), so the
+    agent does not retry — whereas a ``provisioning`` / ``rebuilding``
+    collection bubbles to the retryable ``-32603``.
+    """
+    client, _op = docs_client
+    _seed_collection_sync(status="disabled")
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {"query": "x", "collection": "vmware"},
+                },
+            },
+        )
+    assert response.status_code == 200
+    error = response.json()["error"]
+    assert error["code"] == INVALID_PARAMS
+    assert error["data"]["reason"] == "collection_disabled"
     assert "query" not in fake.captured  # type: ignore[attr-defined]
 
 

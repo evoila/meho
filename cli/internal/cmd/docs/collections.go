@@ -142,9 +142,11 @@ func newCollectionsDisableCmd(provisioned bool) *cobra.Command {
 		Short: "Hide a collection from search service",
 		Long: "disable calls POST /api/v1/doc_collections/<key>/disable, " +
 			"moving the collection to disabled so search_docs fails typed " +
-			"(403) against it rather than returning an empty result. " +
-			"Idempotent: re-disabling an already-disabled collection is a " +
-			"no-op.",
+			"with a terminal rejection (HTTP 403, `collection_disabled`) " +
+			"against it rather than returning an empty result — distinct " +
+			"from the retryable 409 a provisioning/rebuilding collection " +
+			"returns, so a client knows not to retry. Idempotent: " +
+			"re-disabling an already-disabled collection is a no-op.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

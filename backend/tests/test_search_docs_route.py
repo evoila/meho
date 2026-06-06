@@ -16,7 +16,11 @@ Coverage matrix (Task #1552 acceptance criteria):
 * **Per-collection entitlement** -- a tenant lacking
   ``meho-docs:<collection>`` gets **403** on a known collection even though
   it can authenticate; a tenant with it succeeds.
-* **Readiness** -- a not-``ready`` collection → **409**.
+* **Readiness** -- a *transiently* not-ready collection
+  (``provisioning`` / ``rebuilding``) → **409** (retryable); a
+  ``disabled`` collection → **403** with a structured
+  ``detail.error='collection_disabled'`` (terminal), distinguishable from
+  the 409 and from the entitlement-miss 403 (#1567).
 * **RBAC** -- ``read_only`` → 403; unauthenticated → 401.
 * **Central audit** -- one audit row per query, ``op_id="meho.docs.search"``,
   ``op_class="read"``, the raw query stored only as a SHA-256 hash, plus
@@ -418,9 +422,10 @@ def test_not_entitled_to_collection_returns_403(client: TestClient) -> None:
     fake_corpus.assert_not_awaited()
 
 
-def test_not_ready_collection_returns_409(client: TestClient) -> None:
-    """A known + entitled but not-``ready`` collection → 409 (not answerable yet)."""
-    _seed_collection_sync(status="rebuilding")
+@pytest.mark.parametrize("status", ["provisioning", "rebuilding"])
+def test_transiently_not_ready_collection_returns_409(client: TestClient, status: str) -> None:
+    """A known + entitled but transiently not-ready collection → 409 (retryable)."""
+    _seed_collection_sync(status=status)
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(
         key, sub="op-nr", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
@@ -438,6 +443,38 @@ def test_not_ready_collection_returns_409(client: TestClient) -> None:
         )
     assert response.status_code == 409
     assert "not ready" in json.dumps(response.json()["detail"])
+    fake_corpus.assert_not_awaited()
+
+
+def test_disabled_collection_returns_terminal_403(client: TestClient) -> None:
+    """A ``disabled`` collection → 403 (terminal), distinct from the 409 a rebuild yields.
+
+    Asserts the operationally load-bearing terminal/retryable split (#1567):
+    a disabled collection is a permanent "do not retry" 403 carrying the
+    structured ``detail.error='collection_disabled'`` marker, distinguishable
+    both from the retryable 409 a ``provisioning`` / ``rebuilding`` collection
+    returns and from the plain-string entitlement-miss 403.
+    """
+    _seed_collection_sync(status="disabled")
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key, sub="op-dis", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
+    )
+    fake_corpus = _mock_corpus(_make_chunk())
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=fake_corpus),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": "q", "collection": "vmware"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert detail["error"] == "collection_disabled"
+    assert detail["retryable"] is False
     fake_corpus.assert_not_awaited()
 
 

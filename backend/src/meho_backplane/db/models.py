@@ -1035,6 +1035,168 @@ class OperationGroup(Base):
     )
 
 
+class DocCollection(Base):
+    """A named documentation corpus an agent can search (collections-as-data).
+
+    Initiative #1548 (G4.6 Doc-collection catalogue), Task #1550 (T1)
+    substrate. One row per corpus (e.g. ``vmware``). This table is the
+    docs analogue of :class:`Target` — ``list_targets`` answers "what
+    infra can I act on?", ``list_doc_collections`` (T4 #1553) answers
+    "what docs can I search?". The registry is **authoritative for
+    identity + backend binding** (operator-set); the liveness fields
+    (``doc_count`` / ``last_ingested_at`` / ``readiness``) are
+    probe-written from the backend (T6 #1555) — the same data split
+    ``targets`` rows + ``Target.fingerprint`` use.
+
+    ``tenant_id`` is NULL for global / shared collections (available to
+    every tenant) and populated for tenant-curated collections, the
+    NULLABLE-tenant idiom :class:`OperationGroup` established. No FK to
+    ``tenant.id`` in v0.x by the same soft-FK discipline as
+    ``audit_log.tenant_id``.
+
+    Uniqueness on ``collection_key`` is enforced by **two partial unique
+    indexes** rather than a single composite UNIQUE because SQL's
+    NULL != NULL semantics mean a single ``UNIQUE (tenant_id,
+    collection_key)`` would not catch two global rows sharing a
+    ``collection_key``. The split lets a global ``vmware`` row and a
+    tenant-curated ``vmware`` row coexist (the resolver prefers the
+    tenant row); see :class:`OperationGroup` for the precedent.
+
+    ``backend`` is the ``{type, ref}`` routing record the T2 (#1551)
+    backend-agnostic search router resolves server-side — the backend
+    (``vertex-rag`` / ``meho-knowledge``) never appears in a request or
+    response. Operator-set; never probe-written.
+
+    ``status`` is a bounded enum enforced via a DB-layer CHECK
+    (``'provisioning'`` → registered, corpus not yet answerable;
+    ``'ready'`` → live for search; ``'rebuilding'`` → a managed-RAG
+    index rebuild is in flight; ``'disabled'`` → hidden from the
+    catalogue). Portable enum-shape across PG + SQLite — see
+    :attr:`OperationGroup.review_status` for the precedent. T3 (#1552)
+    fails typed against a not-``ready`` collection; the ``readiness``
+    JSON column lands here (NULL until T6's probe writes it) so that
+    typed failure has somewhere to read its detail from.
+
+    ``when_to_use`` mirrors :attr:`OperationGroup.when_to_use`: a blurb
+    ``list_doc_collections`` returns verbatim so an agent can pick the
+    right collection *before* searching.
+
+    ``extras`` is the forward-compat escape hatch for per-collection
+    structured fields without first-class columns; v1 writes ``{}``.
+
+    The model ships with no helper methods — population is operator-
+    managed seed for v1 (no create/import API until a collection needs
+    one); read paths land at the resolver (this task) and the
+    catalogue / search tools (T3 / T4).
+    """
+
+    __tablename__ = "doc_collections"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # NULL → global/shared collection (every tenant sees it); non-null →
+    # tenant-curated. No FK clause by soft-FK discipline.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    # Stable operator-chosen id, e.g. ``"vmware"``. The binary routing +
+    # entitlement key the agent passes as ``collection=<key>`` (#1548).
+    collection_key: Mapped[str] = mapped_column(Text, nullable=False)
+    vendor: Mapped[str] = mapped_column(Text, nullable=False)
+    # Products the corpus covers, e.g. ``["vsphere", "nsx"]``. TEXT[] on
+    # PG (GIN-indexable containment), JSON array on SQLite. NOT NULL with
+    # an empty-list default to avoid NULL vs [] ambiguity (Target.aliases
+    # precedent).
+    products: Mapped[list[str]] = mapped_column(
+        _PORTABLE_ARRAY,
+        nullable=False,
+        default=list,
+    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Agent-facing "pick this collection when…" blurb. Mirrors
+    # OperationGroup.when_to_use; surfaced verbatim by list_doc_collections
+    # (T4) and the initialize.instructions catalogue band.
+    when_to_use: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Operator-set ``{type, ref}`` backend routing record (the T2 router
+    # key). JSONB on PG, generic JSON (text) on SQLite. NOT NULL with no
+    # default — every collection must bind to exactly one backend, so a
+    # writer has to supply ``{type, ref}`` explicitly. Unlike
+    # ``products`` / ``extras`` / ``readiness`` (where empty is a valid
+    # state), an empty ``backend`` is a routing-broken row, so there is
+    # no silent ``{}`` fallback at the ORM or migration layer.
+    backend: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="provisioning",
+    )
+    # Probe-written liveness (T6 #1555). NULL until the first probe.
+    last_ingested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    doc_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Probe-written readiness detail (T6 #1555); the column lands here so
+    # T3 (#1552) can fail typed against a not-ready collection. NULL until
+    # the first probe writes it. JSONB on PG, generic JSON on SQLite.
+    readiness: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    extras: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # Partial unique on (collection_key) for global rows. The WHERE
+        # clause is emitted on both dialects via the postgresql_where /
+        # sqlite_where pair (OperationGroup precedent).
+        Index(
+            "doc_collections_global_idx",
+            "collection_key",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        # Partial unique on (tenant_id, collection_key) for tenant rows.
+        Index(
+            "doc_collections_tenant_idx",
+            "tenant_id",
+            "collection_key",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
+        ),
+        sa.CheckConstraint(
+            "status IN ('provisioning', 'ready', 'rebuilding', 'disabled')",
+            name="ck_doc_collections_status",
+        ),
+    )
+
+
 class EndpointDescriptor(Base):
     """A single operation an agent can dispatch through the G0.6 substrate.
 

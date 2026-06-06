@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Doc-collection registry (#1550)
+
+- Add the `doc_collections` table (collections-as-data) — one row per
+  documentation corpus, the docs analogue of the `targets` registry.
+  Operator-set identity + backend binding (`collection_key` / `vendor` /
+  `backend{type, ref}`) with probe-written liveness (`doc_count` /
+  `last_ingested_at` / `readiness`, populated later). Global + tenant
+  scoping via the dual partial-unique-index idiom, a tenant-first
+  `resolve_doc_collection` lookup with a typed not-found, and a single
+  `project_doc_collection_to_summary` ORM→wire projection. Foundational
+  substrate for the catalogue and collection-scoped `search_docs`; no
+  agent-facing surface yet.
+
 ### CLI — `targets discover` points at the real registration verb (#1536)
 
 - Repoint `meho targets discover` (help text, post-run output, and the

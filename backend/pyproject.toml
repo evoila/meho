@@ -48,7 +48,7 @@ dependencies = [
     "croniter>=6.2.2",
     "markdown-it-py[linkify]>=4.2.0",
     "pygments>=2.18",
-    "python-multipart>=0.0.12",
+    "python-multipart>=0.0.32",
     # G11.4-T3 (#1072) -- Tier-2 free-text NER redaction. Both pins are
     # the 2026-03-15 release (the most recent at task-file time); the
     # version is also called out in the issue body. Loaded **lazily**

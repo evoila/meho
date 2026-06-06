@@ -163,8 +163,6 @@ async def list_doc_collections_endpoint(
     stmt = select(DocCollectionORM).where(
         (DocCollectionORM.tenant_id == operator.tenant_id) | (DocCollectionORM.tenant_id.is_(None)),
     )
-    if vendor is not None:
-        stmt = stmt.where(DocCollectionORM.vendor == vendor)
     if cursor is not None:
         stmt = stmt.where(DocCollectionORM.collection_key > cursor)
     stmt = stmt.order_by(
@@ -174,6 +172,14 @@ async def list_doc_collections_endpoint(
 
     result = await session.execute(stmt)
     rows = _dedupe_tenant_first(list(result.scalars().all()))
+    # Apply ``vendor`` AFTER the tenant-first dedupe (Python-side, over the
+    # post-dedupe tenant-wins rows), never in the pre-dedupe SQL WHERE: a
+    # tenant row may shadow a global key under a *different* vendor, and
+    # filtering in SQL would drop the tenant row before it could win and
+    # surface the shadowed global row's vendor. Mirrors the identical reorder
+    # in the ``list_doc_collections`` MCP tool so the two faces agree.
+    if vendor is not None:
+        rows = [row for row in rows if row.vendor == vendor]
     entitled = [
         row
         for row in rows

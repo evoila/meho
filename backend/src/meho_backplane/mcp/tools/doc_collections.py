@@ -266,8 +266,6 @@ async def _list_doc_collections_handler(
     stmt = select(DocCollectionORM).where(
         (DocCollectionORM.tenant_id == operator.tenant_id) | (DocCollectionORM.tenant_id.is_(None)),
     )
-    if vendor is not None:
-        stmt = stmt.where(DocCollectionORM.vendor == vendor)
     if cursor is not None:
         stmt = stmt.where(DocCollectionORM.collection_key > cursor)
     # Order by ``collection_key`` (the cursor + dedupe key) so the keyset
@@ -287,6 +285,15 @@ async def _list_doc_collections_handler(
         rows = list(result.scalars().all())
 
     deduped = _dedupe_tenant_first(rows)
+    # Apply ``vendor`` AFTER the tenant-first dedupe, over the post-dedupe
+    # tenant-wins rows — never in the pre-dedupe SQL WHERE. A tenant row may
+    # shadow a global key under a *different* vendor; filtering in SQL would
+    # drop the tenant row before it could win and surface the shadowed global
+    # row's vendor instead, so ``vendor`` must filter the rows the principal
+    # actually sees (the tenant-wins projection), matching the resolver's
+    # tenant-then-global preference the docstring promises.
+    if vendor is not None:
+        deduped = [row for row in deduped if row.vendor == vendor]
     entitled = [
         row
         for row in deduped

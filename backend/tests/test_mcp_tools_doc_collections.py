@@ -361,6 +361,41 @@ def test_vendor_filter_narrows_the_catalogue(
     assert keys == ["netapp"]
 
 
+@pytest.mark.parametrize(
+    "catalogue_client",
+    [frozenset({_DOCS_CAPABILITY, "meho-docs:vmware"})],
+    indirect=True,
+)
+def test_vendor_filter_runs_after_dedupe_for_a_shadowed_key(
+    catalogue_client: tuple[TestClient, Operator],
+) -> None:
+    """``vendor`` filters the tenant-wins row, never the shadowed global one.
+
+    A global key ``vmware`` (vendor ``A``) is shadowed by a tenant-curated
+    row for the same key under a *different* vendor ``B`` (the tenant row
+    wins). Because the filter runs after the tenant-first dedupe:
+
+    * ``vendor="B"`` returns the tenant row for ``vmware`` — the scope the
+      principal actually sees.
+    * ``vendor="A"`` does NOT return ``vmware`` — the shadowed global
+      vendor is not searchable; the old SQL-side filter would have leaked
+      the global row's metadata here.
+    """
+    client, op = catalogue_client
+    _seed_sync(collection_key="vmware", vendor="A")
+    _seed_sync(collection_key="vmware", vendor="B", tenant_id=op.tenant_id)
+
+    # vendor=B → the tenant-wins row for the shadowed key.
+    by_tenant_vendor = _payload(_call_list(client, {"vendor": "B"}))
+    assert [c["collection_key"] for c in by_tenant_vendor["collections"]] == ["vmware"]
+    assert by_tenant_vendor["collections"][0]["vendor"] == "B"
+
+    # vendor=A → the shadowed global vendor is not searchable.
+    by_global_vendor = _payload(_call_list(client, {"vendor": "A"}))
+    assert by_global_vendor["collections"] == []
+    assert by_global_vendor["next_cursor"] is None
+
+
 # ---------------------------------------------------------------------------
 # tools/call — keyset pagination
 # ---------------------------------------------------------------------------
@@ -386,6 +421,47 @@ def test_keyset_pagination_walks_by_collection_key(
     second = _payload(_call_list(client, {"limit": 2, "cursor": "bravo"}))
     assert [c["collection_key"] for c in second["collections"]] == ["charlie"]
     assert second["next_cursor"] is None
+
+
+@pytest.mark.parametrize(
+    "catalogue_client",
+    [frozenset({_DOCS_CAPABILITY, "meho-docs:alpha", "meho-docs:bravo", "meho-docs:charlie"})],
+    indirect=True,
+)
+def test_keyset_pagination_with_vendor_filter_after_dedupe(
+    catalogue_client: tuple[TestClient, Operator],
+) -> None:
+    """The cursor still advances by ``collection_key`` with ``vendor`` set.
+
+    With the ``vendor`` filter moved after the dedupe, the keyset cursor
+    must keep windowing by ``collection_key``: ``alpha`` and ``charlie``
+    share vendor ``Acme`` while ``bravo`` is a different vendor. A
+    ``limit=1`` walk filtered to ``Acme`` yields ``alpha`` then resumes
+    after it to ``charlie`` — skipping the filtered-out ``bravo`` without
+    the cursor stalling on it. ``next_cursor`` follows the existing
+    full-page convention (set whenever a page is full, even if it is the
+    last filtered row), so a final empty page terminates the walk.
+    """
+    client, _op = catalogue_client
+    _seed_sync(collection_key="alpha", vendor="Acme")
+    _seed_sync(collection_key="bravo", vendor="Other")
+    _seed_sync(collection_key="charlie", vendor="Acme")
+
+    first = _payload(_call_list(client, {"vendor": "Acme", "limit": 1}))
+    assert [c["collection_key"] for c in first["collections"]] == ["alpha"]
+    assert first["next_cursor"] == "alpha"
+
+    # The cursor windows by ``collection_key`` in SQL, so the next page
+    # skips the filtered-out ``bravo`` and resumes at ``charlie``.
+    second = _payload(_call_list(client, {"vendor": "Acme", "limit": 1, "cursor": "alpha"}))
+    assert [c["collection_key"] for c in second["collections"]] == ["charlie"]
+    assert second["next_cursor"] == "charlie"
+
+    # A full page always advertises a cursor; the terminal empty page is
+    # how the walk ends.
+    third = _payload(_call_list(client, {"vendor": "Acme", "limit": 1, "cursor": "charlie"}))
+    assert third["collections"] == []
+    assert third["next_cursor"] is None
 
 
 # ---------------------------------------------------------------------------

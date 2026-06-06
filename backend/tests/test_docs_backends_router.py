@@ -446,7 +446,12 @@ async def test_search_docs_routes_through_resolved_backend(_restore_registry: No
         "content",
         "source_url",
         "score",
+        "collection",
     }
+    # The single-collection path leaves the provenance tag unset (the
+    # collection is already implied by the request scope); it is only
+    # populated on the cross-collection fan-out path (T5 #1554).
+    assert result.chunks[0].collection is None
 
 
 async def test_search_docs_unroutable_collection_raises(_restore_registry: None) -> None:

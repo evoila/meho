@@ -211,7 +211,7 @@ func TestRunSearchRefusesWhenUnprovisioned(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
 		Query:       "x",
-		Collection:  "vmware",
+		Collections: []string{"vmware"},
 		Provisioned: false,
 	})
 	if err == nil {
@@ -233,7 +233,7 @@ func TestRunSearchRefusalIsBeforeNetwork(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
 		Query:             "x",
-		Collection:        "vmware",
+		Collections:       []string{"vmware"},
 		Provisioned:       false,
 		BackplaneOverride: "http://127.0.0.1:0",
 	})
@@ -249,7 +249,7 @@ func TestRunSearchRefusalIsBeforeNetwork(t *testing.T) {
 
 func TestRunSearchRejectsEmptyQuery(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{Query: "", Collection: "vmware", Provisioned: true})
+	err := runSearch(cmd, searchOptions{Query: "", Collections: []string{"vmware"}, Provisioned: true})
 	if err == nil {
 		t.Fatalf("expected error for empty query")
 	}
@@ -274,7 +274,7 @@ func TestRunSearchRejectsMissingCollection(t *testing.T) {
 
 func TestRunSearchRejectsOutOfRangeLimit(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
-	err := runSearch(cmd, searchOptions{Query: "x", Collection: "vmware", Limit: 51, Provisioned: true})
+	err := runSearch(cmd, searchOptions{Query: "x", Collections: []string{"vmware"}, Limit: 51, Provisioned: true})
 	if err == nil {
 		t.Fatalf("expected error for over-budget limit")
 	}
@@ -286,7 +286,7 @@ func TestRunSearchRejectsOutOfRangeLimit(t *testing.T) {
 func TestRunSearchRejectsExplicitZeroLimit(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
-		Query: "x", Collection: "vmware",
+		Query: "x", Collections: []string{"vmware"},
 		Limit: 0, Changed: true, Provisioned: true,
 	})
 	if err == nil {
@@ -327,7 +327,7 @@ func TestRunSearchHappyPath(t *testing.T) {
 
 	cmd, stdout, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
-		Query: "nsx config maximums", Collection: "vmware", Product: "nsx", Version: "9.0",
+		Query: "nsx config maximums", Collections: []string{"vmware"}, Product: "nsx", Version: "9.0",
 		Provisioned: true, BackplaneOverride: srv.URL,
 	})
 	if err != nil {
@@ -374,7 +374,7 @@ func TestRunSearchOmitsAbsentRefinements(t *testing.T) {
 
 	cmd, _, stderr := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
-		Query: "x", Collection: "vmware",
+		Query: "x", Collections: []string{"vmware"},
 		Provisioned: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v; stderr=%s", err, stderr.String())
@@ -405,7 +405,7 @@ func TestRunSearchSendsLimitWhenSet(t *testing.T) {
 
 	cmd, _, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
-		Query: "x", Collection: "vmware",
+		Query: "x", Collections: []string{"vmware"},
 		Limit: 25, Provisioned: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
@@ -427,7 +427,7 @@ func TestRunSearchZeroHits(t *testing.T) {
 
 	cmd, stdout, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
-		Query: "obscure", Collection: "vmware",
+		Query: "obscure", Collections: []string{"vmware"},
 		Provisioned: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
@@ -459,7 +459,7 @@ func TestRunSearchJSONHappyPath(t *testing.T) {
 
 	cmd, stdout, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
-		Query: "x", Collection: "vmware",
+		Query: "x", Collections: []string{"vmware"},
 		JSONOut: true, Provisioned: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
@@ -491,7 +491,7 @@ func TestRunSearchRendersAbsentScoreAsDash(t *testing.T) {
 
 	cmd, stdout, _ := newRunCmd(t)
 	if err := runSearch(cmd, searchOptions{
-		Query: "x", Collection: "vmware",
+		Query: "x", Collections: []string{"vmware"},
 		Provisioned: true, BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runSearch: %v", err)
@@ -553,7 +553,7 @@ func assertStatusMapping(t *testing.T, status int, body string, wantExit int, wa
 
 	cmd, _, stderr := newRunCmd(t)
 	err := runSearch(cmd, searchOptions{
-		Query: "x", Collection: "vmware",
+		Query: "x", Collections: []string{"vmware"},
 		Provisioned: true, BackplaneOverride: srv.URL,
 	})
 	if err == nil {
@@ -577,5 +577,106 @@ func TestSearchCmdRequiresExactlyOneArg(t *testing.T) {
 	cmd.SetArgs([]string{}) // no query
 	if err := cmd.Execute(); err == nil {
 		t.Errorf("expected error with no <query> arg")
+	}
+}
+
+// --- cross-collection fan-out (#1554) --------------------------------
+
+// TestBuildSearchBodySingleCollection proves one --collection maps to the
+// single `collection` wire field (not the fan-out `collections` list).
+func TestBuildSearchBodySingleCollection(t *testing.T) {
+	body := buildSearchBody(searchOptions{Query: "q", Collections: []string{"vmware"}})
+	if body.Collection == nil || *body.Collection != "vmware" {
+		t.Errorf("expected collection=vmware; got %+v", body)
+	}
+	if body.Collections != nil {
+		t.Errorf("expected collections nil on the single path; got %+v", *body.Collections)
+	}
+}
+
+// TestBuildSearchBodyAllSentinel proves --collection all maps to the
+// `collection: "all"` sentinel (not the `collections` list).
+func TestBuildSearchBodyAllSentinel(t *testing.T) {
+	body := buildSearchBody(searchOptions{Query: "q", Collections: []string{"all"}})
+	if body.Collection == nil || *body.Collection != "all" {
+		t.Errorf("expected collection=all sentinel; got %+v", body)
+	}
+	if body.Collections != nil {
+		t.Errorf("expected collections nil for the all sentinel; got %+v", *body.Collections)
+	}
+}
+
+// TestBuildSearchBodyExplicitFanout proves two-or-more --collection values
+// map to the `collections` list and that product/version are dropped (a
+// fan-out is a merge across pre-scoped corpora).
+func TestBuildSearchBodyExplicitFanout(t *testing.T) {
+	body := buildSearchBody(searchOptions{
+		Query:       "q",
+		Collections: []string{"vmware", "netapp"},
+		Product:     "nsx",
+		Version:     "9.0",
+	})
+	if body.Collections == nil {
+		t.Fatalf("expected collections list on the fan-out path; got nil")
+	}
+	if got := *body.Collections; len(got) != 2 || got[0] != "vmware" || got[1] != "netapp" {
+		t.Errorf("expected [vmware netapp]; got %+v", got)
+	}
+	if body.Collection != nil {
+		t.Errorf("expected single collection nil on the fan-out path; got %q", *body.Collection)
+	}
+	if body.Product != nil || body.Version != nil {
+		t.Errorf("expected product/version dropped on fan-out; got %+v", body)
+	}
+}
+
+// TestRunSearchRejectsAllMixedWithKeys proves the whole-scope sentinel
+// cannot be combined with explicit keys (fail-fast before the round-trip).
+func TestRunSearchRejectsAllMixedWithKeys(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := runSearch(cmd, searchOptions{
+		Query:       "q",
+		Collections: []string{"all", "vmware"},
+		Provisioned: true,
+	})
+	if err == nil {
+		t.Fatalf("expected error mixing 'all' with explicit keys")
+	}
+	if !strings.Contains(stderr.String(), "cannot be combined") {
+		t.Errorf("expected mix-rejection hint; got %q", stderr.String())
+	}
+}
+
+// TestRunSearchFanoutRendersProvenanceColumn proves a fan-out result (chunks
+// tagged with a source collection) renders the extra COLLECTION column.
+func TestRunSearchFanoutRendersProvenanceColumn(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/search_docs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.SearchDocsResponse{
+			Chunks: []api.DocsChunk{
+				{ChunkId: "c1", Content: "vmware hit", DocumentId: "dv1", Collection: ptrStr("vmware")},
+				{ChunkId: "c2", Content: "netapp hit", DocumentId: "dn1", Collection: ptrStr("netapp")},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL, "eyJ.test.token")
+
+	cmd, stdout, stderr := newRunCmd(t)
+	err := runSearch(cmd, searchOptions{
+		Query:             "q",
+		Collections:       []string{"vmware", "netapp"},
+		Provisioned:       true,
+		BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runSearch: %v; stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"COLLECTION", "vmware", "netapp"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q in %q", want, stdout.String())
+		}
 	}
 }

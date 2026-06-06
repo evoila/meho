@@ -674,3 +674,146 @@ async def test_audit_row_written_on_backend_503(client: TestClient) -> None:
     assert payload["version"] == "8.0"
     assert "hit_count" not in payload
     assert raw_query not in json.dumps(payload)
+
+
+# ---------------------------------------------------------------------------
+# Cross-collection fan-out + RRF (G4.6-T5 #1554)
+# ---------------------------------------------------------------------------
+
+
+#: Capabilities entitling the tenant to both fan-out collections.
+_FANOUT_CAPS = ["meho-docs", "meho-docs:vmware", "meho-docs:netapp"]
+
+
+def test_fanout_all_sentinel_queries_entitled_collections_and_tags_provenance(
+    client: TestClient,
+) -> None:
+    """``collection='all'`` fans out across the entitled, ready collections.
+
+    Both collections route to the ``corpus-http`` backend (the seam is mocked
+    once), so the seam is awaited once per collection and every returned
+    chunk is tagged with its source ``collection``.
+    """
+    _seed_collection_sync(collection_key="vmware")
+    _seed_collection_sync(collection_key="netapp")
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key, sub="op-fan", tenant_role=TenantRole.OPERATOR.value, capabilities=_FANOUT_CAPS
+    )
+    fake_corpus = _mock_corpus(_make_chunk("c1"), _make_chunk("c2", "second"))
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=fake_corpus),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": "how to configure", "collection": "all"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    # Each entitled collection's backend was queried independently.
+    assert fake_corpus.await_count == 2
+    # Every chunk carries its source-collection provenance tag.
+    seen_collections = {c["collection"] for c in body["chunks"]}
+    assert seen_collections == {"vmware", "netapp"}
+    assert "backend" not in json.dumps(body)
+
+
+def test_fanout_explicit_list_audit_collection_is_sorted_set(client: TestClient) -> None:
+    """``audit_collection`` records the sorted, comma-joined queried set."""
+    _seed_collection_sync(collection_key="vmware")
+    _seed_collection_sync(collection_key="netapp")
+    key = _make_rsa_keypair("kid-A")
+    raw_query = "shared question"
+    token = _mint_token(
+        key, sub="op-fan2", tenant_role=TenantRole.OPERATOR.value, capabilities=_FANOUT_CAPS
+    )
+    fake_corpus = _mock_corpus(_make_chunk("c1"))
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=fake_corpus),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": raw_query, "collections": ["netapp", "vmware"]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+
+    sessionmaker = get_sessionmaker()
+
+    async def _read_audit() -> AuditLog:
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(AuditLog).where(AuditLog.path == "/api/v1/search_docs")
+            )
+            rows = result.scalars().all()
+        assert len(rows) == 1
+        return rows[0]
+
+    payload = asyncio.run(_read_audit()).payload
+    assert payload["op_id"] == "meho.docs.search"
+    # Sorted, comma-joined queried set so who-touched attributes the fan-out.
+    assert payload["collection"] == "netapp,vmware"
+    assert payload["query_hash"] == _compute_query_hash(raw_query)
+    assert raw_query not in json.dumps(payload)
+
+
+def test_fanout_and_single_collection_are_mutually_exclusive(client: TestClient) -> None:
+    """Supplying both ``collection`` and ``collections`` → 422 (no backend call)."""
+    _seed_collection_sync(collection_key="vmware")
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key, sub="op-fan3", tenant_role=TenantRole.OPERATOR.value, capabilities=_FANOUT_CAPS
+    )
+    fake_corpus = _mock_corpus(_make_chunk("c1"))
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=fake_corpus),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": "q", "collection": "vmware", "collections": ["netapp"]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 422
+    fake_corpus.assert_not_awaited()
+
+
+def test_fanout_drops_non_entitled_collection_from_all(client: TestClient) -> None:
+    """``all`` never contributes a non-entitled collection.
+
+    Two collections are seeded but the tenant is entitled to only ``vmware``;
+    ``netapp`` is dropped silently-but-logged, so the fan-out queries exactly
+    one backend.
+    """
+    _seed_collection_sync(collection_key="vmware")
+    _seed_collection_sync(collection_key="netapp")
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key,
+        sub="op-fan4",
+        tenant_role=TenantRole.OPERATOR.value,
+        capabilities=["meho-docs", "meho-docs:vmware"],  # netapp NOT entitled
+    )
+    fake_corpus = _mock_corpus(_make_chunk("c1"))
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=fake_corpus),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": "q", "collection": "all"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    # Only the entitled collection's backend was queried.
+    assert fake_corpus.await_count == 1
+    body = response.json()
+    assert {c["collection"] for c in body["chunks"]} == {"vmware"}

@@ -174,13 +174,17 @@ def test_search_docs_absent_from_tools_list_for_unprovisioned_tenant(
 def test_search_docs_present_with_strict_collection_schema(
     docs_client: tuple[TestClient, Operator],
 ) -> None:
-    """The tool appears once provisioned, with a strict collection-scoped schema.
+    """The tool appears once provisioned, with a collection-scoped schema.
 
-    Required ``[query, collection]``, ``additionalProperties: false``,
-    product/version demoted to optional, and the MEHO-internal RBAC +
-    capability fields stripped by :meth:`ToolDefinition.to_wire`. Tool
-    visibility rides only the base ``meho-docs`` capability — the
-    per-collection entitlement is enforced at call time, not at list time.
+    Required ``[query]`` (the collection scope is mandatory but enforced at
+    call time so EITHER a single ``collection`` OR a fan-out
+    ``collections`` / ``collection="all"`` satisfies it — T5 #1554),
+    ``additionalProperties: false``, product/version demoted to optional,
+    ``collections`` added for the cross-collection fan-out, and the
+    MEHO-internal RBAC + capability fields stripped by
+    :meth:`ToolDefinition.to_wire`. Tool visibility rides only the base
+    ``meho-docs`` capability — the per-collection entitlement is enforced at
+    call time, not at list time.
     """
     client, _op = docs_client
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -191,9 +195,21 @@ def test_search_docs_present_with_strict_collection_schema(
     tool = tools_by_name["search_docs"]
     schema = tool["inputSchema"]
     assert schema["type"] == "object"
-    assert schema["required"] == ["query", "collection"]
+    # Only ``query`` is schema-required; the collection scope is enforced at
+    # call time (single ``collection`` OR fan-out ``collections``/'all'), so
+    # neither can sit in the schema ``required`` list without forbidding the
+    # other.
+    assert schema["required"] == ["query"]
     assert schema["additionalProperties"] is False
-    assert set(schema["properties"]) == {"query", "collection", "product", "version", "limit"}
+    assert set(schema["properties"]) == {
+        "query",
+        "collection",
+        "collections",
+        "product",
+        "version",
+        "limit",
+    }
+    assert schema["properties"]["collections"]["type"] == "array"
     assert schema["properties"]["limit"]["default"] == 10
     assert schema["properties"]["limit"]["maximum"] == 50
     # Wire shape never leaks the server-side gating fields.

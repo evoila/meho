@@ -409,7 +409,7 @@
           "docs"
         ],
         "summary": "Search Docs Endpoint",
-        "description": "Route a vendor-document query to a collection's backend, returning cited chunks.\n\nEnforces the mandatory ``collection`` binary scope (422 when absent),\nresolves it to its backend via the shared\n:func:`~meho_backplane.docs_search.search_docs` service, enforces the\nper-collection ``meho-docs:<collection>`` entitlement (403) and\nreadiness (409), and binds the central ``meho.docs.search`` audit row.\n``read_only`` operators get 403 via :func:`require_role` before\nreaching this handler.\n\nThe audit contextvars are bound **before** the entitlement / backend\ncall so a handler exception (the entitlement 403, readiness 409, or\n:class:`CorpusUnavailable` 503 branch) still produces an audit row\nwith the query identity + collection scope preserved. The raw query is\nnever bound -- only its SHA-256 hash.",
+        "description": "Route a vendor-document query to one or more collections, returning cited chunks.\n\nTwo scopes, mutually exclusive (a 422 when both are supplied):\n\n* **Single** (``collection``) -- the T3 path: resolve to one backend,\n  enforce the per-collection ``meho-docs:<collection>`` entitlement (403)\n  and readiness (409), and search that one collection.\n* **Fan-out** (``collections=[\u2026]`` or ``collection=\"all\"``, G4.6-T5\n  #1554) -- query every entitled, ready collection in scope on its own\n  backend and RRF-merge the ranked lists. Non-entitled / not-ready\n  collections are dropped (logged); an empty resolved set is a 403.\n\nBoth bind the central ``meho.docs.search`` audit row, with\n``audit_collection`` carrying the queried collection (single) or the\nsorted, comma-joined queried set (fan-out) so who-touched attributes the\nquery either way. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler. The raw query is never\nbound -- only its SHA-256 hash.",
         "operationId": "search_docs_endpoint_api_v1_search_docs_post",
         "parameters": [
           {
@@ -451,7 +451,7 @@
             "description": "The named collection is known and entitled but not ``ready`` (provisioning / rebuilding / disabled) -- its backend is not answerable yet."
           },
           "422": {
-            "description": "The mandatory ``collection`` scope is absent / blank, or names no collection visible to the tenant. A docs query without a routable collection is rejected rather than forwarded as an unscoped query."
+            "description": "The mandatory ``collection`` scope is absent / blank, names no collection visible to the tenant, or both a single ``collection`` and a fan-out ``collections`` / ``collection='all'`` scope were supplied (they are mutually exclusive). A docs query without a routable collection is rejected rather than forwarded as an unscoped query."
           },
           "503": {
             "description": "The collection's backend is unavailable -- unconfigured, unreachable, or returned a non-2xx / malformed response. Fail-closed; never an empty 200."
@@ -12734,6 +12734,11 @@
             "type": "number",
             "nullable": true,
             "title": "Score"
+          },
+          "collection": {
+            "type": "string",
+            "nullable": true,
+            "title": "Collection"
           }
         },
         "type": "object",
@@ -12743,7 +12748,7 @@
           "content"
         ],
         "title": "DocsChunk",
-        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives."
+        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk."
       },
       "DraftTemplateRequest": {
         "properties": {
@@ -15171,6 +15176,15 @@
             "nullable": true,
             "title": "Collection"
           },
+          "collections": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 64,
+            "nullable": true,
+            "title": "Collections"
+          },
           "product": {
             "type": "string",
             "maxLength": 128,
@@ -15197,7 +15211,7 @@
           "query"
         ],
         "title": "SearchDocsRequest",
-        "description": "POST body for ``/api/v1/search_docs``.\n\n``collection`` is the **mandatory binary scope** (G4.6-T3 #1552) -- it\nis typed optional here so a missing value is rejected by the service\nwith a route-shaped 422 naming the absent key (carrying *why* the\ncollection is mandatory), rather than Pydantic's generic\n``field_required``. ``product`` / ``version`` are **optional\nrefinements** within the chosen collection.\n\n``extra=\"forbid\"`` rejects unknown fields at 422 so a client sending\na pre-rename key fails loud rather than running with the defaults --\nthe same posture every public v1 request schema ships under."
+        "description": "POST body for ``/api/v1/search_docs``.\n\n``collection`` is the **mandatory binary scope** (G4.6-T3 #1552) -- it\nis typed optional here so a missing value is rejected by the service\nwith a route-shaped 422 naming the absent key (carrying *why* the\ncollection is mandatory), rather than Pydantic's generic\n``field_required``. ``product`` / ``version`` are **optional\nrefinements** within the chosen collection.\n\n``collections`` is the opt-in **cross-collection fan-out** scope (G4.6-T5\n#1554): an explicit list of collection keys to query and RRF-merge.\n``collection=\"all\"`` is the equivalent sentinel for *every* entitled,\nready collection. The fan-out scope is **mutually exclusive** with a\nsingle ``collection`` -- supplying both is a 422. ``product`` /\n``version`` refinements do not apply to a fan-out (each collection is a\npre-scoped corpus); they are ignored on the fan-out path.\n\n``extra=\"forbid\"`` rejects unknown fields at 422 so a client sending\na pre-rename key fails loud rather than running with the defaults --\nthe same posture every public v1 request schema ships under."
       },
       "SearchDocsResponse": {
         "properties": {

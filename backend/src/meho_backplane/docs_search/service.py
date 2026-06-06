@@ -137,6 +137,12 @@ class DocsChunk(BaseModel):
     wire contract means a corpus field rename doesn't churn the public
     ``search_docs`` response; the projection in :func:`_project_chunk` is
     the one place that mapping lives.
+
+    ``collection`` is the **provenance** tag (G4.6-T5 #1554): which
+    collection the chunk came from. It is ``None`` on the single-collection
+    path (the collection is already implied by the request scope) and set
+    to the source collection key on the cross-collection fan-out path so an
+    agent fusing hits from several collections can attribute each chunk.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -146,6 +152,7 @@ class DocsChunk(BaseModel):
     content: str
     source_url: str | None = None
     score: float | None = None
+    collection: str | None = None
 
 
 class DocsSearchResult(BaseModel):
@@ -206,14 +213,20 @@ def build_docs_scope(
     )
 
 
-def _project_chunk(chunk: CorpusChunk) -> DocsChunk:
-    """Project a corpus chunk into MEHO's cited-chunk surface."""
+def _project_chunk(chunk: CorpusChunk, *, collection: str | None = None) -> DocsChunk:
+    """Project a corpus chunk into MEHO's cited-chunk surface.
+
+    *collection* tags the chunk's provenance on the cross-collection
+    fan-out path (T5 #1554); it is ``None`` on the single-collection path,
+    where the source collection is already implied by the request scope.
+    """
     return DocsChunk(
         chunk_id=chunk.chunk_id,
         document_id=chunk.document_id,
         content=chunk.content,
         source_url=chunk.source_url,
         score=chunk.score,
+        collection=collection,
     )
 
 

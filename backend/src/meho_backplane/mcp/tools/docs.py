@@ -98,12 +98,19 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.docs_collections import DocCollection
 from meho_backplane.docs_search import (
     CollectionForbiddenError,
+    CollectionScope,
+    ConflictingCollectionScopeError,
     DocsScope,
+    DocsSearchResult,
     MissingDocsFilterError,
+    NoEntitledReadyCollectionError,
     UnknownCollectionError,
     build_docs_scope,
+    parse_collection_scope,
     resolve_entitled_ready_collection,
+    resolve_entitled_ready_collections,
     search_docs,
+    search_docs_fanout,
     synthesize_docs_answer,
 )
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
@@ -148,11 +155,13 @@ def _build_scope_or_invalid_params(tool: str, arguments: dict[str, Any]) -> Docs
     ``version`` are optional refinements. A missing/blank ``collection``
     raises :class:`MissingDocsFilterError`, re-raised here as
     :class:`McpInvalidParamsError` so the dispatcher emits the spec-correct
-    ``-32602`` (the MCP analogue of the route's 422). The inputSchema's
-    ``required`` list catches this first for a schema-validating client;
-    this arm covers a non-validating client.
+    ``-32602`` (the MCP analogue of the route's 422). ``collection`` is no
+    longer in the inputSchema's ``required`` list (the fan-out
+    ``collections`` is the alternative scope, T5 #1554), so ``.get`` rather
+    than indexing — the missing-scope case is the same ``-32602`` here as
+    when an empty string is passed.
     """
-    collection: str = arguments["collection"]
+    collection: str | None = arguments.get("collection")
     product: str | None = arguments.get("product")
     version: str | None = arguments.get("version")
     try:
@@ -200,44 +209,117 @@ async def _resolve_collection_or_error(
             raise McpInvalidParamsError(f"{tool}: {exc}") from exc
 
 
+def _parse_scope_or_invalid_params(tool: str, arguments: dict[str, Any]) -> CollectionScope:
+    """Parse the single / fan-out collection scope or raise ``-32602``.
+
+    Maps :class:`ConflictingCollectionScopeError` (both ``collection`` and
+    ``collections`` supplied) to :class:`McpInvalidParamsError` — the MCP
+    analogue of the route's 422 for mutually-exclusive scopes.
+    """
+    collection = arguments.get("collection")
+    collections = arguments.get("collections")
+    try:
+        return parse_collection_scope(collection, collections)
+    except ConflictingCollectionScopeError as exc:
+        raise McpInvalidParamsError(f"{tool}: {exc}") from exc
+
+
+async def _resolve_fanout_or_error(
+    operator: Operator,
+    requested_keys: list[str] | None,
+    *,
+    tool: str,
+) -> list[DocCollection]:
+    """Resolve a fan-out scope's entitled, ready set or raise ``-32602``.
+
+    Opens its own DB session (the MCP dispatcher does not thread one) and
+    maps the empty-set failure: a fan-out that resolves to no entitled,
+    ready collection is :class:`McpInvalidParamsError` (``-32602``, projected
+    to the 403-class audit status by the dispatcher) — the same path the
+    single-collection not-entitled arm uses. Non-entitled / not-ready
+    members are dropped (logged) inside the resolver, not raised here.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        try:
+            return await resolve_entitled_ready_collections(
+                session, operator, requested_keys=requested_keys
+            )
+        except NoEntitledReadyCollectionError as exc:
+            raise McpInvalidParamsError(f"{tool}: {exc}") from exc
+
+
 async def _search_docs_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """Route a vendor-document query through the shared docs-search service.
 
-    Validates the mandatory ``collection`` binary scope, resolves +
-    entitles + readiness-checks the collection, then delegates to
-    :func:`~meho_backplane.docs_search.search_docs` — the same service the
-    REST route fronts — forwarding the operator's JWT so the backend
-    authenticates and audits the call as the operator.
+    Two scopes, mutually exclusive: a single ``collection`` (the T3 path) or
+    a cross-collection fan-out (``collections=[…]`` / ``collection="all"``,
+    T5 #1554) that RRF-merges across every entitled, ready collection.
+    Forwards the operator's JWT so each backend authenticates and audits the
+    call as the operator.
 
-    Error arms (see :func:`_build_scope_or_invalid_params` /
-    :func:`_resolve_collection_or_error`): a missing/blank or unknown /
-    not-entitled ``collection`` → ``-32602``; a not-ready collection or an
-    unavailable :class:`~meho_backplane.auth.corpus.CorpusUnavailable`
-    backend bubbles to ``-32603`` (a well-formed request against a backend
-    that is down / not serving is a server-side fault, not invalid params).
+    Error arms: a conflicting (both single + fan-out) scope, a missing/blank
+    or unknown / not-entitled single ``collection``, or a fan-out that
+    resolves to no entitled, ready collection → ``-32602``; a not-ready
+    single collection or an unavailable
+    :class:`~meho_backplane.auth.corpus.CorpusUnavailable` backend bubbles to
+    ``-32603`` (a well-formed request against a backend that is down / not
+    serving is a server-side fault, not invalid params).
     """
-    # Bind the canonical op_id + collection scope so the persisted audit row
-    # is filterable by ``op_id="meho.docs.search"`` and ``collection`` the
-    # same way the REST + CLI faces are (G4.5-T8 #1549, G4.6-T3 #1552). The
-    # dispatcher lifts the ``audit_*`` contextvars into the row's payload;
-    # ``op_class="read"`` (declared on the ToolDefinition) and the broadcast
-    # / ``classify_op`` op_id (the bare tool name) are unchanged. Bound
+    # Bind the canonical op_id so the persisted audit row is filterable by
+    # ``op_id="meho.docs.search"`` the same way the REST + CLI faces are
+    # (G4.5-T8 #1549). ``audit_collection`` is bound per-path below. Bound
     # up-front so a handler exception still records the canonical identity.
     structlog.contextvars.bind_contextvars(audit_op_id=_SEARCH_OP_ID)
     query: str = arguments["query"]
     limit: int = int(arguments.get("limit", _DEFAULT_SEARCH_LIMIT))
 
-    scope = _build_scope_or_invalid_params("search_docs", arguments)
-    structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
-    collection = await _resolve_collection_or_error(operator, scope, tool="search_docs")
-
-    result = await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
+    scope = _parse_scope_or_invalid_params("search_docs", arguments)
+    if scope.is_fanout():
+        result = await _run_search_fanout(operator, query, scope, limit)
+    else:
+        result = await _run_search_single("search_docs", operator, arguments, query, limit)
     return {
         "chunks": [chunk.model_dump(mode="json") for chunk in result.chunks],
     }
+
+
+async def _run_search_single(
+    tool: str,
+    operator: Operator,
+    arguments: dict[str, Any],
+    query: str,
+    limit: int,
+) -> DocsSearchResult:
+    """The single-collection path (T3 #1552): one backend, one collection."""
+    scope = _build_scope_or_invalid_params(tool, arguments)
+    structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
+    collection = await _resolve_collection_or_error(operator, scope, tool=tool)
+    return await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
+
+
+async def _run_search_fanout(
+    operator: Operator,
+    query: str,
+    scope: CollectionScope,
+    limit: int,
+) -> DocsSearchResult:
+    """The cross-collection fan-out path (T5 #1554): RRF over entitled set.
+
+    Binds ``audit_collection`` to the **sorted, comma-joined** queried set
+    (the resolver returns the collections sorted) so who-touched attributes
+    the fan-out to every collection it touched.
+    """
+    collections = await _resolve_fanout_or_error(
+        operator, scope.requested_keys(), tool="search_docs"
+    )
+    structlog.contextvars.bind_contextvars(
+        audit_collection=",".join(c.collection_key for c in collections)
+    )
+    return await search_docs_fanout(operator, query, collections=collections, limit=limit)
 
 
 register_mcp_tool(
@@ -248,11 +330,19 @@ register_mcp_tool(
             "articles, design / reference guides) for an authoritative "
             "vendor fact — e.g. 'NSX config maximums for 9.0' or "
             "'vCenter 8.0 supported snapshot depth'. "
-            "REQUIRES `collection`: it is the hard binary scope (the query "
-            "is rejected without it), naming WHICH corpus to search and "
-            "gating entitlement — pick it from `list_doc_collections`. "
-            "`product` and `version` are OPTIONAL refinements within that "
-            "collection, not a ranking hint. "
+            "REQUIRES a collection scope: EITHER a single `collection` (the "
+            "hard binary scope naming WHICH corpus to search and gating "
+            "entitlement — pick it from `list_doc_collections`) OR a "
+            "cross-collection fan-out via `collections` (an explicit list of "
+            "keys) or `collection`='all' (every collection you are entitled "
+            "to). A fan-out queries each collection independently and merges "
+            "the hits by reciprocal-rank fusion, tagging each chunk with its "
+            "source `collection`; use it only when you genuinely do not know "
+            "which collection holds the answer (a single `collection` is "
+            "cheaper and sharper). `collection` and `collections`/'all' are "
+            "mutually exclusive. "
+            "`product` and `version` are OPTIONAL refinements within a "
+            "single collection (ignored on a fan-out), not a ranking hint. "
             "Use this for VENDOR REFERENCE — what the documentation says. "
             "Use `search_knowledge` instead for how THIS team does "
             "something (lab conventions, known-good runbooks, "
@@ -274,7 +364,7 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 2000,
                     "description": (
-                        "Free-form vendor-reference query. Forwarded to the "
+                        "Free-form vendor-reference query. Forwarded to each "
                         "collection's backend verbatim; never logged in the "
                         "clear (the audit row stores only its SHA-256 hash)."
                     ),
@@ -284,11 +374,30 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "Collection key to search (e.g. 'vmware'). MANDATORY "
-                        "binary scope — it routes the query to a backend and "
-                        "gates per-collection entitlement; a query without "
-                        "it is rejected with INVALID_PARAMS. Pick it from "
+                        "Single collection key to search (e.g. 'vmware'), OR "
+                        "the sentinel 'all' to fan out across every collection "
+                        "you are entitled to. The binary scope — it routes the "
+                        "query and gates per-collection entitlement. A query "
+                        "with NEITHER `collection` NOR `collections` is "
+                        "rejected with INVALID_PARAMS; supplying BOTH "
+                        "`collection` and `collections` is also INVALID_PARAMS "
+                        "(mutually exclusive). Pick keys from "
                         "`list_doc_collections`."
+                    ),
+                },
+                "collections": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "minItems": 1,
+                    "maxItems": 64,
+                    "description": (
+                        "OPTIONAL cross-collection fan-out: an explicit list of "
+                        "collection keys to query independently and merge by "
+                        "reciprocal-rank fusion (each returned chunk is tagged "
+                        "with its source `collection`). Mutually exclusive with "
+                        "a single `collection`; equivalent to `collection`='all' "
+                        "but scoped to the named keys. Non-entitled or not-ready "
+                        "keys are dropped from the set."
                     ),
                 },
                 "product": {
@@ -296,9 +405,10 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "OPTIONAL vendor-product refinement within the "
+                        "OPTIONAL vendor-product refinement within a SINGLE "
                         "collection (e.g. 'nsx', 'vcenter'). Narrows the "
-                        "search; omit it to search the whole collection."
+                        "search; omit it to search the whole collection. "
+                        "Ignored on a cross-collection fan-out."
                     ),
                 },
                 "version": {
@@ -306,9 +416,10 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "OPTIONAL product-version refinement (e.g. '9.0'). "
-                        "Narrows the search alongside `product`; omit it to "
-                        "search the whole collection."
+                        "OPTIONAL product-version refinement (e.g. '9.0') "
+                        "within a SINGLE collection. Narrows the search "
+                        "alongside `product`; omit it to search the whole "
+                        "collection. Ignored on a cross-collection fan-out."
                     ),
                 },
                 "limit": {
@@ -316,10 +427,14 @@ register_mcp_tool(
                     "minimum": 1,
                     "maximum": _MAX_SEARCH_LIMIT,
                     "default": _DEFAULT_SEARCH_LIMIT,
-                    "description": "Maximum number of ranked cited chunks to return.",
+                    "description": (
+                        "Maximum number of ranked cited chunks to return. On a "
+                        "fan-out this also caps the per-collection request "
+                        "before the merge."
+                    ),
                 },
             },
-            "required": ["query", "collection"],
+            "required": ["query"],
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
@@ -345,8 +460,19 @@ async def _ask_docs_handler(
     ``{answer, citations[]}`` where every citation is a chunk the retrieval
     returned and the model relied on — no claim without a citation.
 
-    Error arms mirror ``search_docs`` exactly, plus the synthesis arm:
+    ``ask_docs`` is **single-collection only** (#1548 decision 2): cross-
+    collection synthesis is permanently out of scope. A fan-out attempt —
+    ``collections=[…]`` or ``collection="all"`` — is rejected with
+    :class:`McpInvalidParamsError` (``-32602``) before any retrieval, so the
+    grounded-answer contract never has to reconcile chunks from divergent
+    corpora.
 
+    Error arms mirror ``search_docs``'s single-collection path, plus the
+    synthesis arm:
+
+    * **Fan-out attempt** (``collections`` / ``collection="all"``) — mapped
+      to :class:`McpInvalidParamsError` (``-32602``): ``ask_docs`` is
+      single-collection only.
     * **Missing/blank or unknown / not-entitled ``collection``** — mapped to
       :class:`McpInvalidParamsError` (``-32602``) by
       :func:`_build_scope_or_invalid_params` /
@@ -376,6 +502,18 @@ async def _ask_docs_handler(
     structlog.contextvars.bind_contextvars(audit_op_id=_ASK_OP_ID)
     query: str = arguments["query"]
     limit: int = int(arguments.get("limit", _DEFAULT_SEARCH_LIMIT))
+
+    # ``ask_docs`` is single-collection only — reject a fan-out attempt
+    # before any retrieval. ``parse_collection_scope`` flags both the
+    # ``collections`` list and the ``collection="all"`` sentinel as a
+    # fan-out (and a conflicting both-scopes request as -32602).
+    parsed = _parse_scope_or_invalid_params("ask_docs", arguments)
+    if parsed.is_fanout():
+        raise McpInvalidParamsError(
+            "ask_docs: cross-collection fan-out (collections / collection='all') "
+            "is not supported — ask_docs is single-collection only; use "
+            "search_docs for a cross-collection query"
+        )
 
     scope = _build_scope_or_invalid_params("ask_docs", arguments)
     structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)

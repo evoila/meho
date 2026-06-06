@@ -2155,8 +2155,15 @@ type DocCollectionSummary struct {
 // wire contract means a corpus field rename doesn't churn the public
 // “search_docs“ response; the projection in :func:`_project_chunk` is
 // the one place that mapping lives.
+//
+// “collection“ is the **provenance** tag (G4.6-T5 #1554): which
+// collection the chunk came from. It is “None“ on the single-collection
+// path (the collection is already implied by the request scope) and set
+// to the source collection key on the cross-collection fan-out path so an
+// agent fusing hits from several collections can attribute each chunk.
 type DocsChunk struct {
 	ChunkId    string   `json:"chunk_id"`
+	Collection *string  `json:"collection"`
 	Content    string   `json:"content"`
 	DocumentId string   `json:"document_id"`
 	Score      *float32 `json:"score"`
@@ -3791,15 +3798,24 @@ type ScheduledTriggerStatus string
 // “field_required“. “product“ / “version“ are **optional
 // refinements** within the chosen collection.
 //
+// “collections“ is the opt-in **cross-collection fan-out** scope (G4.6-T5
+// #1554): an explicit list of collection keys to query and RRF-merge.
+// “collection="all"“ is the equivalent sentinel for *every* entitled,
+// ready collection. The fan-out scope is **mutually exclusive** with a
+// single “collection“ -- supplying both is a 422. “product“ /
+// “version“ refinements do not apply to a fan-out (each collection is a
+// pre-scoped corpus); they are ignored on the fan-out path.
+//
 // “extra="forbid"“ rejects unknown fields at 422 so a client sending
 // a pre-rename key fails loud rather than running with the defaults --
 // the same posture every public v1 request schema ships under.
 type SearchDocsRequest struct {
-	Collection *string `json:"collection"`
-	Limit      *int    `json:"limit,omitempty"`
-	Product    *string `json:"product"`
-	Query      string  `json:"query"`
-	Version    *string `json:"version"`
+	Collection  *string   `json:"collection"`
+	Collections *[]string `json:"collections"`
+	Limit       *int      `json:"limit,omitempty"`
+	Product     *string   `json:"product"`
+	Query       string    `json:"query"`
+	Version     *string   `json:"version"`
 }
 
 // SearchDocsResponse Successful response shape for “/api/v1/search_docs“.

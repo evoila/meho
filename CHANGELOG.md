@@ -90,6 +90,36 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Doc-collection docs + runbook (#1556)
+
+- Update the operator provisioning runbook
+  (`docs/cross-repo/meho-docs-addon.md`) to the **doc-collection
+  catalogue** model now that the whole G4.6 feature has shipped. The page
+  documents the collection model (a named corpus bound to a backend; the
+  agent picks a `collection`, never a backend) and the `doc_collections`
+  row shape; **per-collection provisioning** (the `meho-docs` add-on key
+  gates the surface, `meho-docs:<collection_key>` entitles a tenant to a
+  specific collection — reusing the same JWT capability claim, zero new
+  substrate); seeding a collection with its `backend{type, ref}` routing
+  record (`corpus-http` adapter + the legacy `corpus_url` fallback) and
+  bringing it to readiness through the **probe → enable** lifecycle
+  (`provisioning`/`rebuilding` → `ready`; `disable` → not-ready, so
+  search returns 409 like any other non-`ready` status);
+  **discovery** (`list_doc_collections` / `GET /api/v1/doc_collections` /
+  `meho docs collections list` + the `initialize.instructions`
+  `<<DOC_COLLECTIONS_AVAILABLE>>` band); the **search contract**
+  (`search_docs --collection` mandatory binary scope, `product`/`version`
+  optional refinements, cross-collection fan-out via repeated
+  `--collection` or `--collection all` with RRF merge, `ask_docs`
+  single-collection only); and the **backend-agnostic** note
+  (`collection → backend{type, ref}` resolved server-side). Each
+  command / flag / status-code claim (422/403/409/503 ↔ `-32602`/`-32603`,
+  CLI exit 4/5) matches the shipped surface. States the routing convention
+  verbatim: *ask the team first — `search_knowledge` / `search_memory` —
+  escalate to `search_docs(collection=…)` only on a miss or an explicit
+  vendor-fact need; pick the collection explicitly (it's a binary filter,
+  not a guess).* Docs-only — no code or API-surface change.
+
 ### list_doc_collections catalogue discovery (#1553)
 
 - Make the doc-collection catalogue **discoverable** so an agent learns

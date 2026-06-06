@@ -385,12 +385,35 @@ async def handle_tools_call(
         resolver_params: dict[str, Any] = dict(audit_payload)
         if isinstance(arguments, dict):
             resolver_params.update(arguments)
+        # #93: ``call_operation`` is a wrapper tool — its name does not
+        # carry any sensitivity signal, so ``classify_op("call_operation")``
+        # falls through to ``"other"`` → ``"full"`` detail and ships raw
+        # ``params`` (including secret-bearing ``params.data`` /
+        # ``params.password``) onto the per-tenant feed. The inner
+        # ``arguments["op_id"]`` is the real operation the agent dispatched
+        # and must be used for the redaction classification instead.
+        # This mirrors the inner DISPATCH row's precedent at
+        # ``operations/_audit.py:443`` where ``classify_op(descriptor.op_id)``
+        # is called on the real op id so credential_write/credential_mint/
+        # credential_read ops collapse to aggregate-only. The outer envelope's
+        # ``op_id`` broadcast field and the audit row's ``path`` column are
+        # intentionally left as ``audit_name`` (the wrapper tool name) so
+        # ``meho audit query`` cardinality and path-based correlations are
+        # unchanged (AC #5).
+        _broadcast_op_id = audit_name
+        if (
+            audit_name == "call_operation"
+            and isinstance(arguments, dict)
+            and isinstance(arguments.get("op_id"), str)
+            and arguments["op_id"]
+        ):
+            _broadcast_op_id = arguments["op_id"]
         (
             broadcast_op_class,
             broadcast_detail,
             broadcast_origin,
         ) = await compute_effective_broadcast_detail(
-            op_id=audit_name,
+            op_id=_broadcast_op_id,
             tenant_id=operator.tenant_id,
             raw_params=resolver_params,
             request_override=request_override,

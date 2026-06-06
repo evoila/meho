@@ -73,7 +73,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -197,7 +197,7 @@ async def keycloak_client_get(
     scrubbed.
     """
     realms = resolve_realm_config(target)
-    client_uuid = str(params["id"])
+    client_uuid = quote_segment(params["id"])
     client = await self._get_admin_json(
         target,
         f"/admin/realms/{realms.managed_realm}/clients/{client_uuid}",
@@ -276,7 +276,7 @@ async def keycloak_role_mapping_get(
     scrubber for defence-in-depth consistency with the sibling ops.
     """
     realms = resolve_realm_config(target)
-    user_uuid = str(params["id"])
+    user_uuid = quote_segment(params["id"])
     mappings = await self._get_admin_json(
         target,
         f"/admin/realms/{realms.managed_realm}/users/{user_uuid}/role-mappings",
@@ -334,6 +334,14 @@ WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "client_scope": _WHEN_TO_USE_CLIENT_SCOPE,
     "user": _WHEN_TO_USE_USER,
 }
+
+#: UUID pattern used as a defence-in-depth constraint on every ``id``/``uuid``
+#: parameter that is interpolated into an Admin REST path. The dispatcher's
+#: JSON-schema gate rejects traversal-shaped inputs (e.g. ``../..``) before
+#: the handler runs, complementing the ``quote_segment`` encoding applied at
+#: the path-interpolation site. Pattern mirrors the canonical UUID v4 form
+#: Keycloak uses for internal object identifiers.
+_UUID_PATTERN: str = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 
 _EMPTY_PARAMS: dict[str, Any] = {
     "type": "object",
@@ -451,6 +459,7 @@ READ_OPS: tuple[KeycloakOp, ...] = (
             "properties": {
                 "id": {
                     "type": "string",
+                    "pattern": _UUID_PATTERN,
                     "description": "The client's internal UUID (from keycloak.client.list).",
                 },
             },
@@ -569,6 +578,7 @@ READ_OPS: tuple[KeycloakOp, ...] = (
             "properties": {
                 "id": {
                     "type": "string",
+                    "pattern": _UUID_PATTERN,
                     "description": "The user's internal UUID (from keycloak.user.list).",
                 },
             },

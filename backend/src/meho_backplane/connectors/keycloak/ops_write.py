@@ -94,7 +94,7 @@ from typing import TYPE_CHECKING, Any
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.connectors._shared.vault_creds import strip_credential_value
-from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -343,7 +343,7 @@ async def keycloak_client_update(
     await self._write_admin(
         target,
         "PUT",
-        f"/admin/realms/{realms.managed_realm}/clients/{uuid}",
+        f"/admin/realms/{realms.managed_realm}/clients/{quote_segment(uuid)}",
         operator=operator,
         json=representation,
         idempotent_conflict=False,
@@ -419,7 +419,7 @@ async def keycloak_protocol_mapper_create(
     result = await self._write_admin(
         target,
         "POST",
-        f"/admin/realms/{realms.managed_realm}/clients/{uuid}/protocol-mappers/models",
+        f"/admin/realms/{realms.managed_realm}/clients/{quote_segment(uuid)}/protocol-mappers/models",
         operator=operator,
         json=representation,
     )
@@ -516,7 +516,7 @@ async def keycloak_user_reset_password(
     await self._write_admin(
         target,
         "PUT",
-        f"/admin/realms/{realms.managed_realm}/users/{uuid}/reset-password",
+        f"/admin/realms/{realms.managed_realm}/users/{quote_segment(uuid)}/reset-password",
         operator=operator,
         json=credential,
         idempotent_conflict=False,
@@ -573,7 +573,7 @@ async def keycloak_role_mapping_assign(
     await self._write_admin(
         target,
         "POST",
-        f"/admin/realms/{realms.managed_realm}/users/{uuid}/role-mappings/realm",
+        f"/admin/realms/{realms.managed_realm}/users/{quote_segment(uuid)}/role-mappings/realm",
         operator=operator,
         json=role_reprs,  # type: ignore[arg-type]  # KC accepts a JSON array body here
         idempotent_conflict=False,

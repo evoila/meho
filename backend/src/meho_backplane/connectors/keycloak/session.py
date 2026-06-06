@@ -74,6 +74,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import quote
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.vault_creds import (
@@ -92,6 +93,7 @@ __all__ = [
     "KeycloakTargetLike",
     "RealmConfig",
     "load_admin_credentials_from_vault",
+    "quote_segment",
     "resolve_realm_config",
 ]
 
@@ -110,6 +112,27 @@ DEFAULT_MANAGED_REALM: str = "evba"
 #: truth and error messages stay diff-stable.
 _CLIENT_FIELDS: tuple[str, str] = ("client_id", "client_secret")
 _PASSWORD_FIELDS: tuple[str, str] = ("username", "password")
+
+
+def quote_segment(value: Any) -> str:
+    """Percent-encode a caller-supplied id/uuid for a URL path segment.
+
+    Encodes ``/`` (``safe=""``) and ``.`` so that neither slash-based nor
+    dot-segment path traversal (``..``) can alter the request path structure.
+    A traversal-shaped id such as ``../../../../realms/master/clients``
+    becomes ``%2E%2E%2F%2E%2E%2F%2E%2E%2F%2E%2E%2Frealms%2Fmaster%2Fclients``
+    and cannot climb out of the realm sub-tree.  A bare ``..`` id becomes
+    ``%2E%2E`` and is not normalised by httpx.  Mirrors the ArgoCD connector's
+    ``_quote_name`` (``argocd/ops_write.py:130-132``).
+
+    Applied at every site where a caller-supplied id/uuid is interpolated
+    into a Keycloak Admin REST path — both read and write ops.
+
+    Note: In production every id/uuid is additionally validated against the
+    UUID pattern gate before the handler runs, but this function is a safe
+    standalone primitive that does not rely on that upstream gate.
+    """
+    return quote(str(value), safe="").replace(".", "%2E")
 
 
 @runtime_checkable

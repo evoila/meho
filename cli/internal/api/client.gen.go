@@ -2121,6 +2121,32 @@ type DeprecateTemplateResponse struct {
 	Version int    `json:"version"`
 }
 
+// DocCollectionSummary Short shape for the catalogue list (“list_doc_collections“, T4).
+//
+// Carries the fields an agent needs to choose a collection before
+// searching (“collection_key“ / “vendor“ / “products“ /
+// “when_to_use“) plus operator-facing liveness (“status“ /
+// “last_ingested_at“ / “doc_count“ / “readiness“). The
+// “backend“ record and free-form “extras“ are deliberately omitted
+// — the backend is server-side-only (#1548) and “extras“ is an
+// operator escape hatch that does not belong in the agent-facing
+// catalogue. Frozen.
+type DocCollectionSummary struct {
+	CollectionKey  string                  `json:"collection_key"`
+	CreatedAt      time.Time               `json:"created_at"`
+	Description    *string                 `json:"description"`
+	DocCount       *int                    `json:"doc_count"`
+	Id             openapi_types.UUID      `json:"id"`
+	LastIngestedAt *time.Time              `json:"last_ingested_at"`
+	Products       []string                `json:"products"`
+	Readiness      *map[string]interface{} `json:"readiness"`
+	Status         string                  `json:"status"`
+	TenantId       *openapi_types.UUID     `json:"tenant_id"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	Vendor         string                  `json:"vendor"`
+	WhenToUse      *string                 `json:"when_to_use"`
+}
+
 // DocsChunk One cited chunk in MEHO's “search_docs“ response surface.
 //
 // A stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`
@@ -5209,6 +5235,14 @@ type ListHistoryApiV1ConventionsSlugHistoryGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListDocCollectionsEndpointApiV1DocCollectionsGetParams defines parameters for ListDocCollectionsEndpointApiV1DocCollectionsGet.
+type ListDocCollectionsEndpointApiV1DocCollectionsGetParams struct {
+	Vendor        *string `form:"vendor,omitempty" json:"vendor,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams defines parameters for DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost.
 type DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -6885,6 +6919,9 @@ type ClientInterface interface {
 	// ListHistoryApiV1ConventionsSlugHistoryGet request
 	ListHistoryApiV1ConventionsSlugHistoryGet(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListDocCollectionsEndpointApiV1DocCollectionsGet request
+	ListDocCollectionsEndpointApiV1DocCollectionsGet(ctx context.Context, params *ListDocCollectionsEndpointApiV1DocCollectionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -8099,6 +8136,18 @@ func (c *Client) UpdateConventionApiV1ConventionsSlugPatch(ctx context.Context, 
 
 func (c *Client) ListHistoryApiV1ConventionsSlugHistoryGet(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListHistoryApiV1ConventionsSlugHistoryGetRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListDocCollectionsEndpointApiV1DocCollectionsGet(ctx context.Context, params *ListDocCollectionsEndpointApiV1DocCollectionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListDocCollectionsEndpointApiV1DocCollectionsGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -12844,6 +12893,102 @@ func NewListHistoryApiV1ConventionsSlugHistoryGetRequest(server string, slug str
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListDocCollectionsEndpointApiV1DocCollectionsGetRequest generates requests for ListDocCollectionsEndpointApiV1DocCollectionsGet
+func NewListDocCollectionsEndpointApiV1DocCollectionsGetRequest(server string, params *ListDocCollectionsEndpointApiV1DocCollectionsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/doc_collections")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Vendor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "vendor", runtime.ParamLocationQuery, *params.Vendor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -20321,6 +20466,9 @@ type ClientWithResponsesInterface interface {
 	// ListHistoryApiV1ConventionsSlugHistoryGetWithResponse request
 	ListHistoryApiV1ConventionsSlugHistoryGetWithResponse(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*ListHistoryApiV1ConventionsSlugHistoryGetResponse, error)
 
+	// ListDocCollectionsEndpointApiV1DocCollectionsGetWithResponse request
+	ListDocCollectionsEndpointApiV1DocCollectionsGetWithResponse(ctx context.Context, params *ListDocCollectionsEndpointApiV1DocCollectionsGetParams, reqEditors ...RequestEditorFn) (*ListDocCollectionsEndpointApiV1DocCollectionsGetResponse, error)
+
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error)
 
@@ -21857,6 +22005,29 @@ func (r ListHistoryApiV1ConventionsSlugHistoryGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ListHistoryApiV1ConventionsSlugHistoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListDocCollectionsEndpointApiV1DocCollectionsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]DocCollectionSummary
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListDocCollectionsEndpointApiV1DocCollectionsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListDocCollectionsEndpointApiV1DocCollectionsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -25083,6 +25254,15 @@ func (c *ClientWithResponses) ListHistoryApiV1ConventionsSlugHistoryGetWithRespo
 	return ParseListHistoryApiV1ConventionsSlugHistoryGetResponse(rsp)
 }
 
+// ListDocCollectionsEndpointApiV1DocCollectionsGetWithResponse request returning *ListDocCollectionsEndpointApiV1DocCollectionsGetResponse
+func (c *ClientWithResponses) ListDocCollectionsEndpointApiV1DocCollectionsGetWithResponse(ctx context.Context, params *ListDocCollectionsEndpointApiV1DocCollectionsGetParams, reqEditors ...RequestEditorFn) (*ListDocCollectionsEndpointApiV1DocCollectionsGetResponse, error) {
+	rsp, err := c.ListDocCollectionsEndpointApiV1DocCollectionsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListDocCollectionsEndpointApiV1DocCollectionsGetResponse(rsp)
+}
+
 // DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request returning *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse
 func (c *ClientWithResponses) DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error) {
 	rsp, err := c.DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx, collectionKey, params, reqEditors...)
@@ -28009,6 +28189,39 @@ func ParseListHistoryApiV1ConventionsSlugHistoryGetResponse(rsp *http.Response) 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest []ConventionHistoryEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListDocCollectionsEndpointApiV1DocCollectionsGetResponse parses an HTTP response from a ListDocCollectionsEndpointApiV1DocCollectionsGetWithResponse call
+func ParseListDocCollectionsEndpointApiV1DocCollectionsGetResponse(rsp *http.Response) (*ListDocCollectionsEndpointApiV1DocCollectionsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListDocCollectionsEndpointApiV1DocCollectionsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []DocCollectionSummary
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -19,32 +19,35 @@ import (
 
 // newCollectionsCmd returns the `meho docs collections` command tree.
 //
-// G4.6-T6 (#1555). The lifecycle/readiness face of the doc-collection
-// catalogue: probe a collection's backend to refresh its cached liveness
-// and toggle a collection in / out of search service. The catalogue
-// `list` verb is a sibling Task (T4 #1553) that adds to this same parent;
-// T6 ships the lifecycle verbs that mutate registry state.
+// Two faces share the parent. The catalogue-discovery `list` verb (T4
+// #1553) is a read every operator may run — it lists the collections the
+// tenant is entitled to search. The lifecycle verbs (`probe` / `enable` /
+// `disable`, T6 #1555) mutate the doc_collections row and require
+// tenant_admin (the connector enable/disable gate).
 //
-// Role: tenant_admin on every verb (they mutate the doc_collections row),
-// matching the connector enable/disable gate. `provisioned` carries the
-// meho-docs capability resolved at command-tree-build time; an
-// unprovisioned tenant gets the typed `addon_not_provisioned` refusal
-// before any network call, the same gate `meho docs search` enforces.
+// `provisioned` carries the meho-docs capability resolved at command-tree-
+// build time; an unprovisioned tenant gets the typed
+// `addon_not_provisioned` refusal before any network call on every verb,
+// the same gate `meho docs search` enforces.
 func newCollectionsCmd(provisioned bool) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "collections",
-		Short: "Probe and toggle doc-collection backends (tenant_admin)",
-		Long: "collections operates the readiness + lifecycle of the " +
-			"doc-collection catalogue. `probe` refreshes a collection's " +
-			"cached liveness (doc count, last ingest, readiness) from its " +
-			"backend and transitions its status; `enable` / `disable` move " +
-			"a collection in / out of search service. A managed-RAG index " +
-			"answers searches only once it is built, and rebuilds serialize " +
-			"per project — `probe` surfaces that as the collection's status " +
-			"rather than hiding it behind a silent empty search result.",
+		Short: "List doc collections, and probe / toggle their backends",
+		Long: "collections operates the doc-collection catalogue. `list` " +
+			"(operator) shows the collections you are entitled to search — " +
+			"the keys `meho docs search --collection` accepts. The lifecycle " +
+			"verbs (tenant_admin) operate readiness: `probe` refreshes a " +
+			"collection's cached liveness (doc count, last ingest, " +
+			"readiness) from its backend and transitions its status; " +
+			"`enable` / `disable` move a collection in / out of search " +
+			"service. A managed-RAG index answers searches only once it is " +
+			"built, and rebuilds serialize per project — `probe` surfaces " +
+			"that as the collection's status rather than hiding it behind a " +
+			"silent empty search result.",
 		Hidden:       !provisioned,
 		SilenceUsage: true,
 	}
+	cmd.AddCommand(newCollectionsListCmd(provisioned))
 	cmd.AddCommand(newCollectionsProbeCmd(provisioned))
 	cmd.AddCommand(newCollectionsEnableCmd(provisioned))
 	cmd.AddCommand(newCollectionsDisableCmd(provisioned))

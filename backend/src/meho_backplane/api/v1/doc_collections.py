@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``/api/v1/doc_collections`` — readiness probe + lifecycle (G4.6-T6 #1555).
+"""``/api/v1/doc_collections`` — catalogue list + readiness probe + lifecycle.
+
+``GET /api/v1/doc_collections`` — the catalogue list (G4.6-T4 #1553): the
+REST sibling of the ``list_doc_collections`` MCP tool + the ``meho docs
+collections list`` CLI verb (REST / CLI / MCP are sibling fronts on one
+backplane — the three-front rule). OPERATOR-gated; tenant-scoped (global +
+this tenant's rows); filtered to the collections the operator is entitled
+to (holds ``meho-docs:<collection_key>`` for); keyset-paginated by
+``collection_key``. So an operator (or the CLI it fronts) sees exactly the
+collections ``search_docs`` will accept.
 
 Three tenant-admin-gated write routes against a
 :class:`~meho_backplane.db.models.DocCollection` row, mirroring the
@@ -49,18 +58,23 @@ curated row shadows a global one); an unknown key → 404 with the typed
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.corpus import CorpusUnavailable
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_session
+from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections import (
+    DocCollectionSummary,
     probe_collection,
+    project_doc_collection_to_summary,
     resolve_doc_collection,
     set_collection_enabled,
 )
+from meho_backplane.docs_search import collection_capability_key
 from meho_backplane.docs_search.backends.base import BackendReadiness
 
 __all__ = ["router"]
@@ -73,6 +87,97 @@ router = APIRouter(prefix="/api/v1/doc_collections", tags=["docs"])
 #: (rather than inline) to satisfy ruff B008, matching the convention
 #: :mod:`meho_backplane.api.v1.targets` established.
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: Module-level ``Depends`` closure for the catalogue-list operator gate.
+#: The list is a read; OPERATOR (not tenant_admin) is the floor — every
+#: operator entitled to search a collection may discover it. ``read_only``
+#: operators still pass (the list is non-mutating); the per-collection
+#: entitlement filter, not the role gate, decides what they see.
+_require_operator = Depends(require_role(TenantRole.OPERATOR))
+
+#: Canonical audit op_id for the catalogue list — the SAME ``meho.docs.*``
+#: family the ``search_docs`` route + the ``list_doc_collections`` MCP tool
+#: bind, so a ``query_audit`` filter on ``op_id="meho.docs.*"`` catches the
+#: REST catalogue read transport-independently (G4.5-T8 #1549).
+_LIST_OP_ID = "meho.docs.collections.list"
+
+
+def _dedupe_tenant_first(rows: list[DocCollectionORM]) -> list[DocCollectionORM]:
+    """Collapse global+tenant rows sharing a ``collection_key``, tenant wins.
+
+    A ``collection_key`` may exist both as a global row
+    (``tenant_id IS NULL``) and as a tenant-curated row; the resolver
+    prefers the tenant row (it overrides the global backend binding /
+    metadata), so the catalogue must too — listing both would show the same
+    key twice and surface the shadowed global metadata. The tenant row
+    always wins regardless of which arrives first (the check is
+    order-independent), so the NULLS-FIRST/LAST dialect difference between
+    SQLite and PostgreSQL does not affect the outcome. Mirrors the identical
+    dedupe in the ``list_doc_collections`` MCP tool so the two faces never
+    disagree about which scope's row a shadowed key resolves to.
+    """
+    by_key: dict[str, DocCollectionORM] = {}
+    for row in rows:
+        existing = by_key.get(row.collection_key)
+        if existing is None or row.tenant_id is not None:
+            by_key[row.collection_key] = row
+    return list(by_key.values())
+
+
+@router.get(
+    "",
+    response_model=list[DocCollectionSummary],
+)
+async def list_doc_collections_endpoint(
+    vendor: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    cursor: str | None = Query(default=None),
+    operator: Operator = _require_operator,
+    session: AsyncSession = Depends(get_session),
+) -> list[DocCollectionSummary]:
+    """List the doc collections the operator is entitled to search.
+
+    The REST sibling of the ``list_doc_collections`` MCP tool: reads
+    ``doc_collections`` tenant-scoped (global + this tenant's rows),
+    de-duplicates a shadowed global key in favour of the tenant row, and
+    filters to the collections the operator holds
+    ``meho-docs:<collection_key>`` for — the same per-collection entitlement
+    ``search_docs`` enforces, so every listed key is one ``search_docs``
+    will accept. An unprovisioned tenant (no ``meho-docs:*`` capabilities)
+    gets an empty list, matching the CLI's client-side hidden-when-
+    unprovisioned UX.
+
+    Keyset-paginated by ``collection_key`` (lexicographic): pass
+    ``cursor=<last-key-seen>`` for the next page. ``vendor`` is exact-match.
+    The entitlement filter runs in Python (it lives in the operator's
+    capability set, not a joinable column); the catalogue is small (one row
+    per corpus) so the over-read is negligible.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_LIST_OP_ID,
+        audit_op_class="read",
+    )
+
+    stmt = select(DocCollectionORM).where(
+        (DocCollectionORM.tenant_id == operator.tenant_id) | (DocCollectionORM.tenant_id.is_(None)),
+    )
+    if vendor is not None:
+        stmt = stmt.where(DocCollectionORM.vendor == vendor)
+    if cursor is not None:
+        stmt = stmt.where(DocCollectionORM.collection_key > cursor)
+    stmt = stmt.order_by(
+        DocCollectionORM.collection_key,
+        DocCollectionORM.tenant_id,
+    )
+
+    result = await session.execute(stmt)
+    rows = _dedupe_tenant_first(list(result.scalars().all()))
+    entitled = [
+        row
+        for row in rows
+        if collection_capability_key(row.collection_key) in operator.capabilities
+    ]
+    return [project_doc_collection_to_summary(row) for row in entitled[:limit]]
 
 
 @router.post(

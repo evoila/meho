@@ -459,6 +459,86 @@
         }
       }
     },
+    "/api/v1/doc_collections": {
+      "get": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "List Doc Collections Endpoint",
+        "description": "List the doc collections the operator is entitled to search.\n\nThe REST sibling of the ``list_doc_collections`` MCP tool: reads\n``doc_collections`` tenant-scoped (global + this tenant's rows),\nde-duplicates a shadowed global key in favour of the tenant row, and\nfilters to the collections the operator holds\n``meho-docs:<collection_key>`` for \u2014 the same per-collection entitlement\n``search_docs`` enforces, so every listed key is one ``search_docs``\nwill accept. An unprovisioned tenant (no ``meho-docs:*`` capabilities)\ngets an empty list, matching the CLI's client-side hidden-when-\nunprovisioned UX.\n\nKeyset-paginated by ``collection_key`` (lexicographic): pass\n``cursor=<last-key-seen>`` for the next page. ``vendor`` is exact-match.\nThe entitlement filter runs in Python (it lives in the operator's\ncapability set, not a joinable column); the catalogue is small (one row\nper corpus) so the over-read is negligible.",
+        "operationId": "list_doc_collections_endpoint_api_v1_doc_collections_get",
+        "parameters": [
+          {
+            "name": "vendor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Vendor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DocCollectionSummary"
+                  },
+                  "title": "Response List Doc Collections Endpoint Api V1 Doc Collections Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/doc_collections/{collection_key}/probe": {
       "post": {
         "tags": [
@@ -12541,6 +12621,95 @@
         ],
         "title": "DeprecateTemplateResponse",
         "description": "Response for ``runbook_deprecate_template`` -- the now-deprecated coordinates."
+      },
+      "DocCollectionSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "collection_key": {
+            "type": "string",
+            "title": "Collection Key"
+          },
+          "vendor": {
+            "type": "string",
+            "title": "Vendor"
+          },
+          "products": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Products"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "title": "Description"
+          },
+          "when_to_use": {
+            "type": "string",
+            "nullable": true,
+            "title": "When To Use"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "last_ingested_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Ingested At"
+          },
+          "doc_count": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Doc Count"
+          },
+          "readiness": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Readiness"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "collection_key",
+          "vendor",
+          "products",
+          "description",
+          "when_to_use",
+          "status",
+          "last_ingested_at",
+          "doc_count",
+          "readiness",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DocCollectionSummary",
+        "description": "Short shape for the catalogue list (``list_doc_collections``, T4).\n\nCarries the fields an agent needs to choose a collection before\nsearching (``collection_key`` / ``vendor`` / ``products`` /\n``when_to_use``) plus operator-facing liveness (``status`` /\n``last_ingested_at`` / ``doc_count`` / ``readiness``). The\n``backend`` record and free-form ``extras`` are deliberately omitted\n\u2014 the backend is server-side-only (#1548) and ``extras`` is an\noperator escape hatch that does not belong in the agent-facing\ncatalogue. Frozen."
       },
       "DocsChunk": {
         "properties": {

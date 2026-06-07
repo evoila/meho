@@ -205,18 +205,23 @@ this key.
 
 ### 2. Register the target
 
-```console
-$ meho targets create \
-    --name rke2-meho \
-    --product kubernetes \
-    --host k8s.rke2-meho.example.com \
-    --port 6443 \
-    --secret-ref secret/data/<tenant>/k8s/rke2-meho-kubeconfig \
-    --auth-model shared_service_account
+```yaml
+# targets.yaml
+targets:
+  - name: rke2-meho
+    product: kubernetes
+    host: k8s.rke2-meho.example.com
+    port: 6443
+    secret_ref: secret/data/<tenant>/k8s/rke2-meho-kubeconfig
+    auth_model: shared_service_account
 ```
 
-The `--secret-ref` value matches the path in step 1 with the KV-v2
-`/data/` infix (Vault's KV-v2 API path shape). `--port` defaults to
+```console
+$ meho targets import targets.yaml
+```
+
+The `secret_ref` value matches the path in step 1 with the KV-v2
+`/data/` infix (Vault's KV-v2 API path shape). `port` defaults to
 6443 — the standard K8s API server port — and can be omitted.
 
 ### 3. Verify

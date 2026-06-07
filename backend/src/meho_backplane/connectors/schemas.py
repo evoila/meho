@@ -545,7 +545,7 @@ class CandidateHint(BaseModel):
     hosts; a kubeconfig listing peer cluster contexts). The
     G9.1-T6 ``meho targets discover`` CLI verb surfaces these to the
     operator; auto-registration is intentionally out of scope per
-    Initiative #363 (operator runs ``meho targets create`` after review).
+    Initiative #363 (operator runs ``meho targets import`` after review).
 
     ``evidence`` is the debugging payload — whatever made the connector
     think this candidate exists (e.g. ``{"source": "kubeconfig",

@@ -198,6 +198,7 @@ def parse_openapi(
     spec_path_or_uri: str,
     *,
     spec_source: str | None = None,
+    content: str | None = None,
 ) -> list[EndpointDescriptorProto]:
     """Parse an OpenAPI 3.0 or 3.1 spec into a list of
     :class:`EndpointDescriptorProto` rows.
@@ -216,6 +217,10 @@ def parse_openapi(
             ``tags`` so operators can distinguish rows when a single
             connector ingests multiple specs (vCenter merges
             ``vcenter.yaml`` and ``vi-json.yaml``).
+        content: Optional inline spec text. When the CLI uploads it
+            for a ``docs:`` / ``file://`` source, it is used verbatim
+            instead of fetching *spec_path_or_uri*; the https-only SSRF
+            guard then applies only to the no-content (URL) path.
 
     Returns:
         A list of :class:`EndpointDescriptorProto`. One entry per
@@ -242,8 +247,8 @@ def parse_openapi(
         json.JSONDecodeError: Malformed JSON — bubbles up.
         httpx.HTTPError: HTTP fetch failure for URL inputs.
     """
-    content = _load_spec_bytes(spec_path_or_uri)
-    spec = _decode_spec(content)
+    spec_bytes = _load_spec_bytes(spec_path_or_uri, content=content)
+    spec = _decode_spec(spec_bytes)
     _validate_openapi_version(spec)
 
     paths = spec.get("paths")
@@ -289,7 +294,7 @@ def parse_openapi(
     )
 
 
-def read_spec_info_version(spec_path_or_uri: str) -> str | None:
+def read_spec_info_version(spec_path_or_uri: str, *, content: str | None = None) -> str | None:
     """Return the spec's ``info.version`` string, or ``None`` if absent.
 
     Lightweight companion to :func:`parse_openapi` for the ingest
@@ -307,6 +312,9 @@ def read_spec_info_version(spec_path_or_uri: str) -> str | None:
         spec_path_or_uri: ``https://`` URL — same scheme constraint
             as :func:`parse_openapi`. The SSRF/destination guard in
             :func:`_assert_fetchable_remote_url` fires here too.
+        content: Optional inline spec text, used verbatim when the CLI
+            uploaded it for a ``docs:`` / ``file://`` source -- same
+            semantics as :func:`parse_openapi`'s ``content``.
 
     Returns:
         The ``info.version`` string when present; ``None`` when
@@ -331,8 +339,8 @@ def read_spec_info_version(spec_path_or_uri: str) -> str | None:
         json.JSONDecodeError: Malformed JSON — bubbles up.
         httpx.HTTPError: HTTP fetch failure for URL inputs.
     """
-    content = _load_spec_bytes(spec_path_or_uri)
-    spec = _decode_spec(content)
+    spec_bytes = _load_spec_bytes(spec_path_or_uri, content=content)
+    spec = _decode_spec(spec_bytes)
     _validate_openapi_version(spec)
     info = spec.get("info")
     if not isinstance(info, dict):
@@ -410,40 +418,39 @@ def _assert_fetchable_remote_url(url: str) -> None:
             )
 
 
-def _load_spec_bytes(spec_path_or_uri: str) -> bytes:
-    """Resolve ``spec_path_or_uri`` to raw spec bytes.
+def _load_spec_bytes(spec_path_or_uri: str, content: str | None = None) -> bytes:
+    """Resolve a spec source to raw bytes: uploaded content, or an https fetch.
 
-    Only ``https://`` URIs are accepted. The destination is validated
-    via :func:`_assert_fetchable_remote_url` before any socket opens,
-    and again after every redirect hop, so a 30x chain cannot escape
-    the public-IP constraint by routing through a benign-looking host.
+    When *content* is provided, it is the inline spec text the CLI
+    uploaded for a ``docs:`` / ``file://`` source (so no local path or
+    non-https scheme reaches the backend). It is used verbatim -- capped
+    at :data:`_MAX_SPEC_BYTES`, no fetch, no scheme guard -- and
+    *spec_path_or_uri* serves only as the audit label.
 
-    Non-``https`` schemes (``http``, ``file://``, ``docs:``, bare paths)
-    raise an error with a terse, path-free message so the response is
-    not a filesystem or network-topology oracle. A bare ``docs:`` URI
-    (the CLI-side shorthand, normally expanded before the request
-    reaches the backend) is rejected with :exc:`UnsupportedSpecError`
-    naming the remedy rather than the generic scheme error.
-
-    After a 2xx response the ``Content-Type`` is inspected against the
-    spec allow-list; a non-spec media type raises
-    :exc:`UpstreamNotSpecError` so the operator sees a structured 422
-    rather than an opaque YAML parse error.
-
-    The response body is capped at :data:`_MAX_SPEC_BYTES` (20 MiB) so
-    a redirect to a large internal endpoint cannot exhaust pod memory.
+    Without *content*, *spec_path_or_uri* must be an ``https://`` URL: a
+    bare ``docs:`` shorthand (normally expanded CLI-side) is rejected
+    with :exc:`UnsupportedSpecError`, and the fetch + every other scheme
+    check is delegated to :func:`_fetch_spec_bytes`.
 
     Raises:
-        InvalidSpecError: Scheme is not ``https``, destination guard
-            fires (private/loopback/link-local/reserved IP), or the
-            response body exceeds the size cap.
+        InvalidSpecError: Non-https scheme, destination guard fires, or
+            the uploaded content / fetched body exceeds the size cap.
         UnsupportedSpecError: Bare ``docs:`` shorthand reached the
             backend unexpanded.
-        UpstreamNotSpecError: 2xx response with a non-spec
-            ``Content-Type``.
-        httpx.HTTPStatusError: Non-2xx HTTP response.
+        UpstreamNotSpecError: 2xx fetch with a non-spec ``Content-Type``.
         httpx.HTTPError: Network-level fetch failure.
     """
+    if content is not None:
+        # The CLI uploads the resolved bytes for ``docs:`` / ``file://``
+        # sources so no local path or non-https scheme reaches the
+        # backend; use them verbatim (still size-capped) and skip the
+        # fetch + scheme guard.
+        raw = content.encode("utf-8")
+        if len(raw) > _MAX_SPEC_BYTES:
+            raise InvalidSpecError(
+                f"spec content exceeds the {_MAX_SPEC_BYTES // (1024 * 1024)} MiB size limit"
+            )
+        return raw
     if urlparse(spec_path_or_uri).scheme == "docs":
         # The ``docs:<connector-id>/<file>`` shorthand is a CLI-side
         # convenience the CLI expands to a real URI against
@@ -460,6 +467,31 @@ def _load_spec_bytes(spec_path_or_uri: str) -> bytes:
             f"the request reaches the backend. Set $CLAUDE_RDC_DOCS so "
             f"the CLI resolves it, or pass an 'https://' spec URI.",
         )
+    return _fetch_spec_bytes(spec_path_or_uri)
+
+
+def _fetch_spec_bytes(spec_path_or_uri: str) -> bytes:
+    """Fetch + size-cap the spec body from an ``https://`` URL.
+
+    Only ``https://`` is accepted: the destination is validated via
+    :func:`_assert_fetchable_remote_url` before any socket opens, and
+    again after every redirect hop, so a 30x chain cannot escape the
+    public-IP constraint by routing through a benign-looking host.
+
+    After a 2xx response the ``Content-Type`` is inspected against the
+    spec allow-list; a non-spec media type raises
+    :exc:`UpstreamNotSpecError`. The body is streamed and capped at
+    :data:`_MAX_SPEC_BYTES` (20 MiB) so a redirect to a large internal
+    endpoint cannot exhaust pod memory.
+
+    Raises:
+        InvalidSpecError: Scheme is not ``https``, destination guard
+            fires (private/loopback/link-local/reserved IP), or the
+            response body exceeds the size cap.
+        UpstreamNotSpecError: 2xx response with a non-spec ``Content-Type``.
+        httpx.HTTPStatusError: Non-2xx HTTP response.
+        httpx.HTTPError: Network-level fetch failure.
+    """
     _assert_fetchable_remote_url(spec_path_or_uri)
 
     current_url = spec_path_or_uri

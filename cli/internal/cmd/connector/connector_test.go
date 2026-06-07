@@ -111,101 +111,132 @@ func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
 
 // ---------- resolveSpecURI ----------
 
-// TestResolveSpecURIFile — file:// passes through verbatim once
-// validated (scheme=file, path absolute).
+const sampleSpecYAML = "openapi: 3.0.3\ninfo: {title: t, version: '1'}\npaths: {}\n"
+
+// TestResolveSpecURIFile -- file:// is read CLI-side; the uri is kept as
+// the audit label and the file bytes are returned as content so no local
+// path reaches the backplane.
 func TestResolveSpecURIFile(t *testing.T) {
-	got, err := resolveSpecURI("file:///abs/path/spec.yaml")
+	specPath := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(specPath, []byte(sampleSpecYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	uri := "file://" + specPath
+	gotURI, content, err := resolveSpecURI(uri)
 	if err != nil {
 		t.Fatalf("file scheme: %v", err)
 	}
-	if got != "file:///abs/path/spec.yaml" {
-		t.Fatalf("file scheme passthrough; got %q", got)
+	if gotURI != uri {
+		t.Fatalf("file uri label; got %q want %q", gotURI, uri)
+	}
+	if content != sampleSpecYAML {
+		t.Fatalf("file content; got %q", content)
 	}
 }
 
-// TestResolveSpecURIFileRejectsRelative — a `file://relative/path`
-// URI (no leading slash, so url.Parse reads `relative` as a host)
-// or an empty path is rejected client-side so operators see a fast
-// hint rather than a backplane 4xx.
+// TestResolveSpecURIFileMissing -- a file:// to a nonexistent path is
+// rejected client-side with the read error.
+func TestResolveSpecURIFileMissing(t *testing.T) {
+	_, _, err := resolveSpecURI("file:///no/such/spec.yaml")
+	if err == nil {
+		t.Fatalf("missing file should reject; got nil error")
+	}
+}
+
+// TestResolveSpecURIFileRejectsRelative -- a `file://relative/path` URI
+// (no leading slash, so url.Parse reads `relative` as a host) or an
+// empty/root path is rejected client-side.
 func TestResolveSpecURIFileRejectsRelative(t *testing.T) {
 	cases := []string{
-		"file://relative/path/spec.yaml", // host=relative, not empty
-		"file://",                        // empty path
-		"file:///",                       // root only — no spec name
+		"file://relative/path/spec.yaml",
+		"file://",
+		"file:///",
 	}
 	for _, in := range cases {
-		_, err := resolveSpecURI(in)
+		_, _, err := resolveSpecURI(in)
 		if err == nil || !strings.Contains(err.Error(), "file URI") {
 			t.Errorf("resolveSpecURI(%q): want rejection; got %v", in, err)
 		}
 	}
 }
 
-// TestResolveSpecURIFileAcceptsLocalhostHost — `file://localhost/abs`
-// is the RFC 8089 equivalent of `file:///abs` and must pass.
+// TestResolveSpecURIFileAcceptsLocalhostHost -- `file://localhost/abs` is
+// the RFC 8089 equivalent of `file:///abs` and is read the same way.
 func TestResolveSpecURIFileAcceptsLocalhostHost(t *testing.T) {
-	got, err := resolveSpecURI("file://localhost/abs/spec.yaml")
+	specPath := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(specPath, []byte(sampleSpecYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	uri := "file://localhost" + specPath
+	gotURI, content, err := resolveSpecURI(uri)
 	if err != nil {
 		t.Fatalf("file://localhost: %v", err)
 	}
-	if got != "file://localhost/abs/spec.yaml" {
-		t.Fatalf("file://localhost passthrough; got %q", got)
+	if gotURI != uri || content != sampleSpecYAML {
+		t.Fatalf("file://localhost; got uri=%q content=%q", gotURI, content)
 	}
 }
 
-// TestResolveSpecURIHTTPS — http(s) passes through verbatim.
+// TestResolveSpecURIHTTPS -- https passes through as the uri; no content
+// (the backplane fetches it under the https-only guard).
 func TestResolveSpecURIHTTPS(t *testing.T) {
-	got, err := resolveSpecURI("https://example.com/spec.yaml")
+	gotURI, content, err := resolveSpecURI("https://example.com/spec.yaml")
 	if err != nil {
 		t.Fatalf("https scheme: %v", err)
 	}
-	if got != "https://example.com/spec.yaml" {
-		t.Fatalf("https passthrough; got %q", got)
+	if gotURI != "https://example.com/spec.yaml" || content != "" {
+		t.Fatalf("https passthrough; got uri=%q content=%q", gotURI, content)
 	}
 }
 
-// TestResolveSpecURIDocsWithEnv — `docs:` shorthand resolves to a
-// file:// path when CLAUDE_RDC_DOCS is set.
+// TestResolveSpecURIDocsWithEnv -- `docs:` resolves against
+// CLAUDE_RDC_DOCS, is read CLI-side, and uploads the bytes as content
+// while keeping the `docs:` label as the uri.
 func TestResolveSpecURIDocsWithEnv(t *testing.T) {
-	t.Setenv("CLAUDE_RDC_DOCS", "/opt/rdc/docs")
-	got, err := resolveSpecURI("docs:vcenter-9.0/vcenter.yaml")
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "vcenter-9.0"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "vcenter-9.0", "vcenter.yaml"), []byte(sampleSpecYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_RDC_DOCS", root)
+	gotURI, content, err := resolveSpecURI("docs:vcenter-9.0/vcenter.yaml")
 	if err != nil {
 		t.Fatalf("docs shorthand: %v", err)
 	}
-	want := "file:///opt/rdc/docs/vcenter-9.0/vcenter.yaml"
-	if got != want {
-		t.Fatalf("docs shorthand: got %q want %q", got, want)
+	if gotURI != "docs:vcenter-9.0/vcenter.yaml" {
+		t.Fatalf("docs uri label; got %q", gotURI)
+	}
+	if content != sampleSpecYAML {
+		t.Fatalf("docs content; got %q", content)
 	}
 }
 
-// TestResolveSpecURIDocsNoEnv — `docs:` is resolved CLI-side only.
-// When CLAUDE_RDC_DOCS is unset the shorthand is rejected here with a
-// hint naming the env var, rather than passed through to the backplane
-// (which does not resolve docs: URIs and would surface an opaque ingest
-// error — #1535).
+// TestResolveSpecURIDocsNoEnv -- `docs:` with no CLAUDE_RDC_DOCS is
+// rejected client-side with a hint naming the env var (#1535).
 func TestResolveSpecURIDocsNoEnv(t *testing.T) {
 	t.Setenv("CLAUDE_RDC_DOCS", "")
-	_, err := resolveSpecURI("docs:vcenter-9.0/vcenter.yaml")
+	_, _, err := resolveSpecURI("docs:vcenter-9.0/vcenter.yaml")
 	if err == nil {
 		t.Fatalf("docs shorthand with no env should reject; got nil error")
 	}
 	if !strings.Contains(err.Error(), "CLAUDE_RDC_DOCS") {
-		t.Fatalf("docs shorthand rejection should name CLAUDE_RDC_DOCS; got %v", err)
+		t.Fatalf("docs rejection should name CLAUDE_RDC_DOCS; got %v", err)
 	}
 }
 
-// TestResolveSpecURIUnknownScheme — anything not file/http(s)/docs
-// rejects with a clear message.
+// TestResolveSpecURIUnknownScheme -- anything not file/http(s)/docs rejects.
 func TestResolveSpecURIUnknownScheme(t *testing.T) {
-	_, err := resolveSpecURI("ftp://example.com/spec.yaml")
+	_, _, err := resolveSpecURI("ftp://example.com/spec.yaml")
 	if err == nil || !strings.Contains(err.Error(), "unknown URI scheme") {
 		t.Fatalf("unknown scheme should reject; got %v", err)
 	}
 }
 
-// TestResolveSpecURIEmpty — empty input rejects.
+// TestResolveSpecURIEmpty -- empty input rejects.
 func TestResolveSpecURIEmpty(t *testing.T) {
-	_, err := resolveSpecURI("   ")
+	_, _, err := resolveSpecURI("   ")
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("empty spec should reject; got %v", err)
 	}

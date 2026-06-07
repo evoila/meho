@@ -65,7 +65,7 @@ def _bound_log() -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(__name__).bind(test=True)
 
 
-def _read_spec_info_version_local(uri: str) -> str | None:
+def _read_spec_info_version_local(uri: str, *, content: str | None = None) -> str | None:
     """Read ``info.version`` from a local file path URI, bypassing the SSRF guard.
 
     Autouse fixture :func:`_patch_read_spec_info_version` swaps
@@ -75,12 +75,15 @@ def _read_spec_info_version_local(uri: str) -> str | None:
     (#95). The SSRF guard's own correctness is covered by
     ``tests/test_operations_ingest_openapi.py``.
     """
+    if content is not None:
+        raw = content.encode("utf-8")
+    else:
+        try:
+            raw = Path(uri).read_bytes()
+        except OSError:
+            return None
     try:
-        content = Path(uri).read_bytes()
-    except OSError:
-        return None
-    try:
-        spec = yaml.safe_load(io.BytesIO(content))
+        spec = yaml.safe_load(io.BytesIO(raw))
     except yaml.YAMLError:
         return None
     if not isinstance(spec, dict):

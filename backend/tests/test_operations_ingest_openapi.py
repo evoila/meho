@@ -456,6 +456,31 @@ def test_redirect_chain_over_cap_raises_invalid_spec() -> None:
             parse_openapi(f"{_FIXTURE_HOST}/r0")
 
 
+def test_uploaded_content_skips_fetch_and_scheme_guard() -> None:
+    """When the CLI uploads inline spec content for a docs:/file:// source,
+    ``parse_openapi`` uses it verbatim -- no fetch, no scheme guard -- so a
+    ``docs:`` / ``file://`` uri label parses without the https-only guard
+    firing (#102: this is what keeps the local-spec on-ramp working under
+    the #95 guard).
+    """
+    spec_text = HANDAUTHORED_MINIMAL_30.read_text()
+    rows = parse_openapi("docs:hetzner-robot/spec.yaml", content=spec_text)
+    assert rows, "uploaded content should parse to operations"
+    assert read_spec_info_version("file:///irrelevant.yaml", content=spec_text) == "1.0"
+
+
+def test_uploaded_content_over_size_cap_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uploaded content larger than ``_MAX_SPEC_BYTES`` raises
+    ``InvalidSpecError`` naming the size limit -- the cap applies to the
+    content channel exactly as it does to a fetched body.
+    """
+    monkeypatch.setattr("meho_backplane.operations.ingest.openapi._MAX_SPEC_BYTES", 16)
+    with pytest.raises(InvalidSpecError, match="size limit"):
+        parse_openapi("file:///x.yaml", content="x" * 64)
+
+
 def test_malformed_yaml_bubbles_up() -> None:
     content = b"openapi: '3.0.3'\npaths:\n  /x:\n   get:\n   summary: oops\n  : bad\n"
     with respx.mock(assert_all_called=False) as router:

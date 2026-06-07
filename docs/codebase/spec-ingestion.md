@@ -827,9 +827,10 @@ network-facing function entirely.
 
 ```text
 parse_openapi
-├─ _load_spec_bytes        # https:// only; SSRF guard + redirect re-validation
-│  ├─ docs:<...> rejected with UnsupportedSpecError (CLI-side shorthand, #1535)
-│  └─ _assert_fetchable_remote_url  # scheme check, DNS resolve, IP allowlist
+├─ _load_spec_bytes        # CLI-uploaded content (capped) OR https:// fetch
+│  ├─ content present       # docs:/file:// bytes uploaded by CLI; no fetch, no guard (#102)
+│  ├─ docs:<...> + no content rejected with UnsupportedSpecError (#1535)
+│  └─ _assert_fetchable_remote_url  # https-only SSRF guard; DNS resolve, IP allowlist
 ├─ _decode_spec            # CSafeLoader-preferred YAML, stdlib JSON
 ├─ _validate_openapi_version
 └─ _iter_operations

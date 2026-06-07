@@ -1045,8 +1045,8 @@ under G0.3-T6 (#257).
   renders the merged candidate `NAME / HOST / PORT / CONFIDENCE`
   table plus a `SKIPPED / REASON` table for connectors that
   contributed nothing. Read-only — it never creates `targets` rows;
-  the operator reviews and runs `meho targets create`
-  (auto-registration is v0.2.next). `--seed-target` scopes discovery
+  the operator reviews and runs `meho targets import`
+  (one-shot auto-registration is not yet available). `--seed-target` scopes discovery
   to one already-registered target's reach; it is resolved
   tenant-scoped server-side, so a cross-tenant seed name 404s like a
   typo. Documented in depth under "Topology verbs" (the verb is part

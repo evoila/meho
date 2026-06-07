@@ -164,14 +164,19 @@ order).
 
 ### Registering the target
 
+```yaml
+# targets.yaml
+targets:
+  - name: holorouter-hetzner-dc
+    product: holodeck
+    host: 10.5.20.1
+    port: 22
+    secret_ref: secret/rdc-hetzner-dc/holodeck/holorouter-01
+    auth_model: shared_service_account
+```
+
 ```console
-$ meho targets create \
-    --name holorouter-hetzner-dc \
-    --product holodeck \
-    --host 10.5.20.1 \
-    --port 22 \
-    --secret-ref secret/rdc-hetzner-dc/holodeck/holorouter-01 \
-    --auth-model shared_service_account
+$ meho targets import targets.yaml
 ```
 
 Verify the target is reachable:
@@ -435,7 +440,7 @@ invocation with the `meho holodeck` verb:
 Once every calling site in `evoila-bosnia/claude-rdc-hetzner-dc` is
 migrated:
 
-1. Add the Holodeck target with `meho targets create` (see above).
+1. Add the Holodeck target with `meho targets import` (see above).
 2. Store the SSH credential in Vault with `meho vault kv put`.
 3. Run `meho targets probe holorouter-hetzner-dc` to confirm
    end-to-end connectivity.

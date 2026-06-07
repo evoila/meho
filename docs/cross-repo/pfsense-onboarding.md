@@ -144,14 +144,19 @@ and OpenSSH-format PEM keys.
 
 ### Registering the target
 
+```yaml
+# targets.yaml
+targets:
+  - name: pfsense-hetzner-dc
+    product: pfsense
+    host: 10.5.1.1
+    port: 22
+    secret_ref: secret/rdc-hetzner-dc/pfsense/pfsense-01
+    auth_model: shared_service_account
+```
+
 ```console
-$ meho targets create \
-    --name pfsense-hetzner-dc \
-    --product pfsense \
-    --host 10.5.1.1 \
-    --port 22 \
-    --secret-ref secret/rdc-hetzner-dc/pfsense/pfsense-01 \
-    --auth-model shared_service_account
+$ meho targets import targets.yaml
 ```
 
 Verify the target is reachable:
@@ -362,7 +367,7 @@ over SSH with hard-coded credentials. Replace each invocation with the
 Once every calling site in `evoila-bosnia/claude-rdc-hetzner-dc` is
 migrated:
 
-1. Add the pfSense target with `meho targets create` (see above).
+1. Add the pfSense target with `meho targets import` (see above).
 2. Store the SSH key in Vault with `meho vault kv put`.
 3. Run `meho targets probe pfsense-hetzner-dc` to confirm end-to-end
    connectivity.

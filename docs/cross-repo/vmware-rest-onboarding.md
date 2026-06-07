@@ -146,13 +146,18 @@ event — see [No credential ever leaves the backplane](#no-credential-ever-leav
 
 ### Registering the target
 
+```yaml
+# targets.yaml
+targets:
+  - name: vcenter-lab-01
+    product: vmware
+    host: vc.lab.evba
+    secret_ref: targets/<operator-identity>/vcenter-lab-01
+    auth_model: shared_service_account
+```
+
 ```console
-$ meho targets create \
-    --name vcenter-lab-01 \
-    --product vmware \
-    --host vc.lab.evba \
-    --secret-ref targets/<operator-identity>/vcenter-lab-01 \
-    --auth-model shared_service_account
+$ meho targets import targets.yaml
 ```
 
 Verify it round-trips — `probe` exercises the live credential read +

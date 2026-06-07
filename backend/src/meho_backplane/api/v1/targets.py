@@ -279,8 +279,8 @@ class TargetsDiscoverResult(BaseModel):
     registered for the requested product; ``skipped`` records the
     connectors that contributed nothing (clean-but-empty or errored).
     The verb never auto-creates ``targets`` rows — the operator reviews
-    ``discovered`` and runs ``meho targets create`` (Initiative #363:
-    auto-registration is v0.2.next).
+    ``discovered`` and runs ``meho targets import`` (Initiative #363:
+    one-shot auto-registration is not yet available).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -606,8 +606,9 @@ async def discover_targets(
     seed name does not resolve.
 
     The verb is **read-only** — it returns candidates, never creates
-    ``targets`` rows (Initiative #363: auto-registration is v0.2.next;
-    the operator runs ``meho targets create`` after review). One
+    ``targets`` rows (Initiative #363: one-shot auto-registration is not
+    yet available; the operator runs ``meho targets import`` after
+    review). One
     connector raising does not fail the sweep: it is recorded in
     ``skipped`` with the exception summary and the rest still run.
 

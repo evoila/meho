@@ -66,7 +66,7 @@ their `last_seen`.
 > counts zero). To find connectors that can reach more of your estate,
 > `meho targets discover <product>` lists candidate targets a connector
 > sees but you haven't registered yet (it does **not** auto-create
-> them — review, then `meho targets create`).
+> them — review, then `meho targets import`).
 
 ## 2. Verify `dependents` against a known target
 

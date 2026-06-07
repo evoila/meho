@@ -1542,7 +1542,7 @@ type CallOperationBody_Target struct {
 // hosts; a kubeconfig listing peer cluster contexts). The
 // G9.1-T6 “meho targets discover“ CLI verb surfaces these to the
 // operator; auto-registration is intentionally out of scope per
-// Initiative #363 (operator runs “meho targets create“ after review).
+// Initiative #363 (operator runs “meho targets import“ after review).
 //
 // “evidence“ is the debugging payload — whatever made the connector
 // think this candidate exists (e.g. “{"source": "kubeconfig",
@@ -4284,8 +4284,8 @@ type TargetUpdate struct {
 // registered for the requested product; “skipped“ records the
 // connectors that contributed nothing (clean-but-empty or errored).
 // The verb never auto-creates “targets“ rows — the operator reviews
-// “discovered“ and runs “meho targets create“ (Initiative #363:
-// auto-registration is v0.2.next).
+// “discovered“ and runs “meho targets import“ (Initiative #363:
+// one-shot auto-registration is not yet available).
 type TargetsDiscoverResult struct {
 	Discovered []CandidateHint    `json:"discovered"`
 	Skipped    []SkippedConnector `json:"skipped"`

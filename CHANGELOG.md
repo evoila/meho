@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Retire the stale `meho targets create` verb tree-wide (#1559)
+
+- Remove the last references to the nonexistent `meho targets create`
+  command outside the CLI surface that #1536 already fixed. The three
+  backend `targets discover` docstrings (`CandidateHint`,
+  `TargetsDiscoverResult`, `discover_targets`) — which propagate verbatim
+  into `cli/api/openapi.json` and the generated Go client — now name
+  `meho targets import`, and the regenerated snapshot/client follow. The
+  five cross-repo onboarding docs (pfSense, BIND9, Holodeck, vmware-rest,
+  Kubernetes) that showed an inline-flag `meho targets create --name …`
+  block are rewritten to a `targets.yaml` descriptor + `meho targets
+  import targets.yaml`, mirroring `argocd-onboarding.md` — a literal verb
+  swap would have left an invalid file-based-import call. The dangling
+  `(auto-registration is v0.2.next)` aside is reworded to
+  `(one-shot auto-registration is not yet available)`, matching #1536. The
+  verb now survives only in the two docs that state it does not exist.
+
 ### Disabled-collection search contract (#1567)
 
 - Reconcile the disabled-collection `search_docs` contract so code, the

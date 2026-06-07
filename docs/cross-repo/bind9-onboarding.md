@@ -149,13 +149,18 @@ the 2026-05-04 leak chain exposed, see
 
 ### Registering the target
 
+```yaml
+# targets.yaml
+targets:
+  - name: vcf-router-bind9
+    product: bind9
+    host: bind9.lab.evba
+    secret_ref: secret/rdc-hetzner-dc/bind9/vcf-router-01
+    auth_model: shared_service_account
+```
+
 ```console
-$ meho targets create \
-    --name vcf-router-bind9 \
-    --product bind9 \
-    --host bind9.lab.evba \
-    --secret-ref secret/rdc-hetzner-dc/bind9/vcf-router-01 \
-    --auth-model shared_service_account
+$ meho targets import targets.yaml
 ```
 
 Verify the target round-trips:

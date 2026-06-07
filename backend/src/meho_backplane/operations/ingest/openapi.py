@@ -57,7 +57,7 @@ import re
 import socket
 from collections.abc import Iterable
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import yaml
@@ -505,10 +505,13 @@ def _fetch_spec_bytes(spec_path_or_uri: str) -> bytes:
             # and the success ``return`` alike.
             with client.stream("GET", current_url) as response:
                 if response.has_redirect_location:
-                    next_url = str(response.headers["location"])
-                    # Re-validate the redirect target before following it
-                    # so a 30x from a public host to a private IP is
-                    # rejected here, before a socket opens to the target.
+                    # Resolve relative / protocol-relative Location headers
+                    # against the current URL so a valid 30x to a relative
+                    # path isn't rejected by the https-only guard.
+                    next_url = urljoin(current_url, str(response.headers["location"]))
+                    # Re-validate the (now absolute) redirect target before
+                    # following it so a 30x to a private IP is rejected here,
+                    # before a socket opens to it.
                     _assert_fetchable_remote_url(next_url)
                     current_url = next_url
                     continue

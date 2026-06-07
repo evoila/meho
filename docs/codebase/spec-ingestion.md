@@ -804,9 +804,11 @@ activity:
    `169.254.0.0/16` (cloud metadata), `::1`, `fc00::/7`, or `fe80::/10` is
    rejected before the transport opens a connection.
 
-3. **Per-hop redirect re-validation.** `_load_spec_bytes` uses
-   `follow_redirects=False` and manually follows each 30x hop, calling
-   `_assert_fetchable_remote_url` on the redirect target before issuing the
+3. **Per-hop redirect re-validation.** `_fetch_spec_bytes` (invoked by
+   `_load_spec_bytes` when no content is uploaded) uses
+   `follow_redirects=False`, resolves each `Location` against the current
+   URL (`urljoin`, so relative hops aren't wrongly rejected), and calls
+   `_assert_fetchable_remote_url` on the resolved target before issuing the
    next request. A redirect from a public host to a private IP is rejected
    at the hop — the private-target socket is never opened.
 

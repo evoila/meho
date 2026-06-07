@@ -29,9 +29,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import httpx
 import pytest
-import respx
 
 from meho_backplane.operations.ingest import parse_openapi
 from tests.acceptance._vcenter_spec import VCENTER_SPEC_REASON, resolve_vi_json_yaml
@@ -50,19 +48,11 @@ def test_parse_vi_json_does_not_raise() -> None:
         # Already a public HTTPS URL — fetch directly; no mock needed.
         rows = parse_openapi(spec_source_raw, spec_source="spec:vi-json.yaml")
     else:
-        # Local filesystem path — serve the file bytes through a respx mock so
-        # the SSRF guard's scheme check passes (guard requires https://).
-        spec_bytes = Path(spec_source_raw).read_bytes()
-        spec_url = "https://specs.example.test/vi-json.yaml"
-        with respx.mock(assert_all_called=False) as router:
-            router.get(spec_url).mock(
-                return_value=httpx.Response(
-                    200,
-                    content=spec_bytes,
-                    headers={"content-type": "application/yaml"},
-                )
-            )
-            rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+        # Local filesystem path — upload the bytes via the content channel
+        # (mirrors how the CLI uploads docs:/file:// specs), so the https
+        # guard + DNS lookup are skipped without a respx mock.
+        spec_text = Path(spec_source_raw).read_text()
+        rows = parse_openapi(spec_source_raw, spec_source="spec:vi-json.yaml", content=spec_text)
 
     assert len(rows) >= 2000, f"got {len(rows)} rows; acceptance threshold is 2000"
     # Spot-check the parameter-ref resolution path: every row that

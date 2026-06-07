@@ -34,9 +34,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import httpx
 import pytest
-import respx
 
 from meho_backplane.operations.ingest import parse_openapi
 
@@ -83,18 +81,11 @@ def test_parse_vcenter_meets_path_coverage_threshold() -> None:
     if spec_source.startswith("https://"):
         rows = parse_openapi(spec_source, spec_source="spec:vcenter.yaml")
     else:
-        # Local filesystem path — serve via respx mock to satisfy the https guard.
-        spec_bytes = Path(spec_source).read_bytes()
-        spec_url = "https://specs.example.test/vcenter.yaml"
-        with respx.mock(assert_all_called=False) as router:
-            router.get(spec_url).mock(
-                return_value=httpx.Response(
-                    200,
-                    content=spec_bytes,
-                    headers={"content-type": "application/yaml"},
-                )
-            )
-            rows = parse_openapi(spec_url, spec_source="spec:vcenter.yaml")
+        # Local filesystem path — upload the bytes via the content channel
+        # (mirrors how the CLI uploads docs:/file:// specs), so the https
+        # guard + DNS lookup are skipped without a respx mock.
+        spec_text = Path(spec_source).read_text()
+        rows = parse_openapi(spec_source, spec_source="spec:vcenter.yaml", content=spec_text)
 
     distinct_paths = {row.path for row in rows}
     assert len(rows) >= 950, f"got {len(rows)} rows; acceptance threshold is 950"

@@ -481,6 +481,30 @@ def test_uploaded_content_over_size_cap_raises(
         parse_openapi("file:///x.yaml", content="x" * 64)
 
 
+def test_relative_redirect_location_resolved_and_followed() -> None:
+    """A 30x with a relative ``Location`` is resolved against the current URL
+    (``urljoin``) so the https-only guard does not wrongly reject a valid
+    relative redirect (M1).
+    """
+    spec = (
+        b"openapi: 3.0.3\n"
+        b"info: {title: t, version: '1'}\n"
+        b"paths:\n  /x:\n    get:\n      responses:\n"
+        b"        '200':\n          description: ok\n"
+    )
+    with respx.mock(assert_all_called=False) as router:
+        router.get(f"{_FIXTURE_HOST}/redir.yaml").mock(
+            return_value=httpx.Response(302, headers={"location": "/real.yaml"})
+        )
+        router.get(f"{_FIXTURE_HOST}/real.yaml").mock(
+            return_value=httpx.Response(
+                200, content=spec, headers={"content-type": "application/yaml"}
+            )
+        )
+        rows = parse_openapi(f"{_FIXTURE_HOST}/redir.yaml")
+    assert rows, "relative redirect should be resolved and followed"
+
+
 def test_malformed_yaml_bubbles_up() -> None:
     content = b"openapi: '3.0.3'\npaths:\n  /x:\n   get:\n   summary: oops\n  : bad\n"
     with respx.mock(assert_all_called=False) as router:

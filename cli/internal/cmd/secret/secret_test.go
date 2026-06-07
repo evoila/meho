@@ -141,11 +141,11 @@ func TestMoveHelpListsFlags(t *testing.T) {
 // security invariant of #1580 (mirrors keycloak's
 // TestUserCreatePassesSecretRefNotPassword).
 func TestSecretMovePassesRefsNotValues(t *testing.T) {
-	var captured map[string]any
+	var body callRequestBody
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
-			if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
-				t.Errorf("decode: %v", err)
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode body: %v", err)
 				w.WriteHeader(400)
 				return
 			}
@@ -171,15 +171,20 @@ func TestSecretMovePassesRefsNotValues(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 
-	if captured["connector_id"] != "secret-broker-1.x" {
-		t.Errorf("connector_id: got %v want secret-broker-1.x", captured["connector_id"])
+	if body.ConnectorID != "secret-broker-1.x" {
+		t.Errorf("connector_id: got %q want secret-broker-1.x", body.ConnectorID)
 	}
-	if captured["op_id"] != opMove {
-		t.Errorf("op_id: got %v want %s", captured["op_id"], opMove)
+	if body.OpID != opMove {
+		t.Errorf("op_id: got %q want %s", body.OpID, opMove)
 	}
-	params, _ := captured["params"].(map[string]any)
+	// The broker op acts on no target — only the source/sink refs and the
+	// reason carry it. A non-nil target would signal a wire-shape drift.
+	if body.Target != nil {
+		t.Errorf("target should be nil for the broker op; got %v", body.Target)
+	}
+	params := body.Params
 	if params == nil {
-		t.Fatalf("no params captured: %v", captured)
+		t.Fatalf("no params captured: %+v", body)
 	}
 	if params["from"] != "vault:secret/db/prod#password" {
 		t.Errorf("from not forwarded: %v", params["from"])
@@ -196,7 +201,7 @@ func TestSecretMovePassesRefsNotValues(t *testing.T) {
 			t.Errorf("params must NEVER carry an inline %q field; got %v", leaked, params)
 		}
 	}
-	blob, _ := json.Marshal(captured)
+	blob, _ := json.Marshal(body)
 	for _, leaked := range []string{`"value"`, `"secret"`, `"password"`} {
 		if strings.Contains(string(blob), leaked) {
 			t.Errorf("request body carries an inline %s field: %s", leaked, blob)

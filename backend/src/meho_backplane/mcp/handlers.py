@@ -94,6 +94,7 @@ from meho_backplane.mcp.registry import (
     capability_satisfied,
     get_resource_for_uri,
     get_tool,
+    redacted_audit_uri,
     role_at_least,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, register_method
@@ -617,6 +618,18 @@ async def handle_resources_read(
             status_code = 404
             raise McpInvalidParamsError(f"resource not found: {uri!r}")
         defn, handler, bound_params = match
+
+        # G0.5-T9: query-bearing resources (``meho://retrieve/{query}``)
+        # opt out of persisting the concrete URI — its variable portion is
+        # a free-form query that leaks operator intent. Replace the audit
+        # path + payload URI with a query-stripped sentinel; the resource
+        # handler binds a privacy-preserving ``audit_query_hash``
+        # contextvar so the row stays correlatable without the raw query.
+        # Only applied once the template matched, so a 404 (unmatched URI)
+        # still records the attempted URI for forensic visibility.
+        if defn.audit_redact_uri:
+            audit_uri = redacted_audit_uri(defn.uriTemplate)
+            audit_payload["uri"] = audit_uri
 
         # RBAC: same call-time re-check as tools.
         if not _operator_meets_required_role(operator, defn):

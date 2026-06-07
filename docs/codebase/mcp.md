@@ -133,6 +133,41 @@ client identity should file a follow-up Task on
 [`evoila/meho`](https://github.com/evoila/meho) describing the
 mismatch pattern and what behaviour change would unblock them.
 
+## Audit URI redaction for query-bearing resources
+
+The `resources/read` dispatcher
+(`handle_resources_read` in `mcp/handlers.py`) records the concrete
+read URI in the audit row's `path` (`/mcp/resources/read/<uri>`) and
+`payload.uri`. For most resources the URI variable is an opaque
+identifier (a kb slug, a docs chunk id, a tenant UUID), so persisting
+it is harmless and useful for forensic queries.
+
+`meho://retrieve/{query}` is the exception: its variable is a
+free-form retrieval query that leaks operator intent, so the raw query
+must not land in the audit trail. The resource template opts into
+`audit_redact_uri=True` (a field on
+`ResourceTemplateDefinition`); when set, the dispatcher substitutes a
+query-stripped sentinel — the template prefix up to the first `{var}`
+plus `<redacted>`, i.e. `meho://retrieve/<redacted>` — for both the
+audit `path` and `payload.uri`. The substitution runs only after the
+URI matches a registered template, so an unmatched URI (404) still
+records the attempted value.
+
+Correlatability is preserved through the `audit_*` contextvar
+convention: the retrieve handler binds `audit_query_hash` (the
+SHA-256 of the decoded query, byte-for-byte identical to the
+`POST /api/v1/retrieve` hash) plus `audit_hit_count` before/after the
+retrieval call. `write_mcp_audit_row` merges those into the row's
+`payload`, so the persisted row is fully attributable (tenant,
+operator, `query_hash`, `hit_count`) without carrying the query text.
+This mirrors the HTTP route's privacy posture documented in
+[`retrieval.md`](retrieval.md).
+
+The redaction helper is `redacted_audit_uri(template)` in
+`mcp/registry.py`. New query-bearing resources reuse the same flag +
+contextvar pattern rather than special-casing the dispatcher per
+resource.
+
 ## Dependencies
 
 * `structlog` — every MCP log line goes through

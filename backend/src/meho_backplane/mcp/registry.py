@@ -273,6 +273,22 @@ class ResourceTemplateDefinition(BaseModel):
     operator lacking the key. ``None`` (the default) means no capability
     gate. T4's companion ``meho://docs/{...}`` resource is the first
     consumer.
+
+    ``audit_redact_uri`` (G0.5-T9) opts the template out of persisting
+    its concrete URI in the audit trail. Most resources encode opaque
+    identifiers (slugs, chunk ids, tenant UUIDs) whose presence in
+    ``audit_log.path`` / ``payload.uri`` is harmless or useful. The
+    ``meho://retrieve/{query}`` resource is different: its variable is a
+    free-form retrieval query that leaks operator intent, so the row must
+    not carry it. When ``True``,
+    :func:`~meho_backplane.mcp.handlers.handle_resources_read` substitutes
+    a query-stripped sentinel (the template prefix up to the first
+    variable, plus ``<redacted>``) for both the audit ``path`` and
+    ``payload.uri``; the resource handler is expected to bind a
+    privacy-preserving identity (e.g. ``audit_query_hash``) via the
+    ``audit_*`` contextvar convention so the row stays correlatable.
+    ``False`` (the default) preserves the per-URI forensic path every
+    other resource relies on.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -284,6 +300,7 @@ class ResourceTemplateDefinition(BaseModel):
     title: str | None = None
     required_role: TenantRole = TenantRole.OPERATOR
     required_capability: str | None = None
+    audit_redact_uri: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         """Serialise to the MCP wire shape, dropping MEHO-internal fields."""
@@ -469,6 +486,26 @@ def _canonical_template_shape(template: str) -> str:
     at boot) rather than silent (the second handler never fires).
     """
     return _TEMPLATE_VAR_RE.sub("{}", template)
+
+
+def redacted_audit_uri(template: str) -> str:
+    """Return a query-stripped sentinel for an ``audit_redact_uri`` template.
+
+    Takes the literal prefix of *template* up to its first ``{var}``
+    placeholder and appends ``<redacted>``, so ``meho://retrieve/{query}``
+    collapses to ``meho://retrieve/<redacted>``. Used by
+    :func:`~meho_backplane.mcp.handlers.handle_resources_read` to keep the
+    free-form variable portion (a retrieval query that leaks operator
+    intent) out of ``audit_log.path`` / ``payload.uri`` while preserving a
+    stable, greppable prefix that identifies *which* resource was read.
+
+    Templates with no placeholder (none exist in v0.2 — every registered
+    resource is templated) fall back to the template verbatim plus the
+    sentinel suffix, which is the harmless degenerate case.
+    """
+    first = _TEMPLATE_VAR_RE.search(template)
+    prefix = template[: first.start()] if first is not None else template
+    return f"{prefix}<redacted>"
 
 
 def _match_uri_template(uri: str, template: str) -> dict[str, str] | None:

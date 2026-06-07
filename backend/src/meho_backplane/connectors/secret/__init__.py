@@ -22,6 +22,13 @@ secret broker in two import-time steps:
   :func:`~meho_backplane.connectors.secret.ops.register_secret_broker_operations`
   to the lifespan-driven registrar list, so the ``secret.move``
   ``endpoint_descriptor`` row lands before the first dispatch.
+* **Preview-builder registration** — importing
+  :mod:`~meho_backplane.connectors.secret.move_preview` runs its
+  module-level
+  :func:`~meho_backplane.operations._preview.register_preview_builder`
+  call, so a parked ``secret.move`` gets a **ref-only**
+  ``proposed_effect`` (the parsed ``{kind, ref}`` of ``--from`` / ``--to``,
+  never the value) for the reviewer (#1579).
 
 Unlike every other connector subpackage, this one calls neither
 ``register_connector`` nor ``register_connector_v2``: the synthetic
@@ -36,6 +43,7 @@ handler is a module-level function the dispatcher routes to with
 # The keycloak sink (#1578) lives under ``connectors/keycloak`` but
 # registers here so the broker's second kind lands on the same seam.
 from meho_backplane.connectors.keycloak import secret_endpoint as _keycloak_endpoint  # noqa: F401
+from meho_backplane.connectors.secret import move_preview as _move_preview  # noqa: F401
 from meho_backplane.connectors.secret import vault_endpoint as _vault_endpoint  # noqa: F401
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.operations.typed_register import register_typed_op_registrar

@@ -114,6 +114,18 @@ connector-related release-notes line.
   response, logs, or the audit row. Keycloak is write-only here, so the
   source side raises a clear unsupported error.
 
+### Secret broker `secret.move` — ref-only approval summary + time-boxed scope (#1579)
+
+- Gate `secret.move` through the existing approval queue as a change-class
+  op. A park-time preview builder records a **ref-only** `proposed_effect`
+  on the approval request — the parsed `<kind>:<ref>` of `--from`/`--to`
+  plus the operator reason, never the secret value (nor anything
+  value-derived beyond hash/length). The time-boxed grant reuses the
+  existing `AgentPermission` + approval `expires_at` machinery: an expired
+  grant authorizes nothing and a parked request swept to `EXPIRED` is no
+  longer decidable. Reuses the shipped approval substrate — no new
+  capability/token system.
+
 ### Retire the stale `meho targets create` verb tree-wide (#1559)
 
 - Remove the last references to the nonexistent `meho targets create`

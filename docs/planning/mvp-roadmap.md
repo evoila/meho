@@ -24,6 +24,7 @@ v0.2" framing on the board.
 | **v0.8** | **MVP7** | **Consolidated post-v0.7 release** — agent runtime hardening (G11.4–G11.6) + operator web UI (G10.0–G10.5) + topology time-travel (G9.3) + audit replay (G8.2) + Holodeck (G3.8) + github-rest connector (G3.11) + broadcast meta-tools (G6.4) + retrieval enhancements (G4.4) + v0.6/v0.7 dogfood hardening cycles (G0.13/G0.14/G0.15) | **shipped — tag `v0.8.0` (2026-05-28)** |
 | **v0.9** | **MVP8** | **Runbooks** (G12 — schema + template + run lifecycle + session priming + CLI) + CLI hygiene (G0.12) + v0.8.x consumer closed-loop dogfood hardening (G0.16/G0.17/G0.18) + release-tooling unblock (G0.11 partial: #1126/#1127) | **shipped — tag `v0.9.0` (2026-05-31)** — all of G12 + G0.12 + G0.16/17/18 closed; rest of G0.11 → v0.10 |
 | **v0.10** | **MVP9** | **Connector write surface + operator UX** — argocd (G3.12 #1387) + keycloak (G3.13 #1388) connectors, both **read + approval-gated write** + k8s / vault / VCF write activation (G3.14 #1398 / G3.15 #1399 / G3.16 #1400) + production ingest LLM client (G3.17 #1407) + approval-policy hardening for connector writes (G11.7 #1397) + Runbooks UI (G10.6 #1381) + README front-door rework (#1447). G0.11 substrate remainder (#956: #1111/#292) carries forward. | **shipped — tag `v0.10.0` (2026-06-01)** — all 8 release Initiatives + #1447 closed; write half landed behind the G11.7 approval queue once ingest client #1386 shipped |
+| **v0.11** | **maint** | **Consumer dogfood hardening + JSONFlux read-back** — G0.20 ([#1500](https://github.com/evoila/meho/issues/1500): autonomous-execute-loop lease/heartbeat reaper + scheduler-tick wedge fix + parked-op approve-execute path + Vault KV write-policy preflight + dispatcher `target_required` / scheduled-run polish — 8 findings from RDC #864) + JSONFlux materialized-`ResultHandle` read-back (`result_query` MCP meta-tool, [#1507](https://github.com/evoila/meho/issues/1507)). | **shipped — tag `v0.11.0` (2026-06-05)**; preceding patch tag `v0.10.1` (2026-06-04) carried the G0.19 dogfood cycle (#1484) |
 
 ---
 
@@ -628,6 +629,61 @@ G10.6 (#1381) retain their pre-existing child tasks.
 
 ---
 
+## v0.11 — maintenance — dogfood hardening + JSONFlux read-back
+
+**Shipped — tag `v0.11.0` (2026-06-05).** A maintenance cut, not an MVP
+milestone. It bundled the **G0.20 closed-loop dogfood-hardening cycle**
+([#1500](https://github.com/evoila/meho/issues/1500), 8 findings from RDC #864)
+plus one feature follow-up, the JSONFlux read-back surface
+([#1507](https://github.com/evoila/meho/issues/1507)). The preceding patch tag
+`v0.10.1` (2026-06-04) carried the earlier G0.19 dogfood cycle (#1484).
+
+### What shipped (G0.20 — #1500, all 8 child tasks closed)
+
+- **#1501** — agent-run lease/heartbeat wired into the fire path; a hung /
+  crashed / worker-killed run is reaped to terminal `failed` instead of
+  staying `running` forever (child `invoke_agent` runs leased too).
+- **#1502** — scheduler tick no longer blocks on a hung/approval-gated run and
+  strands the process-wide advisory lock: `run_scheduled` waits via
+  `asyncio.wait_for(asyncio.shield(task), AGENT_SYNC_TIMEOUT_SECONDS=30)`,
+  converting an over-deadline run to background (`converted_to_async`).
+- **#1503** — a parked direct operator op now executes when approved via
+  `/decide` or the MCP/CLI by-id approve, not only via REST `/approve`.
+- **#1504** — Vault KV write (`vault.kv.put`/`patch`/`delete`) is preflighted
+  at **park time** via `POST sys/capabilities-self`, surfacing a
+  `permission_preflight` banner (`will_be_denied`) so an operator isn't asked
+  to approve a write Vault will then deny; documents the `meho-mcp` role policy.
+- **#1505** — a no-inputs scheduled trigger fails with a typed
+  `scheduled_run_no_input` instead of an opaque provider 400.
+- **#1506** — a target-requiring typed op dispatched with no `target` returns a
+  clean structured `target_required` error instead of an opaque
+  `connector_error: RuntimeError`; the loud self-guard stays for real faults.
+- **#1507** — JSONFlux materialized-`ResultHandle` **read-back**: a large
+  reducing dispatch spills its full row set to a Valkey-backed
+  `ResultHandleStore` (tenant+handle-scoped, `ttl_seconds` expiry,
+  `RESULT_HANDLE_MAX_SPILL_ROWS`=10000) and the new `result_query` MCP meta-tool
+  pages it back (operator+tenant scoped). Fail-open: an unreachable store ships
+  the inline sample exactly as before.
+- **#1508** — docs: scheduler Vault agent-credentials path uses the sanitized
+  mount.
+
+### Carrying forward (unreleased on `main`, CHANGELOG `[Unreleased]`)
+
+The next cut's candidate content is already on `main` but untagged:
+
+- **G4.5 meho-docs add-on** ([#1518](https://github.com/evoila/meho/issues/1518))
+  — backplane-federated `search_docs` over the external vendor-doc corpus,
+  tenant-provisioned capability gate. All 8 child tasks merged.
+- **G4.6 doc-collection catalogue**
+  ([#1548](https://github.com/evoila/meho/issues/1548)) — collections-as-data
+  registry + backend-agnostic router + collection-scoped `search_docs`/
+  `ask_docs`. All 9 child tasks merged.
+- **Connector-ingest spec-source + error-surfacing**
+  ([#1529](https://github.com/evoila/meho/issues/1529)) — open (1 task open).
+- **G0.11 substrate remainder** (#956: #1111/#292) — open, continuing carry.
+
+---
+
 ## Cross-cutting
 
 ### Connector cadence
@@ -647,7 +703,7 @@ Tier is fixed by operator value, not architectural dependency:
 | 3 | pfSense | typed-SSH | v0.6 |
 | 3 | gcloud | transport TBD | v0.6 |
 | 3 | Hetzner Robot | generic-ingested | v0.6 |
-| — | Holodeck | typed-SSH | v0.11 *(deferred 2026-05-22; ready now)* |
+| — | Holodeck | typed-SSH | v0.12 TBD *(deferred 2026-05-22; v0.11 went to dogfood hardening instead — still unslotted)* |
 
 ### Items dropped from scope
 
@@ -676,18 +732,24 @@ Tier is fixed by operator value, not architectural dependency:
 - **CI/test/release hardening (G0.11)** + **CLI hygiene (G0.12)** — substrate
   work that doesn't earn its own milestone; travels with v0.9.
 
-### Ownership today (updated 2026-06-01)
+### Ownership today (updated 2026-06-07)
 
 | Version | Status | Notes |
 |---|---|---|
-| v0.2 → v0.10 | **shipped** | tags `v0.2.0` through `v0.10.0` cut |
-| next cut | **planning** | G0.11 substrate remainder (#956: #1111/#292) + the next consumer dogfood-hardening cycle carry forward; no milestone slotted yet |
+| v0.2 → v0.11 | **shipped** | tags `v0.2.0` through `v0.11.0` cut (incl. patch tags `v0.10.1` 2026-06-04 and the `v0.11.0` maintenance cut 2026-06-05) |
+| next cut | **planning** | Unreleased on `main` (CHANGELOG `[Unreleased]`): G4.5 meho-docs add-on (#1518) + G4.6 doc-collection catalogue (#1548) — all child tasks merged — plus connector-ingest spec-source/error-surfacing (#1529, open) + G0.11 substrate remainder (#956: #1111/#292, open) + the next dogfood cycle. No milestone slotted yet. |
 
 **v0.10 planning need — resolved (shipped 2026-06-01).** G3.17 #1407 landed
 (#1386 as its T1) and the full connector wave (G3.12–G3.16) + G11.7 approval
 queue + G10.6 Runbooks UI tagged in `v0.10.0`, with the off-roadmap README
 front-door rework (#1447) riding along. Carrying forward: the G0.11 substrate
 remainder (#956) + the next dogfood cycle.
+
+**v0.11 maintenance cut (shipped 2026-06-05).** Patch tag `v0.10.1`
+(2026-06-04) carried the G0.19 dogfood cycle (#1484); the `v0.11.0` minor cut
+carried the G0.20 dogfood cycle (#1500, RDC #864) + JSONFlux read-back (#1507).
+See §v0.11. The G4.5/G4.6 knowledge-layer wave is merged to `main` but untagged
+— it leads the next cut.
 
 ---
 

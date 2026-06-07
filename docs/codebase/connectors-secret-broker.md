@@ -136,11 +136,27 @@ import-time effects land before `run_typed_op_registrars` runs.
 ## Change-class posture
 
 The op registers `safety_level="dangerous"` + `requires_approval=True`,
-so the **existing** approval gate parks an unapproved move. This task
-sets the posture and relies on the existing gate; wiring the scoped,
-time-boxed grant (the approval's `expires_at` + an `AgentPermission`
-`op_pattern`) and the ref-only `proposed_effect` shaping is the policy
-task (#1579), not the mechanism.
+so the **existing** approval gate parks an unapproved move (#1577 sets
+the posture and relies on the existing gate). The policy refinement
+(#1579) reuses the same substrate — no new infrastructure:
+
+- **Ref-only `proposed_effect`.** A park-time preview builder
+  (`move_preview.py`, registered via `register_preview_builder("secret.move", …)`)
+  populates `ApprovalRequest.proposed_effect` with a ref-only summary —
+  the parsed `{kind, ref}` of `--from`/`--to` plus the operator `reason`,
+  never the value. `secret.move` classifies `"other"` (so the
+  credential-class preview suppression does not fire) and carries no
+  value in its params, so the summary is value-free by construction.
+- **Time-boxed scope.** The grant is the existing `AgentPermission`
+  (`op_pattern`/`verdict`/`expires_at`) + the approval's `expires_at` —
+  no bearer token. A grant whose `expires_at` has passed is excluded by
+  the resolver, so an agent reverts to baseline. Note the `dangerous`
+  safety lattice: an agent with **no live grant** is *denied* (not
+  parked), and a **live** `auto-execute` grant is *capped to
+  needs-approval* (the `dangerous` ceiling) — so an agent can never
+  auto-execute a credential move; a live grant only lifts the verdict
+  off the deny baseline to park. A parked row past its `expires_at` is
+  swept to `EXPIRED` and is no longer decidable (`/decide` → 409).
 
 ## Dependencies
 
@@ -164,13 +180,16 @@ task (#1579), not the mechanism.
   mount to `"secret"`; a non-default mount is a richer-ref-grammar
   follow-up, not wired here.
 - The `reason` param is recorded for the approver/audit trail but is not
-  read by the handler; surfacing it to the approver is the #1579 task.
+  read by the handler; it is surfaced to the approver in the ref-only
+  `proposed_effect` summary (#1579).
 
 ## References
 
 - `backend/src/meho_backplane/connectors/secret/endpoints.py`
 - `backend/src/meho_backplane/connectors/secret/vault_endpoint.py`
 - `backend/src/meho_backplane/connectors/secret/ops.py`
+- `backend/src/meho_backplane/connectors/secret/move_preview.py`
 - `backend/src/meho_backplane/connectors/secret/__init__.py`
 - `backend/tests/test_connectors_secret_broker.py`
+- `backend/tests/test_secret_move_approval.py`
 - Initiative #581 (G0.22 Secret broker), Goal #221.

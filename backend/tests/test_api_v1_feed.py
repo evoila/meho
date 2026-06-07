@@ -48,6 +48,7 @@ Two surfaces, each tested at the layer that fits:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from collections.abc import AsyncIterator, Iterator
@@ -467,6 +468,234 @@ class TestFeedEndpoint:
         with pytest.raises(HTTPException) as exc_info:
             _validate_cursor_or_400("2026-05-25")
         assert exc_info.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# ASGI-transport e2e — SSE streams incrementally through the full
+# middleware stack (regression coverage for #1389)
+# ---------------------------------------------------------------------------
+
+
+def _sse_frame(event: BroadcastEvent, entry_id: str) -> str:
+    """Render *event* as the on-wire ``event: broadcast`` SSE frame."""
+    return f"event: broadcast\ndata: {event.model_dump_json()}\nid: {entry_id}\n\n"
+
+
+class TestSseStreamsThroughMiddleware:
+    """The audit middleware forwards ``text/event-stream`` chunks live (#1389).
+
+    Before #1389 :class:`~meho_backplane.audit.AuditMiddleware` buffered
+    the entire ASGI response before forwarding it. For an open-ended SSE
+    generator the inner-app call never returns, so the buffer is never
+    flushed and the client receives **zero bytes** for the life of the
+    connection — ``/api/v1/feed`` and ``/ui/broadcast/stream`` are dark
+    on a real deploy even though the generator is yielding frames.
+
+    ``httpx.ASGITransport`` cannot prove incremental delivery: it runs
+    the inner app **to completion** before exposing the body
+    (``handle_async_request`` collects every ``http.response.body`` into
+    a list, then wraps it in a stream), so an open-ended generator would
+    just hang the transport regardless of whether the middleware buffers
+    or streams. The first test therefore drives the production middleware
+    stack (``AuditMiddleware`` inside ``RequestContextMiddleware``, the
+    ordering :func:`meho_backplane.main` wires) as a **raw ASGI app**
+    with an instrumented ``send`` — the only seam that observes a body
+    chunk reaching the transport *while the inner generator is still
+    suspended*. With the old buffering middleware the handshake below
+    deadlocks (no body chunk is forwarded until the generator returns,
+    which it never does) → ``asyncio.timeout`` fires → the test fails.
+
+    The second test asserts the audit row is still written for the
+    streaming request (fail-closed preserved). It uses a finite generator
+    so the assertion rides the normal stream-completion path rather than
+    ASGI's racy disconnect-cancellation handshake; ``ASGITransport`` is
+    fine here because a finite stream completes on its own.
+    """
+
+    async def test_first_chunk_forwarded_before_inner_generator_completes(
+        self,
+        _feed_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A body chunk reaches ``send`` while the SSE generator is still open.
+
+        Drives ``RequestContextMiddleware(AuditMiddleware(app))`` directly
+        as an ASGI callable. The patched generator yields one
+        ``event: broadcast`` frame and then ``await``\\ s an event that is
+        only set *after* the instrumented ``send`` observes the first
+        ``http.response.body`` — i.e. the test asserts the body left the
+        middleware before the generator could move past its first yield.
+
+        Against the pre-#1389 buffering middleware no body chunk is
+        forwarded until the inner app returns, so ``first_body_seen`` is
+        never set, the generator blocks on ``release.wait()`` forever, and
+        the ``asyncio.timeout`` guard fires → the test fails. The
+        streaming fix forwards the chunk live, the handshake completes,
+        and the generator is released to finish cleanly.
+        """
+        from tests._vault_fakes import install_fake_vault
+
+        first_frame = _sse_frame(_make_event(), "1715600000000-0")
+        first_body_seen = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _one_then_wait(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            yield first_frame
+            # Suspend until the test confirms the first chunk was
+            # forwarded — stands in for the never-returning XREAD BLOCK
+            # loop. A buffering middleware never sets ``first_body_seen``,
+            # so this wait (and thus the whole request) hangs.
+            await release.wait()
+
+        import meho_backplane.api.v1.feed as feed_module
+
+        monkeypatch.setattr(feed_module, "_feed_generator", _one_then_wait)
+
+        install_fake_vault(monkeypatch)
+        key = make_rsa_keypair("kid-sse-live")
+        token = mint_token(
+            key,
+            sub="op-sse-live",
+            tenant_id=str(_TENANT_A),
+            tenant_role=TenantRole.OPERATOR.value,
+        )
+
+        # Build the production middleware stack around the feed router.
+        inner = FastAPI()
+        inner.include_router(feed_router)
+        asgi_app = RequestContextMiddleware(AuditMiddleware(inner))
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "path": "/api/v1/feed",
+            "raw_path": b"/api/v1/feed",
+            "query_string": b"",
+            "root_path": "",
+            "scheme": "https",
+            "server": ("testserver", 443),
+            "client": ("testclient", 50000),
+            "headers": [(b"authorization", f"Bearer {token}".encode())],
+        }
+
+        request_drained = False
+
+        async def receive() -> dict[str, object]:
+            # Deliver the (empty) request body exactly once, then behave
+            # like a still-connected client: block until the test releases
+            # the request, then report ``http.disconnect``. A real ASGI
+            # server's ``receive`` blocks here too — Starlette's
+            # ``StreamingResponse`` spawns a disconnect-listener task that
+            # polls ``receive``; returning ``http.request`` on every call
+            # would busy-loop that task at 100% CPU.
+            nonlocal request_drained
+            if not request_drained:
+                request_drained = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await release.wait()
+            return {"type": "http.disconnect"}
+
+        captured_status: dict[str, int] = {}
+        body_chunks: list[bytes] = []
+
+        async def send(message: dict[str, object]) -> None:
+            if message["type"] == "http.response.start":
+                captured_status["status"] = int(message["status"])  # type: ignore[arg-type]
+            elif message["type"] == "http.response.body":
+                body = message.get("body", b"")
+                if body:
+                    body_chunks.append(body)  # type: ignore[arg-type]
+                    first_body_seen.set()
+
+        with respx.mock as mock_router:
+            mock_discovery_and_jwks(mock_router, public_jwks(key))
+            task = asyncio.ensure_future(asgi_app(scope, receive, send))
+            try:
+                # Streaming fix: the first body chunk is forwarded live,
+                # so this resolves immediately. Buffering: never resolves.
+                async with asyncio.timeout(5.0):
+                    await first_body_seen.wait()
+                assert captured_status["status"] == 200
+                assert body_chunks, "no body chunk forwarded before generator suspended"
+                assert b"event: broadcast" in b"".join(body_chunks)
+            finally:
+                # Release the suspended generator so the request task can
+                # complete and we don't leak a pending task.
+                release.set()
+                with contextlib.suppress(TimeoutError):
+                    async with asyncio.timeout(5.0):
+                        await task
+
+    async def test_streaming_request_writes_audit_row(
+        self,
+        _feed_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An audit row is written for a streaming request (fail-closed preserved).
+
+        Uses a *finite* generator (two frames, then the stream ends) so
+        the middleware's audit-write runs on normal stream completion
+        rather than depending on ASGI's racy disconnect-cancellation
+        handshake. After the body is fully drained the ``audit_log``
+        table carries exactly one row for ``GET /api/v1/feed`` with
+        ``status_code=200`` — proving the SSE path keeps the
+        every-authenticated-action-gets-a-row contract.
+        """
+        from sqlalchemy import select
+
+        from meho_backplane.db.engine import get_sessionmaker
+        from meho_backplane.db.models import AuditLog
+
+        frames = [
+            _sse_frame(_make_event(op_id="vsphere.vm.list"), "1715600000000-0"),
+            _sse_frame(_make_event(op_id="vsphere.vm.get"), "1715600000001-0"),
+        ]
+
+        async def _finite_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            for frame in frames:
+                yield frame
+
+        import meho_backplane.api.v1.feed as feed_module
+
+        monkeypatch.setattr(feed_module, "_feed_generator", _finite_stream)
+
+        app = _build_app()
+        with respx.mock as mock_router:
+            from tests._vault_fakes import install_fake_vault
+
+            install_fake_vault(monkeypatch)
+            key = make_rsa_keypair("kid-sse-audit")
+            mock_discovery_and_jwks(mock_router, public_jwks(key))
+            token = mint_token(
+                key,
+                sub="op-sse-audit",
+                tenant_id=str(_TENANT_A),
+                tenant_role=TenantRole.OPERATOR.value,
+            )
+            async with _make_client(app) as client:
+                response = await client.get(
+                    "/api/v1/feed",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status_code == 200
+                assert response.headers["content-type"].startswith("text/event-stream")
+                # Both frames must be present in the streamed body — the
+                # middleware forwarded them, it did not drop the stream.
+                assert response.text.count("event: broadcast") == 2
+
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            rows = list(
+                (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/feed")))
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 1
+        assert rows[0].operator_sub == "op-sse-audit"
+        assert rows[0].method == "GET"
+        assert rows[0].status_code == 200
 
 
 # ---------------------------------------------------------------------------

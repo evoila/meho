@@ -306,6 +306,52 @@ assert the published events show up in the first batch of frames
 within bounded latency. A second test asserts that an explicit
 `since=` cursor skips the prelude.
 
+### SSE feed delivers zero bytes on deploy — `AuditMiddleware` buffered the stream (FIXED, #1389)
+
+**Symptom.** On a real deploy `GET /api/v1/feed` (Bearer JWT) and
+`/ui/broadcast/stream` (session cookie) delivered **zero bytes** for
+the life of the connection even though the generator was yielding
+`event: broadcast` frames — the live-activity UI and
+`meho status --watch` stayed dark.
+
+**Root cause (middleware side, distinct from #1305/#771).** The
+chassis `AuditMiddleware` (`backend/src/meho_backplane/audit.py`) ran
+the inner app through `_run_inner_app_buffered`, which appended every
+`http.response.start` + `http.response.body` message to a list and
+forwarded them only **after** the audit insert completed — i.e. after
+`await app(...)` returned. An SSE generator's `await app(...)` never
+returns (the BLOCK loop runs for the life of the connection), so the
+buffer was never flushed. The handlers were correct (#1305 fixed the
+backlog prelude / `$`-cursor blackout; #1354 fixed the 5 s
+`socket_timeout` teardown); the bytes simply never left the
+middleware. #1354 *unmasked* this defect by removing the periodic
+spurious teardown that had been flushing the buffer with an error
+frame.
+
+**Fix.** `_run_inner_app_buffered` now recognises a
+`text/event-stream` response (`_is_event_stream_start`, matched on the
+`content-type` header of `http.response.start`) and forwards the start
+message + every body chunk **immediately** through the real `send`
+instead of buffering. The audit row is written when the stream ends —
+normal completion or a client-disconnect `CancelledError` — so the
+fail-closed "every authenticated action gets a row" contract holds.
+The fail-closed-500 swap cannot apply once a stream's
+`http.response.start` is on the wire; an audit-write failure is logged
+loudly, and the feed handler surfaces transport faults to the
+subscriber as an `event: feed_error` frame. Non-streaming JSON routes
+keep the buffered fail-closed-500 contract verbatim.
+
+**Acceptance test** lives in `backend/tests/test_api_v1_feed.py` under
+`TestSseStreamsThroughMiddleware`. One test drives
+`RequestContextMiddleware(AuditMiddleware(app))` as a raw ASGI
+callable with an instrumented `send` and asserts a body chunk reaches
+the transport *while the generator is still suspended* — it deadlocks
+(and times out) against the old buffering behaviour. A second test
+asserts the streaming request still writes one `audit_log` row.
+(`httpx.ASGITransport` cannot prove incremental delivery — it runs the
+inner app to completion before exposing the body — so the raw-ASGI
+seam is the one that observes live forwarding.)
+
 ### Earlier issue: empty broadcast feed in v0.7.0 (#755)
 
 The v0.7.0 cycle (`claude-rdc-hetzner-dc#753`) surfaced "I see empty

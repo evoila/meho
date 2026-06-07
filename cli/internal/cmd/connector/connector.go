@@ -405,93 +405,92 @@ func truncate(s string, maxLen int) string {
 	return string(runes[:maxLen-1]) + "…"
 }
 
-// resolveSpecURI normalises a --spec flag value into the canonical
-// URI the backplane's IngestRequest accepts. Three input shapes are
+// resolveSpecURI normalises a --spec flag value into the (uri, content)
+// pair the backplane's IngestRequest accepts. Three input shapes are
 // supported:
 //
-//   - `file://<absolute path>`    — passes through after path validation.
-//   - `https://<url>` / `http://` — passes through.
-//   - `docs:<product-version>/<spec>` — shorthand resolving against
-//     the consumer's checked-in docs/ directory. The base directory
-//     comes from the CLAUDE_RDC_DOCS env var (operator workstation
-//     convention — points at a checkout of
-//     `claude-rdc-hetzner-dc/docs/meho-coordination/`). The resolved
-//     form is `file://<absolute path>` so the backplane sees a uniform
-//     scheme. Resolution is CLI-side only: the backplane has no docs
-//     root and does not resolve a bare `docs:` URI, so when
-//     CLAUDE_RDC_DOCS is unset the shorthand is rejected here with a
-//     hint naming the env var rather than passed through to surface as
-//     an opaque backplane ingest error (#1535).
+//   - `https://<url>` -- passed through as the uri; the backplane fetches
+//     it under the https-only SSRF / local-file guard (#95). content is
+//     empty. (`http://` is passed through too, but the https-only guard
+//     rejects it backplane-side.)
+//   - `file://<absolute path>` -- the CLI reads the file and uploads its
+//     bytes as content; uri is kept as the audit label. No local path
+//     reaches the backplane.
+//   - `docs:<product-version>/<spec>` -- resolved CLI-side against the
+//     consumer's checked-in docs/ directory ($CLAUDE_RDC_DOCS, e.g. a
+//     checkout of `claude-rdc-hetzner-dc/docs/meho-coordination/`), then
+//     read + uploaded as content with the `docs:` label kept as uri.
+//     When CLAUDE_RDC_DOCS is unset the shorthand is rejected here with a
+//     hint naming the env var (#1535).
 //
-// Anything else returns an error — the operator gets a clear "use
-// one of file:// / https:// / docs:<...>" hint rather than a 422
-// from the backplane.
-func resolveSpecURI(raw string) (string, error) {
+// Reading docs:/file:// CLI-side and uploading the bytes is what keeps
+// the #95 https-only backend from breaking the local-spec on-ramp: the
+// backplane never sees a local path or a non-https scheme (#102).
+//
+// Anything else returns an error -- the operator gets a clear "use one of
+// file:// / https:// / docs:<...>" hint rather than a 422 from the
+// backplane.
+func resolveSpecURI(raw string) (uri string, content string, err error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", errors.New("--spec value is empty")
+		return "", "", errors.New("--spec value is empty")
 	}
 	if strings.HasPrefix(raw, "file://") {
-		// Validate locally so operators see a fast CLI error rather
-		// than a backplane 4xx. The contract is `file://<absolute
-		// path>` — relative or scheme-less file URIs are rejected.
-		u, err := url.Parse(raw)
-		if err != nil || u.Scheme != "file" {
-			return "", fmt.Errorf("--spec %q: invalid file URI", raw)
+		// Validate locally so operators see a fast CLI error rather than a
+		// backplane 4xx. The contract is `file://<absolute path>`.
+		u, perr := url.Parse(raw)
+		if perr != nil || u.Scheme != "file" {
+			return "", "", fmt.Errorf("--spec %q: invalid file URI", raw)
 		}
-		// Per RFC 8089, file URIs have either an empty authority
-		// or `localhost`. A bare `file://relative/path` would
-		// parse `relative` as the host, which is what RFC 3986
-		// says but not what an operator typing the URL means. Reject
-		// any other host so the typo surfaces here instead of as
-		// a confused on-disk lookup.
+		// Per RFC 8089, file URIs have either an empty authority or
+		// `localhost`. Reject any other host so a `file://relative/path`
+		// typo surfaces here instead of as a confused on-disk lookup.
 		if u.Host != "" && u.Host != "localhost" {
-			return "", fmt.Errorf("--spec %q: file URI host must be empty or \"localhost\"", raw)
+			return "", "", fmt.Errorf("--spec %q: file URI host must be empty or \"localhost\"", raw)
 		}
-		// u.Path is the on-disk path with the `file://` (and optional
-		// host) prefix stripped. `path.IsAbs` covers POSIX absolute
-		// paths; the Windows drive-letter form (`/C:/...`) also
-		// satisfies path.IsAbs after url.Parse normalises the leading
-		// slash, so one check covers both.
-		//
-		// Root-only (`file:///`) is rejected too — there's no spec
-		// file name to ingest. `len(u.Path) <= 1` covers both the
-		// empty case and the bare-slash case.
+		// Root-only (`file:///`) is rejected too -- no spec file to read.
 		if len(u.Path) <= 1 || !path.IsAbs(u.Path) {
-			return "", fmt.Errorf("--spec %q: file URI must be an absolute path to a spec", raw)
+			return "", "", fmt.Errorf("--spec %q: file URI must be an absolute path to a spec", raw)
 		}
-		return raw, nil
+		b, rerr := os.ReadFile(u.Path) // #nosec G304 -- operator-supplied spec path, operator-only CLI
+		if rerr != nil {
+			return "", "", fmt.Errorf("--spec %q: %w", raw, rerr)
+		}
+		return raw, string(b), nil
 	}
 	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") {
-		return raw, nil
+		return raw, "", nil
 	}
 	if strings.HasPrefix(raw, "docs:") {
 		shorthand := strings.TrimPrefix(raw, "docs:")
 		if shorthand == "" {
-			return "", errors.New("--spec docs: shorthand has no path")
+			return "", "", errors.New("--spec docs: shorthand has no path")
 		}
 		root := os.Getenv("CLAUDE_RDC_DOCS")
 		if root == "" {
-			// The `docs:` shorthand is resolved CLI-side only. The
-			// backplane has no docs root and does not resolve a bare
-			// `docs:` URI — passing one through would surface as an
-			// opaque ingest error (#1535). Fail here with a clear hint
-			// naming the env var the operator must set.
-			return "", errors.New(
+			// The `docs:` shorthand is resolved CLI-side only. The backplane
+			// has no docs root and is https-only, so it cannot resolve a bare
+			// `docs:` URI. Fail here with a clear hint naming the env var
+			// the operator must set (#1535).
+			return "", "", errors.New(
 				"--spec docs: shorthand requires $CLAUDE_RDC_DOCS to be set " +
 					"(the backplane does not resolve docs: URIs); set it to a " +
-					"docs checkout, or pass an absolute file:// / https:// spec URI",
+					"docs checkout, or pass a file:// / https:// spec URI",
 			)
 		}
 		abs := filepath.Join(root, shorthand)
 		if !filepath.IsAbs(abs) {
-			// filepath.Join keeps relative roots relative; reject
-			// rather than ship a half-resolved URI.
-			return "", fmt.Errorf("CLAUDE_RDC_DOCS=%q produced non-absolute spec path %q", root, abs)
+			// filepath.Join keeps relative roots relative; reject rather
+			// than read from a half-resolved path.
+			return "", "", fmt.Errorf("CLAUDE_RDC_DOCS=%q produced non-absolute spec path %q", root, abs)
 		}
-		return "file://" + abs, nil
+		b, rerr := os.ReadFile(abs) // #nosec G304 -- operator-supplied docs path, operator-only CLI
+		if rerr != nil {
+			return "", "", fmt.Errorf("--spec %q (resolved to %q): %w", raw, abs, rerr)
+		}
+		return raw, string(b), nil
 	}
-	return "", fmt.Errorf(
+	return "", "", fmt.Errorf(
 		"--spec %q: unknown URI scheme; expected file:// / https:// / docs:<product-version>/<spec>",
 		raw,
 	)

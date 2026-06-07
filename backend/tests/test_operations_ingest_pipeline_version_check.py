@@ -28,11 +28,13 @@ covered by ``tests/test_api_v1_connectors_ingest.py``.
 
 from __future__ import annotations
 
+import io
 import uuid
 from pathlib import Path
 
 import pytest
 import structlog
+import yaml
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.operations.ingest import (
@@ -61,6 +63,56 @@ def _operator() -> Operator:
 def _bound_log() -> structlog.stdlib.BoundLogger:
     """Return a bound logger of the shape ``_validate_spec_versions`` expects."""
     return structlog.get_logger(__name__).bind(test=True)
+
+
+def _read_spec_info_version_local(uri: str, *, content: str | None = None) -> str | None:
+    """Read ``info.version`` from a local file path URI, bypassing the SSRF guard.
+
+    Autouse fixture :func:`_patch_read_spec_info_version` swaps
+    the pipeline's ``read_spec_info_version`` for this function so
+    these service-layer unit tests can pass local file paths without
+    triggering the network-facing guard that was added in G0.16-T8
+    (#95). The SSRF guard's own correctness is covered by
+    ``tests/test_operations_ingest_openapi.py``.
+    """
+    if content is not None:
+        raw = content.encode("utf-8")
+    else:
+        try:
+            raw = Path(uri).read_bytes()
+        except OSError:
+            return None
+    try:
+        spec = yaml.safe_load(io.BytesIO(raw))
+    except yaml.YAMLError:
+        return None
+    if not isinstance(spec, dict):
+        return None
+    info = spec.get("info")
+    if not isinstance(info, dict):
+        return None
+    version = info.get("version")
+    if not isinstance(version, str) or not version:
+        return None
+    return version
+
+
+@pytest.fixture(autouse=True)
+def _patch_read_spec_info_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the pipeline's ``read_spec_info_version`` with a local-file reader.
+
+    These tests exercise ``_validate_spec_versions`` (the service-layer
+    cross-check logic) not the HTTP fetch path. G0.16-T8 (#95) moved
+    the network-facing guard into ``_load_spec_bytes``, so all tests
+    that pass local file paths as ``spec.uri`` would fail the scheme
+    check without this patch. Swapping the imported name in the pipeline
+    module is the narrowest possible seam — only ``_validate_spec_versions``
+    is affected; the real ``read_spec_info_version`` (and its SSRF guard)
+    stays in place for every other caller.
+    """
+    import meho_backplane.operations.ingest.pipeline as _pipeline_mod
+
+    monkeypatch.setattr(_pipeline_mod, "read_spec_info_version", _read_spec_info_version_local)
 
 
 def _spec_yaml(path: Path, *, openapi: str = "3.0.3", info_version: str | None) -> SpecSource:

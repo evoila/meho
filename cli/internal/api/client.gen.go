@@ -3872,19 +3872,20 @@ type SkippedConnector struct {
 
 // SpecSource One spec to ingest under a connector triple.
 //
-// “uri“ carries the operator's spec identifier. Two forms are
-// resolved by the underlying :func:`parse_openapi` resolver:
+// “uri“ is the operator's spec identifier and audit label. When the
+// spec is *fetched* by the backend, only an “https://“ URL is
+// accepted -- the G0.16-T8 (#95) SSRF / local-file guard rejects
+// “http“, “file://“, and bare paths so a spec URI cannot become a
+// network-topology or filesystem oracle.
 //
-//   - Absolute local path — “/abs/path/to/spec.yaml“ (or its
-//     “file://“ URI form).
-//   - HTTP(S) URL — “https://api.example.com/openapi.yaml“.
-//
-// The “meho“ CLI additionally accepts a “docs:<connector-id>/<file>“
-// shorthand, which it expands **CLI-side** to a “file://“ URI against
-// “$CLAUDE_RDC_DOCS“ before sending the request. The backend has no
-// docs root of its own, so a bare “docs:“ URI that reaches the parser
-// unexpanded is rejected with :exc:`UnsupportedSpecError` naming the
-// scheme — the backend does not resolve “docs:“ natively (#1535).
+// “content“ carries the spec text inline. The “meho“ CLI reads
+// “docs:<connector-id>/<file>“ and “file://“ sources **CLI-side**
+// and uploads the bytes here, leaving “uri“ as the audit label, so
+// no local path or non-https scheme reaches the backend. When
+// “content“ is set the backend uses it verbatim (size-capped) and
+// skips the fetch; when absent, “uri“ is fetched under the https
+// guard. A bare “docs:“ URI that reaches the backend with no
+// “content“ is rejected with :exc:`UnsupportedSpecError` (#1535).
 //
 // Wrapped in its own model so future per-spec knobs (auth headers,
 // dialect pinning, content-type override) can land without
@@ -3893,7 +3894,8 @@ type SkippedConnector struct {
 // typo in a nested “specs[*]“ entry fails 422 at the body parse
 // instead of being silently dropped.
 type SpecSource struct {
-	Uri string `json:"uri"`
+	Content *string `json:"content"`
+	Uri     string  `json:"uri"`
 }
 
 // StartRunRequest Request body for “runbook_start“ -- begin a new run on a template.

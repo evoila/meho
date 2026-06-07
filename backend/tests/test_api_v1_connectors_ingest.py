@@ -33,8 +33,10 @@ stub so the ingest test paths don't need a real Anthropic key.
 
 from __future__ import annotations
 
+import socket
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -138,6 +140,85 @@ def _reset_ingest_job_registry() -> Iterator[None]:
     reset_job_registry_for_tests()
     yield
     reset_job_registry_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# SSRF guard helpers (G0.16-T8, #95)
+# ---------------------------------------------------------------------------
+
+# A public IP used for mock getaddrinfo responses — ``93.184.216.34`` is
+# IANA's example.com assignment; it is globally routable and non-special
+# per the ipaddress module so the SSRF destination guard passes.
+_INGEST_TEST_PUBLIC_IP = "93.184.216.34"
+
+# Hostname for all spec mock endpoints in this module.
+_SPEC_HOST = "specs.example.test"
+_SPEC_BASE = f"https://{_SPEC_HOST}"
+
+# All test hostnames that must resolve to a public IP via the mock.
+_INGEST_TEST_HOSTS = frozenset(
+    {
+        "specs.example.test",
+        "example.lab",
+        "developer.broadcom.com",
+        "keycloak.test",
+        "vault.test",
+    }
+)
+
+
+def _ingest_getaddrinfo(
+    host: str, port: object, **kwargs: object
+) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+    """Mock for ``socket.getaddrinfo`` in the SSRF guard.
+
+    Returns a public IP for test hostnames so the destination guard
+    accepts them; delegates to the real function for everything else so
+    that the discovery/JWKS mock routes wired by respx still resolve.
+    """
+    if host in _INGEST_TEST_HOSTS:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (_INGEST_TEST_PUBLIC_IP, 443))]
+    return socket.getaddrinfo(host, port, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.fixture(autouse=True)
+def _mock_ssrf_getaddrinfo() -> Iterator[None]:
+    """Patch the SSRF guard's getaddrinfo for the duration of every test.
+
+    Since G0.16-T8 (#95) the spec fetcher resolves the hostname before
+    opening any socket. Tests that pass ``https://specs.example.test/…``
+    URIs would fail DNS resolution without this patch.
+    """
+    with patch(
+        "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+        side_effect=_ingest_getaddrinfo,
+    ):
+        yield
+
+
+def _register_spec_at_https(
+    router: respx.MockRouter,
+    spec_path: Path,
+    *,
+    path: str = "spec.yaml",
+    content_type: str = "application/yaml",
+) -> str:
+    """Register spec file content at an HTTPS mock URL and return the URL.
+
+    Reads ``spec_path`` from disk, registers the bytes at
+    ``https://specs.example.test/<path>`` on ``router``, and returns
+    the URL. All ingest tests that formerly passed a local file path to
+    the ``uri`` field now call this helper instead.
+    """
+    url = f"{_SPEC_BASE}/{path}"
+    router.get(url).mock(
+        return_value=httpx.Response(
+            200,
+            content=spec_path.read_bytes(),
+            headers={"content-type": content_type},
+        )
+    )
+    return url
 
 
 @pytest.fixture
@@ -1666,13 +1747,14 @@ paths:
         ),
     ):
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-503.yaml")
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
                 "product": "test",
                 "version": "1.0",
                 "impl_id": "test-impl",
-                "specs": [{"uri": str(spec_path)}],
+                "specs": [{"uri": spec_url}],
                 "async": False,
             },
             headers=_authed(token),
@@ -1715,13 +1797,14 @@ paths:
     key, token = _admin_token()
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-dryrun.yaml")
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
                 "product": "test",
                 "version": "1.0",
                 "impl_id": "test-impl",
-                "specs": [{"uri": str(spec_path)}],
+                "specs": [{"uri": spec_url}],
                 "dry_run": True,
             },
             headers=_authed(token),
@@ -1795,13 +1878,14 @@ paths:
         ),
     ):
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-happy.yaml")
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
                 "product": "test",
                 "version": "1.0",
                 "impl_id": "test-impl",
-                "specs": [{"uri": str(spec_path)}],
+                "specs": [{"uri": spec_url}],
                 "async": False,
             },
             headers=_authed(token),
@@ -1827,13 +1911,14 @@ def test_ingest_bad_spec_returns_400(client: TestClient, tmp_path: Any) -> None:
     key, token = _admin_token()
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="bad-spec.yaml")
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
                 "product": "test",
                 "version": "1.0",
                 "impl_id": "test-impl",
-                "specs": [{"uri": str(spec_path)}],
+                "specs": [{"uri": spec_url}],
                 "async": False,
             },
             headers=_authed(token),
@@ -1869,13 +1954,14 @@ paths:
     key, token = _admin_token()
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="vcenter-9.yaml")
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
                 "product": "vmware",
                 "version": "8.0",
                 "impl_id": "vmware-rest",
-                "specs": [{"uri": str(spec_path)}],
+                "specs": [{"uri": spec_url}],
                 "async": False,
             },
             headers=_authed(token),
@@ -1884,7 +1970,7 @@ paths:
     detail = response.json()["detail"]
     assert detail["kind"] == "spec_label_mismatch"
     assert detail["requested_version"] == "8.0"
-    assert detail["spec_info_versions"] == [{"spec_uri": str(spec_path), "info_version": "9.0.3"}]
+    assert detail["spec_info_versions"] == [{"spec_uri": spec_url, "info_version": "9.0.3"}]
     # The operator-facing message must mention both versions.
     assert "9.0.3" in detail["message"]
     assert "8.0" in detail["message"]
@@ -1937,13 +2023,14 @@ paths:
         ),
     ):
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-drift.yaml")
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
                 "product": "drift-test",
                 "version": "9.1",
                 "impl_id": "drift-impl",
-                "specs": [{"uri": str(spec_path)}],
+                "specs": [{"uri": spec_url}],
                 "async": False,
             },
             headers=_authed(token),
@@ -2055,13 +2142,14 @@ paths:
     key, token = _admin_token()
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="vcenter-7.yaml")
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
                 "product": "t9-vmware",
                 "version": "7.0",
                 "impl_id": "t9-vmware-rest",
-                "specs": [{"uri": str(spec_path)}],
+                "specs": [{"uri": spec_url}],
                 "async": False,
             },
             headers=_authed(token),
@@ -2102,13 +2190,14 @@ paths:
     key, token = _admin_token()
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="vcenter-7-dryrun.yaml")
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
                 "product": "t9-vmware",
                 "version": "7.0",
                 "impl_id": "t9-vmware-rest",
-                "specs": [{"uri": str(spec_path)}],
+                "specs": [{"uri": spec_url}],
                 "dry_run": True,
             },
             headers=_authed(token),
@@ -2181,6 +2270,7 @@ paths:
           description: ok
 """,
     )
+    catalog_spec_url = f"{_SPEC_BASE}/catalog-spec.yaml"
     _patch_catalog(
         monkeypatch,
         entries=[
@@ -2189,13 +2279,20 @@ paths:
                 "version": "9.0",
                 "impl_id": "vmware-rest-t9",
                 "requires_connector_class": "VmwareRestConnector",
-                "upstream": (str(spec_path),),
+                "upstream": (catalog_spec_url,),
             },
         ],
     )
     key, token = _admin_token()
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        mock_router.get(catalog_spec_url).mock(
+            return_value=httpx.Response(
+                200,
+                content=spec_path.read_bytes(),
+                headers={"content-type": "application/yaml"},
+            )
+        )
         response = client.post(
             "/api/v1/connectors/ingest",
             json={"catalog_entry": "vmware-t9/9.0", "dry_run": True},
@@ -2655,13 +2752,14 @@ paths:
     key, token = _admin_token()
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-quadruple.yaml")
         response = client.post(
             "/api/v1/connectors/ingest",
             json={
                 "product": "test-quadruple",
                 "version": "1.0",
                 "impl_id": "test-impl",
-                "specs": [{"uri": str(spec_path)}],
+                "specs": [{"uri": spec_url}],
                 "dry_run": True,
             },
             headers=_authed(token),
@@ -2852,6 +2950,7 @@ async def test_ingest_async_default_returns_202_with_job_handle(
         ),
     ):
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="stress-spec.yaml")
         async with httpx.AsyncClient(
             transport=ASGITransport(app=app),
             base_url="https://testserver",
@@ -2863,7 +2962,7 @@ async def test_ingest_async_default_returns_202_with_job_handle(
                     "product": "stress-vmware",
                     "version": "9.0.0.0",
                     "impl_id": "stress-vmware-rest",
-                    "specs": [{"uri": str(spec_path)}],
+                    "specs": [{"uri": spec_url}],
                     # Default is ``async=true``; the assertion below
                     # is what the issue's "must not crash the pod"
                     # framing protects against. No need to set it
@@ -2997,6 +3096,7 @@ paths:
         # JWKS and 401-ing the POST on the very signature it
         # produced.
         _mock_discovery_and_jwks(mock_router, _public_jwks(key_a, key_b))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-tenant-iso.yaml")
         async with httpx.AsyncClient(
             transport=ASGITransport(app=app),
             base_url="https://testserver",
@@ -3007,7 +3107,7 @@ paths:
                     "product": "tenant-iso",
                     "version": "1.0",
                     "impl_id": "tenant-iso-impl",
-                    "specs": [{"uri": str(spec_path)}],
+                    "specs": [{"uri": spec_url}],
                 },
                 headers=_authed(token_a),
             )

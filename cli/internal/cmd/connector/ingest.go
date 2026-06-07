@@ -57,11 +57,10 @@ func newIngestCmd() *cobra.Command {
 			"  fqdn-templated entries are refused with a hint.\n\n" +
 			"  Manual mode: --product + --version + --impl + one-or-more --spec.\n" +
 			"  --spec accepts three URI shapes:\n" +
-			"    - file:///abs/path/to/spec.yaml          (local file)\n" +
-			"    - https://example.com/spec.yaml           (HTTP fetch)\n" +
-			"    - docs:<product-version>/<spec.yaml>      (CLI-side shorthand;\n" +
-			"      requires $CLAUDE_RDC_DOCS — expanded to a file:// URI. The\n" +
-			"      backplane does not resolve docs: URIs itself)\n" +
+			"    - https://example.com/spec.yaml           (fetched by the backplane; https only)\n" +
+			"    - file:///abs/path/to/spec.yaml          (read + uploaded by the CLI)\n" +
+			"    - docs:<product-version>/<spec.yaml>      (CLI-side shorthand against\n" +
+			"      $CLAUDE_RDC_DOCS; read + uploaded by the CLI like file://)\n" +
 			"  Repeat --spec to merge multiple specs under one connector_id\n" +
 			"  (vSphere is the canonical case: vcenter.yaml + vi-json.yaml).\n\n" +
 			"--dry-run parses + plans without writing to the DB; useful for\n" +
@@ -170,11 +169,15 @@ func buildIngestRequest(opts ingestOptions) (api.IngestRequest, error) {
 	}
 	specs := make([]api.SpecSource, 0, len(opts.Specs))
 	for _, raw := range opts.Specs {
-		uri, uerr := resolveSpecURI(raw)
+		uri, content, uerr := resolveSpecURI(raw)
 		if uerr != nil {
 			return api.IngestRequest{}, uerr
 		}
-		specs = append(specs, api.SpecSource{Uri: uri})
+		src := api.SpecSource{Uri: uri}
+		if content != "" {
+			src.Content = &content
+		}
+		specs = append(specs, src)
 	}
 	product := opts.Product
 	version := opts.Version

@@ -48,11 +48,12 @@ Operator-facing surfaces — CLI (T5, [#405](https://github.com/evoila/meho/issu
 
 ## T1 — the parser
 
-[`parse_openapi(spec_path_or_uri, *, spec_source=None) -> list[EndpointDescriptorProto]`](../../backend/src/meho_backplane/operations/ingest/openapi.py) is the only public entry point. The function is synchronous because callers are CLI / one-shot ingestion endpoints with no event-loop concern, and the surface stays trivially testable.
+[`parse_openapi(spec_path_or_uri, *, spec_source=None, content=None) -> list[EndpointDescriptorProto]`](../../backend/src/meho_backplane/operations/ingest/openapi.py) is the only public entry point. The function is synchronous because callers are CLI / one-shot ingestion endpoints with no event-loop concern, and the surface stays trivially testable.
 
 ### Inputs
 
-- `spec_path_or_uri` — a `file://` path or an `http(s)://` URL. Local files read with stdlib; remote files fetched via [`httpx`](https://www.python-httpx.org/) with a 30 s timeout. YAML decoded via PyYAML's `CSafeLoader` (with a pure-Python `SafeLoader` fallback for platforms lacking LibYAML); JSON decoded via stdlib.
+- `spec_path_or_uri` — an `https://` URL the backend fetches under the SSRF / local-file guard (`_assert_fetchable_remote_url`; non-`https` schemes are rejected). Remote fetch uses [`httpx`](https://www.python-httpx.org/) streaming with a 30 s timeout and a 20 MiB cap. YAML decoded via PyYAML's `CSafeLoader` (pure-Python `SafeLoader` fallback); JSON via stdlib.
+- `content` — optional inline spec text. The `meho` CLI reads `docs:` / `file://` sources client-side and uploads the bytes here, so no local path or non-`https` scheme reaches the backend; when set it is used verbatim (capped) and `spec_path_or_uri` is just the audit label.
 - `spec_source` — optional tag string (e.g. `"vcenter.yaml"`) the parser stamps onto every row as a `spec:<source>` entry in `tags`. The downstream T2 merge path keys collision detection off this tag.
 
 ### Per-operation output

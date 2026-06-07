@@ -15345,6 +15345,12 @@
             "maxLength": 2048,
             "minLength": 1,
             "title": "Uri"
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 20971520,
+            "nullable": true,
+            "title": "Content"
           }
         },
         "additionalProperties": false,
@@ -15353,7 +15359,7 @@
           "uri"
         ],
         "title": "SpecSource",
-        "description": "One spec to ingest under a connector triple.\n\n``uri`` carries the operator's spec identifier. Two forms are\nresolved by the underlying :func:`parse_openapi` resolver:\n\n* Absolute local path \u2014 ``/abs/path/to/spec.yaml`` (or its\n  ``file://`` URI form).\n* HTTP(S) URL \u2014 ``https://api.example.com/openapi.yaml``.\n\nThe ``meho`` CLI additionally accepts a ``docs:<connector-id>/<file>``\nshorthand, which it expands **CLI-side** to a ``file://`` URI against\n``$CLAUDE_RDC_DOCS`` before sending the request. The backend has no\ndocs root of its own, so a bare ``docs:`` URI that reaches the parser\nunexpanded is rejected with :exc:`UnsupportedSpecError` naming the\nscheme \u2014 the backend does not resolve ``docs:`` natively (#1535).\n\nWrapped in its own model so future per-spec knobs (auth headers,\ndialect pinning, content-type override) can land without\nreshaping :class:`IngestRequest`. ``extra=\"forbid\"`` rejects\nunknown fields (per the request-schema-strictness rule) so a\ntypo in a nested ``specs[*]`` entry fails 422 at the body parse\ninstead of being silently dropped."
+        "description": "One spec to ingest under a connector triple.\n\n``uri`` is the operator's spec identifier and audit label. When the\nspec is *fetched* by the backend, only an ``https://`` URL is\naccepted -- the G0.16-T8 (#95) SSRF / local-file guard rejects\n``http``, ``file://``, and bare paths so a spec URI cannot become a\nnetwork-topology or filesystem oracle.\n\n``content`` carries the spec text inline. The ``meho`` CLI reads\n``docs:<connector-id>/<file>`` and ``file://`` sources **CLI-side**\nand uploads the bytes here, leaving ``uri`` as the audit label, so\nno local path or non-https scheme reaches the backend. When\n``content`` is set the backend uses it verbatim (size-capped) and\nskips the fetch; when absent, ``uri`` is fetched under the https\nguard. A bare ``docs:`` URI that reaches the backend with no\n``content`` is rejected with :exc:`UnsupportedSpecError` (#1535).\n\nWrapped in its own model so future per-spec knobs (auth headers,\ndialect pinning, content-type override) can land without\nreshaping :class:`IngestRequest`. ``extra=\"forbid\"`` rejects\nunknown fields (per the request-schema-strictness rule) so a\ntypo in a nested ``specs[*]`` entry fails 422 at the body parse\ninstead of being silently dropped."
       },
       "StartRunRequest": {
         "properties": {

@@ -522,7 +522,7 @@ class IngestionPipelineService:
         per_spec: list[tuple[str, str | None]] = []
         mismatches: list[tuple[str, str | None]] = []
         for spec in specs:
-            info_version = read_spec_info_version(spec.uri)
+            info_version = read_spec_info_version(spec.uri, content=spec.content)
             per_spec.append((spec.uri, info_version))
             if info_version is None:
                 # No info.version → no cross-check possible. Operators
@@ -765,7 +765,9 @@ class IngestionPipelineService:
             # extra synchronisation. Yielding the loop between specs
             # lets the request handler return its 202 + handle inside
             # the kubelet liveness-probe budget.
-            parsed = await asyncio.to_thread(parse_openapi, spec.uri, spec_source=spec.uri)
+            parsed = await asyncio.to_thread(
+                parse_openapi, spec.uri, spec_source=spec.uri, content=spec.content
+            )
             total_ops += len(parsed)
         ingestion = IngestionResult(
             inserted_count=total_ops,
@@ -819,7 +821,9 @@ class IngestionPipelineService:
             # this hop). ``register_ingested_operations`` is already
             # an async coroutine that yields on every DB write so
             # it doesn't need the same treatment.
-            protos = await asyncio.to_thread(parse_openapi, spec.uri, spec_source=spec.uri)
+            protos = await asyncio.to_thread(
+                parse_openapi, spec.uri, spec_source=spec.uri, content=spec.content
+            )
             partial = await register_ingested_operations(
                 product=product,
                 version=version,

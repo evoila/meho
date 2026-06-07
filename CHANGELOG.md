@@ -126,6 +126,19 @@ connector-related release-notes line.
   longer decidable. Reuses the shipped approval substrate — no new
   capability/token system.
 
+### `meho secret move` CLI verb (#1580)
+
+- Add the operator-facing `meho secret move --from <kind>:<ref> --to
+  <kind>:<ref> --reason …` verb over the `secret-broker-1.x` connector
+  (#1577). It is references-not-values: only the `<kind>:<ref>` source /
+  sink references and the audit reason cross the wire — the secret value
+  is never a flag, argument, or prompt, so it never lands in argv, shell
+  history, or the op params. The change-class move requires approval, so
+  the verb surfaces `status=awaiting_approval` verbatim (rendered, not
+  treated as an error) and otherwise prints only the move status, the
+  value SHA-256, and its byte length. Reuses the generic
+  `/api/v1/operations/call` route, so the OpenAPI snapshot is unchanged.
+
 ### Retire the stale `meho targets create` verb tree-wide (#1559)
 
 - Remove the last references to the nonexistent `meho targets create`

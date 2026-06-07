@@ -41,6 +41,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/runbook"
 	"github.com/evoila/meho/cli/internal/cmd/scheduler"
 	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
+	"github.com/evoila/meho/cli/internal/cmd/secret"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
@@ -430,6 +431,17 @@ func newRootCmd() *cobra.Command {
 	// before registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `keycloak` parent.
 	root.AddCommand(keycloak.NewRootCmd())
+
+	// G0.22-T4 (#1580) -- secret-broker-1.x operator alias verb for
+	// Initiative #581. `meho secret move` pre-bakes connector_id=
+	// "secret-broker-1.x" on top of the existing /api/v1/operations/call
+	// dispatcher route and dispatches the synthetic secret.move broker op
+	// (#1577). The move is references-not-values: the operator names
+	// --from / --to '<kind>:<ref>' references and a --reason; the value is
+	// read, transferred, and re-written entirely server-side and never
+	// crosses the command line or the op params. The verb is change-class
+	// (requires approval) and surfaces status=awaiting_approval verbatim.
+	root.AddCommand(secret.NewRootCmd())
 
 	// G3.12-T3 (#1392) -- argocd-api-3.x operator alias verbs for
 	// Initiative #1387. The verb tree pre-bakes connector_id=

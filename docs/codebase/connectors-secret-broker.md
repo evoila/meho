@@ -69,6 +69,20 @@ boundary redaction:
   double-unwrap + `strip_credential_value`; writes via
   `create_or_update_secret` (a single-field body, `cas=None`). Both
   through `vault_client_for_operator`.
+- **`KeycloakCredentialSecretEndpoint`**
+  (`connectors/keycloak/secret_endpoint.py`) — the second adapter (#1578),
+  registered under kind `"keycloak"`. **Sink-only**: keycloak credentials
+  are write-only (Keycloak hashes them; the plaintext is unrecoverable),
+  so `read_secret` raises `NotImplementedError`. Addresses one user
+  credential as `<target>/<realm>/<username>#password` (the `#password`
+  field is the only writable one). `write_secret` resolves the target by
+  name (tenant-scoped `resolve_target`), gets the `KeycloakConnector`
+  instance from the dispatcher's instance cache, resolves username→UUID
+  via `_find_user_uuid`, and PUTs `.../users/{id}/reset-password` with a
+  permanent password CredentialRepresentation via `_write_admin` — it
+  opens no HTTP client of its own. The value is `strip_credential_value`-d
+  before the PUT. This is the broker's **second kind**, so a cross-kind
+  `vault:` → `keycloak:` move proves the initiative's "≥2 kinds" DoD.
 - **`secret_move`** + **`register_secret_broker_operations`**
   (`ops.py`) — the module-level handler and its lifespan registrar.
 
@@ -143,8 +157,9 @@ task (#1579), not the mechanism.
 
 ## Known issues / scope boundaries
 
-- vault-kv is the only adapter kind in this task; further kinds are
-  separate tasks reusing the `SecretEndpoint` contract.
+- vault-kv (source+sink) and keycloak (sink-only, #1578) are the
+  registered adapter kinds; further kinds are separate tasks reusing the
+  `SecretEndpoint` contract.
 - The vault adapter forwards the `ref` to hvac's `path=` and defaults the
   mount to `"secret"`; a non-default mount is a richer-ref-grammar
   follow-up, not wired here.

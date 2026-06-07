@@ -30,9 +30,12 @@ handler is a module-level function the dispatcher routes to with
 ``connector_instance=None`` / ``target=None``.
 """
 
-# Importing the adapter module runs its module-level
-# ``register_secret_endpoint("vault", ...)`` call so the registry is
+# Importing each adapter module runs its module-level
+# ``register_secret_endpoint(<kind>, ...)`` call so the registry is
 # populated before any move dispatches. Imported for the side effect.
+# The keycloak sink (#1578) lives under ``connectors/keycloak`` but
+# registers here so the broker's second kind lands on the same seam.
+from meho_backplane.connectors.keycloak import secret_endpoint as _keycloak_endpoint  # noqa: F401
 from meho_backplane.connectors.secret import vault_endpoint as _vault_endpoint  # noqa: F401
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.operations.typed_register import register_typed_op_registrar

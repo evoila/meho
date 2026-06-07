@@ -102,6 +102,18 @@ connector-related release-notes line.
   The keycloak sink, approval-queue gating, CLI verb, and docs page are
   separate sibling tasks reusing this contract.
 
+### Keycloak-credential `SecretEndpoint` sink — broker's second kind (#1578)
+
+- Add a `keycloak`-kind `SecretEndpoint` sink so a `secret.move` can land
+  a credential in a Keycloak user's password, proving the broker's
+  cross-kind ("≥2 kinds") move surface (`vault:secret/...#password` →
+  `keycloak:<target>/<realm>/<user>#password`). The sink reuses the
+  existing Keycloak admin write path (username→UUID + `PUT
+  .../reset-password`) and writes the value server-side from the
+  in-memory `SecretMaterial`; the value never enters op params, the
+  response, logs, or the audit row. Keycloak is write-only here, so the
+  source side raises a clear unsupported error.
+
 ### Retire the stale `meho targets create` verb tree-wide (#1559)
 
 - Remove the last references to the nonexistent `meho targets create`

@@ -177,6 +177,7 @@ def isolated_registry() -> Iterator[None]:
     from meho_backplane.mcp.resources import docs as docs_resource
     from meho_backplane.mcp.resources import kb as kb_resource
     from meho_backplane.mcp.resources import memory as memory_resource
+    from meho_backplane.mcp.resources import retrieve as retrieve_resource
     from meho_backplane.mcp.resources import (
         tenant_conventions as tenant_conventions_resource,
     )
@@ -288,6 +289,13 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(kb_resource)
     importlib.reload(docs_resource)
     importlib.reload(memory_resource)
+    # G0.5-T9 (#348): the hybrid-retrieval resource
+    # (``meho://retrieve/{query}``) joins the reload list for the same
+    # reason every other resource module does -- the autouse
+    # clear_registries() above would otherwise leave it unregistered in
+    # any test file that imports this fixture after the first one runs in
+    # the process.
+    importlib.reload(retrieve_resource)
     # G7.1-T4 (#316): the tenant-conventions per-slug resource
     # (``meho://tenant/{tenant_id}/conventions/{slug}``) joins the
     # reload list for the same reason every other resource module

@@ -139,6 +139,26 @@ connector-related release-notes line.
   value SHA-256, and its byte length. Reuses the generic
   `/api/v1/operations/call` route, so the OpenAPI snapshot is unchanged.
 
+### Secret-broker operator docs page (#1581)
+
+- Add the operator/reviewer-facing runbook
+  [`docs/cross-repo/secret-broker.md`](docs/cross-repo/secret-broker.md)
+  for the G0.22 secret broker — the `<kind>:<ref>` move-intent schema
+  (shipped `vault` source+sink and `keycloak` sink kinds), the value-free
+  `{status, value_sha256, length}` response, the "agent never observes the
+  value" guarantee tied to each enforcing mechanism (no value-bearing
+  flag / param / response / log / audit row / approval `proposed_effect` /
+  broadcast), and the enlarged threat model — the backplane as a
+  credential-bearing intermediary, mitigated by operator-context reads,
+  the `dangerous` deny-by-default / needs-approval-ceiling lattice,
+  mandatory four-eyes approval, time-boxed `AgentPermission` + approval
+  `expires_at`, `params_hash` tamper-evidence, and hash-only audit. Names
+  the deferred token-minting / diff-shaped-approval follow-ups so neither
+  is mistaken for shipped, and links from the `docs/cross-repo/` runbook
+  index. Documents the actual merged behaviour, including where the CLI
+  (`--reason` required) tightens the op schema (`reason` optional) and
+  that a parked move exits 0.
+
 ### Retire the stale `meho targets create` verb tree-wide (#1559)
 
 - Remove the last references to the nonexistent `meho targets create`

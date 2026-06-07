@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Secret broker `secret.move` op + `SecretEndpoint` adapter protocol (#1577)
+
+- Add the server-side `secret.move` broker op (synthetic
+  `secret-broker-1.x` identity, `requires_approval=True` +
+  `safety_level="dangerous"`) and the `SecretEndpoint` adapter protocol
+  with a kind-keyed registry, plus the first vault-kv↔vault-kv pair. A
+  move copies one credential field between stores entirely inside the
+  backplane; the value never enters the op params, response, logs, or the
+  audit row — only the move status, the value SHA-256, and its length.
+  The keycloak sink, approval-queue gating, CLI verb, and docs page are
+  separate sibling tasks reusing this contract.
+
 ### Retire the stale `meho targets create` verb tree-wide (#1559)
 
 - Remove the last references to the nonexistent `meho targets create`

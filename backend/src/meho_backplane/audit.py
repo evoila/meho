@@ -757,7 +757,9 @@ class AuditMiddleware:
         # out of the inner app; the audit row for the now-closed session
         # is still written (the ``result`` holder is fully populated by
         # then) before the cancellation propagates to unwind the task
-        # tree per asyncio's contract.
+        # tree per asyncio's contract. That disconnect-path write is
+        # shielded (#1599) so a second cancellation mid-INSERT cannot
+        # silently drop the row — see the ``except`` arm below.
         buffered: list[Message] = []
         result = _InnerAppResult()
         try:
@@ -775,13 +777,56 @@ class AuditMiddleware:
             # sent on the first yield; write the audit row for the closed
             # session, then re-raise to unwind the task tree (Sonar
             # S7497 / asyncio cancellation contract).
-            await self._finalize(
-                scope=scope,
-                send=send,
-                buffered=buffered,
-                result=result,
-                duration_ms=round((time.monotonic() - start) * 1000, 2),
+            #
+            # The write is run as a shielded task (#1599): a *second*
+            # ``CancelledError`` delivered while ``_finalize`` is awaiting
+            # the audit INSERT (task-tree teardown, server shutdown, an
+            # enclosing ``timeout()`` or anyio cancel scope) would
+            # otherwise propagate straight out of a bare ``await`` —
+            # ``CancelledError`` is a ``BaseException``, so ``_finalize``'s
+            # ``except Exception`` arm never sees it and the row is dropped
+            # with no log line at all.
+            #
+            # ``ensure_future`` schedules the write on the loop and we keep
+            # a strong reference (the loop holds only a weak one). We then
+            # drain it to completion under ``asyncio.shield``. The drain is
+            # a loop, not a single ``await``: cancellation can be delivered
+            # repeatedly (an ASGI server re-cancelling the task on a
+            # half-closed disconnect, an enclosing anyio cancel scope that
+            # is *level-triggered* and re-raises at every checkpoint while
+            # it stays cancelled), so a single ``await shield(write)`` may
+            # be interrupted before the shielded task finishes. Re-awaiting
+            # under a fresh shield each iteration lets the write run to
+            # completion regardless of how many cancellations are
+            # redelivered. The shielded task itself is never cancelled by
+            # these (that is what ``shield`` guarantees); only our wait is.
+            # Once the write is done we re-raise the original ``cancelled``
+            # so the disconnect is honored, without suppressing it (no
+            # ``Task.uncancel()``).
+            write = asyncio.ensure_future(
+                self._finalize(
+                    scope=scope,
+                    send=send,
+                    buffered=buffered,
+                    result=result,
+                    duration_ms=round((time.monotonic() - start) * 1000, 2),
+                ),
             )
+            while not write.done():
+                try:
+                    await asyncio.shield(write)
+                except asyncio.CancelledError:
+                    # A redelivered cancellation interrupted the wait, not
+                    # the shielded write. Loop to finish draining it; the
+                    # original ``cancelled`` is re-raised below to honor the
+                    # disconnect.
+                    continue
+            # Surface a ``_finalize`` failure (the handler itself raised);
+            # ``write.result()`` re-raises it. An SSE disconnect never
+            # populates ``handler_exc`` (the inner app only catches
+            # ``Exception``), so a cleanly-closed stream's write returns
+            # ``None`` here.
+            write.result()
             raise cancelled
 
         duration_ms = round((time.monotonic() - start) * 1000, 2)

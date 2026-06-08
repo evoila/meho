@@ -697,6 +697,197 @@ class TestSseStreamsThroughMiddleware:
         assert rows[0].method == "GET"
         assert rows[0].status_code == 200
 
+    async def test_double_cancelled_disconnect_still_writes_audit_row(
+        self,
+        _feed_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A second cancellation mid-INSERT does not drop the disconnect-path row (#1599).
+
+        Drives ``RequestContextMiddleware(AuditMiddleware(app))`` as a raw
+        ASGI callable (the same seam as
+        ``test_first_chunk_forwarded_before_inner_generator_completes``)
+        and reproduces a production SSE disconnect by **cancelling the ASGI
+        task** while the feed generator is suspended — which is how a real
+        ASGI server (uvicorn, ``asgi.spec_version >= 2.4``) signals a
+        client disconnect: it cancels the task running the app. That
+        cancellation raises out of the suspended generator, past
+        ``_run_inner_app_buffered``'s ``except Exception`` (``CancelledError``
+        is a ``BaseException``), and into ``AuditMiddleware.__call__``'s
+        ``except asyncio.CancelledError`` arm — the disconnect-path audit
+        write under test.
+
+        The ``http.disconnect`` / ``receive``-listener route is *not* used:
+        under Starlette's ``spec_version < 2.4`` task-group branch the
+        disconnect listener cancels the stream inside the response's own
+        anyio cancel scope, which absorbs the ``CancelledError`` so the
+        response returns normally and the row is written on the *normal*
+        path — never exercising the ``except`` arm. Pinning
+        ``spec_version="2.4"`` selects the branch that streams directly, so
+        a task-level cancel propagates the way a real disconnect does.
+
+        While the disconnect-path INSERT is in flight, the instrumented
+        write delivers a **second** ``task.cancel()`` — the task-tree
+        teardown / server-shutdown / enclosing-``timeout()`` interleaving
+        the issue describes. With the shielded write the row still commits:
+        the cancellation hits ``await asyncio.shield(write)`` (not the write
+        task), the fix drains the write to completion, then re-raises so
+        cancellation is honored. The post-run ``audit_log`` table carries
+        exactly one row for ``GET /api/v1/feed``.
+
+        This test *discriminates*: against a variant where the
+        disconnect-path ``_finalize`` is awaited unshielded, the second
+        cancellation interrupts the in-flight ``_write_audit_row`` await
+        (``CancelledError`` bypasses ``_finalize``'s ``except Exception``
+        arm) and zero rows are written → ``write_committed`` stays False and
+        ``len(rows) == 1`` fails. Adversarially verified against that
+        broken variant during implementation.
+        """
+        from sqlalchemy import select
+
+        import meho_backplane.audit as audit_module
+        from meho_backplane.db.engine import get_sessionmaker
+        from meho_backplane.db.models import AuditLog
+        from tests._vault_fakes import install_fake_vault
+
+        first_frame = _sse_frame(_make_event(), "1715600000000-0")
+        first_body_seen = asyncio.Event()
+        # Set only in cleanup. The generator must NOT return on its own —
+        # the *only* way out of its post-yield suspension is the disconnect
+        # cancellation that drives ``__call__``'s ``except`` arm. A
+        # generator that could return would race the normal stream-end path
+        # and the test would no longer isolate the disconnect branch.
+        teardown = asyncio.Event()
+
+        async def _one_then_block(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            yield first_frame
+            await teardown.wait()
+
+        import meho_backplane.api.v1.feed as feed_module
+
+        monkeypatch.setattr(feed_module, "_feed_generator", _one_then_block)
+
+        # The ASGI task is bound below; the in-flight write closes over it.
+        task_holder: dict[str, asyncio.Task[None]] = {}
+        write_committed = False
+
+        # Wrap the audit INSERT so the SECOND cancellation is delivered
+        # *while the disconnect-path write is in flight*. By the time this
+        # runs we are provably inside ``__call__``'s ``except CancelledError``
+        # arm — it is the only caller of ``_finalize`` for a generator that
+        # never returns — so cancelling the task here is the "second cancel
+        # mid-INSERT" the issue describes, with no race against the normal
+        # path.
+        real_write_audit_row = audit_module._write_audit_row
+
+        async def _instrumented_write(**kwargs: object) -> None:
+            nonlocal write_committed
+            # Deliver the second cancellation, then yield so it is raised at
+            # the parent's ``await asyncio.shield(write)`` before this
+            # shielded write proceeds. ``shield`` keeps the cancel off this
+            # (the write) task; the fix drains us to completion here.
+            task_holder["task"].cancel()
+            await asyncio.sleep(0)
+            await real_write_audit_row(**kwargs)  # type: ignore[arg-type]
+            write_committed = True
+
+        monkeypatch.setattr(audit_module, "_write_audit_row", _instrumented_write)
+
+        install_fake_vault(monkeypatch)
+        key = make_rsa_keypair("kid-sse-dbl-cancel")
+        token = mint_token(
+            key,
+            sub="op-sse-dbl-cancel",
+            tenant_id=str(_TENANT_A),
+            tenant_role=TenantRole.OPERATOR.value,
+        )
+
+        inner = FastAPI()
+        inner.include_router(feed_router)
+        asgi_app = RequestContextMiddleware(AuditMiddleware(inner))
+
+        scope = {
+            "type": "http",
+            # ``spec_version="2.4"`` selects Starlette's direct-stream
+            # branch (no disconnect-listener cancel scope), so a task-level
+            # cancel propagates the way a real server-signalled disconnect
+            # does — into the middleware's ``except`` arm.
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "GET",
+            "path": "/api/v1/feed",
+            "raw_path": b"/api/v1/feed",
+            "query_string": b"",
+            "root_path": "",
+            "scheme": "https",
+            "server": ("testserver", 443),
+            "client": ("testclient", 50000),
+            "headers": [(b"authorization", f"Bearer {token}".encode())],
+        }
+
+        request_drained = False
+
+        async def receive() -> dict[str, object]:
+            # Drain the (empty) request body once, then behave like a
+            # still-connected client (block). The disconnect is signalled by
+            # cancelling the ASGI task, not via this channel.
+            nonlocal request_drained
+            if not request_drained:
+                request_drained = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await teardown.wait()
+            return {"type": "http.disconnect"}
+
+        captured_status: dict[str, int] = {}
+
+        async def send(message: dict[str, object]) -> None:
+            if message["type"] == "http.response.start":
+                captured_status["status"] = int(message["status"])  # type: ignore[arg-type]
+            elif message["type"] == "http.response.body" and message.get("body"):
+                first_body_seen.set()
+
+        with respx.mock as mock_router:
+            mock_discovery_and_jwks(mock_router, public_jwks(key))
+            task = asyncio.ensure_future(asgi_app(scope, receive, send))
+            task_holder["task"] = task
+            try:
+                # 1. Let the first SSE frame reach the wire (response has
+                #    started; the generator is now suspended on ``teardown``).
+                async with asyncio.timeout(5.0):
+                    await first_body_seen.wait()
+                assert captured_status["status"] == 200
+
+                # 2. Signal the client disconnect by cancelling the task
+                #    (FIRST cancel). This raises out of the suspended
+                #    generator into the middleware's ``except`` arm, which
+                #    schedules the shielded write; the instrumented INSERT
+                #    then delivers the SECOND cancel mid-write.
+                task.cancel()
+
+                # 3. The task must end cancelled (cancellation honored, not
+                #    suppressed).
+                with pytest.raises(asyncio.CancelledError):
+                    async with asyncio.timeout(5.0):
+                        await task
+            finally:
+                teardown.set()
+
+        # The shielded write committed the row despite the double cancel.
+        assert write_committed, "disconnect-path audit write did not run to completion"
+
+        # Exactly one audit row for the disconnected feed request — no
+        # silent drop.
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            rows = list(
+                (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/feed")))
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 1
+        assert rows[0].operator_sub == "op-sse-dbl-cancel"
+        assert rows[0].method == "GET"
+
 
 # ---------------------------------------------------------------------------
 # Generator — every body-shaping AC

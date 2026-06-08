@@ -90,8 +90,208 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Secret broker `secret.move` op + `SecretEndpoint` adapter protocol (#1577)
+## [0.12.0] - 2026-06-08
 
+### Added
+
+- Add a corpus-agnostic per-tenant **capability gate** on the MCP tool +
+  resource surface (G4.5-T1). A `ToolDefinition` /
+  `ResourceTemplateDefinition` may now declare an optional
+  `required_capability`; a tool/template carrying one is **absent** from
+  `tools/list` / `resources/templates/list` AND rejected with a
+  403-class error at `tools/call` / `resources/read` for any operator
+  whose tenant hasn't provisioned that capability — true absence, not
+  just un-callable, so an agent never sees a capability it can't use.
+  The gate is a second axis orthogonal to the existing role gate
+  (mirrors the connector enable model, not a packaging/entitlement
+  system). `Operator` gains a `capabilities: frozenset[str]` populated
+  from a configurable JWT claim (`JWT_CAPABILITIES_CLAIM_NAME`, default
+  `capabilities`) with no DB hit on `tools/list`; an absent or malformed
+  claim resolves to the empty set (fail-closed). `meho://tenant/{id}/info`
+  now returns a `capabilities` array so MCP clients and the CLI read
+  provisioning from one source of truth. The `meho-docs` add-on is the
+  first consumer (#1528).
+- Backplane→corpus federation client for the `meho-docs` add-on: an
+  async client that forwards the operator JWT to the external
+  vendor-document corpus over HTTP, with `CORPUS_URL` / `CORPUS_AUDIENCE`
+  / `CORPUS_TIMEOUT_SECONDS` / `CORPUS_REQUIRE_FILTERS` settings and a
+  fail-closed `CorpusUnavailable` error (corpus unconfigured, unreachable,
+  or non-2xx) that the upcoming `search_docs` route maps to HTTP 503
+  (#1520). Transport only — the `search_docs` route lands separately.
+- `POST /api/v1/search_docs` — the federated vendor-document retrieval
+  route of the `meho-docs` add-on (G4.5-T3). Operator role minimum,
+  tenant-scoped via the forwarded operator JWT. Enforces a **mandatory
+  binary product+version scope** (REQUIRE_FILTERS): a request missing
+  either is rejected `422` (fail-closed), never forwarded as an
+  unfiltered corpus query — the scope is a containment filter, not a
+  ranking weight (#1178 / #1177). Enforcement is gated by
+  `CORPUS_REQUIRE_FILTERS` (default on). The route federates to the
+  external corpus via the T2 client (`CorpusUnavailable` → `503`, never
+  an empty `200`) and binds one central audit row per query under the
+  named op `meho.docs.search` (`op_class=read`), storing the query only
+  as a SHA-256 hash plus the product/version scope and hit count — so
+  `query_audit` / who-touched surface every docs query without leaking
+  the raw query. The scope-validation + corpus-call + cited-chunk shape
+  live in a shared `docs_search` service the future MCP tool (T4) and
+  CLI verb (T5) reuse (#1521).
+- `search_docs` MCP tool + `meho://docs/{product}/{version}/{chunk_id}`
+  companion resource — the agent-facing face of the `meho-docs` add-on
+  (G4.5-T4). Both are gated by `required_capability="meho-docs"` (T1):
+  absent from `tools/list` / `resources/templates/list` for a tenant
+  without the add-on and 403-class on call, present and callable once
+  provisioned. The tool takes `query` + the **mandatory** `product` +
+  `version` binary scope (strict 2020-12 `inputSchema`,
+  `additionalProperties:false`) and federates through the shared
+  `docs_search` service (T3) to the external corpus, returning ranked
+  cited chunks; a missing/blank scope surfaces the REQUIRE_FILTERS
+  rejection as an MCP `-32602`, a down corpus as `-32603`. Its
+  description routes the agent — `search_docs` for vendor reference,
+  `search_knowledge` for how-we-do-X, `search_memory` for cross-session
+  state — and points at the companion resource, which recovers the full
+  text of a cited chunk on a later turn by re-issuing a scoped search
+  (the corpus transport is search-only). One hashed audit row per call
+  (`op_class=read`); the raw query is never logged (#1523).
+- `meho docs search <query> --product <p> --version <v> [--limit N]
+  [--json]` — the operator-facing CLI verb of the `meho-docs` add-on
+  (G4.5-T5). Wraps `POST /api/v1/search_docs` via the shared generated
+  authed client (bearer + 401-refresh), mirrors the route's
+  REQUIRE_FILTERS gate client-side (missing `--product`/`--version` is
+  rejected before the round-trip), and renders cited chunks as a text
+  table or raw JSON. The `meho docs` tree compiles into every binary
+  but is gated on the tenant's `meho-docs` capability (read from the
+  bearer JWT's `capabilities` claim, T1): when unprovisioned the tree
+  is **hidden from `meho --help`** and every verb refuses with a typed
+  `addon_not_provisioned` error before any network call — true absence,
+  fail-closed. The claim is read unverified (a visibility affordance —
+  the backplane and corpus federation enforce the real boundary), so a
+  forged claim changes only what the CLI shows, not what the server
+  allows (#1524).
+- `ask_docs` MCP tool — the synthesized, **cited** answer over the
+  `meho-docs` corpus (G4.5-T7), the fast-follow to `search_docs`. Runs the
+  **same** shared `docs_search` retrieval (same `required_capability=
+  "meho-docs"` gate, same mandatory `product`+`version` REQUIRE_FILTERS
+  scope, same hashed audit row, `op_class=read`), then composes one
+  grounded answer over the retrieved chunks and returns `{answer,
+  citations[]}` where every citation resolves to a retrieved chunk — no
+  claim survives without a citation. An empty retrieval returns a
+  deterministic "no grounded answer" (the model is never called, so it
+  cannot hallucinate), and an unconfigured/unreachable synthesis model
+  fails closed to `-32603` rather than degrading to an ungrounded answer
+  (reusing the #1386 `LlmClientUnavailable` Anthropic-Messages precedent).
+  Single-shot Q→cited-A only; no new REST/CLI surface (the tool is
+  auto-discovered) (#1526).
+- `meho://retrieve/{query}` MCP resource (G0.5-T9) — exposes the G0.4
+  hybrid-retrieval substrate through the MCP resource registry,
+  percent-decoding the query path segment, sourcing `tenant_id` purely
+  from the JWT, and returning the same `RetrievalHit` shape as
+  `POST /api/v1/retrieve` (operator-min RBAC). Because the query rides in
+  the URI path segment, the resource opts into a new generic
+  `audit_redact_uri` flag on `ResourceTemplateDefinition`: when set, the
+  dispatcher substitutes a query-stripped `meho://retrieve/<redacted>`
+  sentinel for both the audit path and the payload URI, while
+  correlatability is preserved via the existing `audit_query_hash` +
+  `audit_hit_count` contextvars. The flag defaults off, so kb / memory /
+  docs / tenant resources are unaffected (#348 / #1576).
+- Add the `doc_collections` table (collections-as-data) — one row per
+  documentation corpus, the docs analogue of the `targets` registry.
+  Operator-set identity + backend binding (`collection_key` / `vendor` /
+  `backend{type, ref}`) with probe-written liveness (`doc_count` /
+  `last_ingested_at` / `readiness`, populated later). Global + tenant
+  scoping via the dual partial-unique-index idiom, a tenant-first
+  `resolve_doc_collection` lookup with a typed not-found, and a single
+  `project_doc_collection_to_summary` ORM→wire projection. Foundational
+  substrate for the catalogue and collection-scoped `search_docs`; no
+  agent-facing surface yet (#1550).
+- Add a `collection → backend{type, ref}` search router so one doc
+  collection can sit on a managed RAG and another on the JWT-forward
+  corpus behind the same `search_docs`, with the backend never appearing
+  in the request or response. New `docs_search/backends/` package: a
+  `SearchBackend` ABC (with a `probe()` seam for the later readiness
+  Task), a tiny `dict[type, SearchBackend]` registry, and
+  `resolve_backend` / `resolve_backend_or_label` (direct type lookup, no
+  tie-break ladder; unknown/unconfigured type → the existing 503 arm).
+  The single-corpus client is re-homed as the first `corpus-http`
+  adapter, resolving its endpoint/audience per collection from
+  `backend.ref` with the legacy `corpus_url` fallback for an unmigrated
+  single-collection deploy. The `search_docs` service routes through the
+  router via an additive, optional `collection` argument; threading a
+  mandatory collection request param is a downstream Task (#1551).
+- Make the doc-collection catalogue carry **backend readiness** so the
+  router hides managed-RAG operational footguns. Fill in the
+  `SearchBackend.probe(operator, *, backend_ref)` seam to return a typed
+  `BackendReadiness` (reachable / index-built / doc count / last ingest);
+  the `corpus-http` adapter reads it from the corpus `/status` endpoint
+  and serializes concurrent rebuilds **per project** inside the adapter
+  (an `asyncio.Lock` keyed on the corpus endpoint — no substrate
+  scheduler). New tenant_admin-gated routes
+  `POST /api/v1/doc_collections/{collection_key}/probe|enable|disable`: the probe
+  **writes liveness back onto the row on success only** (a failed probe
+  leaves it untouched, the `probe_target` split) and transitions the
+  lifecycle `status` (`provisioning`/`rebuilding` → `ready` once the
+  index is built); enable/disable are idempotent and guarded (forbidden
+  transition → 409). A coarse `/ready` check reports each configured
+  search backend reachable. New `meho docs collections probe|enable|disable`
+  CLI verbs. The search-time "not-ready → typed 409/403" guard
+  (`ensure_collection_searchable`) ships here; wiring it into the
+  `search_docs` route is a downstream Task (#1552) (#1555).
+- Make `collection` the mandatory binary scope on `search_docs` /
+  `ask_docs` across all three surfaces (REST `POST /api/v1/search_docs`,
+  the MCP tools + the `meho://docs/{collection}/{product}/{version}/{chunk_id}`
+  resource, and `meho docs search --collection`). The query routes to the
+  named collection's backend via the T2 router; `product` / `version`
+  demote to optional metadata refinements within the collection (omitting
+  them still succeeds). A missing/blank `collection` → 422 / `-32602`; an
+  unknown collection → 422 / `-32602`. Add **per-collection entitlement**
+  (reusing the `meho-docs` capability substrate, zero new tables): a
+  principal may search a collection only when its tenant holds the
+  `meho-docs:<collection>` capability — a miss → 403 / `-32602` even
+  though the tool stays visible via the base `meho-docs` gate. A
+  not-`ready` collection → 409 / `-32603`. Each call's audit row carries
+  `audit_collection` alongside the canonical `meho.docs.search` /
+  `meho.docs.ask` op_id (#1549), so rows are filterable by both op_id and
+  collection; the raw query stays hashed. The shared resolve + entitle +
+  readiness gate lives in `docs_search/collection_access.py` so all
+  surfaces enforce one policy. CLI client regenerated for the new
+  `collection` request field (#1552).
+- Make the doc-collection catalogue **discoverable** so an agent learns
+  which collections it may search before it searches. Add the
+  `list_doc_collections` MCP tool (`required_capability="meho-docs"`,
+  operator/read), the REST sibling `GET /api/v1/doc_collections`
+  (operator), and the `meho docs collections list` CLI verb (`--vendor` /
+  `--limit` / `--cursor` / `--json`, on the existing capability-gated
+  `collections` parent). All three read `doc_collections` tenant-scoped
+  (global + tenant rows, tenant row shadows a global key once), filter to
+  the collections the principal is **entitled** to (`meho-docs:<key>` —
+  the same per-collection key `search_docs` enforces, so every listed key
+  is one `search_docs` accepts), keyset-paginate by `collection_key`, and
+  bind the canonical `meho.docs.collections.list` audit op_id. Add an
+  `initialize.instructions` catalogue band: the MCP `initialize` preamble
+  now carries a guard-delimited `<<DOC_COLLECTIONS_AVAILABLE>>` block
+  listing the operator's entitled collections (key / vendor / products /
+  when-to-use + status), threaded via an optional `capabilities` keyword
+  on `assemble_preamble`; the band is independently token-capped (an
+  over-budget catalogue collapses to a summary pointing at
+  `list_doc_collections`) and returns empty for a non-docs tenant, so an
+  unprovisioned preamble is byte-identical to before. CLI client + OpenAPI
+  snapshot regenerated for the new list route (#1553).
+- Add opt-in **cross-collection fan-out** to `search_docs` (REST, MCP,
+  and `meho docs search`): pass an explicit `collections=[a, b]` list
+  (repeat `--collection` on the CLI) or the `collection="all"` sentinel
+  (`--collection all`) to query several entitled collections at once. Each
+  collection is searched independently on its own backend, and the per-
+  collection ranked lists are merged by **reciprocal-rank fusion** (the
+  house `RRF_K=60`) — never a raw-score sort, since scores are not
+  comparable across backends/embedding models. Every returned chunk is
+  tagged with its source `collection` for provenance. The fan-out resolves
+  to **only entitled, ready** collections — non-entitled and not-ready
+  members are dropped (logged, never silently truncated); an empty
+  resolved set → 403 / `-32602`. A single `collection` and the fan-out
+  scope are mutually exclusive (→ 422 / `-32602`). The audit row's
+  `audit_collection` records the sorted, comma-joined queried set so
+  who-touched attributes the fan-out. `ask_docs` stays single-collection
+  only and rejects the fan-out shapes. CLI client regenerated for the new
+  `collections` request field and the `DocsChunk.collection` provenance
+  field (#1554).
 - Add the server-side `secret.move` broker op (synthetic
   `secret-broker-1.x` identity, `requires_approval=True` +
   `safety_level="dangerous"`) and the `SecretEndpoint` adapter protocol
@@ -100,10 +300,7 @@ connector-related release-notes line.
   backplane; the value never enters the op params, response, logs, or the
   audit row — only the move status, the value SHA-256, and its length.
   The keycloak sink, approval-queue gating, CLI verb, and docs page are
-  separate sibling tasks reusing this contract.
-
-### Keycloak-credential `SecretEndpoint` sink — broker's second kind (#1578)
-
+  separate sibling tasks reusing this contract (#1577).
 - Add a `keycloak`-kind `SecretEndpoint` sink so a `secret.move` can land
   a credential in a Keycloak user's password, proving the broker's
   cross-kind ("≥2 kinds") move surface (`vault:secret/...#password` →
@@ -112,10 +309,7 @@ connector-related release-notes line.
   .../reset-password`) and writes the value server-side from the
   in-memory `SecretMaterial`; the value never enters op params, the
   response, logs, or the audit row. Keycloak is write-only here, so the
-  source side raises a clear unsupported error.
-
-### Secret broker `secret.move` — ref-only approval summary + time-boxed scope (#1579)
-
+  source side raises a clear unsupported error (#1578).
 - Gate `secret.move` through the existing approval queue as a change-class
   op. A park-time preview builder records a **ref-only** `proposed_effect`
   on the approval request — the parsed `<kind>:<ref>` of `--from`/`--to`
@@ -124,10 +318,7 @@ connector-related release-notes line.
   existing `AgentPermission` + approval `expires_at` machinery: an expired
   grant authorizes nothing and a parked request swept to `EXPIRED` is no
   longer decidable. Reuses the shipped approval substrate — no new
-  capability/token system.
-
-### `meho secret move` CLI verb (#1580)
-
+  capability/token system (#1579).
 - Add the operator-facing `meho secret move --from <kind>:<ref> --to
   <kind>:<ref> --reason …` verb over the `secret-broker-1.x` connector
   (#1577). It is references-not-values: only the `<kind>:<ref>` source /
@@ -137,30 +328,45 @@ connector-related release-notes line.
   the verb surfaces `status=awaiting_approval` verbatim (rendered, not
   treated as an error) and otherwise prints only the move status, the
   value SHA-256, and its byte length. Reuses the generic
-  `/api/v1/operations/call` route, so the OpenAPI snapshot is unchanged.
+  `/api/v1/operations/call` route, so the OpenAPI snapshot is unchanged
+  (#1580).
+- `meho.connector.ingest` MCP tool gains an `async=true` mode + a
+  companion `meho.connector.ingest_status` poll tool (G3.5-T2),
+  carrying the #1303 REST async-202 offload to the agent-facing MCP
+  surface so a real vendor-spec ingest (e.g. SDDC Manager 9.0) returns
+  a job handle immediately instead of blocking the parse+register+LLM-
+  grouping pipeline past the agent's tool-call deadline. The async path
+  reuses the existing in-memory `IngestJobRegistry` + `run_ingest_job`,
+  so a job started over MCP is poll-able over the REST
+  `GET /api/v1/connectors/ingest/jobs/{job_id}` endpoint and vice versa;
+  the poll tool reports the run through to a terminal `succeeded`
+  (final ingestion + grouping counts) or `failed` (`error_class` +
+  `error`). `dry_run=true` and `async` unset keep the inline-return
+  shape (no regression). The ingest tools moved into a new
+  `connector_ingest` module alongside the existing `connector_admin`
+  review/edit tools (#1531).
 
-### Secret-broker operator docs page (#1581)
+### Changed
 
-- Add the operator/reviewer-facing runbook
-  [`docs/cross-repo/secret-broker.md`](docs/cross-repo/secret-broker.md)
-  for the G0.22 secret broker — the `<kind>:<ref>` move-intent schema
-  (shipped `vault` source+sink and `keycloak` sink kinds), the value-free
-  `{status, value_sha256, length}` response, the "agent never observes the
-  value" guarantee tied to each enforcing mechanism (no value-bearing
-  flag / param / response / log / audit row / approval `proposed_effect` /
-  broadcast), and the enlarged threat model — the backplane as a
-  credential-bearing intermediary, mitigated by operator-context reads,
-  the `dangerous` deny-by-default / needs-approval-ceiling lattice,
-  mandatory four-eyes approval, time-boxed `AgentPermission` + approval
-  `expires_at`, `params_hash` tamper-evidence, and hash-only audit. Names
-  the deferred token-minting / diff-shaped-approval follow-ups so neither
-  is mistaken for shipped, and links from the `docs/cross-repo/` runbook
-  index. Documents the actual merged behaviour, including where the CLI
-  (`--reason` required) tightens the op schema (`reason` optional) and
-  that a parked move exits 0.
-
-### Retire the stale `meho targets create` verb tree-wide (#1559)
-
+- Connector ingest now rejects a **Swagger 2.0** spec with an
+  *actionable* `UnsupportedSpecError` that names the conversion path —
+  convert to OpenAPI 3.x (`swagger2openapi` / `converter.swagger.io`)
+  and re-ingest the 3.x output — instead of a bare "not supported (
+  v0.2.next)". The parser stays OpenAPI-3.x-only on purpose (no
+  spec-conversion dependency pulled into the Python backend); the
+  enriched diagnostic unblocks 2.0-only vendor surfaces such as Harbor
+  2.x's `swagger.yaml` by telling the operator exactly what to do.
+  OpenAPI 3.0.x / 3.1 ingestion is unchanged (#1532).
+- **Security (SSRF):** the backend connector-spec fetch is now
+  **https-only** — SSRF-guarded, streamed, 20 MiB-capped, and
+  relative-redirect-safe — so a spec URL can no longer reach a local
+  file (`file://`) or a non-https / internal scheme. To keep the
+  `docs:` / `file://` on-ramps working without exposing the backend to
+  local paths, the CLI now reads those spec sources **client-side** and
+  uploads the bytes over a new `SpecSource.content` channel rather than
+  handing the backend a path to fetch. Together these fold the #95 SSRF /
+  local-file guard and the #102 content-upload on-ramp fix into one
+  coherent change (supersedes #1477) (#95 + #102 / #1572).
 - Remove the last references to the nonexistent `meho targets create`
   command outside the CLI surface that #1536 already fixed. The three
   backend `targets discover` docstrings (`CandidateHint`,
@@ -174,10 +380,82 @@ connector-related release-notes line.
   swap would have left an invalid file-based-import call. The dangling
   `(auto-registration is v0.2.next)` aside is reworded to
   `(one-shot auto-registration is not yet available)`, matching #1536. The
-  verb now survives only in the two docs that state it does not exist.
+  verb now survives only in the two docs that state it does not exist
+  (#1559).
 
-### Disabled-collection search contract (#1567)
+### Fixed
 
+- **Security (path traversal):** percent-encode operator-supplied `id` /
+  `uuid` segments in the Keycloak Admin REST connector and add a UUID
+  `pattern` gate. The fields were interpolated verbatim into f-string URL
+  paths, and because httpx resolves `..` segments when merging a relative
+  path against `base_url`, a traversal-shaped id (e.g.
+  `../../../../realms/master/clients`) could escape the connector's
+  configured `managed_realm` and reach any realm/admin path the broad
+  admin service-account token can touch. A new `quote_segment()` helper
+  (`urllib.parse.quote(..., safe="")`, mirroring the ArgoCD `_quote_name`
+  precedent) is applied at all six path-interpolation sites, and a UUID
+  `pattern` constraint on every `id`/`uuid` field in the op
+  `parameter_schema`s makes the dispatcher's JSON-schema gate reject
+  traversal-shaped input before any outbound call fires (#96 / #1476).
+- **Security (secret disclosure):** clamp the `call_operation` envelope
+  broadcast to the inner op's class. `handle_tools_call` computed the
+  broadcast detail from the literal wrapper tool name `call_operation`,
+  which `classify_op` maps to `other` → full detail, so the per-tenant
+  broadcast event shipped `resolver_params` verbatim — including
+  `params.data` for `vault.kv.put` and `params.password` for
+  `vault.auth.userpass.write` — exposing secrets to every co-tenant feed
+  subscriber. The handler now passes the inner `op_id` (from
+  `arguments["op_id"]`) to `compute_effective_broadcast_detail`, so a
+  credential-class inner op collapses to the aggregate-only
+  `{op_class, result_status}` shape the inner DISPATCH row already uses;
+  non-secret inner ops keep full-detail broadcast, and the envelope
+  `op_id` / audit path stay the wrapper name so audit cardinality is
+  unaffected (#93 / #1497).
+- **Security (credential disclosure):** extend the `_API_KEY` redaction
+  label set so free-text / error strings carrying `token` /
+  `refresh_token` / `auth_token` / `session_token` / `secret_id` /
+  `private_key` are masked. The pattern previously matched only `api_key`
+  / `access_token` / `secret(_key)?` / `password` / `passwd` / `pwd` /
+  `client_secret`, so a bare `token:` (and `secret_id:`, which
+  `secret(?:[_-]?key)?` failed to match) slipped through — any connector
+  whose upstream response embedded such a label in an error body passed
+  the value to the agent and persisted it in the audit raw payload. Six
+  more-specific members (`*_token` / `secret[_-]?id` / `private[_-]?key`)
+  are added before the broad bare-`token` member so leftmost-first
+  alternation never shadows them, and the module docstring + both policy
+  reason strings are reconciled with the actual coverage so the gap
+  cannot silently re-open (#94 / #1498).
+- `meho.connector.ingest` over MCP now returns a typed `-32602 Invalid
+  Params` with structured `error.data` for every spec-rejection class
+  (`UnsupportedSpecError`, `InvalidSpecError`, `UpstreamNotSpecError`,
+  `InvalidSchemaError`, `OpIdCollision`, `LlmOutputInvalid`) instead of a
+  bare `-32603 "internal error: <ClassName>"` with the diagnostic
+  discarded. Agents now get the same actionable detail the REST surface
+  already carried (e.g. the Swagger-2.0 conversion path, "upstream
+  served HTML, not a spec"), completing the #777 error-envelope pattern
+  (#1534).
+- NSX 9.x (VCF 9) is now ingestable into a dispatchable connector.
+  NSX-T 4.x was renumbered onto the VCF train at VCF 9.0, but
+  `NsxConnector` advertised `supported_version_range=">=4.0,<5.0"`, so a
+  VCF-9 NSX appliance (which reports NSX 9.0.x and a 9.x `info.version`)
+  could not be ingested under any label — the spec/label gate and the
+  class version-range gate pincered every version. The range is widened
+  to `">=4.0,<10.0"` and the class pin + catalog row track the
+  VCF-9-aligned `9.0` line (the standalone NSX-T 4.x line still
+  dispatches through the same class), and `apply_nsx_core_curation` gains
+  a `connector_id` keyword so it curates the ops the ingest actually
+  landed (e.g. `nsx-rest-9.1.0.0`) (#1530).
+- The `docs:<connector-id>/<file>` spec-source shorthand is now honest:
+  it is resolved **CLI-side only** (expanded to a `file://` URI against
+  `$CLAUDE_RDC_DOCS`). Previously the schema docstring, CLI help, and a
+  CLI comment claimed the backplane resolved `docs:` natively — it never
+  did, so a bare `docs:` URI surfaced as an opaque
+  `InvalidSpecError`/`-32603` that read like a missing file. The CLI now
+  rejects an unset-`$CLAUDE_RDC_DOCS` `docs:` spec up front with a hint
+  naming the env var, and the backend rejects any `docs:` URI that
+  reaches the parser with a typed `UnsupportedSpecError` naming the
+  scheme. `https://` / `file://` specs are unaffected (#1535).
 - Reconcile the disabled-collection `search_docs` contract so code, the
   OpenAPI response descriptions, the `disable` endpoint docstring, and the
   CLI `disable` help all agree, and restore the operationally load-bearing
@@ -200,10 +478,7 @@ connector-related release-notes line.
   rather than the misleading `insufficient_role`. (Option A of the issue —
   honor the designed split — chosen over Option B's 409-for-all because the
   terminal/retryable signal is a genuine client value and the mechanism was
-  already shipped and tested by #1555.)
-
-### list_doc_collections vendor scoping (#1568)
-
+  already shipped and tested by #1555.) (#1567)
 - Fix the optional `vendor` filter on `list_doc_collections` (MCP tool +
   `GET /api/v1/doc_collections` REST route) to run **after** the
   tenant-first dedupe instead of before it. Previously the filter was a
@@ -216,10 +491,54 @@ connector-related release-notes line.
   drops the row the principal would actually search; the keyset cursor
   (`collection_key > cursor`) stays in SQL and pagination is unaffected.
   Not an entitlement leak — the returned `collection_key` set and
-  entitlement filtering are unchanged.
+  entitlement filtering are unchanged (#1568).
+- Repoint `meho targets discover` (help text, post-run output, and the
+  command doc-comment) from the nonexistent `meho targets create` to
+  `meho targets import`, the verb that actually registers a reviewed
+  candidate. The stale `(auto-registration is v0.2.next)` aside is
+  reworded so it no longer dangles on a verb that does not exist (#1536).
+- Stream `text/event-stream` responses through `AuditMiddleware` instead
+  of buffering them. The middleware previously buffered the entire ASGI
+  response before forwarding, so SSE endpoints (`/api/v1/feed`,
+  `/ui/broadcast/stream`) delivered zero bytes until the stream closed —
+  which for an open-ended feed is never, leaving the live-activity UI and
+  `meho status --watch` dark on a real deploy (#1354 unmasked this by
+  removing the spurious teardown that had been flushing the buffer with an
+  error frame). The middleware now detects an SSE response via the
+  `content-type` on `http.response.start` and forwards the start message
+  plus every body chunk immediately; the audit row is still written at
+  stream end (normal completion) or on a client-disconnect
+  `CancelledError`, so the fail-closed "every authenticated action gets a
+  row" contract holds for the streaming path. Non-streaming JSON routes
+  keep the buffered fail-closed-500 contract verbatim (#1389 / #1585).
+- Bind a canonical `audit_op_id` on the MCP `search_docs` / `ask_docs`
+  handlers and make the dispatcher honor a handler-bound `audit_op_id` as
+  an explicit override of the seeded tool-name op_id, so every docs query
+  (REST / CLI / MCP) is filterable by `op_id=meho.docs.search` /
+  `meho.docs.ask`. The same change lands the previously-ineffective dotted
+  op_ids on the sibling MCP tools (`agent_runs`, `scheduler`, `approvals`,
+  `agent_grants`, `agent_principals`), restoring the documented
+  transport-independence of the audit op_id. `op_class` stays `read`; the
+  raw query stays hashed (#1549 / #1558).
 
-### Doc-collection docs + runbook (#1556)
+### Documentation
 
+- Operator runbook for the `meho-docs` add-on:
+  `docs/cross-repo/meho-docs-addon.md` (G4.5-T6). Covers what the add-on
+  **is** (federated vendor-document layer, not ingested — vs the
+  lightweight kb `search_knowledge`), **provisioning** (granting the
+  `meho-docs` capability via the JWT `capabilities` claim from T1, plus
+  the `CORPUS_*` settings from T2 the deploy needs), **verify** (the
+  surface present + returning cited chunks on a provisioned tenant,
+  absent on an unprovisioned one, the per-face audit row visible via
+  `meho audit query` — `meho.docs.search` for the REST route + CLI verb,
+  `search_docs` for the MCP tool, the dispatcher's tool-name-verbatim
+  convention), and the one-line **routing convention** —
+  "ask the team first (`search_knowledge` / `search_memory`), escalate
+  to `search_docs` only on a miss or an explicit vendor-fact need" —
+  matching the shipped T4 tool description. Notes the external
+  MEHO.Knowledge → meho-docs corpus rename is ops-side, tracked on the
+  consumer repo (#1525).
 - Update the operator provisioning runbook
   (`docs/cross-repo/meho-docs-addon.md`) to the **doc-collection
   catalogue** model now that the whole G4.6 feature has shipped. The page
@@ -248,312 +567,31 @@ connector-related release-notes line.
   verbatim: *ask the team first — `search_knowledge` / `search_memory` —
   escalate to `search_docs(collection=…)` only on a miss or an explicit
   vendor-fact need; pick the collection explicitly (it's a binary filter,
-  not a guess).* Docs-only — no code or API-surface change.
-
-### list_doc_collections catalogue discovery (#1553)
-
-- Make the doc-collection catalogue **discoverable** so an agent learns
-  which collections it may search before it searches. Add the
-  `list_doc_collections` MCP tool (`required_capability="meho-docs"`,
-  operator/read), the REST sibling `GET /api/v1/doc_collections`
-  (operator), and the `meho docs collections list` CLI verb (`--vendor` /
-  `--limit` / `--cursor` / `--json`, on the existing capability-gated
-  `collections` parent). All three read `doc_collections` tenant-scoped
-  (global + tenant rows, tenant row shadows a global key once), filter to
-  the collections the principal is **entitled** to (`meho-docs:<key>` —
-  the same per-collection key `search_docs` enforces, so every listed key
-  is one `search_docs` accepts), keyset-paginate by `collection_key`, and
-  bind the canonical `meho.docs.collections.list` audit op_id. Add an
-  `initialize.instructions` catalogue band: the MCP `initialize` preamble
-  now carries a guard-delimited `<<DOC_COLLECTIONS_AVAILABLE>>` block
-  listing the operator's entitled collections (key / vendor / products /
-  when-to-use + status), threaded via an optional `capabilities` keyword
-  on `assemble_preamble`; the band is independently token-capped (an
-  over-budget catalogue collapses to a summary pointing at
-  `list_doc_collections`) and returns empty for a non-docs tenant, so an
-  unprovisioned preamble is byte-identical to before. CLI client + OpenAPI
-  snapshot regenerated for the new list route.
-
-### Cross-collection fan-out (#1554)
-
-- Add opt-in **cross-collection fan-out** to `search_docs` (REST, MCP,
-  and `meho docs search`): pass an explicit `collections=[a, b]` list
-  (repeat `--collection` on the CLI) or the `collection="all"` sentinel
-  (`--collection all`) to query several entitled collections at once. Each
-  collection is searched independently on its own backend, and the per-
-  collection ranked lists are merged by **reciprocal-rank fusion** (the
-  house `RRF_K=60`) — never a raw-score sort, since scores are not
-  comparable across backends/embedding models. Every returned chunk is
-  tagged with its source `collection` for provenance. The fan-out resolves
-  to **only entitled, ready** collections — non-entitled and not-ready
-  members are dropped (logged, never silently truncated); an empty
-  resolved set → 403 / `-32602`. A single `collection` and the fan-out
-  scope are mutually exclusive (→ 422 / `-32602`). The audit row's
-  `audit_collection` records the sorted, comma-joined queried set so
-  who-touched attributes the fan-out. `ask_docs` stays single-collection
-  only and rejects the fan-out shapes. CLI client regenerated for the new
-  `collections` request field and the `DocsChunk.collection` provenance
-  field.
-
-### Collection-scoped doc search (#1552)
-
-- Make `collection` the mandatory binary scope on `search_docs` /
-  `ask_docs` across all three surfaces (REST `POST /api/v1/search_docs`,
-  the MCP tools + the `meho://docs/{collection}/{product}/{version}/{chunk_id}`
-  resource, and `meho docs search --collection`). The query routes to the
-  named collection's backend via the T2 router; `product` / `version`
-  demote to optional metadata refinements within the collection (omitting
-  them still succeeds). A missing/blank `collection` → 422 / `-32602`; an
-  unknown collection → 422 / `-32602`. Add **per-collection entitlement**
-  (reusing the `meho-docs` capability substrate, zero new tables): a
-  principal may search a collection only when its tenant holds the
-  `meho-docs:<collection>` capability — a miss → 403 / `-32602` even
-  though the tool stays visible via the base `meho-docs` gate. A
-  not-`ready` collection → 409 / `-32603`. Each call's audit row carries
-  `audit_collection` alongside the canonical `meho.docs.search` /
-  `meho.docs.ask` op_id (#1549), so rows are filterable by both op_id and
-  collection; the raw query stays hashed. The shared resolve + entitle +
-  readiness gate lives in `docs_search/collection_access.py` so all
-  surfaces enforce one policy. CLI client regenerated for the new
-  `collection` request field.
-
-### Doc-collection readiness probe + lifecycle (#1555)
-
-- Make the doc-collection catalogue carry **backend readiness** so the
-  router hides managed-RAG operational footguns. Fill in the
-  `SearchBackend.probe(operator, *, backend_ref)` seam to return a typed
-  `BackendReadiness` (reachable / index-built / doc count / last ingest);
-  the `corpus-http` adapter reads it from the corpus `/status` endpoint
-  and serializes concurrent rebuilds **per project** inside the adapter
-  (an `asyncio.Lock` keyed on the corpus endpoint — no substrate
-  scheduler). New tenant_admin-gated routes
-  `POST /api/v1/doc_collections/{key}/probe|enable|disable`: the probe
-  **writes liveness back onto the row on success only** (a failed probe
-  leaves it untouched, the `probe_target` split) and transitions the
-  lifecycle `status` (`provisioning`/`rebuilding` → `ready` once the
-  index is built); enable/disable are idempotent and guarded (forbidden
-  transition → 409). A coarse `/ready` check reports each configured
-  search backend reachable. New `meho docs collections probe|enable|disable`
-  CLI verbs. The search-time "not-ready → typed 409/403" guard
-  (`ensure_collection_searchable`) ships here; wiring it into the
-  `search_docs` route is a downstream Task (#1552).
-
-### Backend-agnostic search router (#1551)
-
-- Add a `collection → backend{type, ref}` search router so one doc
-  collection can sit on a managed RAG and another on the JWT-forward
-  corpus behind the same `search_docs`, with the backend never appearing
-  in the request or response. New `docs_search/backends/` package: a
-  `SearchBackend` ABC (with a `probe()` seam for the later readiness
-  Task), a tiny `dict[type, SearchBackend]` registry, and
-  `resolve_backend` / `resolve_backend_or_label` (direct type lookup, no
-  tie-break ladder; unknown/unconfigured type → the existing 503 arm).
-  The single-corpus client is re-homed as the first `corpus-http`
-  adapter, resolving its endpoint/audience per collection from
-  `backend.ref` with the legacy `corpus_url` fallback for an unmigrated
-  single-collection deploy. The `search_docs` service routes through the
-  router via an additive, optional `collection` argument; threading a
-  mandatory collection request param is a downstream Task.
-
-### Doc-collection registry (#1550)
-
-- Add the `doc_collections` table (collections-as-data) — one row per
-  documentation corpus, the docs analogue of the `targets` registry.
-  Operator-set identity + backend binding (`collection_key` / `vendor` /
-  `backend{type, ref}`) with probe-written liveness (`doc_count` /
-  `last_ingested_at` / `readiness`, populated later). Global + tenant
-  scoping via the dual partial-unique-index idiom, a tenant-first
-  `resolve_doc_collection` lookup with a typed not-found, and a single
-  `project_doc_collection_to_summary` ORM→wire projection. Foundational
-  substrate for the catalogue and collection-scoped `search_docs`; no
-  agent-facing surface yet.
-
-### CLI — `targets discover` points at the real registration verb (#1536)
-
-- Repoint `meho targets discover` (help text, post-run output, and the
-  command doc-comment) from the nonexistent `meho targets create` to
-  `meho targets import`, the verb that actually registers a reviewed
-  candidate. The stale `(auto-registration is v0.2.next)` aside is
-  reworded so it no longer dangles on a verb that does not exist.
-
-### Connector ingest — hand-authored spec on-ramp (#1533)
-
+  not a guess).* Docs-only — no code or API-surface change (#1556).
 - Document the hand-authored-OpenAPI-3.x → `--spec file://…` route as the
   intended on-ramp for products that publish **no** OpenAPI spec (VCF
   Fleet / vRSLCM, Hetzner Robot): a "Product publishes no OpenAPI spec"
   section in `docs/cross-repo/connector-ingestion.md` with a minimal
   worked example, and the catalog-miss `next_step` rationale widened to
   name it so a 0-op `state=registered` connector no longer reads as a
-  dead end.
-
-### Added
-
-- Add a corpus-agnostic per-tenant **capability gate** on the MCP tool +
-  resource surface (G4.5-T1). A `ToolDefinition` /
-  `ResourceTemplateDefinition` may now declare an optional
-  `required_capability`; a tool/template carrying one is **absent** from
-  `tools/list` / `resources/templates/list` AND rejected with a
-  403-class error at `tools/call` / `resources/read` for any operator
-  whose tenant hasn't provisioned that capability — true absence, not
-  just un-callable, so an agent never sees a capability it can't use.
-  The gate is a second axis orthogonal to the existing role gate
-  (mirrors the connector enable model, not a packaging/entitlement
-  system). `Operator` gains a `capabilities: frozenset[str]` populated
-  from a configurable JWT claim (`JWT_CAPABILITIES_CLAIM_NAME`, default
-  `capabilities`) with no DB hit on `tools/list`; an absent or malformed
-  claim resolves to the empty set (fail-closed). `meho://tenant/{id}/info`
-  now returns a `capabilities` array so MCP clients and the CLI read
-  provisioning from one source of truth. The `meho-docs` add-on is the
-  first consumer.
-- Backplane→corpus federation client for the `meho-docs` add-on: an
-  async client that forwards the operator JWT to the external
-  vendor-document corpus over HTTP, with `CORPUS_URL` / `CORPUS_AUDIENCE`
-  / `CORPUS_TIMEOUT_SECONDS` / `CORPUS_REQUIRE_FILTERS` settings and a
-  fail-closed `CorpusUnavailable` error (corpus unconfigured, unreachable,
-  or non-2xx) that the upcoming `search_docs` route maps to HTTP 503
-  (#1520). Transport only — the `search_docs` route lands separately.
-- `POST /api/v1/search_docs` — the federated vendor-document retrieval
-  route of the `meho-docs` add-on (G4.5-T3). Operator role minimum,
-  tenant-scoped via the forwarded operator JWT. Enforces a **mandatory
-  binary product+version scope** (REQUIRE_FILTERS): a request missing
-  either is rejected `422` (fail-closed), never forwarded as an
-  unfiltered corpus query — the scope is a containment filter, not a
-  ranking weight (#1178 / #1177). Enforcement is gated by
-  `CORPUS_REQUIRE_FILTERS` (default on). The route federates to the
-  external corpus via the T2 client (`CorpusUnavailable` → `503`, never
-  an empty `200`) and binds one central audit row per query under the
-  named op `meho.docs.search` (`op_class=read`), storing the query only
-  as a SHA-256 hash plus the product/version scope and hit count — so
-  `query_audit` / who-touched surface every docs query without leaking
-  the raw query. The scope-validation + corpus-call + cited-chunk shape
-  live in a shared `docs_search` service the future MCP tool (T4) and
-  CLI verb (T5) reuse (#1521).
-- `meho docs search <query> --product <p> --version <v> [--limit N]
-  [--json]` — the operator-facing CLI verb of the `meho-docs` add-on
-  (G4.5-T5). Wraps `POST /api/v1/search_docs` via the shared generated
-  authed client (bearer + 401-refresh), mirrors the route's
-  REQUIRE_FILTERS gate client-side (missing `--product`/`--version` is
-  rejected before the round-trip), and renders cited chunks as a text
-  table or raw JSON. The `meho docs` tree compiles into every binary
-  but is gated on the tenant's `meho-docs` capability (read from the
-  bearer JWT's `capabilities` claim, T1): when unprovisioned the tree
-  is **hidden from `meho --help`** and every verb refuses with a typed
-  `addon_not_provisioned` error before any network call — true absence,
-  fail-closed. The claim is read unverified (a visibility affordance —
-  the backplane and corpus federation enforce the real boundary), so a
-  forged claim changes only what the CLI shows, not what the server
-  allows (#1524).
-- `search_docs` MCP tool + `meho://docs/{product}/{version}/{chunk_id}`
-  companion resource — the agent-facing face of the `meho-docs` add-on
-  (G4.5-T4). Both are gated by `required_capability="meho-docs"` (T1):
-  absent from `tools/list` / `resources/templates/list` for a tenant
-  without the add-on and 403-class on call, present and callable once
-  provisioned. The tool takes `query` + the **mandatory** `product` +
-  `version` binary scope (strict 2020-12 `inputSchema`,
-  `additionalProperties:false`) and federates through the shared
-  `docs_search` service (T3) to the external corpus, returning ranked
-  cited chunks; a missing/blank scope surfaces the REQUIRE_FILTERS
-  rejection as an MCP `-32602`, a down corpus as `-32603`. Its
-  description routes the agent — `search_docs` for vendor reference,
-  `search_knowledge` for how-we-do-X, `search_memory` for cross-session
-  state — and points at the companion resource, which recovers the full
-  text of a cited chunk on a later turn by re-issuing a scoped search
-  (the corpus transport is search-only). One hashed audit row per call
-  (`op_class=read`); the raw query is never logged (#1523).
-- `ask_docs` MCP tool — the synthesized, **cited** answer over the
-  `meho-docs` corpus (G4.5-T7), the fast-follow to `search_docs`. Runs the
-  **same** shared `docs_search` retrieval (same `required_capability=
-  "meho-docs"` gate, same mandatory `product`+`version` REQUIRE_FILTERS
-  scope, same hashed audit row, `op_class=read`), then composes one
-  grounded answer over the retrieved chunks and returns `{answer,
-  citations[]}` where every citation resolves to a retrieved chunk — no
-  claim survives without a citation. An empty retrieval returns a
-  deterministic "no grounded answer" (the model is never called, so it
-  cannot hallucinate), and an unconfigured/unreachable synthesis model
-  fails closed to `-32603` rather than degrading to an ungrounded answer
-  (reusing the #1386 `LlmClientUnavailable` Anthropic-Messages precedent).
-  Single-shot Q→cited-A only; no new REST/CLI surface (the tool is
-  auto-discovered) (#1526).
-- `meho.connector.ingest` MCP tool gains an `async=true` mode + a
-  companion `meho.connector.ingest_status` poll tool (G3.5-T2),
-  carrying the #1303 REST async-202 offload to the agent-facing MCP
-  surface so a real vendor-spec ingest (e.g. SDDC Manager 9.0) returns
-  a job handle immediately instead of blocking the parse+register+LLM-
-  grouping pipeline past the agent's tool-call deadline. The async path
-  reuses the existing in-memory `IngestJobRegistry` + `run_ingest_job`,
-  so a job started over MCP is poll-able over the REST
-  `GET /api/v1/connectors/ingest/jobs/{job_id}` endpoint and vice versa;
-  the poll tool reports the run through to a terminal `succeeded`
-  (final ingestion + grouping counts) or `failed` (`error_class` +
-  `error`). `dry_run=true` and `async` unset keep the inline-return
-  shape (no regression). The ingest tools moved into a new
-  `connector_ingest` module alongside the existing `connector_admin`
-  review/edit tools (#1531).
-
-### Fixed
-
-- `meho.connector.ingest` over MCP now returns a typed `-32602 Invalid
-  Params` with structured `error.data` for every spec-rejection class
-  (`UnsupportedSpecError`, `InvalidSpecError`, `UpstreamNotSpecError`,
-  `InvalidSchemaError`, `OpIdCollision`, `LlmOutputInvalid`) instead of a
-  bare `-32603 "internal error: <ClassName>"` with the diagnostic
-  discarded. Agents now get the same actionable detail the REST surface
-  already carried (e.g. the Swagger-2.0 conversion path, "upstream
-  served HTML, not a spec"), completing the #777 error-envelope pattern
-  (#1534).
-
-- NSX 9.x (VCF 9) is now ingestable into a dispatchable connector.
-  NSX-T 4.x was renumbered onto the VCF train at VCF 9.0, but
-  `NsxConnector` advertised `supported_version_range=">=4.0,<5.0"`, so a
-  VCF-9 NSX appliance (which reports NSX 9.0.x and a 9.x `info.version`)
-  could not be ingested under any label — the spec/label gate and the
-  class version-range gate pincered every version. The range is widened
-  to `">=4.0,<10.0"` and the class pin + catalog row track the
-  VCF-9-aligned `9.0` line (the standalone NSX-T 4.x line still
-  dispatches through the same class), and `apply_nsx_core_curation` gains
-  a `connector_id` keyword so it curates the ops the ingest actually
-  landed (e.g. `nsx-rest-9.1.0.0`) (#1530).
-- The `docs:<connector-id>/<file>` spec-source shorthand is now honest:
-  it is resolved **CLI-side only** (expanded to a `file://` URI against
-  `$CLAUDE_RDC_DOCS`). Previously the schema docstring, CLI help, and a
-  CLI comment claimed the backplane resolved `docs:` natively — it never
-  did, so a bare `docs:` URI surfaced as an opaque
-  `InvalidSpecError`/`-32603` that read like a missing file. The CLI now
-  rejects an unset-`$CLAUDE_RDC_DOCS` `docs:` spec up front with a hint
-  naming the env var, and the backend rejects any `docs:` URI that
-  reaches the parser with a typed `UnsupportedSpecError` naming the
-  scheme. `https://` / `file://` specs are unaffected (#1535).
-
-### Changed
-
-- Connector ingest now rejects a **Swagger 2.0** spec with an
-  *actionable* `UnsupportedSpecError` that names the conversion path —
-  convert to OpenAPI 3.x (`swagger2openapi` / `converter.swagger.io`)
-  and re-ingest the 3.x output — instead of a bare "not supported (
-  v0.2.next)". The parser stays OpenAPI-3.x-only on purpose (no
-  spec-conversion dependency pulled into the Python backend); the
-  enriched diagnostic unblocks 2.0-only vendor surfaces such as Harbor
-  2.x's `swagger.yaml` by telling the operator exactly what to do.
-  OpenAPI 3.0.x / 3.1 ingestion is unchanged (#1532).
-
-### Documentation
-
-- Operator runbook for the `meho-docs` add-on:
-  `docs/cross-repo/meho-docs-addon.md` (G4.5-T6). Covers what the add-on
-  **is** (federated vendor-document layer, not ingested — vs the
-  lightweight kb `search_knowledge`), **provisioning** (granting the
-  `meho-docs` capability via the JWT `capabilities` claim from T1, plus
-  the `CORPUS_*` settings from T2 the deploy needs), **verify** (the
-  surface present + returning cited chunks on a provisioned tenant,
-  absent on an unprovisioned one, the per-face audit row visible via
-  `meho audit query` — `meho.docs.search` for the REST route + CLI verb,
-  `search_docs` for the MCP tool, the dispatcher's tool-name-verbatim
-  convention), and the one-line **routing convention** —
-  "ask the team first (`search_knowledge` / `search_memory`), escalate
-  to `search_docs` only on a miss or an explicit vendor-fact need" —
-  matching the shipped T4 tool description. Notes the external
-  MEHO.Knowledge → meho-docs corpus rename is ops-side, tracked on the
-  consumer repo (#1525).
+  dead end (#1533).
+- Add the operator/reviewer-facing runbook
+  [`docs/cross-repo/secret-broker.md`](docs/cross-repo/secret-broker.md)
+  for the G0.22 secret broker — the `<kind>:<ref>` move-intent schema
+  (shipped `vault` source+sink and `keycloak` sink kinds), the value-free
+  `{status, value_sha256, length}` response, the "agent never observes the
+  value" guarantee tied to each enforcing mechanism (no value-bearing
+  flag / param / response / log / audit row / approval `proposed_effect` /
+  broadcast), and the enlarged threat model — the backplane as a
+  credential-bearing intermediary, mitigated by operator-context reads,
+  the `dangerous` deny-by-default / needs-approval-ceiling lattice,
+  mandatory four-eyes approval, time-boxed `AgentPermission` + approval
+  `expires_at`, `params_hash` tamper-evidence, and hash-only audit. Names
+  the deferred token-minting / diff-shaped-approval follow-ups so neither
+  is mistaken for shipped, and links from the `docs/cross-repo/` runbook
+  index. Documents the actual merged behaviour, including where the CLI
+  (`--reason` required) tightens the op schema (`reason` optional) and
+  that a parked move exits 0 (#1581).
 
 ## [0.11.0] - 2026-06-05
 

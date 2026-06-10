@@ -126,6 +126,26 @@ connector-related release-notes line.
   unavailable. A build-time guard test asserts every declared composite
   `op_id` resolves against the ingested spec so a future drift fails CI
   rather than at runtime (#1602 / #1603).
+- Defuse the pre-upgrade-migration ↔ auto-rollback trap that made
+  `helm --atomic` dead on arrival for any release carrying a migration
+  (live ~2.5h outage, 2026-06-08): the `db` readiness probe demanded
+  strict `current == head` revision equality, so once the
+  `pre-install,pre-upgrade` Job committed the new migration — a side
+  effect `helm rollback` never reverts — both the still-running prior
+  pods and any rolled-back pods failed `/ready` forever
+  (`current=0037 head=0036`). The probe now tolerates a database
+  **ahead** of the image's head (revision unknown to the image's
+  `versions/` directory ⇒ stamped by a newer release), reporting
+  `ok=true` with `db_ahead=true` in the detail; this leans on the
+  CI-enforced additive-only `upgrade()` contract that already
+  guarantees older code reads newer schemas. A DB *behind* head (missed
+  migration) still fails readiness, as does a missing pgvector
+  extension. The migration ↔ rollback contract, the rejected
+  `pre-rollback` `alembic downgrade` alternative (Helm renders rollback
+  hooks from the *previous* release's manifests — the old image lacks
+  the newer migration scripts), and a failure-injection rollback drill
+  are documented in `docs/codebase/migrations.md` and
+  `docs/RELEASING.md` § 6b (#1607).
 
 ## [0.12.0] - 2026-06-08
 

@@ -10,12 +10,22 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
 )
+
+// defaultIngestPollInterval is the steady-state delay between
+// GET /api/v1/connectors/ingest/jobs/{job_id} polls while waiting
+// for an async ingest job to reach a terminal status. The job-status
+// read is an in-memory registry lookup backplane-side, so a 2s
+// cadence is cheap; real vendor specs spend ~30s+ in the register +
+// LLM-grouping phases, so anything much faster only burns requests.
+const defaultIngestPollInterval = 2 * time.Second
 
 // newIngestCmd returns the `meho connector ingest` command.
 //
@@ -24,11 +34,16 @@ import (
 //	meho connector ingest \
 //	  --product <p> --version <v> --impl <i> \
 //	  --spec <uri> [--spec <uri> ...] \
-//	  [--dry-run] [--json] [--backplane <url>]
+//	  [--dry-run] [--no-wait] [--json] [--backplane <url>]
 //
 // The verb hits POST /api/v1/connectors/ingest with an IngestRequest
 // body; the backplane runs T1 parser → T2 register_ingested → T3
-// LLM grouping and returns an IngestResponse envelope. tenant_admin
+// LLM grouping. Since #1303 the route defaults to the async shape:
+// it fires the pipeline off the request thread and answers
+// 202 Accepted + an IngestJobHandle. The CLI polls the handle to a
+// terminal status by default (`--no-wait` exits 0 with the handle
+// instead); a legacy 200 + IngestResponse (sync backplane, or
+// --dry-run which always runs inline) renders directly. tenant_admin
 // role required (HTTP 403 → exit 5).
 func newIngestCmd() *cobra.Command {
 	var (
@@ -38,6 +53,7 @@ func newIngestCmd() *cobra.Command {
 		specs             []string
 		catalog           string
 		dryRun            bool
+		noWait            bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -63,8 +79,16 @@ func newIngestCmd() *cobra.Command {
 			"      $CLAUDE_RDC_DOCS; read + uploaded by the CLI like file://)\n" +
 			"  Repeat --spec to merge multiple specs under one connector_id\n" +
 			"  (vSphere is the canonical case: vcenter.yaml + vi-json.yaml).\n\n" +
+			"v0.12+ backplanes run the pipeline off the request thread and\n" +
+			"answer 202 Accepted + a job handle. The CLI polls the job to a\n" +
+			"terminal status and renders the usual summary on success; pass\n" +
+			"--no-wait to exit 0 with the handle (job_id + poll URL) as soon\n" +
+			"as the backplane accepts the work. Either way the job keeps\n" +
+			"running server-side — re-running ingest after a 202 starts a\n" +
+			"SECOND job, so poll the handle instead of retrying.\n\n" +
 			"--dry-run parses + plans without writing to the DB; useful for\n" +
-			"validating a spec before committing. Role: tenant_admin.",
+			"validating a spec before committing. Dry runs always execute\n" +
+			"synchronously (200 + inline result). Role: tenant_admin.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -76,6 +100,7 @@ func newIngestCmd() *cobra.Command {
 				Specs:             specs,
 				Catalog:           catalog,
 				DryRun:            dryRun,
+				NoWait:            noWait,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -94,6 +119,9 @@ func newIngestCmd() *cobra.Command {
 			"mutually exclusive with --product/--version/--impl/--spec")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"parse and plan without writing to the DB; the response carries an IngestionResult with counts but no GroupingResult")
+	cmd.Flags().BoolVar(&noWait, "no-wait", false,
+		"on an async 202 answer, exit 0 with the job handle (job_id + poll URL) instead of polling the job to completion; "+
+			"no effect when the backplane answers synchronously (HTTP 200)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -108,8 +136,14 @@ type ingestOptions struct {
 	Specs             []string
 	Catalog           string
 	DryRun            bool
+	NoWait            bool
 	JSONOut           bool
 	BackplaneOverride string
+
+	// pollInterval overrides defaultIngestPollInterval; zero means
+	// "use the default". Unexported test seam so the async-poll
+	// tests don't sleep wall-clock seconds per iteration.
+	pollInterval time.Duration
 }
 
 func runIngest(cmd *cobra.Command, opts ingestOptions) error {
@@ -127,7 +161,12 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
 	}
 
-	result, err := postIngest(cmd.Context(), backplaneURL, body)
+	authed, err := newAuthedClient(cmd.Context(), backplaneURL)
+	if err != nil {
+		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+
+	start, err := postIngest(cmd.Context(), authed, body)
 	if err != nil {
 		var he *httpResponseError
 		if errors.As(err, &he) {
@@ -135,10 +174,13 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), result)
+	if start.job != nil {
+		return runIngestAsync(cmd, authed, backplaneURL, start.job, opts)
 	}
-	printIngestSummary(cmd.OutOrStdout(), opts, result)
+	if opts.JSONOut {
+		return output.PrintJSON(cmd.OutOrStdout(), start.sync)
+	}
+	printIngestSummary(cmd.OutOrStdout(), opts, start.sync)
 	return nil
 }
 
@@ -194,6 +236,15 @@ func buildIngestRequest(opts ingestOptions) (api.IngestRequest, error) {
 // Replaces the per-flag MarkFlagRequired wiring (which can't express
 // "required unless --catalog").
 func validateIngestMode(opts ingestOptions) error {
+	if opts.NoWait && opts.DryRun {
+		// Dry runs always execute synchronously backplane-side (the
+		// parse-only leg returns 200 + the inline plan; there is no
+		// job to detach from), so a combined flag set signals a
+		// misunderstanding worth correcting rather than ignoring.
+		return errors.New(
+			"--no-wait cannot be combined with --dry-run: dry runs always execute " +
+				"synchronously (the backplane returns the parse plan inline)")
+	}
 	manualSet := opts.Product != "" || opts.Version != "" || opts.ImplID != "" || len(opts.Specs) > 0
 	if opts.Catalog != "" {
 		if manualSet {
@@ -228,15 +279,31 @@ func validateIngestMode(opts ingestOptions) error {
 	return nil
 }
 
+// ingestStart carries the two mutually-exclusive success shapes of
+// POST /api/v1/connectors/ingest. Exactly one field is non-nil:
+//
+//   - sync — HTTP 200, the legacy blocking IngestResponse
+//     (async=false backplanes, and every --dry-run regardless of
+//     backplane version).
+//   - job — HTTP 202, the #1303 async default: the pipeline runs
+//     off the request thread and the handle names the job to poll.
+//
+// Callers branch on `job != nil` rather than re-reading the status
+// code so the "202 is a success, not an error" contract lives in
+// one place (this is the envelope the pre-#1609 CLI rendered as a
+// fatal unexpected_response — after the work had already started
+// server-side, which is what made retrying double-ingest).
+type ingestStart struct {
+	sync *api.IngestResponse
+	job  *api.IngestJobHandle
+}
+
 // postIngest drives the typed-client ingest endpoint with a one-shot
-// 401-retry. The route declares `response_model=IngestResponse` so
-// JSON200 carries the typed envelope; non-2xx surfaces as
-// *httpResponseError for the caller to route through renderHTTPStatus.
-func postIngest(ctx context.Context, backplaneURL string, body api.IngestRequest) (*api.IngestResponse, error) {
-	authed, err := newAuthedClient(ctx, backplaneURL)
-	if err != nil {
-		return nil, err
-	}
+// 401-retry. The route declares both success shapes (200 sync legacy,
+// 202 async job handle) so JSON200 / JSON202 carry the typed
+// envelopes; any other status surfaces as *httpResponseError for the
+// caller to route through renderHTTPStatus.
+func postIngest(ctx context.Context, authed *api.AuthedClient, body api.IngestRequest) (*ingestStart, error) {
 	resp, err := retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.IngestEndpointApiV1ConnectorsIngestPostResponse, error) {
 			return authed.IngestEndpointApiV1ConnectorsIngestPostWithResponse(
@@ -250,13 +317,246 @@ func postIngest(ctx context.Context, backplaneURL string, body api.IngestRequest
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode() != http.StatusOK {
+	switch resp.StatusCode() {
+	case http.StatusOK:
+		if resp.JSON200 == nil {
+			return nil, fmt.Errorf("backplane returned 200 OK but no JSON body decoded against IngestResponse")
+		}
+		return &ingestStart{sync: resp.JSON200}, nil
+	case http.StatusAccepted:
+		if resp.JSON202 == nil {
+			return nil, fmt.Errorf("backplane returned 202 Accepted but no JSON body decoded against IngestJobHandle")
+		}
+		return &ingestStart{job: resp.JSON202}, nil
+	default:
 		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 	}
-	if resp.JSON200 == nil {
-		return nil, fmt.Errorf("backplane returned 200 OK but no JSON body decoded against IngestResponse")
+}
+
+// runIngestAsync finishes an ingest the backplane accepted with
+// 202 + an IngestJobHandle. Two modes:
+//
+//   - --no-wait: render the handle (human key/value or the raw
+//     IngestJobHandle JSON) and exit 0 — the job keeps running
+//     server-side and the operator polls poll_url themselves.
+//   - default: poll GET /api/v1/connectors/ingest/jobs/{job_id}
+//     until the job leaves "running", then render exactly what the
+//     sync path would have rendered (the assembled IngestResponse) —
+//     so scripts parsing `--json` see one stable success shape
+//     regardless of whether the backplane ran the pipeline inline
+//     or off-thread. A failed job renders the job's error_class +
+//     capped error message as unexpected_response (exit 4), the
+//     same family the sync path's pipeline failures land in.
+//
+// The progress notice goes to stderr in both output modes: stdout
+// stays reserved for the final result (Goal #11 §5 output
+// discipline — `--json` consumers must see a single JSON document).
+func runIngestAsync(
+	cmd *cobra.Command,
+	authed *api.AuthedClient,
+	backplaneURL string,
+	handle *api.IngestJobHandle,
+	opts ingestOptions,
+) error {
+	if opts.NoWait {
+		if opts.JSONOut {
+			return output.PrintJSON(cmd.OutOrStdout(), handle)
+		}
+		printIngestJobHandle(cmd.OutOrStdout(), handle)
+		return nil
 	}
-	return resp.JSON200, nil
+	interval := opts.pollInterval
+	if interval <= 0 {
+		interval = defaultIngestPollInterval
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(),
+		"ingest accepted (HTTP 202) — job_id=%s; polling %s every %s until the job completes\n",
+		handle.JobId, handle.PollUrl, interval)
+	st, err := pollIngestJob(cmd.Context(), authed, handle.JobId, interval)
+	if err != nil {
+		return renderIngestWaitError(cmd, backplaneURL, handle, err, opts.JSONOut)
+	}
+	switch st.Status {
+	case api.IngestJobStatusResponseStatusSucceeded:
+		if st.Ingestion == nil {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf(
+					"ingest job %s reports succeeded but carries no ingestion result", st.JobId)),
+				opts.JSONOut,
+			)
+		}
+		result := &api.IngestResponse{Ingestion: *st.Ingestion, Grouping: st.Grouping}
+		if opts.JSONOut {
+			return output.PrintJSON(cmd.OutOrStdout(), result)
+		}
+		printIngestSummary(cmd.OutOrStdout(), opts, result)
+		return nil
+	case api.IngestJobStatusResponseStatusFailed:
+		errClass := "IngestJobFailed"
+		if st.ErrorClass != nil && *st.ErrorClass != "" {
+			errClass = *st.ErrorClass
+		}
+		detail := "(no error detail recorded)"
+		if st.Error != nil && *st.Error != "" {
+			detail = *st.Error
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"ingest job %s failed: %s: %s", st.JobId, errClass, detail)),
+			opts.JSONOut,
+		)
+	default:
+		// Forward-compat: a status outside the documented
+		// running/succeeded/failed lifecycle fails loudly instead of
+		// being treated as success (or spinning forever in the poll
+		// loop, which only continues on "running").
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"ingest job %s returned undocumented status %q", st.JobId, st.Status)),
+			opts.JSONOut,
+		)
+	}
+}
+
+// pollIngestJob reads the job row until it leaves "running", with
+// the same one-shot 401-refresh contract every connector verb uses
+// (a token can expire mid-wait on a long LLM-grouping pass; the
+// refresh keeps the poll alive without operator action). Errors are
+// returned raw — renderIngestWaitError owns the job-aware
+// classification, because every poll-phase failure message must
+// carry the "job keeps running server-side, don't re-run ingest"
+// guidance.
+func pollIngestJob(
+	ctx context.Context,
+	authed *api.AuthedClient,
+	jobID uuid.UUID,
+	interval time.Duration,
+) (*api.IngestJobStatusResponse, error) {
+	for {
+		resp, err := retryOn401(ctx, authed,
+			func(ctx context.Context) (*api.GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error) {
+				return authed.GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse(
+					ctx,
+					jobID,
+					&api.GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams{},
+				)
+			},
+			func(r *api.GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse) int { return r.StatusCode() },
+		)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode() != http.StatusOK {
+			return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+		}
+		if resp.JSON200 == nil {
+			return nil, fmt.Errorf("backplane returned 200 OK on the job poll but no JSON body decoded against IngestJobStatusResponse")
+		}
+		if resp.JSON200.Status != api.IngestJobStatusResponseStatusRunning {
+			return resp.JSON200, nil
+		}
+		if serr := sleepCtx(ctx, interval); serr != nil {
+			return nil, serr
+		}
+	}
+}
+
+// renderIngestWaitError classifies a poll-phase failure. Unlike the
+// pre-submit failure paths (renderHTTPStatus / renderRequestError),
+// every message here must orient the operator around one fact: the
+// ingest job already started server-side, so the safe reaction to a
+// broken wait is to re-check the job (poll_url or `meho connector
+// list`), never to re-run `meho connector ingest` — a re-run starts
+// a second job (the double-ingest failure mode this verb's 202
+// handling exists to prevent).
+func renderIngestWaitError(
+	cmd *cobra.Command,
+	backplaneURL string,
+	handle *api.IngestJobHandle,
+	err error,
+	jsonOut bool,
+) error {
+	recheck := fmt.Sprintf(
+		"the job keeps running server-side — re-check GET %s (or `meho connector list`) before re-running ingest, "+
+			"a re-run would start a second job", handle.PollUrl)
+	var he *httpResponseError
+	if errors.As(err, &he) {
+		switch he.statusCode {
+		case http.StatusUnauthorized:
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.AuthExpired(fmt.Sprintf(
+					"backplane rejected the stored token while polling ingest job %s; run `meho login %s`; %s",
+					handle.JobId, backplaneURL, recheck)),
+				jsonOut,
+			)
+		case http.StatusForbidden:
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.InsufficientRole(fmt.Sprintf(
+					"polling ingest job %s: HTTP 403 (the job poll requires tenant_admin role); %s",
+					handle.JobId, recheck)),
+				jsonOut,
+			)
+		case http.StatusNotFound:
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf(
+					"ingest job %s is no longer tracked by the backplane (pod restart or registry eviction); "+
+						"the pipeline may have completed or died with the pod — check `meho connector list` "+
+						"for the connector before re-running ingest", handle.JobId)),
+				jsonOut,
+			)
+		default:
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf(
+					"polling ingest job %s: HTTP %d: %s; %s",
+					handle.JobId, he.statusCode, strings.TrimSpace(string(he.body)), recheck)),
+				jsonOut,
+			)
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"wait for ingest job %s cancelled: %v; %s", handle.JobId, err, recheck)),
+			jsonOut,
+		)
+	}
+	return output.RenderError(cmd.ErrOrStderr(),
+		output.Unreachable(fmt.Sprintf(
+			"polling ingest job %s on %s: %v; %s", handle.JobId, backplaneURL, err, recheck)),
+		jsonOut,
+	)
+}
+
+// printIngestJobHandle renders the --no-wait handle for human eyes:
+// the job_id first (the thing the operator copies), the poll URL,
+// and the workflow reminder that makes the detached mode safe —
+// the next action is polling, not re-running ingest.
+func printIngestJobHandle(w io.Writer, handle *api.IngestJobHandle) {
+	fmt.Fprintf(w, "ingest accepted — job_id=%s (status=%s)\n", handle.JobId, handle.Status)
+	fmt.Fprintf(w, "  poll: GET %s\n", handle.PollUrl)
+	fmt.Fprintf(w,
+		"\nThe pipeline keeps running server-side; re-running ingest would start a second job.\n"+
+			"Poll the URL above (or watch `meho connector list`) until the connector lands in\n"+
+			"review_status=staged, then:\n"+
+			"  meho connector review <connector_id>\n"+
+			"  meho connector enable <connector_id> --confirm\n")
+}
+
+// sleepCtx waits d or until ctx is cancelled, whichever comes first.
+// Returns ctx.Err() on cancellation, nil on timer fire. Same shape
+// as the status --watch retry loop's helper (internal/cmd/
+// status_watch.go) — duplicated because cmd/connector can't import
+// the root cmd package without a cycle (cmd/root.go grafts this
+// package onto the tree).
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // printIngestSummary renders an IngestResponse for human eyes. The

@@ -241,8 +241,19 @@ way (#1452): `argocd.app.set` / `argocd.appproject.update` populate
 `{before_spec, after_spec}` and `argocd.app.delete` populates
 `{cascade_resources}` from read-only GETs against the live
 Application / AppProject — wired in
-`connectors/argocd/ops_write_preview.py`. Further connectors register
-their own builders as needed.
+`connectors/argocd/ops_write_preview.py`. The `secret.move` broker op
+populates a ref-only `{action, source, sink}` summary with no store I/O
+(#1580, `connectors/secret/move_preview.py`). The 8 vmware write
+composites register builders in
+`connectors/vmware_rest/composites/_write_preview.py` (#1608): the
+fan-out composites (`vm.power.bulk`, `host.evacuate`,
+`host.detach_from_vds`, `cluster.patch`) resolve their entity set via
+the same read-only listing helpers the handlers use — `{..., resolved,
+total_resolved}` with the list capped — and the single-entity
+composites echo their params; see
+[`connectors-vmware-rest.md`](connectors-vmware-rest.md) "Park-time
+approval previews". Further connectors register their own builders as
+needed.
 
 ## Permission preflight hook (#1504)
 

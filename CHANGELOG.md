@@ -92,6 +92,15 @@ connector-related release-notes line.
 
 ### Fixed
 
+- `/ready` no longer fail-closes on the self-registered `corpus-http`
+  docs backend when `CORPUS_URL` is unset. The docs add-on is optional:
+  the coarse `docs_backends` readiness check now skips unconfigured
+  backends (registered ≠ configured), so a deploy with no docs backend
+  configured becomes Ready instead of returning 503 forever (which made
+  `helm --wait` time out and the rollout never complete). Call-time
+  behaviour is unchanged — `search_docs` still fails closed with 503
+  `CorpusUnavailable` when the corpus is unconfigured or unreachable
+  (#1606).
 - Distinguish ingested-but-**disabled** L2 sub-ops from truly-absent ones
   in the `vmware-rest` composite pre-flight. A composite that depends on
   an L2 op whose descriptor row exists but is `is_enabled=false` now

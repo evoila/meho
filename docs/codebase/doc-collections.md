@@ -194,14 +194,21 @@ enable/disable gate):
 - `POST /api/v1/doc_collections/{key}/enable` / `.../disable` → 204,
   idempotent, 409 on a forbidden move.
 
-### `/ready` backend reachability (`meho_backplane.docs_search.readiness_probe`)
+### `/ready` backend configuredness (`meho_backplane.docs_search.readiness_probe`)
 
 `docs_backends_readiness_probe` is a coarse, synchronous, credential-free
-`/ready` check registered in the lifespan: it reports `ok` only when
-every registered adapter's `is_configured()` is true (for `corpus-http`,
-`settings.corpus_url` set), naming the unconfigured ones. It deliberately
-does **not** issue a live round-trip — that is the explicit per-collection
-probe route's job.
+`/ready` check registered in the lifespan. Registered ≠ configured
+(#1606): the shipped `corpus-http` adapter self-registers at import even
+on deploys that never set `CORPUS_URL`, so the probe filters to the
+adapters whose `is_configured()` is true (for `corpus-http`,
+`settings.corpus_url` set) and reports `ok=True` unconditionally — the
+docs add-on is optional, and a deploy with no docs backend configured
+must still become Ready. `detail` carries the configured count (the
+observability value of the check). It deliberately does **not** issue a
+live round-trip — a corpus outage must not flap the backplane out of
+rotation; an unconfigured or unreachable backend instead fails closed at
+call time (`CorpusUnavailable` → 503) and at the explicit per-collection
+probe route.
 
 ### CLI (`cli/internal/cmd/docs/collections.go`)
 

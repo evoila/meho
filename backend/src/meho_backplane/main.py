@@ -278,9 +278,9 @@ async def _run_lifespan_startup() -> None:
     register_probe("vault", vault_readiness_probe)
     register_probe("db", db_migration_probe)
     register_probe("broadcast", broadcast_readiness_probe)
-    # G4.6-T6 (#1555) — coarse "each configured search backend reachable"
-    # gate. Synchronous config read (no live round-trip); the
-    # per-collection liveness round-trip is the explicit probe route.
+    # G4.6-T6 (#1555) — coarse "which search backends are configured"
+    # check; observability-only since #1606 (unconfigured optional
+    # backends are skipped, never failed — no live round-trip).
     register_probe("docs_backends", docs_backends_readiness_probe)
     # Eager engine construction (G2.3-T2 #258); validates ``DATABASE_URL``
     # at startup so first-request latency doesn't absorb the pool build.

@@ -92,6 +92,16 @@ connector-related release-notes line.
 
 ### Fixed
 
+- Distinguish ingested-but-**disabled** L2 sub-ops from truly-absent ones
+  in the `vmware-rest` composite pre-flight. A composite that depends on
+  an L2 op whose descriptor row exists but is `is_enabled=false` now
+  returns a new `composite_l2_disabled` error (with `disabled_op_ids[]` +
+  `connector_id`) whose remediation names a real verb —
+  `meho connector edit-op <connector_id> <op_id> --enable` — instead of
+  the wrong `composite_l2_missing` / re-ingest hint. Truly-absent ops are
+  unchanged. On a default `vmware-rest-9.0` deploy (L2 surface
+  ingested-but-disabled) this stops every composite read from steering
+  operators to re-run an ingest that already happened (#1601).
 - Reconcile the `vmware.composite.network.portgroup.audit` composite's L2
   `op_id` keys with the canonical vCenter REST Automation surface so the
   composite is dispatchable on real deploys. The composite declared

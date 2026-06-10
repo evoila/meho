@@ -313,6 +313,29 @@ async def _l2_missing_composite(
     )
 
 
+async def _l2_disabled_composite(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    dispatch_child: DispatchChild,
+) -> dict[str, Any]:
+    """Composite that simulates a pre-flight L2-disabled failure (#1601).
+
+    The dispatcher's specific ``except CompositeL2DependencyDisabled``
+    branch (ahead of both the missing branch and the generic
+    ``except Exception``) converts it to a structured
+    ``composite_l2_disabled`` result naming the per-op enable verb,
+    not the catalog-ingest remediation.
+    """
+    from meho_backplane.operations import CompositeL2DependencyDisabled
+
+    raise CompositeL2DependencyDisabled(
+        composite_op_id="vault.composite.fake_l2_dep",
+        disabled_op_ids=("GET:/vault/secrets/foo", "GET:/vault/secrets/bar"),
+        connector_id="vault-1.x",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helper -- insert a composite descriptor row directly (T4 only handles typed)
 # ---------------------------------------------------------------------------
@@ -869,3 +892,62 @@ async def test_dispatch_converts_composite_l2_missing_to_structured_result(
     assert "composite_l2_missing" in result.error
     assert "GET:/vault/secrets/foo" in result.error
     assert "meho connector ingest --catalog vault/1.x" in result.error
+
+
+@pytest.mark.asyncio
+async def test_dispatch_converts_composite_l2_disabled_to_structured_result(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#1601: a composite handler raising
+    :class:`CompositeL2DependencyDisabled` surfaces as a structured
+    ``composite_l2_disabled`` result, distinct from ``composite_l2_missing``.
+
+    The dispatcher catches the specific exception ahead of both the
+    missing branch and the generic ``except Exception`` branch and emits
+    :func:`result_composite_l2_disabled` so the response body carries:
+
+    - stable ``error_code='composite_l2_disabled'`` in ``extras``,
+    - structured ``disabled_op_ids`` + ``connector_id`` payload,
+    - a human message naming the real per-op enable verb and NOT the
+      re-ingest remediation (the catalog is already ingested).
+    """
+    register_connector_v2(
+        product="vault",
+        version="",
+        impl_id="",
+        cls=_NoOpVaultConnector,
+    )
+    await _insert_composite_descriptor(
+        session=session,
+        op_id="vault.composite.fake_l2_dep",
+        handler_ref="tests.test_operations_composite._l2_disabled_composite",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    operator = _make_operator()
+    target = _FakeTarget(product="vault")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.composite.fake_l2_dep",
+        target=target,
+        params={},
+    )
+    assert result.status == "error"
+    assert result.extras is not None
+    assert result.extras["error_code"] == "composite_l2_disabled"
+    assert result.extras["disabled_op_ids"] == [
+        "GET:/vault/secrets/foo",
+        "GET:/vault/secrets/bar",
+    ]
+    assert result.extras["connector_id"] == "vault-1.x"
+    assert result.error is not None
+    assert "composite_l2_disabled" in result.error
+    assert "GET:/vault/secrets/foo" in result.error
+    assert "meho connector edit-op vault-1.x <op_id> --enable" in result.error
+    # The catalog is already ingested in the disabled state -- the result
+    # must NOT steer the operator back to re-ingest.
+    assert "connector ingest" not in result.error

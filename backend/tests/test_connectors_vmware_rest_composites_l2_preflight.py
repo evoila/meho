@@ -10,6 +10,12 @@ Coverage matrix:
 * Cache miss + at least one L2 sub-op missing -> raises
   :class:`CompositeL2DependencyMissing` with every missing op_id listed
   and the catalog command resolved.
+* Cache miss + at least one L2 sub-op present-but-disabled -> raises
+  :class:`CompositeL2DependencyDisabled` with the disabled op_ids +
+  connector_id, NOT ``CompositeL2DependencyMissing`` (#1601). Mixed
+  disabled+absent walks raise the disabled exception (documented
+  precedence). The ``composite_l2_disabled`` result shape names the real
+  per-op enable verb and references no fabricated group-level verb.
 * Negative result is NOT cached -- a subsequent call after the catalog
   is ingested sees the up-to-date state.
 * Composite-to-composite sub-ops (``vmware.composite.*``) are skipped
@@ -49,8 +55,14 @@ from meho_backplane.connectors.vmware_rest.composites._preflight import (
 from meho_backplane.connectors.vmware_rest.composites._read import (
     datastore_usage_composite,
 )
-from meho_backplane.operations import CompositeL2DependencyMissing
-from meho_backplane.operations._errors import result_composite_l2_missing
+from meho_backplane.operations import (
+    CompositeL2DependencyDisabled,
+    CompositeL2DependencyMissing,
+)
+from meho_backplane.operations._errors import (
+    result_composite_l2_disabled,
+    result_composite_l2_missing,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
@@ -84,12 +96,21 @@ def _patch_lookup(
     monkeypatch: pytest.MonkeyPatch,
     *,
     present: set[str],
+    disabled: set[str] | None = None,
 ) -> list[str]:
-    """Stub :func:`lookup_descriptor` to behave as if ``present`` is the registered set.
+    """Stub the lookup helpers as if ``present`` is enabled and ``disabled`` is ingested-but-off.
 
-    Returns the list of sub-op-ids the stub was called against (read
-    by the caller to assert call shape).
+    ``present`` is the set of op-ids :func:`lookup_descriptor` resolves
+    (an enabled descriptor row). ``disabled`` is the set of op-ids that
+    have a descriptor row but ``is_enabled = false``: invisible to
+    ``lookup_descriptor`` (returns ``None``) yet present to the
+    ``is_enabled``-agnostic :func:`descriptor_exists_any_state` probe.
+    Any op-id in neither set is truly absent (no row in any state).
+
+    Returns the list of sub-op-ids :func:`lookup_descriptor` was called
+    against (read by the caller to assert call shape).
     """
+    disabled = disabled or set()
     calls: list[str] = []
 
     async def _stub_lookup_descriptor(
@@ -97,13 +118,24 @@ def _patch_lookup(
     ) -> object | None:
         calls.append(op_id)
         if op_id in present:
-            return object()  # truthy non-None descriptor stand-in.
+            return object()  # truthy non-None descriptor stand-in (enabled row).
         return None
+
+    async def _stub_descriptor_exists_any_state(
+        *, tenant_id: Any, product: str, version: str, impl_id: str, op_id: str
+    ) -> bool:
+        # Present in any state == enabled OR disabled; absent otherwise.
+        return op_id in present or op_id in disabled
 
     monkeypatch.setattr(
         _preflight,
         "lookup_descriptor",
         _stub_lookup_descriptor,
+    )
+    monkeypatch.setattr(
+        _preflight,
+        "descriptor_exists_any_state",
+        _stub_descriptor_exists_any_state,
     )
     return calls
 
@@ -359,3 +391,176 @@ def test_result_composite_l2_missing_shape_matches_t11_convention() -> None:
         "missing_op_ids": ["GET:/vcenter/datastore", "GET:/vcenter/vm"],
         "catalog_command": "meho connector ingest --catalog vmware/9.0",
     }
+
+
+# ---------------------------------------------------------------------------
+# Disabled vs absent classification (#1601)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preflight_disabled_sub_op_raises_disabled_not_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ingested-but-disabled sub-op yields ``CompositeL2DependencyDisabled``.
+
+    Acceptance criterion (#1601): an L2 sub-op present in
+    ``endpoint_descriptor`` with ``is_enabled = false`` must classify as
+    *disabled* (re-enable remediation), NOT *missing* (re-ingest
+    remediation).
+    """
+    _patch_lookup(
+        monkeypatch,
+        present=set(),
+        disabled={"GET:/vcenter/datastore", "GET:/vcenter/datastore/{datastore}"},
+    )
+    sub_ops: tuple[str, ...] = (
+        "GET:/vcenter/datastore",
+        "GET:/vcenter/datastore/{datastore}",
+    )
+    with pytest.raises(CompositeL2DependencyDisabled) as exc_info:
+        await preflight_l2_dependencies(
+            composite_op_id="vmware.composite.datastore.usage",
+            sub_op_ids=sub_ops,
+            connector_id="vmware-rest-9.0",
+            tenant_id=_TENANT_ID,
+        )
+    exc = exc_info.value
+    assert exc.composite_op_id == "vmware.composite.datastore.usage"
+    assert exc.disabled_op_ids == sub_ops
+    assert exc.connector_id == "vmware-rest-9.0"
+    # Negative result NOT cached: re-enabling then retrying must re-walk.
+    assert "vmware.composite.datastore.usage" not in _preflight._PREFLIGHT_CACHE
+
+
+@pytest.mark.asyncio
+async def test_preflight_absent_sub_op_still_raises_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sub-op with no descriptor row in any state still yields ``...Missing``.
+
+    Acceptance criterion (#1601): the missing-path regression is
+    preserved -- a truly-absent op keeps the catalog-ingest remediation.
+    """
+    _patch_lookup(monkeypatch, present=set(), disabled=set())
+    sub_ops: tuple[str, ...] = ("GET:/vcenter/datastore", "GET:/vcenter/vm")
+    with pytest.raises(CompositeL2DependencyMissing) as exc_info:
+        await preflight_l2_dependencies(
+            composite_op_id="vmware.composite.datastore.usage",
+            sub_op_ids=sub_ops,
+            connector_id="vmware-rest-9.0",
+            tenant_id=_TENANT_ID,
+        )
+    exc = exc_info.value
+    assert exc.missing_op_ids == sub_ops
+    assert exc.catalog_command == "meho connector ingest --catalog vmware/9.0"
+
+
+@pytest.mark.asyncio
+async def test_preflight_mixed_disabled_and_absent_prefers_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed walk (one disabled, one absent): disabled takes documented precedence.
+
+    Acceptance criterion (#1601): the mixed case has documented
+    precedence -- only one exception surfaces, and it is the disabled
+    one (the re-enable remediation a default ingested-but-disabled deploy
+    needs). The disabled payload carries only the disabled op, not the
+    absent one.
+    """
+    _patch_lookup(
+        monkeypatch,
+        present={"GET:/vcenter/datastore"},  # enabled, dispatchable
+        disabled={"GET:/vcenter/datastore/{datastore}"},  # ingested-but-off
+        # "GET:/vcenter/vm" is in neither set -> truly absent.
+    )
+    sub_ops: tuple[str, ...] = (
+        "GET:/vcenter/datastore",
+        "GET:/vcenter/datastore/{datastore}",
+        "GET:/vcenter/vm",
+    )
+    with pytest.raises(CompositeL2DependencyDisabled) as exc_info:
+        await preflight_l2_dependencies(
+            composite_op_id="vmware.composite.datastore.usage",
+            sub_op_ids=sub_ops,
+            connector_id="vmware-rest-9.0",
+            tenant_id=_TENANT_ID,
+        )
+    # Only the disabled op surfaces; the enabled op is dispatchable and
+    # the absent op is subsumed by the higher-precedence disabled signal.
+    assert exc_info.value.disabled_op_ids == ("GET:/vcenter/datastore/{datastore}",)
+
+
+def test_result_composite_l2_disabled_shape_matches_t11_convention() -> None:
+    """The disabled result complies with ``docs/codebase/error-message-shape.md``.
+
+    Three load-bearing fields per the convention: a stable
+    ``composite_l2_disabled`` code, a human message naming the disabled
+    ops + the real per-op enable verb + the connector-level caveat + a
+    doc reference, and a structured ``extras`` payload.
+    """
+    out = result_composite_l2_disabled(
+        op_id="vmware.composite.datastore.usage",
+        disabled_op_ids=("GET:/vcenter/datastore", "GET:/vcenter/vm"),
+        connector_id="vmware-rest-9.0",
+        duration_ms=1.0,
+    )
+    assert out.status == "error"
+    assert out.op_id == "vmware.composite.datastore.usage"
+    assert out.error is not None
+    assert "composite_l2_disabled" in out.error
+    assert "GET:/vcenter/datastore" in out.error
+    assert "GET:/vcenter/vm" in out.error
+    # Names the REAL per-op enable verb (deterministic remediation).
+    assert "meho connector edit-op vmware-rest-9.0 <op_id> --enable" in out.error
+    # Names the connector-level verb only as the caveated alternative.
+    assert "meho connector enable vmware-rest-9.0" in out.error
+    # Must NOT steer the operator back to ingest -- the catalog is
+    # already ingested in the disabled state.
+    assert "connector ingest" not in out.error
+    # Must NOT reference the fabricated group-level enable verb.
+    assert "edit_group" not in out.error
+    assert "edit-group" not in out.error
+    assert "docs/codebase/connectors-vmware-rest.md" in out.error
+    assert out.extras == {
+        "error_code": "composite_l2_disabled",
+        "disabled_op_ids": ["GET:/vcenter/datastore", "GET:/vcenter/vm"],
+        "connector_id": "vmware-rest-9.0",
+    }
+
+
+def test_disabled_remediation_references_no_fabricated_verb() -> None:
+    """No fabricated group-level enable verb anywhere in shipped backend/ or docs/.
+
+    Acceptance criterion (#1601): the disabled remediation must name only
+    verbs that exist. The group-level enable verb the original report
+    proposed does not exist and must appear nowhere in shipped source or
+    docs. The grep mirrors the criterion's
+    ``edit_group --enable\\|edit-group --enable`` pattern, excluding
+    Python bytecode and *this test file* -- the latter necessarily spells
+    the forbidden tokens as its own search needles.
+    """
+    import subprocess
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    proc = subprocess.run(
+        [
+            "grep",
+            "-rn",
+            "--include=*.py",
+            "--include=*.go",
+            "--include=*.md",
+            "--exclude=test_connectors_vmware_rest_composites_l2_preflight.py",
+            "-e",
+            "edit_group --enable",
+            "-e",
+            "edit-group --enable",
+            str(repo_root / "backend"),
+            str(repo_root / "docs"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 1, f"fabricated group-level enable verb found:\n{proc.stdout}"

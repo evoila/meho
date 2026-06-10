@@ -262,9 +262,56 @@ The response shape is:
 
 The first call against a stale catalog pays the DB walk; subsequent
 calls hit a per-process cache and short-circuit. A negative result
-(missing L2) is **not** cached -- the operator's expected next action
-is to run the catalog command and retry, and we want the retry to see
+(missing or disabled L2) is **not** cached -- the operator's expected
+next action is to remediate and retry, and we want the retry to see
 fresh state from the database.
+
+### Disabled vs absent L2 (`composite_l2_disabled`, #1601)
+
+`lookup_descriptor` hard-filters `is_enabled = TRUE`, so a sub-op whose
+descriptor row **exists but is disabled** (`is_enabled = false`)
+resolves to `None` exactly like one that was never ingested. On a
+default `vmware-rest-9.0` deploy the ~3,470 L2 ops land
+ingested-but-disabled, so collapsing both into `composite_l2_missing`
+would tell the operator to re-run `meho connector ingest` -- which has
+already happened. The pre-flight therefore classifies each
+non-dispatchable sub-op with the `is_enabled`-agnostic
+`descriptor_exists_any_state` probe (used **only** to classify -- a
+disabled op stays non-dispatchable, it is never transient-enabled at
+dispatch):
+
+- **present but disabled** -> `CompositeL2DependencyDisabled` ->
+  structured `composite_l2_disabled`:
+
+  ```json
+  {
+    "status": "error",
+    "op_id": "vmware.composite.datastore.usage",
+    "error": "composite_l2_disabled: ... present in this connector's catalog but disabled ... 'meho connector edit-op vmware-rest-9.0 <op_id> --enable' ...",
+    "extras": {
+      "error_code": "composite_l2_disabled",
+      "disabled_op_ids": ["GET:/vcenter/datastore", ...],
+      "connector_id": "vmware-rest-9.0"
+    }
+  }
+  ```
+
+  The remediation names a **real** verb: per-op
+  `meho connector edit-op <connector_id> <op_id> --enable`. Connector-level
+  `meho connector enable <connector_id>` is named only as the caveated
+  alternative -- it does **not** re-enable spec-ingested ops, which land
+  `group_id = NULL` and the enable cascade filters on `group_id` (see
+  `ingest/_internals.py` / `ingest/_upsert.py`), so per-op `edit-op
+  --enable` is the deterministic path. The original report proposed a
+  group-level enable verb; no such verb exists, so the remediation never
+  references one.
+
+- **truly absent** (no row in any state) -> unchanged
+  `composite_l2_missing` + the catalog-ingest remediation above.
+
+When a single walk turns up both states, **disabled takes precedence**
+-- only one exception can surface, and the re-enable remediation is the
+one a default ingested-but-disabled deploy needs.
 
 Composite-to-composite sub-ops (`vmware.composite.*`, today only
 `host.evacuate` -> `vm.migrate`) are deliberately skipped by the

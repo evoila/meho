@@ -1031,6 +1031,22 @@ whose pod died was never going to finish. Durable cross-restart
 jobs are a v0.9 follow-up (the same migration that lands
 operator-cancellable jobs).
 
+**The Go CLI consumes the handle (G0.22-T4 / #1609).** `meho
+connector ingest` (`cli/internal/cmd/connector/ingest.go`) treats
+202 as a first-class success: by default it polls the job to a
+terminal status every 2s and renders the same summary / `--json`
+`IngestResponse` shape the sync 200 path renders, so script
+consumers see one stable success document regardless of how the
+backplane ran the pipeline; `--no-wait` exits 0 with the handle
+instead. A failed job renders `error_class` + the capped `error`
+as `unexpected_response` (exit 4); a 404 on the poll (pod restart /
+eviction) tells the operator to check `meho connector list`
+**before** re-running ingest. Pre-#1609 CLIs rendered the 202
+itself as a fatal `unexpected_response`, which baited operators
+into retrying and double-ingesting. `--dry-run` is unaffected
+(always sync, see above), and `--no-wait --dry-run` is rejected
+client-side.
+
 **The MCP surface shares the offload (G3.5-T2 / #1531).** The
 `meho.connector.ingest` admin MCP tool carries the same async shape:
 `async=true` (with `dry_run=false`) creates a job in the **same**

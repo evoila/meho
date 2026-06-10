@@ -163,6 +163,20 @@ connector-related release-notes line.
   the newer migration scripts), and a failure-injection rollback drill
   are documented in `docs/codebase/migrations.md` and
   `docs/RELEASING.md` § 6b (#1607).
+- `meho connector ingest` no longer dies with a fatal
+  `unexpected_response` when a v0.12+ backplane answers the default
+  async shape (`202 Accepted` + ingest-job handle) — an error that hid
+  a successfully started job and baited operators into retrying, i.e.
+  double-ingesting. The CLI now treats 202 as success: it polls
+  `GET /api/v1/connectors/ingest/jobs/{job_id}` to a terminal status by
+  default (rendering the same summary / `--json` shape as the
+  synchronous path, with token refresh kept alive across long waits)
+  and a new `--no-wait` flag exits 0 with the job handle instead. A
+  failed job surfaces its `error_class` + message (exit 4), and a job
+  lost to a backplane restart tells the operator to check
+  `meho connector list` before re-running. Legacy synchronous `200`
+  responses (and `--dry-run`, which always runs inline) are unchanged
+  (#1609).
 
 ## [0.12.0] - 2026-06-08
 

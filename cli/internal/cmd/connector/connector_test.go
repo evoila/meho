@@ -15,12 +15,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // ---------- helper tests (pure-function) ----------
@@ -378,6 +382,12 @@ func TestValidateIngestModeTable(t *testing.T) {
 		{"manual missing impl+spec", ingestOptions{
 			Product: "vmware", Version: "9.0",
 		}, "manual ingest requires --impl, --spec"},
+		{"no-wait + dry-run", ingestOptions{
+			Catalog: "vmware/9.0", DryRun: true, NoWait: true,
+		}, "--no-wait cannot be combined with --dry-run"},
+		{"no-wait alone is fine", ingestOptions{
+			Catalog: "vmware/9.0", NoWait: true,
+		}, ""},
 	}
 	for _, c := range cases {
 		err := validateIngestMode(c.opts)
@@ -982,18 +992,28 @@ func TestPostIngestRoundTripWithMockServer(t *testing.T) {
 	version := "9.0"
 	implID := "vmware-rest"
 	specs := []api.SpecSource{{Uri: "file:///abs/vcenter.yaml"}}
-	got, err := postIngest(context.Background(), srv.URL, api.IngestRequest{
+	authed, err := newAuthedClient(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("newAuthedClient: %v", err)
+	}
+	got, err := postIngest(context.Background(), authed, api.IngestRequest{
 		Product: &product, Version: &version, ImplId: &implID,
 		Specs: &specs,
 	})
 	if err != nil {
 		t.Fatalf("postIngest: %v", err)
 	}
-	if got.Ingestion.ConnectorId != "vmware-rest-9.0" || got.Ingestion.InsertedCount != 961 {
-		t.Fatalf("unexpected ingest result: %+v", got)
+	if got.job != nil {
+		t.Fatalf("sync 200 answer must not produce a job handle: %+v", got.job)
 	}
-	if got.Grouping == nil || got.Grouping.GroupsCreated != 9 {
-		t.Fatalf("unexpected grouping: %+v", got.Grouping)
+	if got.sync == nil {
+		t.Fatal("sync 200 answer must populate the IngestResponse")
+	}
+	if got.sync.Ingestion.ConnectorId != "vmware-rest-9.0" || got.sync.Ingestion.InsertedCount != 961 {
+		t.Fatalf("unexpected ingest result: %+v", got.sync)
+	}
+	if got.sync.Grouping == nil || got.sync.Grouping.GroupsCreated != 9 {
+		t.Fatalf("unexpected grouping: %+v", got.sync.Grouping)
 	}
 }
 
@@ -1143,6 +1163,415 @@ func TestRunIngestManualModePostsQuadruple(t *testing.T) {
 	}
 	if posted["product"] != "test" || posted["version"] != "1.0" || posted["impl_id"] != "test-impl" {
 		t.Errorf("manual mode posted quadruple wrong: %+v", posted)
+	}
+}
+
+// ---------- async-202 ingest (G0.22-T4 #1609) ----------
+
+// asyncIngestJobID is the fixed job id the async-202 mock fixtures
+// use; the GET-route key embeds it because mockBackplane routes on
+// the literal path.
+var asyncIngestJobID = uuid.MustParse("0c4b7e8f-1111-2222-3333-444455556666")
+
+// asyncIngestHandle builds the 202 envelope the #1303 backplane
+// returns for a default (async) ingest.
+func asyncIngestHandle() api.IngestJobHandle {
+	return api.IngestJobHandle{
+		JobId:   asyncIngestJobID,
+		Status:  api.IngestJobHandleStatusRunning,
+		PollUrl: "/api/v1/connectors/ingest/jobs/" + asyncIngestJobID.String(),
+	}
+}
+
+// TestPostIngest202ReturnsJobHandle pins the half of the #1609 fix
+// that used to be the bug: a 202 + IngestJobHandle is a *success*
+// shape on the postIngest surface, never an *httpResponseError
+// (the pre-fix code rendered it as a fatal unexpected_response
+// after the pipeline had already started server-side).
+func TestPostIngest202ReturnsJobHandle(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	authed, err := newAuthedClient(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("newAuthedClient: %v", err)
+	}
+	catalog := "vmware/9.0"
+	got, err := postIngest(context.Background(), authed, api.IngestRequest{CatalogEntry: &catalog})
+	if err != nil {
+		t.Fatalf("postIngest on a 202 must not error (double-ingest bait): %v", err)
+	}
+	if got.sync != nil {
+		t.Fatalf("202 answer must not populate the sync IngestResponse: %+v", got.sync)
+	}
+	if got.job == nil {
+		t.Fatal("202 answer must populate the job handle")
+	}
+	if got.job.JobId != asyncIngestJobID || got.job.PollUrl != asyncIngestHandle().PollUrl {
+		t.Fatalf("unexpected handle: %+v", got.job)
+	}
+}
+
+// TestPostIngest202WithoutBodyErrors covers the decode guard: a 202
+// whose body didn't decode against IngestJobHandle (wrong content
+// type) is a contract violation, not a silent success.
+func TestPostIngest202WithoutBodyErrors(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(202)
+			_, _ = w.Write([]byte("accepted"))
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	authed, err := newAuthedClient(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("newAuthedClient: %v", err)
+	}
+	catalog := "vmware/9.0"
+	_, err = postIngest(context.Background(), authed, api.IngestRequest{CatalogEntry: &catalog})
+	if err == nil || !strings.Contains(err.Error(), "202 Accepted but no JSON body") {
+		t.Fatalf("want decode-guard error, got %v", err)
+	}
+}
+
+// TestRunIngestAsyncPollsToSuccess pins the default async flow
+// end-to-end: POST → 202 + handle, poll → running, poll →
+// succeeded, then the CLI renders the exact summary the sync path
+// renders (assembled from the job's ingestion + grouping clusters)
+// and exits 0. Also pins single-submission: exactly one POST ever
+// leaves the CLI (the double-ingest regression guard).
+func TestRunIngestAsyncPollsToSuccess(t *testing.T) {
+	var postCalls, pollCalls atomic.Int32
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			postCalls.Add(1)
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+		"GET /api/v1/connectors/ingest/jobs/" + asyncIngestJobID.String(): func(w http.ResponseWriter, _ *http.Request) {
+			if pollCalls.Add(1) == 1 {
+				writeJSON(t, w, 200, api.IngestJobStatusResponse{
+					JobId:  asyncIngestJobID,
+					Status: api.IngestJobStatusResponseStatusRunning,
+				})
+				return
+			}
+			writeJSON(t, w, 200, api.IngestJobStatusResponse{
+				JobId:  asyncIngestJobID,
+				Status: api.IngestJobStatusResponseStatusSucceeded,
+				Ingestion: &api.IngestionResultModel{
+					ConnectorId:         "vmware-rest-9.0",
+					InsertedCount:       961,
+					ConnectorRegistered: true,
+					OperationsGrouped:   true,
+				},
+				Grouping: &api.GroupingResultModel{
+					ConnectorId:        "vmware-rest-9.0",
+					GroupsCreated:      9,
+					OperationsAssigned: 961,
+				},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	if err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		BackplaneOverride: srv.URL,
+		pollInterval:      time.Millisecond,
+	}); err != nil {
+		t.Fatalf("runIngest async: %v", err)
+	}
+	if got := postCalls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 ingest POST (re-submitting double-ingests), got %d", got)
+	}
+	if got := pollCalls.Load(); got != 2 {
+		t.Errorf("expected 2 job polls (running, then succeeded), got %d", got)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"ingest vmware/9.0/vmware-rest — connector_id=vmware-rest-9.0",
+		"operations: 961 total (961 inserted / 0 updated / 0 skipped)",
+		"grouping: 9 groups, 961 ops assigned",
+		"meho connector review vmware-rest-9.0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "ingest accepted (HTTP 202)") ||
+		!strings.Contains(errOut, asyncIngestJobID.String()) {
+		t.Errorf("stderr missing the 202 progress notice:\n%s", errOut)
+	}
+	if strings.Contains(out, "202") {
+		t.Errorf("stdout must stay reserved for the result (progress goes to stderr):\n%s", out)
+	}
+}
+
+// TestRunIngestAsyncNoWaitPrintsHandle pins the detached mode: a
+// 202 + --no-wait exits 0 with the handle and never polls (the
+// mock registers no GET route, so any poll fails the test via the
+// unhandled-route check in mockBackplane).
+func TestRunIngestAsyncNoWaitPrintsHandle(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		NoWait:            true,
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runIngest --no-wait on 202 must exit clean: %v", err)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"job_id=" + asyncIngestJobID.String(),
+		"poll: GET /api/v1/connectors/ingest/jobs/" + asyncIngestJobID.String(),
+		"re-running ingest would start a second job",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunIngestAsyncNoWaitJSONEmitsHandle pins the machine shape of
+// the detached mode: stdout is exactly the IngestJobHandle document.
+func TestRunIngestAsyncNoWaitJSONEmitsHandle(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		NoWait:            true,
+		JSONOut:           true,
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runIngest --no-wait --json: %v", err)
+	}
+	var handle api.IngestJobHandle
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &handle); err != nil {
+		t.Fatalf("stdout is not a single IngestJobHandle document: %v\n%s", err, stdout.String())
+	}
+	if handle.JobId != asyncIngestJobID {
+		t.Errorf("handle round-trip lost the job id: %+v", handle)
+	}
+}
+
+// TestRunIngestAsyncJSONStableSuccessShape pins the script contract:
+// `--json` (wait mode) emits the same IngestResponse shape on the
+// async path that the legacy sync path emits, so jq consumers see
+// one stable success document regardless of how the backplane ran
+// the pipeline.
+func TestRunIngestAsyncJSONStableSuccessShape(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+		"GET /api/v1/connectors/ingest/jobs/" + asyncIngestJobID.String(): func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, api.IngestJobStatusResponse{
+				JobId:  asyncIngestJobID,
+				Status: api.IngestJobStatusResponseStatusSucceeded,
+				Ingestion: &api.IngestionResultModel{
+					ConnectorId:   "vmware-rest-9.0",
+					InsertedCount: 961,
+				},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		JSONOut:           true,
+		BackplaneOverride: srv.URL,
+		pollInterval:      time.Millisecond,
+	}); err != nil {
+		t.Fatalf("runIngest async --json: %v", err)
+	}
+	var resp api.IngestResponse
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &resp); err != nil {
+		t.Fatalf("stdout is not a single IngestResponse document: %v\n%s", err, stdout.String())
+	}
+	if resp.Ingestion.ConnectorId != "vmware-rest-9.0" || resp.Ingestion.InsertedCount != 961 {
+		t.Errorf("IngestResponse round-trip wrong: %+v", resp)
+	}
+}
+
+// TestRunIngestAsyncJobFailure pins the failed-terminal contract:
+// the job's error_class + capped error render as
+// unexpected_response (exit 4) with the job id, mirroring where the
+// sync path's pipeline failures land.
+func TestRunIngestAsyncJobFailure(t *testing.T) {
+	errClass := "VersionMismatchError"
+	errMsg := "spec info.version 8.0 does not match requested 9.0"
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+		"GET /api/v1/connectors/ingest/jobs/" + asyncIngestJobID.String(): func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, api.IngestJobStatusResponse{
+				JobId:      asyncIngestJobID,
+				Status:     api.IngestJobStatusResponseStatusFailed,
+				ErrorClass: &errClass,
+				Error:      &errMsg,
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stderr bytes.Buffer
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&stderr)
+
+	err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		BackplaneOverride: srv.URL,
+		pollInterval:      time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("failed job must exit non-zero")
+	}
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitUnexpected {
+		t.Fatalf("want exit %d (unexpected_response), got %v / %T", output.ExitUnexpected, err, err)
+	}
+	errOut := stderr.String()
+	for _, want := range []string{asyncIngestJobID.String(), errClass, errMsg} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr missing %q:\n%s", want, errOut)
+		}
+	}
+}
+
+// TestRunIngestAsyncPollLost404 pins the pod-restart story: the
+// poll 404s (registry is process-local), the CLI exits non-zero
+// with the check-before-re-running guidance, and crucially never
+// re-POSTs the ingest.
+func TestRunIngestAsyncPollLost404(t *testing.T) {
+	var postCalls atomic.Int32
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			postCalls.Add(1)
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+		"GET /api/v1/connectors/ingest/jobs/" + asyncIngestJobID.String(): func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 404, map[string]string{"detail": "ingest_job_not_found"})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stderr bytes.Buffer
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&stderr)
+
+	err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		BackplaneOverride: srv.URL,
+		pollInterval:      time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("lost job must exit non-zero")
+	}
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitUnexpected {
+		t.Fatalf("want exit %d (unexpected_response), got %v", output.ExitUnexpected, err)
+	}
+	if got := postCalls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 ingest POST even when the poll dies, got %d", got)
+	}
+	errOut := stderr.String()
+	for _, want := range []string{"no longer tracked", "meho connector list", "before re-running ingest"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr missing %q:\n%s", want, errOut)
+		}
+	}
+}
+
+// TestRunIngestAsyncUndocumentedStatus pins forward-compat
+// fail-loud: a terminal status outside running/succeeded/failed is
+// an error, never a silent success.
+func TestRunIngestAsyncUndocumentedStatus(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+		"GET /api/v1/connectors/ingest/jobs/" + asyncIngestJobID.String(): func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, api.IngestJobStatusResponse{
+				JobId:  asyncIngestJobID,
+				Status: api.IngestJobStatusResponseStatus("paused"),
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stderr bytes.Buffer
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&stderr)
+
+	err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		BackplaneOverride: srv.URL,
+		pollInterval:      time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("undocumented job status must exit non-zero")
+	}
+	if !strings.Contains(stderr.String(), `undocumented status "paused"`) {
+		t.Errorf("stderr missing the undocumented-status detail:\n%s", stderr.String())
 	}
 }
 
@@ -1501,7 +1930,11 @@ func TestHTTPErrorClassification403(t *testing.T) {
 	version := "y"
 	implID := "z"
 	specs := []api.SpecSource{{Uri: "file:///a.yaml"}}
-	_, err := postIngest(context.Background(), srv.URL, api.IngestRequest{
+	authed, err := newAuthedClient(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("newAuthedClient: %v", err)
+	}
+	_, err = postIngest(context.Background(), authed, api.IngestRequest{
 		Product: &product, Version: &version, ImplId: &implID,
 		Specs: &specs,
 	})

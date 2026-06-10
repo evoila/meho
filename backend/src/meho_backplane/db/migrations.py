@@ -3,15 +3,28 @@
 
 """DB-migration-state readiness probe + Alembic configuration helpers.
 
-The probe answers a single operational question: *is the database
-schema at the revision this code expects?* Three failure modes — DB
+The probe answers a single operational question: *can this code run
+against the database's current schema?* Three failure modes — DB
 unreachable, ``alembic_version`` table missing, current revision
-diverges from the code's head — collapse into a single
+**behind** the code's head — collapse into a single
 :class:`~meho_backplane.health.ProbeResult` with ``ok=False`` and a
 short structured detail string. The probe is registered against the
 shared readiness registry from :mod:`meho_backplane.main`'s lifespan
 hook so ``/ready`` returns 503 (and the kubelet keeps the pod out of
-service traffic) until the schema matches.
+service traffic) until the schema is compatible.
+
+The comparison is deliberately **not** strict equality: a database
+*ahead* of the code's head (a revision this image's ``versions/``
+directory cannot resolve) reports ``ok=True``. That is the schema
+state every ``helm rollback`` / ``--atomic`` auto-rollback produces —
+the ``pre-upgrade`` migration Job's commit survives the manifest
+rollback (Helm reverts manifests only, never hook side effects), so
+the rolled-back image must tolerate the newer schema or the rollback
+is dead on arrival (#1607, 2026-06-08 outage). The additive-only
+``upgrade()`` contract enforced by
+``scripts/ci/check_migration_compat.py`` is what makes the newer
+schema safe to run against. See
+``docs/codebase/migrations.md`` § "Rollback contract".
 
 The helper :func:`alembic_config` resolves and caches the on-disk
 ``alembic.ini``; both the probe and the migration runner (T29) share
@@ -34,6 +47,7 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
@@ -173,6 +187,26 @@ def _read_current_revision(connection: Connection) -> str | None:
     return context.get_current_revision()
 
 
+def _revision_known(script: ScriptDirectory, revision: str) -> bool:
+    """Return ``True`` iff *revision* resolves in this image's ``versions/``.
+
+    ``alembic_version`` has a single writer — ``alembic upgrade head``
+    run by the chart's pre-upgrade migration Job — so a revision the
+    on-disk :class:`~alembic.script.ScriptDirectory` cannot resolve
+    was stamped by a *newer* image: the database is ahead of this
+    code, not diverged from it. Alembic signals the unknown id with
+    :class:`alembic.util.exc.CommandError` ("Can't locate revision
+    identified by ..."); only that error is treated as "unknown".
+    Anything else propagates to the probe's catch-all so the probe
+    stays fail-closed (``check_failed: <ExcClass>``).
+    """
+    try:
+        script.get_revision(revision)
+    except CommandError:
+        return False
+    return True
+
+
 def _check_pgvector_extension(connection: Connection) -> bool:
     """Return ``True`` iff the ``vector`` extension is enabled.
 
@@ -207,17 +241,30 @@ def _check_pgvector_extension(connection: Connection) -> bool:
 async def db_migration_probe() -> ProbeResult:
     """Compare the DB's Alembic revision to the code's head.
 
-    Three observable outcomes:
+    Four observable outcomes:
 
     * **healthy** — database reachable, ``alembic_version`` table
       readable, current revision matches the head defined by the
       ``versions/`` directory on disk. Detail carries
       ``revision=<sha>``.
-    * **unhealthy (revision diverged)** — current and head both
-      resolved but they differ. Detail carries
-      ``current=<sha> head=<sha>``. Operators see this when a
-      forward-deploy missed an ``alembic upgrade head`` or when a
-      rollback returned the image but not the schema.
+    * **healthy (DB ahead)** — current is a revision this image's
+      ``versions/`` directory cannot resolve, i.e. it was stamped by
+      a newer release. This is the expected state after a
+      ``helm rollback`` / ``--atomic`` auto-rollback: Helm reverts
+      manifests only, never the pre-upgrade migration Job's commit,
+      and the additive-only ``upgrade()`` contract
+      (``scripts/ci/check_migration_compat.py``) guarantees the
+      newer schema is readable by this code. Detail carries
+      ``current=<sha> head=<sha> db_ahead=true`` so the tolerated
+      mismatch stays visible on ``/ready``. Trade-off (#1607): a
+      corrupted / foreign ``alembic_version`` value is
+      indistinguishable from "newer release" and now passes
+      readiness — accepted, because the dangerous direction (DB
+      *behind* the code, schema objects missing) still fails.
+    * **unhealthy (DB behind)** — current resolves in this image's
+      ``versions/`` but differs from head: a forward-deploy missed
+      its ``alembic upgrade head``. Detail carries
+      ``current=<sha> head=<sha>``.
     * **unhealthy (DB / config error)** — DB unreachable, table
       missing, ini missing, etc. Detail carries
       ``check_failed: <ExcClass>`` — the class name only, not the
@@ -233,9 +280,9 @@ async def db_migration_probe() -> ProbeResult:
     drift where an operator manually dropped the extension or a
     backup restore brought back the schema without the catalog
     entry. The detail in that case is ``revision=<sha>
-    pgvector=missing`` (revision still matches head — only the
-    extension is gone). SQLite skips this check; the dialect has no
-    ``pg_extension`` catalog.
+    pgvector=missing`` — ``<sha>`` is the DB's current revision
+    (equal to head except on the db-ahead path). SQLite skips this
+    check; the dialect has no ``pg_extension`` catalog.
 
     The function is ``async`` because the canonical SQLAlchemy 2.x
     pattern reads the version through an ``AsyncEngine.connect()`` /
@@ -245,12 +292,18 @@ async def db_migration_probe() -> ProbeResult:
     pgvector_ok = True  # default for non-PG dialects; PG branch overrides below
     try:
         cfg = alembic_config()
-        head = ScriptDirectory.from_config(cfg).get_current_head()
+        script = ScriptDirectory.from_config(cfg)
+        head = script.get_current_head()
         engine = get_engine()
         async with engine.connect() as conn:
             current = await conn.run_sync(_read_current_revision)
             if engine.dialect.name == "postgresql":
                 pgvector_ok = await conn.run_sync(_check_pgvector_extension)
+        # The verdict stays inside the try: its db-ahead branch walks
+        # the script directory again (``_revision_known``), and an
+        # unexpected error there must fold into ``check_failed`` —
+        # the probe never raises (Task #27 AC #3).
+        return _revision_verdict(script, current, head, pgvector_ok)
     except Exception as exc:
         _log.warning(
             "db_migration_probe_failed",
@@ -261,6 +314,21 @@ async def db_migration_probe() -> ProbeResult:
             ok=False,
             detail=f"check_failed: {type(exc).__name__}",
         )
+
+
+def _revision_verdict(
+    script: ScriptDirectory,
+    current: str | None,
+    head: str | None,
+    pgvector_ok: bool,
+) -> ProbeResult:
+    """Fold the fetched migration state into a single :class:`ProbeResult`.
+
+    Pure decision logic, split from :func:`db_migration_probe` so the
+    async I/O shell stays small. Outcome matrix in the probe's
+    docstring; rollback rationale in the module docstring and
+    ``docs/codebase/migrations.md`` § "Rollback contract".
+    """
     if head is None and current is None:
         # No migrations on disk and none applied. Treat as not-ready
         # rather than vacuously-ready: the chassis ships with an
@@ -271,24 +339,45 @@ async def db_migration_probe() -> ProbeResult:
             ok=False,
             detail="no_migrations: head and current are both unset",
         )
+    db_ahead = False
     if current != head:
-        return ProbeResult(
-            name="db",
-            ok=False,
-            detail=f"current={current} head={head}",
-        )
+        # A current revision this image's script directory cannot
+        # resolve was stamped by a newer release — the DB is *ahead*,
+        # the post-auto-rollback state (#1607). Tolerated: the
+        # additive-only upgrade() contract means this code still runs
+        # against the newer schema. ``current is None`` (fresh DB,
+        # migrations never ran) and a *resolvable* mismatch (DB
+        # behind head) keep failing. ``head is None`` with a stamped
+        # DB (image shipped without its ``versions/``) is a packaging
+        # defect, not a rollback — also keeps failing.
+        db_ahead = current is not None and head is not None and not _revision_known(script, current)
+        if not db_ahead:
+            return ProbeResult(
+                name="db",
+                ok=False,
+                detail=f"current={current} head={head}",
+            )
     if not pgvector_ok:
-        # Revision matches head but the pgvector extension is gone.
-        # G0.4-T6 (#263) failure mode: operator dropped the extension
-        # post-deploy or a backup restore brought back the schema
-        # without the catalog entry. Surfaced loudly on ``/ready`` so
-        # the kubelet pulls the pod out of service traffic; retrieval
-        # writes / reads against the ``vector(384)`` column would
-        # silently degrade otherwise.
+        # Schema revision is compatible but the pgvector extension is
+        # gone. G0.4-T6 (#263) failure mode: operator dropped the
+        # extension post-deploy or a backup restore brought back the
+        # schema without the catalog entry. Surfaced loudly on
+        # ``/ready`` so the kubelet pulls the pod out of service
+        # traffic; retrieval writes / reads against the
+        # ``vector(384)`` column would silently degrade otherwise.
+        # ``current`` (== head except on the db-ahead path, where it
+        # is the DB's actual revision) keeps the detail truthful in
+        # both cases.
         return ProbeResult(
             name="db",
             ok=False,
-            detail=f"revision={head} pgvector=missing",
+            detail=f"revision={current} pgvector=missing",
+        )
+    if db_ahead:
+        return ProbeResult(
+            name="db",
+            ok=True,
+            detail=f"current={current} head={head} db_ahead=true",
         )
     return ProbeResult(
         name="db",

@@ -144,9 +144,73 @@ Migrations in `upgrade()` must be additive: `create_table`, `add_column`,
 raw `DROP …` / `RENAME …` / `SET NOT NULL` SQL) is forbidden in `upgrade()`.
 
 The CI script `scripts/ci/check_migration_compat.py` enforces this at the AST
-level. Running `alembic downgrade` in production is the rollback path; the
-schema must survive a rollback without manual DB intervention (`helm rollback`
-contract, Goal #11 DoD).
+level. Production **never** runs `alembic downgrade` — rollback is
+image-revert plus forward-compatible schema discipline (`helm rollback`
+contract, Goal #11 DoD). The additive-only rule is what makes that safe: any
+older image can read any newer schema. See the rollback contract below.
+
+## Rollback contract (readiness ↔ migrations, #1607)
+
+The chart applies migrations from a `helm.sh/hook: pre-install,pre-upgrade`
+Job (`deploy/charts/meho/templates/migration-job.yaml`), so the schema moves
+**before** the Deployment rolls. Helm's `helm rollback` / `--atomic` reverts
+**manifests only** — hook side effects such as a committed migration survive
+(documented Helm limitation; hook resources are not tracked as part of the
+release). After any rollback across a migration the database is therefore
+*ahead* of the running image, by design.
+
+Two enforced invariants make that state safe instead of an outage:
+
+1. **Additive-only `upgrade()`** (above, CI-gated by
+   `scripts/ci/check_migration_compat.py` via `migration-compat.yml`) — the
+   older code never depends on schema objects the newer migration removed,
+   because nothing is removed.
+2. **DB-ahead-tolerant readiness** — `db_migration_probe`
+   (`backend/src/meho_backplane/db/migrations.py`) reports `ok=True` with
+   detail `current=<newer> head=<older> db_ahead=true` when the DB's
+   revision does not resolve in the image's `versions/` directory (only a
+   newer release's migration Job can have stamped it). A revision the image
+   *does* know that differs from head means the DB is **behind** — that
+   still fails readiness, as does a fresh unmigrated DB.
+
+Before #1607 the probe demanded strict `current == head` equality, which
+poisoned the deploy lifecycle twice over (live 2026-06-08, v0.12.0): the
+moment the pre-upgrade Job committed `0037`, the *still-running* prior pods
+flipped NotReady (their head was `0036`), and after `--atomic` rolled the
+failed release back, the restored pods could never become Ready either —
+the service could move neither forward nor back without manual `alembic`.
+
+**Why not a `pre-rollback` downgrade hook** (the textbook Helm answer):
+Helm renders rollback hooks from the *previous* release's stored manifests
+(`pkg/action/rollback.go` builds the target release with
+`Hooks: previousRelease.Hooks`), i.e. the **old image** — which does not
+ship the newer migration scripts. `alembic downgrade` must load the script
+of every revision it walks down through, so it dies with `Can't locate
+revision identified by '0037'` (verified against Alembic 1.18.4) and the
+failed hook would block the rollback outright. Even if the scripts were
+available, an unattended downgrade is destructive: `0037`'s `downgrade()`
+drops `doc_collections`, destroying anything written during the
+failed-release window. Automatic downgrades stay banned.
+
+**Trade-offs, accepted in #1607:**
+
+- The probe no longer flags "DB at a revision this image does not know" as
+  a failure, so a corrupted or foreign `alembic_version` value passes
+  readiness. The dangerous direction (DB behind the code — expected tables
+  or columns missing) still fails closed, and the tolerated state stays
+  visible on `/ready` as `db_ahead=true`.
+- The tolerance ships *in the image being rolled back to*. Rolling back to
+  a pre-tolerance image (strict-equality probe) across a migration still
+  bricks readiness — recover by rolling forward.
+
+`downgrade()` bodies remain **mandatory and real** (see `0037`): they are
+the development-time symmetry check and the *manual*, operator-driven
+escape hatch — never part of the automated deploy lifecycle.
+
+What re-arms the trap: a migration that smuggles destructive DDL past the
+compat gate, or a readiness check that reintroduces strict revision
+equality. Both are CI/test-pinned (`test_migration_compat.py`,
+`test_alembic_probe.py`).
 
 ## Async and sync engine interaction
 
@@ -157,6 +221,12 @@ avoid "event loop already running" errors.
 
 ## References
 
+- Task #1607: pre-upgrade hook ↔ auto-rollback trap; db-ahead-tolerant
+  readiness probe (G0.22, 2026-06-08 outage).
+- Helm chart hooks (hook resources unmanaged by the release):
+  <https://helm.sh/docs/topics/charts_hooks/>; `--atomic` rolls back
+  manifests only, not hook side effects:
+  <https://github.com/helm/helm/issues/7158>.
 - PR #1045: the UUID `str()` vs `.hex` incident (G7.1-T5).
 - Task #1095: UUID audit + drift-guard (G0.11 CI hardening).
 - `backend/alembic/versions/0018_seed_rdc_internal_conventions.py`: the

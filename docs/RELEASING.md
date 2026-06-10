@@ -336,6 +336,62 @@ enabled. Any `"configured": false` with a non-empty `missing_env`
 list is an unfinished provisioning step — name the listed env vars
 into the pod's environment and re-deploy.
 
+### 6b. Rollback drill — the migration ↔ rollback contract
+
+**Contract** (#1607, hardened after the 2026-06-08 outage):
+`helm rollback` / `--atomic` reverts **manifests only** — the
+`pre-install,pre-upgrade` migration Job's schema commit survives the
+rollback (Helm does not track hook side effects). Pods rolled back
+across a migration therefore run against a *newer* schema than their
+code expects. Two enforced invariants make that safe:
+
+1. **Additive-only `upgrade()`** — `scripts/ci/check_migration_compat.py`
+   (CI: `migration-compat.yml`) rejects destructive DDL, so an older
+   image can always read a newer schema.
+2. **DB-ahead-tolerant readiness** — the `db` probe
+   (`backend/src/meho_backplane/db/migrations.py`) reports `ok=true`
+   with detail `current=<newer> head=<older> db_ahead=true` when the
+   DB revision is unknown to the image. DB *behind* head still fails
+   readiness. Full rationale (including why a `pre-rollback`
+   `alembic downgrade` hook cannot work):
+   [`docs/codebase/migrations.md`](codebase/migrations.md) § "Rollback
+   contract".
+
+Never run `alembic downgrade` as part of a deploy or rollback;
+`downgrade()` bodies are the manual escape hatch only. **Caveat:** the
+tolerance lives in the image being rolled back **to** — rolling back
+to a pre-tolerance release (strict `current == head` probe) across a
+migration still bricks readiness; recover those by rolling forward.
+
+**Failure-injection drill** — run on a sandbox (kind/minikube or the
+staging namespace, never prod) when the release carries a migration,
+and whenever the migration Job or the `db` probe changes:
+
+- [ ] 1. Install the prior release `v(n)` (DB at migration `00NN`);
+  wait Ready. Per the caveat above, `v(n)` must already carry the
+  db-ahead-tolerant probe (#1607) — the drill proves the safety net
+  of the release being rolled back *to*.
+- [ ] 2. Upgrade to the candidate `v(n+1)` (carrying `00NN+1`) with
+  readiness deliberately broken, so the rollout must fail and
+  auto-roll-back:
+
+  ```bash
+  helm upgrade meho oci://ghcr.io/evoila/meho-chart \
+    --version <candidate> --reuse-values --atomic --timeout 5m \
+    --set probes.readiness.httpGet.path=/definitely-404
+  ```
+
+- [ ] 3. Confirm the upgrade fails and Helm auto-rolls-back:
+  `helm history meho` shows a rollback revision; pods run the `v(n)`
+  image again.
+- [ ] 4. Assert the rolled-back pods reach `READY 1/1` **without any
+  manual `alembic` command**, and `GET /ready` returns 200 with the
+  `db` check `ok=true`, detail `current=00NN+1 head=00NN
+  db_ahead=true`.
+- [ ] 5. Clean up by rolling **forward**: re-run the upgrade with
+  readiness intact. The DB is already at `00NN+1`; the migration Job
+  re-runs as a no-op (`alembic upgrade head` is idempotent).
+
 ### 7. Post-release
 
 - [ ] Close the release Initiative; update the board / MVP roadmap.
@@ -359,6 +415,9 @@ into the pod's environment and re-deploy.
         configure the env vars per the cited Vault doc; verify gate
         flips to configured (or capture_mode=always for audit_replay
         post-T6)
+[ ] 6b. Rollback drill (releases carrying a migration): broken-readiness
+        upgrade auto-rolls-back; rolled-back pods reach Ready with
+        db_ahead=true and no manual alembic (#1607)
 [ ] 7. Initiative closed; board/roadmap updated; consumers notified
 ```
 
@@ -370,6 +429,15 @@ into the pod's environment and re-deploy.
 - **Empty release notes:** `cli-release.yml` falls back to `[Unreleased]`
   when no `## [X.Y.Z]` section exists at tag time. Always roll (step 2)
   *before* tagging (step 4).
+- **Strict `current == head` readiness vs pre-upgrade migrations
+  (v0.12.0, 2026-06-08, ~2.5h outage):** the migration Job committed
+  `0037` before the Deployment rolled; the new release failed
+  readiness; `--atomic` rolled the manifests back but not the schema,
+  and the restored `v0.11.0` pods failed their own strict `db` probe
+  (`current=0037 head=0036`) forever — recovery required rolling
+  *forward*. Closed by #1607 (db-ahead-tolerant probe + section 6b's
+  drill). Remember: the tolerance must exist in the image being
+  rolled back **to**.
 - **Tagging off a red / cancelled `main` (v0.5.0):** the publish
   workflows have no green-main gate — the `v*` tag publishes whatever
   `main` is. During the v0.5.0 cut, merge-storm concurrency cancellation

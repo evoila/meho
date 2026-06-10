@@ -364,6 +364,36 @@ revert.
   patches would overwhelm DRS by forcing every VM in the cluster to
   vMotion at once. The composite serialises hosts and lets DRS
   rebalance between iterations.
+- **`network.portgroup.audit` op_id reconciliation (#1602)** — the
+  read composite originally dispatched
+  `GET:/vcenter/network/distributed-switch` and
+  `GET:/vcenter/network/distributed-portgroup` (both **singular**),
+  neither of which resolves against the canonical `vmware/9.0` ingest.
+  The vSphere Automation REST distributed-switch resource is **plural**
+  (`GET:/vcenter/network/distributed-switches`, a preview feature), and
+  there is **no** dedicated distributed-portgroup list resource at all —
+  distributed portgroups are enumerated via the generic
+  `GET:/vcenter/network` resource filtered to the
+  `DISTRIBUTED_PORTGROUP` type. Both corrected sub-ops live in the REST
+  Automation `vcenter.yaml` (this is **not** a VI-JSON MoRef family
+  swap). The generic `Network` summary carries no parent-DVS field, so
+  the per-portgroup `dvs`/`dvs_name` enrichment is best-effort and
+  `filter_dvs` scopes only the DVS-name index, not the portgroup set.
+  A build-time guard
+  (`tests/acceptance/test_portgroup_audit_op_id_reconcile.py`) parses
+  the pinned `vcenter.yaml` and asserts every audit sub-op_id is emitted
+  by the ingest, so a future drift goes red in CI.
+- **`host.detach_from_vds` write composite carries the same singular
+  `distributed-portgroup` defect (out of scope for #1602)** —
+  `_write.py`'s `_OP_LIST_PORTGROUPS =
+  "GET:/vcenter/network/distributed-portgroup"` has the identical
+  unresolvable spelling. #1602 is scoped to the read
+  `network.portgroup.audit` composite only; the write-side fix plus a
+  reconcile guard over the 8 write composites' `_SUB_OPS_*` against the
+  real pinned spec (the existing
+  `test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
+  synthesises its fixture *from* the constants, so it cannot catch a
+  wrong key) is a follow-up under the #1529 cleanup.
 
 ## References
 

@@ -207,20 +207,26 @@ adoption on
 via the shared helper
 [`backend/src/meho_backplane/api/v1/_envelope.py`](../../backend/src/meho_backplane/api/v1/_envelope.py)
 (``EnvelopeVersion`` type, ``ENVELOPE_QUERY`` declaration,
-``wrap_v2_envelope`` builder). All five list endpoints now accept
+``wrap_v2_envelope`` builder). All five list endpoints accept
 the opt-in: `targets` (the reference) and the topology
 `dependents`/`dependencies` reads in #1312, plus the four sister
 endpoints (``conventions`` / ``audit/my-recent`` /
 ``broadcast/overrides`` / ``connectors``) in G0.18-T3 (#1356),
-completing #1312 acceptance A. The ``connectors``, ``conventions``,
-and ``broadcast/overrides`` lists are unpaginated, so their
-``next_cursor`` is always ``null`` under the opt-in; ``conventions``
-carries ``budget_status`` as a top-level sidecar.
+completing #1312 acceptance A. The two runbook list endpoints
+(``GET /api/v1/runbooks/templates`` / ``GET /api/v1/runbooks/runs``)
+shipped after that sweep with product-specific keyed shapes
+(``{"templates": [...]}`` / ``{"runs": [...]}``) and joined the
+opt-in in G0.22-T6 (#1611). The ``connectors``, ``conventions``,
+``broadcast/overrides``, and both runbook lists are unpaginated, so
+their ``next_cursor`` is always ``null`` under the opt-in;
+``conventions`` carries ``budget_status`` as a top-level sidecar.
 
-The three sister endpoints with a named/typed v0.8.0 response model
+The sister endpoints with a named/typed v0.8.0 response model
 (``conventions`` → ``ConventionListResponse``, ``audit/my-recent``
 → ``AuditQueryResult``, ``broadcast/overrides`` →
-``[BroadcastOverrideRead]``) keep ``response_model`` on the route and
+``[BroadcastOverrideRead]``, ``runbooks/templates`` →
+``RunbookTemplateListResponse``, ``runbooks/runs`` →
+``RunbookListRunsResponse``) keep ``response_model`` on the route and
 emit the v2 envelope via a raw ``JSONResponse`` in the opt-in branch.
 That preserves the named OpenAPI 200 schema — and the typed CLI
 client generated from it — while still returning the unified shape

@@ -3650,7 +3650,7 @@
           "runbooks"
         ],
         "summary": "List Templates",
-        "description": "List the latest version of each template slug for the operator's tenant.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a tenant\nid from the query string. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler; ``operator`` and\n``tenant_admin`` both pass.\n\nThe optional ``status`` / ``target_kind`` filters narrow the rows\nconsidered before the latest-per-slug projection; ``limit`` is capped\nat 500. ``status`` is typed as the closed ``draft`` / ``published`` /\n``deprecated`` vocabulary, so an out-of-vocabulary value trips a clean\n422 at FastAPI's query-parameter validation boundary (before the\nhandler body runs) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.schemas.ListTemplatesFilter`\ninternally.\n\nBinds ``audit_op_id=\"runbook.list_templates\"`` + ``audit_op_class=\n\"read\"`` before the service call.",
+        "description": "List the latest version of each template slug for the operator's tenant.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a tenant\nid from the query string. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler; ``operator`` and\n``tenant_admin`` both pass.\n\nThe optional ``status`` / ``target_kind`` filters narrow the rows\nconsidered before the latest-per-slug projection; ``limit`` is capped\nat 500. ``status`` is typed as the closed ``draft`` / ``published`` /\n``deprecated`` vocabulary, so an out-of-vocabulary value trips a clean\n422 at FastAPI's query-parameter validation boundary (before the\nhandler body runs) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.schemas.ListTemplatesFilter`\ninternally.\n\nThe default response is the v0.8.0 keyed\n:class:`RunbookTemplateListResponse` shape (``{\"templates\": [...]}``).\nPassing ``?envelope=v2`` returns the unified ``{\"items\": [...],\n\"next_cursor\": null}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72 -- the listing is not\ncursor-paginated (``limit`` truncates), so ``next_cursor`` is always\n``null`` under the opt-in, matching the sibling unpaged adopters.\nOmitting the param keeps the keyed default so no client breaks\n(G0.22-T6 #1611, joining the shape unified in #1356/#1366).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so the\ndocumented OpenAPI 200 schema, and the typed CLI client generated\nfrom it) as the named :class:`RunbookTemplateListResponse` while\nstill letting the opt-in branch return the unified shape.\n\nBinds ``audit_op_id=\"runbook.list_templates\"`` + ``audit_op_class=\n\"read\"`` before the service call.",
         "operationId": "list_templates_api_v1_runbooks_templates_get",
         "parameters": [
           {
@@ -3689,6 +3689,19 @@
               "default": 100,
               "title": "Limit"
             }
+          },
+          {
+            "name": "envelope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "v2",
+              "type": "string",
+              "nullable": true,
+              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "title": "Envelope"
+            },
+            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -4049,7 +4062,7 @@
           "runbooks"
         ],
         "summary": "List Runs",
-        "description": "List runs for the operator's tenant, scoped by role.\n\nRole floor: ``operator``. The handler computes\n``caller_is_admin`` from ``operator.tenant_role`` and passes it\nto the service:\n\n* ``caller_is_admin=False`` (operator path) -- the service forces\n  ``assignee=operator.sub`` regardless of what the query string\n  says, so an ``OPERATOR`` only ever sees their own runs even if\n  they try to filter to another assignee. The filter is a\n  *narrow* surface for their own view, never an *escape* into\n  another operator's.\n* ``caller_is_admin=True`` (admin path) -- the filter is honoured\n  as-is, so a ``TENANT_ADMIN`` can pass ``?assignee=<other-sub>``\n  to inspect a junior's runs.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``status`` is typed as the\nclosed ``in_progress`` / ``completed`` / ``abandoned`` vocabulary,\nso an out-of-vocabulary value trips a clean 422 at FastAPI's\nquery-parameter validation boundary (before the handler body\nruns) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.runs_schemas.ListRunsFilter`\ninternally.\n\nBinds ``audit_op_id=\"runbook.list_runs\"`` + ``audit_op_class=\n\"read\"`` before the service call. ``runbook.list_runs`` matches\nno ``.list`` / ``.get`` suffix the broadcast classifier\nrecognises, so the explicit override is load-bearing to keep\nclassification from defaulting to ``op_class=\"other\"`` (same\ngotcha :mod:`meho_backplane.api.v1.runbook_templates`'s\n``list_templates`` documents).",
+        "description": "List runs for the operator's tenant, scoped by role.\n\nRole floor: ``operator``. The handler computes\n``caller_is_admin`` from ``operator.tenant_role`` and passes it\nto the service:\n\n* ``caller_is_admin=False`` (operator path) -- the service forces\n  ``assignee=operator.sub`` regardless of what the query string\n  says, so an ``OPERATOR`` only ever sees their own runs even if\n  they try to filter to another assignee. The filter is a\n  *narrow* surface for their own view, never an *escape* into\n  another operator's.\n* ``caller_is_admin=True`` (admin path) -- the filter is honoured\n  as-is, so a ``TENANT_ADMIN`` can pass ``?assignee=<other-sub>``\n  to inspect a junior's runs.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``status`` is typed as the\nclosed ``in_progress`` / ``completed`` / ``abandoned`` vocabulary,\nso an out-of-vocabulary value trips a clean 422 at FastAPI's\nquery-parameter validation boundary (before the handler body\nruns) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.runs_schemas.ListRunsFilter`\ninternally.\n\nThe default response is the v0.8.0 keyed\n:class:`RunbookListRunsResponse` shape (``{\"runs\": [...]}``).\nPassing ``?envelope=v2`` returns the unified ``{\"items\": [...],\n\"next_cursor\": null}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72 -- the listing is\nnot cursor-paginated (``limit`` truncates), so ``next_cursor`` is\nalways ``null`` under the opt-in, matching the sibling unpaged\nadopters. Omitting the param keeps the keyed default so no client\nbreaks (G0.22-T6 #1611, joining the shape unified in #1356/#1366).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so\nthe documented OpenAPI 200 schema, and the typed CLI client\ngenerated from it) as the named :class:`RunbookListRunsResponse`\nwhile still letting the opt-in branch return the unified shape.\n\nBinds ``audit_op_id=\"runbook.list_runs\"`` + ``audit_op_class=\n\"read\"`` before the service call. ``runbook.list_runs`` matches\nno ``.list`` / ``.get`` suffix the broadcast classifier\nrecognises, so the explicit override is load-bearing to keep\nclassification from defaulting to ``op_class=\"other\"`` (same\ngotcha :mod:`meho_backplane.api.v1.runbook_templates`'s\n``list_templates`` documents).",
         "operationId": "list_runs_api_v1_runbooks_runs_get",
         "parameters": [
           {
@@ -4098,6 +4111,19 @@
               "default": 100,
               "title": "Limit"
             }
+          },
+          {
+            "name": "envelope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "v2",
+              "type": "string",
+              "nullable": true,
+              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "title": "Envelope"
+            },
+            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",

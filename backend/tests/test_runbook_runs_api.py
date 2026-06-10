@@ -971,6 +971,36 @@ def test_list_runs_invalid_status_422(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_list_runs_envelope_v2_unified_shape(client: TestClient) -> None:
+    """``?envelope=v2`` returns ``{items, next_cursor}``; the keyed field is absent.
+
+    G0.22-T6 (#1611): the same rows the default ``{"runs": [...]}`` shape
+    carries ride under ``items``; the listing is unpaged so ``next_cursor``
+    is always ``null``. The cross-endpoint contract pin lives in
+    ``test_api_v1_list_envelope_v2.py``; this test owns the data-bearing
+    assertion that the v2 items match the keyed payload.
+    """
+    run_id = uuid.uuid4()
+    key, token = _operator_token(sub="op-operator")
+    fake_list = AsyncMock(return_value=[_run_summary(run_id=run_id, assigned_to="op-operator")])
+    with (
+        respx.mock as mock_router,
+        patch(f"{_SERVICE_ROUTE}.list_runs", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/runbooks/runs?envelope=v2",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["run_id"] for item in body["items"]] == [str(run_id)]
+    assert body["items"][0]["started_at"] == "2026-05-01T11:00:00Z"
+    assert body["next_cursor"] is None
+    assert "runs" not in body
+
+
 def test_list_runs_cross_tenant_isolation(client: TestClient) -> None:
     """Operator's tenant_id is the *only* tenant id the service ever sees.
 

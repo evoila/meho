@@ -25,9 +25,13 @@ Coverage matrix (Task #1555 acceptance criteria):
   the same backend endpoint serialize inside the adapter (the lock is
   held across the corpus round-trip); probes against different endpoints
   run concurrently.
-* **/ready backend reachability** — the coarse probe reports ``ok`` only
-  when every registered backend is configured, naming the unconfigured
-  ones.
+* **/ready backend configuredness** — registered ≠ configured (#1606):
+  the coarse probe *skips* unconfigured (optional) backends rather than
+  failing them, so a deploy with no docs backend configured is Ready
+  (``GET /ready`` → 200), while a configured-but-unreachable backend
+  still fails closed at call time — never at the readiness gate (the
+  coarse probe does no I/O, so a corpus outage cannot flap the
+  backplane out of rotation).
 * **REST routes** — probe / enable / disable are tenant_admin-gated
   (operator → 403), 404 on an unknown key, and the probe maps a backend
   failure to 503 with the row untouched.
@@ -45,6 +49,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from fastapi import FastAPI
@@ -73,6 +78,8 @@ from meho_backplane.docs_collections.lifecycle import (
 from meho_backplane.docs_search.backends import BackendReadiness, CorpusHttpBackend
 from meho_backplane.docs_search.backends.base import SearchBackend
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
+from meho_backplane.health import clear_probes, register_probe
+from meho_backplane.health import router as health_router
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
@@ -433,7 +440,7 @@ async def test_concurrent_probes_different_projects_run_concurrently(
 
 
 # ---------------------------------------------------------------------------
-# /ready backend reachability probe
+# /ready backend configuredness probe
 # ---------------------------------------------------------------------------
 
 
@@ -441,14 +448,71 @@ def test_ready_probe_ok_when_corpus_configured() -> None:
     result = docs_backends_readiness_probe()
     assert result.name == "docs_backends"
     assert result.ok is True
+    assert result.detail == "1 backend(s) configured"
 
 
-def test_ready_probe_fails_when_backend_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ready_probe_skips_unconfigured_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Registered ≠ configured (#1606): an unconfigured optional backend is skipped.
+
+    The ``corpus-http`` adapter self-registers at import, so a deploy
+    that never set ``CORPUS_URL`` still has it in the registry. That must
+    not fail readiness — the docs add-on is optional — and the detail
+    must not name any backend as unconfigured.
+    """
     monkeypatch.setenv("CORPUS_URL", "")
     get_settings.cache_clear()
     result = docs_backends_readiness_probe()
-    assert result.ok is False
-    assert "corpus-http" in (result.detail or "")
+    assert result.ok is True
+    assert result.detail == "no backends configured"
+    assert "corpus-http" not in (result.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_configured_but_unreachable_backend_fails_closed_at_call_time() -> None:
+    """A *configured* backend that is unreachable still fails closed — at call time.
+
+    The coarse ``/ready`` probe is a credential-free config read and
+    never dials the corpus, so an outage of the (optional) docs backend
+    cannot flap the whole backplane out of rotation. The fail-closed
+    property for real config lives where the call actually dials: the
+    search round-trip maps the dead endpoint to ``CorpusUnavailable``
+    (→ HTTP 503 at the route / per-collection probe).
+    """
+    with respx.mock as mock_router:
+        # Only the search POST is mocked (as unreachable); the readiness
+        # probe running inside this strict context proves it issues no
+        # HTTP I/O at all (an unmocked request would raise).
+        mock_router.post(_CORPUS_URL).mock(side_effect=httpx.ConnectError("connection refused"))
+        result = docs_backends_readiness_probe()
+        assert result.ok is True
+        assert result.detail == "1 backend(s) configured"
+        with pytest.raises(CorpusUnavailable):
+            await CorpusHttpBackend().search(_make_operator(), "q", backend_ref=None)
+
+
+@pytest.mark.asyncio
+async def test_ready_endpoint_200_when_no_backend_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end over ASGI transport: a deploy without ``CORPUS_URL`` is Ready."""
+    monkeypatch.setenv("CORPUS_URL", "")
+    get_settings.cache_clear()
+    app = FastAPI()
+    app.include_router(health_router)
+    clear_probes()
+    try:
+        register_probe("docs_backends", docs_backends_readiness_probe)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            resp = await http_client.get("/ready")
+    finally:
+        clear_probes()
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ready"
+    docs_check = next(c for c in body["checks"] if c["name"] == "docs_backends")
+    assert docs_check["ok"] is True
+    assert docs_check["detail"] == "no backends configured"
 
 
 # ---------------------------------------------------------------------------

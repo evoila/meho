@@ -12,6 +12,9 @@ form ``"<impl_id>-<version>"`` and resolves it into the
   encoding contract and the v1-style backward-compatible fallback.
 * :func:`lookup_descriptor` -- tenant-scoped-then-global descriptor
   lookup. Returns ``None`` if no enabled descriptor matches.
+* :func:`descriptor_exists_any_state` -- ``is_enabled``-agnostic
+  presence probe. Used only to classify a non-dispatchable sub-op as
+  *present-but-disabled* versus *truly absent*; never used to dispatch.
 * :func:`count_known_ops` -- count of enabled descriptors for a given
   ``(product, version, impl_id)``. Returned in the ``unknown_op`` error
   payload so the operator has a "did you mean…" signal without the
@@ -36,6 +39,7 @@ __all__ = [
     "connector_class_registered",
     "connector_exists",
     "count_known_ops",
+    "descriptor_exists_any_state",
     "lookup_descriptor",
     "parse_connector_id",
 ]
@@ -133,6 +137,51 @@ async def lookup_descriptor(
             )
         )
         return result.scalar_one_or_none()
+
+
+async def descriptor_exists_any_state(
+    *,
+    tenant_id: UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+    op_id: str,
+) -> bool:
+    """Return whether a descriptor row exists for the op id, **ignoring** ``is_enabled``.
+
+    The ``is_enabled``-agnostic sibling of :func:`lookup_descriptor`,
+    used **only to classify** a sub-op that :func:`lookup_descriptor`
+    could not resolve. It never returns a descriptor and is never used
+    to dispatch -- a disabled op stays non-dispatchable. Its sole job is
+    to tell *present-but-disabled* (a row exists, ``is_enabled = false``)
+    apart from *truly absent* (no row at all), so the composite pre-flight
+    can emit ``composite_l2_disabled`` (remediation: re-enable the op)
+    rather than ``composite_l2_missing`` (remediation: ingest the catalog)
+    for a deploy whose L2 surface is ingested-but-disabled (#1601).
+
+    Scoping mirrors :func:`lookup_descriptor`'s tenant-then-global
+    visibility: a row counts when it is this tenant's
+    (``tenant_id == tenant_id``) **or** built-in / global
+    (``tenant_id IS NULL``). A single ``LIMIT 1`` existence probe over
+    that union -- the caller has already established (via
+    :func:`lookup_descriptor` returning ``None``) that no *enabled* row
+    matches, so the only open question is presence in any state.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor.id)
+            .where(
+                (EndpointDescriptor.tenant_id == tenant_id)
+                | (EndpointDescriptor.tenant_id.is_(None)),
+                EndpointDescriptor.product == product,
+                EndpointDescriptor.version == version,
+                EndpointDescriptor.impl_id == impl_id,
+                EndpointDescriptor.op_id == op_id,
+            )
+            .limit(1)
+        )
+        return result.first() is not None
 
 
 async def count_known_ops(

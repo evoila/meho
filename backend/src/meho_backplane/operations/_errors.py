@@ -348,6 +348,79 @@ def result_composite_l2_missing(
     )
 
 
+def result_composite_l2_disabled(
+    op_id: str,
+    disabled_op_ids: tuple[str, ...],
+    connector_id: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Composite pre-flight found L2 sub-ops present in the catalog but **disabled**.
+
+    #1601. The sibling of :func:`result_composite_l2_missing` for the
+    *ingested-but-disabled* deploy state. A composite's L2 sub-op has a
+    descriptor row in ``endpoint_descriptor`` whose ``is_enabled = false``,
+    so :func:`~meho_backplane.operations._lookup.lookup_descriptor`
+    (which hard-filters ``is_enabled = TRUE``) cannot resolve it and the
+    composite is non-dispatchable -- but the catalog has already been
+    ingested, so the ``composite_l2_missing`` remediation
+    (``meho connector ingest --catalog ...``) would send the operator in
+    the wrong direction.
+
+    The pre-flight classifies the non-dispatchable sub-op via the
+    ``is_enabled``-agnostic
+    :func:`~meho_backplane.operations._lookup.descriptor_exists_any_state`
+    probe and raises
+    :class:`~meho_backplane.operations.composite.CompositeL2DependencyDisabled`
+    when the row is present; the dispatcher converts it to this result.
+
+    Remediation contract: name only verbs that **exist**. The reliable
+    path is per-op ``meho connector edit-op <connector_id> <op_id>
+    --enable``. Connector-level ``meho connector enable <connector_id>``
+    is named only as the broad-strokes alternative **with the caveat that
+    it does not re-enable spec-ingested ops** -- those land
+    ``group_id = NULL`` and the enable cascade filters on ``group_id``
+    (see ``ingest/_internals.py`` / ``ingest/_upsert.py``), so for an L2
+    surface ingested from a spec, only the per-op ``edit-op --enable`` is
+    deterministic. The original report proposed a group-level enable verb;
+    no such verb exists, so this message must never reference one (the
+    ``connector edit-group`` CLI command patches ``when_to_use`` / ``name``
+    only -- it has no enable flag).
+
+    The shape complies with the ``docs/codebase/error-message-shape.md``
+    convention (#1141): a stable ``composite_l2_disabled`` code, a
+    diagnostic-bearing human message (disabled op-ids + the real per-op
+    enable verb + the connector-level caveat + a doc reference), and a
+    structured ``extras`` payload (``disabled_op_ids`` + ``connector_id``)
+    so an agent can branch on the diagnostic without re-parsing the text.
+    """
+    disabled_repr = ", ".join(disabled_op_ids) if disabled_op_ids else "(none)"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"composite_l2_disabled: composite {op_id!r} depends on sub-ops "
+            f"that are present in this connector's catalog but disabled: "
+            f"[{disabled_repr}]. The catalog is already ingested, so re-ingest "
+            f"is not the fix -- re-enable each op per-op with "
+            f"'meho connector edit-op {connector_id} <op_id> --enable' (the "
+            f"reliable path), then retry. Note: connector-level "
+            f"'meho connector enable {connector_id}' does NOT re-enable "
+            f"spec-ingested ops -- they land with group_id=NULL and the enable "
+            f"cascade filters on group_id, so per-op edit-op --enable is the "
+            f"deterministic remediation. See "
+            f"docs/codebase/connectors-vmware-rest.md for the L1+L2 dispatch "
+            f"contract and docs/codebase/error-message-shape.md for the error "
+            f"convention."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "composite_l2_disabled",
+            "disabled_op_ids": list(disabled_op_ids),
+            "connector_id": connector_id,
+        },
+    )
+
+
 def result_connector_error(
     op_id: str,
     exc: BaseException,

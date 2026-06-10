@@ -298,9 +298,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=network_portgroup_audit_composite,
         summary="Audit distributed portgroups with parent DVS + connected VMs.",
         description=(
-            "Reads the distributed-switch listing (for parent-DVS name "
-            "enrichment) plus the distributed-portgroup listing, then "
-            "per-portgroup queries the VM list via "
+            "Reads the distributed-switches listing (for parent-DVS name "
+            "enrichment) plus the distributed portgroups via "
+            "'GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP', "
+            "then per-portgroup queries the VM list via "
             "'GET:/vcenter/vm?filter.networks=...'. Aggregates one row "
             "per portgroup with its parent DVS + connected VM names. "
             "Equivalent of 'govc dvs.portgroup.info' rolled up across "

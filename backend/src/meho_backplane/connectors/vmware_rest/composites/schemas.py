@@ -229,8 +229,11 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Optional Distributed-Virtual-Switch managed-object ID. "
-                "When supplied, only portgroups belonging to this DVS "
-                "are returned."
+                "When supplied, scopes the distributed-switch listing "
+                "(and thus the parent-DVS name enrichment) to this DVS. "
+                "Distributed portgroups are listed via the generic "
+                "network resource, which has no per-DVS filter, so the "
+                "returned portgroup set is not narrowed by this value."
             ),
         },
         "include_disconnected_vms": {

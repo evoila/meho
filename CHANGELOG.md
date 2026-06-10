@@ -102,6 +102,21 @@ connector-related release-notes line.
   unchanged. On a default `vmware-rest-9.0` deploy (L2 surface
   ingested-but-disabled) this stops every composite read from steering
   operators to re-run an ingest that already happened (#1601).
+- Reconcile the `vmware.composite.network.portgroup.audit` composite's L2
+  `op_id` keys with the canonical vCenter REST Automation surface so the
+  composite is dispatchable on real deploys. The composite declared
+  singular keys — `GET:/vcenter/network/distributed-switch` and
+  `GET:/vcenter/network/distributed-portgroup` — that resolve against no
+  operation in the ingested vCenter spec (neither path is a real
+  resource), so the composite silently failed to dispatch its L2 legs.
+  The keys are corrected to the real resources: the plural
+  `GET:/vcenter/network/distributed-switches` for the DVS leg and the
+  generic `GET:/vcenter/network` (filtered to `DISTRIBUTED_PORTGROUP`,
+  since distributed portgroups have no dedicated list resource) for the
+  portgroup leg, with best-effort degradation when the DVS leg is
+  unavailable. A build-time guard test asserts every declared composite
+  `op_id` resolves against the ingested spec so a future drift fails CI
+  rather than at runtime (#1602 / #1603).
 
 ## [0.12.0] - 2026-06-08
 

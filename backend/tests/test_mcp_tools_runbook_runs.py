@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the ``runbook_start`` / ``runbook_next`` / ``runbook_abort`` /
-``runbook_reassign`` / ``runbook_list_runs`` MCP tools (G12.3-T6, #1313).
+"""Tests for the ``meho.runbook.start`` / ``.next`` / ``.abort`` /
+``.reassign`` / ``.list_runs`` MCP tools (G12.3-T6, #1313).
 
 Covers the task's acceptance criteria for the five run-lifecycle tools
 that wrap :class:`~meho_backplane.runbooks.run_service.RunbookRunService`
@@ -11,18 +11,21 @@ on the MCP transport:
 * Registration: all five tools register against the G0.5 registry with
   strict 2020-12 ``inputSchema`` shapes; the MEHO-internal RBAC fields
   never reach the wire.
-* RBAC: four tools (``runbook_start`` / ``runbook_next`` /
-  ``runbook_abort`` / ``runbook_list_runs``) are ``OPERATOR``-callable;
-  ``runbook_reassign`` is ``TENANT_ADMIN``-only.
+* RBAC: four tools (``meho.runbook.start`` / ``.next`` / ``.abort`` /
+  ``.list_runs``) are ``OPERATOR``-callable; ``meho.runbook.reassign``
+  is ``TENANT_ADMIN``-only.
+* #1612 naming canonicalisation: the dotted names are canonical; the
+  flat ``runbook_*`` names resolve as deprecated aliases routed to the
+  same handler objects, including end-to-end through the dispatcher.
 * Typed-exception -> ``-32602`` mapping for the ten operator-actionable
   service + engine errors.
-* The load-bearing ``runbook_next`` description carries the verbatim
+* The load-bearing ``meho.runbook.next`` description carries the verbatim
   load-bearing strings (``OPACITY CONTRACT``, ``WHEN A STEP FAILS``,
   ``SINGLE-ASSIGNEE``, ``no skip, no force_advance``) -- a regression
   guard so a refactor that drops them surfaces here rather than as
   silently degraded agent UX.
-* Structural opacity: ``runbook_next`` response carries exactly one
-  step body (no future-step leakage); ``runbook_list_runs`` summaries
+* Structural opacity: ``meho.runbook.next`` response carries exactly one
+  step body (no future-step leakage); ``meho.runbook.list_runs`` summaries
   carry no step contents.
 * Single-assignee discipline at the tool boundary -- operators *and*
   admins are refused if they are not the run's assignee.
@@ -57,6 +60,7 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Target
+from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.operations import (
     register_typed_operation,
@@ -75,13 +79,23 @@ from tests.mcp_test_fixtures import (
 )
 
 _OPERATOR_TOOLS = {
-    "runbook_start",
-    "runbook_next",
-    "runbook_abort",
-    "runbook_list_runs",
+    "meho.runbook.start",
+    "meho.runbook.next",
+    "meho.runbook.abort",
+    "meho.runbook.list_runs",
 }
-_ADMIN_TOOLS = {"runbook_reassign"}
+_ADMIN_TOOLS = {"meho.runbook.reassign"}
 _ALL_TOOLS = _OPERATOR_TOOLS | _ADMIN_TOOLS
+
+#: Deprecated flat aliases (#1612) — kept resolvable for one release;
+#: each maps to its canonical dotted name.
+_FLAT_ALIASES = {
+    "runbook_start": "meho.runbook.start",
+    "runbook_next": "meho.runbook.next",
+    "runbook_abort": "meho.runbook.abort",
+    "runbook_reassign": "meho.runbook.reassign",
+    "runbook_list_runs": "meho.runbook.list_runs",
+}
 
 
 def _template_body(
@@ -91,7 +105,7 @@ def _template_body(
 ) -> dict[str, Any]:
     """Build a minimal valid template-body wire dict with two manual steps.
 
-    Two steps is the smallest shape that lets ``runbook_next`` advance
+    Two steps is the smallest shape that lets ``meho.runbook.next`` advance
     *between* steps (rather than completing the run immediately).
     """
     if steps is None:
@@ -188,7 +202,7 @@ def test_all_five_tools_registered_with_strict_schema(
 def test_admin_tool_hidden_from_operator_list(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC: an OPERATOR sees the four operator tools; ``runbook_reassign`` is hidden."""
+    """AC: an OPERATOR sees the four operator tools; ``meho.runbook.reassign`` is hidden."""
     client, _op = client_with_operator
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tool_names = {t["name"] for t in response.json()["result"]["tools"]}
@@ -198,7 +212,7 @@ def test_admin_tool_hidden_from_operator_list(
 
 
 # ---------------------------------------------------------------------------
-# runbook_start
+# meho.runbook.start
 # ---------------------------------------------------------------------------
 
 
@@ -212,7 +226,7 @@ async def test_start_tool_invocation_success(
     await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
 
     payload = _result_payload(
-        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+        _call(client, "meho.runbook.start", {"template_slug": "r1", "target": "host-1"})
     )
     assert payload["kind"] == "current_step"
     assert payload["template_slug"] == "r1"
@@ -237,7 +251,7 @@ async def test_start_admin_can_call(
     await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
 
     payload = _result_payload(
-        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+        _call(client, "meho.runbook.start", {"template_slug": "r1", "target": "host-1"})
     )
     assert payload["kind"] == "current_step"
     assert payload["template_slug"] == "r1"
@@ -263,12 +277,12 @@ async def test_start_deprecated_template_error_maps_to_invalid_params(
         tenant_id=op.tenant_id, request=PublishTemplateRequest(slug="old", version=1)
     )
 
-    body = _call(client, "runbook_start", {"template_slug": "old", "target": "h"})
+    body = _call(client, "meho.runbook.start", {"template_slug": "old", "target": "h"})
     assert body["error"]["code"] == INVALID_PARAMS
 
 
 # ---------------------------------------------------------------------------
-# runbook_next — opacity-load-bearing
+# meho.runbook.next — opacity-load-bearing
 # ---------------------------------------------------------------------------
 
 
@@ -281,13 +295,13 @@ async def test_next_confirm_yes_advances(
     client, op = client_with_operator
     await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
     started = _result_payload(
-        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+        _call(client, "meho.runbook.start", {"template_slug": "r1", "target": "host-1"})
     )
 
     payload = _result_payload(
         _call(
             client,
-            "runbook_next",
+            "meho.runbook.next",
             {
                 "run_id": started["run_id"],
                 "last_verified": True,
@@ -309,18 +323,18 @@ async def test_next_confirm_no_transitions_to_failed(
 
     Mirrors the run-service contract: the engine flips the step to
     ``failed`` and the service surfaces :class:`PreviousStepFailedError`
-    so the caller's next move is :func:`runbook_abort` rather than a
+    so the caller's next move is ``meho.runbook.abort`` rather than a
     spurious retry on a state the substrate no longer accepts.
     """
     client, op = client_with_operator
     await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
     started = _result_payload(
-        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+        _call(client, "meho.runbook.start", {"template_slug": "r1", "target": "host-1"})
     )
 
     body = _call(
         client,
-        "runbook_next",
+        "meho.runbook.next",
         {
             "run_id": started["run_id"],
             "last_verified": False,
@@ -354,12 +368,12 @@ async def test_next_completes_at_last_step(
         ),
     )
     started = _result_payload(
-        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+        _call(client, "meho.runbook.start", {"template_slug": "r1", "target": "host-1"})
     )
     payload = _result_payload(
         _call(
             client,
-            "runbook_next",
+            "meho.runbook.next",
             {
                 "run_id": started["run_id"],
                 "last_verified": True,
@@ -377,7 +391,7 @@ async def test_next_completes_at_last_step(
 async def test_next_response_opacity_property(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """LOAD-BEARING: ``runbook_next`` response carries exactly one step body.
+    """LOAD-BEARING: ``meho.runbook.next`` response carries exactly one step body.
 
     Serialise the response, assert exactly one step id appears (the
     current one), and that no other step ids leak into the JSON. Opacity
@@ -402,12 +416,12 @@ async def test_next_response_opacity_property(
         body=_template_body(steps=five_steps),
     )
     started = _result_payload(
-        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+        _call(client, "meho.runbook.start", {"template_slug": "r1", "target": "host-1"})
     )
     payload = _result_payload(
         _call(
             client,
-            "runbook_next",
+            "meho.runbook.next",
             {
                 "run_id": started["run_id"],
                 "last_verified": True,
@@ -443,7 +457,7 @@ async def test_next_not_assignee_denied(
 
     body = _call(
         client,
-        "runbook_next",
+        "meho.runbook.next",
         {
             "run_id": str(started.run_id),
             "last_verified": True,
@@ -461,8 +475,8 @@ async def test_next_admin_non_assignee_still_denied(
     """AC: TENANT_ADMIN who isn't the assignee -> still ``-32602``.
 
     Single-assignee discipline is unconditional. The right way for a
-    senior to take over is :func:`runbook_reassign`, not a role-based
-    bypass on :func:`runbook_next`.
+    senior to take over is ``meho.runbook.reassign``, not a role-based
+    bypass on ``meho.runbook.next``.
     """
     client, op = client_with_operator
     await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
@@ -475,7 +489,7 @@ async def test_next_admin_non_assignee_still_denied(
 
     body = _call(
         client,
-        "runbook_next",
+        "meho.runbook.next",
         {
             "run_id": str(started.run_id),
             "last_verified": True,
@@ -501,7 +515,7 @@ def test_next_description_includes_load_bearing_text(
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
 
-    next_desc = tools_by_name["runbook_next"]["description"]
+    next_desc = tools_by_name["meho.runbook.next"]["description"]
     # The four load-bearing strings -- per the issue body's acceptance
     # criteria. Each one is a specific contract the agent needs to learn.
     assert "OPACITY CONTRACT" in next_desc
@@ -511,7 +525,7 @@ def test_next_description_includes_load_bearing_text(
 
 
 # ---------------------------------------------------------------------------
-# runbook_abort
+# meho.runbook.abort
 # ---------------------------------------------------------------------------
 
 
@@ -524,12 +538,12 @@ async def test_abort_by_assignee_succeeds(
     client, op = client_with_operator
     await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
     started = _result_payload(
-        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+        _call(client, "meho.runbook.start", {"template_slug": "r1", "target": "host-1"})
     )
     payload = _result_payload(
         _call(
             client,
-            "runbook_abort",
+            "meho.runbook.abort",
             {"run_id": started["run_id"], "reason": "human cancelled"},
         )
     )
@@ -560,7 +574,7 @@ async def test_abort_by_admin_succeeds(
     payload = _result_payload(
         _call(
             client,
-            "runbook_abort",
+            "meho.runbook.abort",
             {"run_id": str(started.run_id), "reason": "senior taking over"},
         )
     )
@@ -584,14 +598,14 @@ async def test_abort_by_non_assignee_non_admin_denied(
 
     body = _call(
         client,
-        "runbook_abort",
+        "meho.runbook.abort",
         {"run_id": str(started.run_id), "reason": "nope"},
     )
     assert body["error"]["code"] == INVALID_PARAMS
 
 
 # ---------------------------------------------------------------------------
-# runbook_reassign
+# meho.runbook.reassign
 # ---------------------------------------------------------------------------
 
 
@@ -613,7 +627,7 @@ async def test_reassign_by_admin_succeeds(
     payload = _result_payload(
         _call(
             client,
-            "runbook_reassign",
+            "meho.runbook.reassign",
             {"run_id": str(started.run_id), "new_assignee": "operator-senior"},
         )
     )
@@ -643,7 +657,7 @@ async def test_reassign_by_operator_denied(
 
     body = _call(
         client,
-        "runbook_reassign",
+        "meho.runbook.reassign",
         {"run_id": str(started.run_id), "new_assignee": "operator-other"},
     )
     assert "error" in body
@@ -662,14 +676,14 @@ def test_reassign_missing_run_error(
     client, _op = client_with_operator
     body = _call(
         client,
-        "runbook_reassign",
+        "meho.runbook.reassign",
         {"run_id": str(uuid.uuid4()), "new_assignee": "operator-other"},
     )
     assert body["error"]["code"] == INVALID_PARAMS
 
 
 # ---------------------------------------------------------------------------
-# runbook_list_runs
+# meho.runbook.list_runs
 # ---------------------------------------------------------------------------
 
 
@@ -696,7 +710,9 @@ async def test_list_runs_operator_sees_only_own(
 
     # Operator tries to filter to ``operator-other`` explicitly; the
     # service overrides to the caller's own sub.
-    payload = _result_payload(_call(client, "runbook_list_runs", {"assignee": "operator-other"}))
+    payload = _result_payload(
+        _call(client, "meho.runbook.list_runs", {"assignee": "operator-other"})
+    )
     runs = payload["runs"]
     assert len(runs) == 1
     assert runs[0]["run_id"] == str(started_self.run_id)
@@ -723,7 +739,7 @@ async def test_list_runs_admin_sees_all_tenant(
         request=StartRunRequest(template_slug="r1", target="host-2", params={}),
     )
 
-    payload = _result_payload(_call(client, "runbook_list_runs", {}))
+    payload = _result_payload(_call(client, "meho.runbook.list_runs", {}))
     assigned_subs = {r["assigned_to"] for r in payload["runs"]}
     assert assigned_subs == {"operator-alpha", "operator-beta"}
 
@@ -754,7 +770,7 @@ async def test_list_runs_tenant_isolation(
         request=StartRunRequest(template_slug="r1", target="host-theirs", params={}),
     )
 
-    payload = _result_payload(_call(client, "runbook_list_runs", {}))
+    payload = _result_payload(_call(client, "meho.runbook.list_runs", {}))
     assigned_subs = {r["assigned_to"] for r in payload["runs"]}
     assert assigned_subs == {"operator-mine"}
 
@@ -767,16 +783,16 @@ async def test_list_runs_omits_step_contents(
     """LOAD-BEARING property: ``RunSummary`` rows never carry step bodies.
 
     Step-by-step content is opaque-by-construction (only
-    :func:`runbook_next` ever returns a step body, and only one step at
+    ``meho.runbook.next`` ever returns a step body, and only one step at
     a time). The list surface only exposes ``current_step_id`` -- the
     *id* of the step the run is on, not its body. This test asserts the
     summary shape never widens to leak the step list.
     """
     client, op = client_with_operator
     await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
-    _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+    _call(client, "meho.runbook.start", {"template_slug": "r1", "target": "host-1"})
 
-    payload = _result_payload(_call(client, "runbook_list_runs", {}))
+    payload = _result_payload(_call(client, "meho.runbook.list_runs", {}))
     runs = payload["runs"]
     assert len(runs) == 1
     summary = runs[0]
@@ -792,7 +808,7 @@ async def test_list_runs_omits_step_contents(
 
 
 # ---------------------------------------------------------------------------
-# runbook_next — operation_call verify dispatch (audit correlation)
+# meho.runbook.next — operation_call verify dispatch (audit correlation)
 # ---------------------------------------------------------------------------
 
 
@@ -954,13 +970,13 @@ async def test_next_operation_call_match_advances(
         ),
     )
     started = _result_payload(
-        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+        _call(client, "meho.runbook.start", {"template_slug": "r1", "target": "host-1"})
     )
 
     payload = _result_payload(
         _call(
             client,
-            "runbook_next",
+            "meho.runbook.next",
             {
                 "run_id": started["run_id"],
                 "last_verified": True,
@@ -995,3 +1011,88 @@ async def test_next_operation_call_match_advances(
         payload_row.get("run_id") == started["run_id"]
     )
     assert (column_step_id == "call-it") or (payload_row.get("step_id") == "call-it")
+
+
+# ---------------------------------------------------------------------------
+# #1612 — deprecated flat-name aliases + template_slug round-trip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_flat_aliases_listed_deprecated_and_route_to_same_handler(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC #1612: every flat alias resolves, is DEPRECATED-marked, shares the handler.
+
+    Mirrors the template-side assertion for the five run-lifecycle pairs:
+    both names listed for an admin, the alias's wire description is the
+    standard DEPRECATED pointer, and the registry routes both names to
+    the same handler object.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+
+    for alias, canonical in _FLAT_ALIASES.items():
+        assert canonical in tools_by_name, canonical
+        assert alias in tools_by_name, alias
+        alias_desc = tools_by_name[alias]["description"]
+        assert alias_desc.startswith(f"DEPRECATED alias for `{canonical}`"), alias_desc
+        assert tools_by_name[alias]["inputSchema"] == tools_by_name[canonical]["inputSchema"]
+
+        canonical_entry = get_tool(canonical)
+        alias_entry = get_tool(alias)
+        assert canonical_entry is not None and alias_entry is not None
+        assert alias_entry[1] is canonical_entry[1], alias
+        assert alias_entry[0].deprecated_alias_for == canonical
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_flat_alias_call_behaves_identically(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC #1612: calling the flat ``runbook_start`` alias behaves like the dotted name.
+
+    Same arguments, same dispatcher path, same response shape — the
+    pre-#1612 wire contract holds verbatim for the deprecation window.
+    """
+    client, op = client_with_operator
+    await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="r1")
+
+    payload = _result_payload(
+        _call(client, "runbook_start", {"template_slug": "r1", "target": "host-1"})
+    )
+    assert payload["kind"] == "current_step"
+    assert payload["template_slug"] == "r1"
+    assert payload["current_step"]["id"] == "step-1"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.asyncio
+async def test_show_template_id_round_trips_into_start(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC #1612 round-trip: the id ``show_template`` returns starts a run verbatim.
+
+    ``meho.runbook.show_template`` returns the template id under
+    ``template_slug``; ``meho.runbook.start`` accepts that exact field
+    name — no rename between reading a template and starting a run
+    against it. This was the original asymmetry (#1612): ``slug`` out of
+    ``show_template`` vs ``template_slug`` into ``start``.
+    """
+    client, op = client_with_operator
+    await _seed_published_template(tenant_id=op.tenant_id, operator_sub=op.sub, slug="rt")
+
+    shown = _result_payload(_call(client, "meho.runbook.show_template", {"template_slug": "rt"}))
+    assert shown["template_slug"] == "rt"
+
+    started = _result_payload(
+        _call(
+            client,
+            "meho.runbook.start",
+            {"template_slug": shown["template_slug"], "target": "host-1"},
+        )
+    )
+    assert started["kind"] == "current_step"
+    assert started["template_slug"] == shown["template_slug"]

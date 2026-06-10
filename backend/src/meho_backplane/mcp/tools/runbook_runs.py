@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 # code-quality-allow: load-bearing tool descriptions per issue #1313; the
-# runbook_next description teaches the opacity contract + verify shapes +
-# no-skip + single-assignee + no-third-response-shape (~110 lines on its
-# own) and is regression-tested verbatim. Splitting would obscure the
-# contract. Same shape as sibling mcp/tools/runbooks.py (template-side,
-# 686 lines) which made the identical structural choice.
+# meho.runbook.next description teaches the opacity contract + verify
+# shapes + no-skip + single-assignee + no-third-response-shape (~110
+# lines on its own) and is regression-tested verbatim. Splitting would
+# obscure the contract. Same shape as sibling mcp/tools/runbooks.py
+# (template-side) which made the identical structural choice.
 
-"""``runbook_start`` / ``runbook_next`` / ``runbook_abort`` / ``runbook_reassign`` /
-``runbook_list_runs`` MCP tools -- run lifecycle (G12.3-T6).
+"""``meho.runbook.start`` / ``.next`` / ``.abort`` / ``.reassign`` /
+``.list_runs`` MCP tools -- run lifecycle (G12.3-T6).
 
 Five tool registrations that surface
 :class:`~meho_backplane.runbooks.run_service.RunbookRunService` on the
@@ -17,6 +17,14 @@ MCP transport. The matching REST routes are owned by the sibling Task
 single-assignee enforcement, the verify-at-advance gating, the
 audit-row plumbing, and the response-shape opacity all live in one
 place (T3, #1308).
+
+Naming canonicalisation (#1612): the dotted names above are canonical,
+matching the ``meho.<noun>.<verb>`` grammar of every other multi-verb
+family; the original flat ``runbook_*`` names remain registered as
+deprecated aliases (same handler object) for one release and are
+removed in v0.14.0. The run-side wire fields already used the canonical
+``template_slug`` name, so only the template-side module needed the
+field shim.
 
 The :data:`_NEXT_DESCRIPTION` text is the longest in the codebase by
 design -- it teaches the opacity contract, the verify shapes (``confirm``
@@ -33,19 +41,19 @@ RBAC
 ====
 
 Four tools are ``OPERATOR``-readable/writable (start / next / abort /
-list_runs). :func:`runbook_reassign` is ``TENANT_ADMIN``-only.
+list_runs). ``meho.runbook.reassign`` is ``TENANT_ADMIN``-only.
 Service-level enforces single-assignee inside
 :meth:`~meho_backplane.runbooks.run_service.RunbookRunService.next_step`
 and :meth:`~meho_backplane.runbooks.run_service.RunbookRunService.abort_run`;
 the role gate handles tenant-wide visibility discipline on
-:func:`runbook_list_runs` (operator sees only own; admin sees all).
+``meho.runbook.list_runs`` (operator sees only own; admin sees all).
 
 Audit + broadcast
 =================
 
 Same dispatcher mechanism as the kb + template tools -- one
 ``audit_log`` row + one broadcast event per ``tools/call``.
-:func:`runbook_next` on an ``operation_call`` verify produces TWO audit
+``meho.runbook.next`` on an ``operation_call`` verify produces TWO audit
 rows: one outer envelope (dispatcher writes it with
 ``op_class=write``) and one inner verify dispatch (audit op-id is the
 verify's ``op_id``, e.g. ``vmware.host.is_powered_on``, with
@@ -75,7 +83,11 @@ from typing import Any, Final
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import (
+    ToolDefinition,
+    register_deprecated_mcp_tool_alias,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.runbooks.engine import (
     PreviousStepNotVerifiedError,
@@ -135,11 +147,17 @@ _INVALID_PARAMS_ERRORS = (
     VerifyResponseRequiredError,
 )
 
-#: Default + maximum row cap for ``runbook_list_runs``. Matches the
+#: Default + maximum row cap for ``meho.runbook.list_runs``. Matches the
 #: service's :meth:`~meho_backplane.runbooks.run_service.RunbookRunService.list_runs`
 #: default (100).
 _DEFAULT_LIST_LIMIT: Final[int] = 100
 _MAX_LIST_LIMIT: Final[int] = 500
+
+#: Release that drops the deprecated flat ``runbook_*`` tool-name
+#: aliases (#1612). Must stay in lockstep with the template-side
+#: constant in :mod:`meho_backplane.mcp.tools.runbooks` — the 11 aliases
+#: are announced and removed as one set.
+_ALIAS_REMOVAL_VERSION: Final[str] = "0.14.0"
 
 
 def _to_invalid_params(tool: str, exc: Exception) -> McpInvalidParamsError:
@@ -182,7 +200,7 @@ _START_DESCRIPTION: Final[str] = (
     "of the template. If only deprecated versions exist, this fails -- "
     "ask the senior to publish a fresh version.\n\n"
     "Requires OPERATOR role. The run is single-assignee -- only you can "
-    "advance it (via runbook_next) until you abort or reassign.\n\n"
+    "advance it (via meho.runbook.next) until you abort or reassign.\n\n"
     "Errors:\n"
     "- -32602 if the template slug is missing, only-deprecated, or "
     "missing required ${run.params.X} keys."
@@ -219,9 +237,9 @@ _NEXT_DESCRIPTION: Final[str] = (
     "WHEN A STEP FAILS:\n"
     "- A 'failed' step does NOT auto-advance, does NOT auto-retry. There "
     "is no skip, no force_advance, no override. These DO NOT EXIST.\n"
-    "- The only forward path from a 'failed' state is runbook_abort + "
-    "(optionally)\n"
-    "  runbook_start over with the issue resolved.\n"
+    "- The only forward path from a 'failed' state is meho.runbook.abort "
+    "+ (optionally)\n"
+    "  meho.runbook.start over with the issue resolved.\n"
     "- This is by design -- runbooks are governance-graded; the substrate "
     "refuses\n"
     "  to advance over an unverified step.\n\n"
@@ -229,15 +247,15 @@ _NEXT_DESCRIPTION: Final[str] = (
     "(per the\n"
     "run's assigned_to field). Even TENANT_ADMINs cannot bypass this -- "
     "they go through\n"
-    "runbook_reassign first to take ownership, then advance.\n\n"
+    "meho.runbook.reassign first to take ownership, then advance.\n\n"
     "WHEN TO USE: every time the human operator confirms the current step "
     "is done\n"
     "(operation_call verify resolves automatically) and the run should "
     "progress.\n\n"
     'WHEN NOT TO USE: never to "skip" a step you don\'t understand. If '
     "the current\n"
-    "step is broken or unsafe, runbook_abort with a reason and ask the "
-    "senior to\n"
+    "step is broken or unsafe, meho.runbook.abort with a reason and ask "
+    "the senior to\n"
     "fix the template (which will fork-on-edit per the "
     "docs/runbooks/authoring.md\n"
     "flow).\n\n"
@@ -275,9 +293,9 @@ _REASSIGN_DESCRIPTION: Final[str] = (
     "TENANT_ADMIN-only. This is the escalation/handoff knob: a junior "
     "who can't advance asks the senior in chat, the senior reassigns to "
     "themselves and takes over. After reassign, only the new assignee "
-    "can call runbook_next.\n\n"
+    "can call meho.runbook.next.\n\n"
     "Use when: a junior is stuck on a step and the senior needs to take "
-    "the controls. The junior should runbook_abort if the procedure "
+    "the controls. The junior should meho.runbook.abort if the procedure "
     'itself is broken; reassign is for "this operator needs to step '
     'in," not for "this procedure is broken."\n\n'
     "Errors:\n"
@@ -291,11 +309,11 @@ _LIST_DESCRIPTION: Final[str] = (
     "completed / abandoned), template_slug, limit (default 100).\n\n"
     'Use when: the human asks "what\'s in flight?", "what have I '
     'completed recently?", or the senior asks "who\'s stuck on what?" '
-    "before considering runbook_reassign.\n\n"
+    "before considering meho.runbook.reassign.\n\n"
     "Returns RunSummary entries -- run-level state only, no step "
     "contents. To see the current step body of an in-progress run you "
-    "OWN, call runbook_next with last_verified=False to refresh (the "
-    "substrate returns the current step)."
+    "OWN, call meho.runbook.next with last_verified=False to refresh "
+    "(the substrate returns the current step)."
 )
 
 
@@ -338,7 +356,7 @@ _PARAMS_PROPERTY: Final[dict[str, Any]] = {
     "additionalProperties": True,
 }
 
-#: The verify-response payload accepted by ``runbook_next``. A discriminated
+#: The verify-response payload accepted by ``meho.runbook.next``. A discriminated
 #: union (``confirm`` vs ``operation_call``) but flattened at the wire
 #: level because the Anthropic Messages API rejects top-level ``oneOf``
 #: -- the server-side Pydantic
@@ -352,7 +370,7 @@ _VERIFY_RESPONSE_PROPERTY: Final[dict[str, Any]] = {
         '{"type": "confirm", "answer": "yes"|"no"|"escalate"}. '
         "For type='operation_call' steps, pass null and the substrate "
         "dispatches the verify call itself. None on the very first "
-        "runbook_next call (no prior step to verify)."
+        "meho.runbook.next call (no prior step to verify)."
     ),
     "properties": {
         "type": {"type": "string", "enum": ["confirm", "operation_call"]},
@@ -394,7 +412,7 @@ async def _start_handler(
             request=request,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("runbook_start", exc) from exc
+        raise _to_invalid_params("meho.runbook.start", exc) from exc
     return response.model_dump(mode="json")
 
 
@@ -407,14 +425,14 @@ async def _next_handler(
     Single-assignee discipline is enforced by the service:
     :class:`NotRunAssigneeError` is raised for any caller other than
     ``run.assigned_to``, including ``TENANT_ADMIN`` -- the right path
-    for a senior to take over is :func:`runbook_reassign`. The engine
+    for a senior to take over is ``meho.runbook.reassign``. The engine
     is the verify oracle: a ``confirm`` response of ``"no"`` /
     ``"escalate"`` transitions the step to ``failed`` and surfaces as
     :class:`PreviousStepFailedError`; an ``operation_call`` verify
     whose ``actual`` does not match ``expect`` does the same.
     """
     service = RunbookRunService()
-    run_id = _parse_run_id("runbook_next", arguments["run_id"])
+    run_id = _parse_run_id("meho.runbook.next", arguments["run_id"])
     try:
         request = NextStepRequest.model_validate(
             {
@@ -429,7 +447,7 @@ async def _next_handler(
             request=request,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("runbook_next", exc) from exc
+        raise _to_invalid_params("meho.runbook.next", exc) from exc
     return response.model_dump(mode="json")
 
 
@@ -446,7 +464,7 @@ async def _abort_handler(
     stuck run.
     """
     service = RunbookRunService()
-    run_id = _parse_run_id("runbook_abort", arguments["run_id"])
+    run_id = _parse_run_id("meho.runbook.abort", arguments["run_id"])
     try:
         request = AbortRunRequest.model_validate({"reason": arguments["reason"]})
         response = await service.abort_run(
@@ -457,7 +475,7 @@ async def _abort_handler(
             caller_is_admin=operator.tenant_role == TenantRole.TENANT_ADMIN,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("runbook_abort", exc) from exc
+        raise _to_invalid_params("meho.runbook.abort", exc) from exc
     return response.model_dump(mode="json")
 
 
@@ -474,7 +492,7 @@ async def _reassign_handler(
     owner.
     """
     service = RunbookRunService()
-    run_id = _parse_run_id("runbook_reassign", arguments["run_id"])
+    run_id = _parse_run_id("meho.runbook.reassign", arguments["run_id"])
     try:
         request = ReassignRunRequest.model_validate({"new_assignee": arguments["new_assignee"]})
         response = await service.reassign_run(
@@ -484,7 +502,7 @@ async def _reassign_handler(
             request=request,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("runbook_reassign", exc) from exc
+        raise _to_invalid_params("meho.runbook.reassign", exc) from exc
     return response.model_dump(mode="json")
 
 
@@ -523,7 +541,7 @@ async def _list_runs_handler(
             limit=limit,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("runbook_list_runs", exc) from exc
+        raise _to_invalid_params("meho.runbook.list_runs", exc) from exc
     return {"runs": [summary.model_dump(mode="json") for summary in summaries]}
 
 
@@ -534,7 +552,7 @@ async def _list_runs_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="runbook_start",
+        name="meho.runbook.start",
         description=_START_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -555,7 +573,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="runbook_next",
+        name="meho.runbook.next",
         description=_NEXT_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -583,7 +601,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="runbook_abort",
+        name="meho.runbook.abort",
         description=_ABORT_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -607,7 +625,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="runbook_reassign",
+        name="meho.runbook.reassign",
         description=_REASSIGN_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -633,7 +651,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="runbook_list_runs",
+        name="meho.runbook.list_runs",
         description=_LIST_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -670,3 +688,25 @@ register_mcp_tool(
     ),
     handler=_list_runs_handler,
 )
+
+
+# ---------------------------------------------------------------------------
+# Deprecated flat-name aliases (#1612) — one release, removed in
+# v0.14.0 (`_ALIAS_REMOVAL_VERSION`). Registered strictly after their
+# canonical targets; each shares the canonical handler object and
+# schema, differing only in name + DEPRECATED pointer description.
+# ---------------------------------------------------------------------------
+
+
+for _flat_alias, _canonical in (
+    ("runbook_start", "meho.runbook.start"),
+    ("runbook_next", "meho.runbook.next"),
+    ("runbook_abort", "meho.runbook.abort"),
+    ("runbook_reassign", "meho.runbook.reassign"),
+    ("runbook_list_runs", "meho.runbook.list_runs"),
+):
+    register_deprecated_mcp_tool_alias(
+        alias=_flat_alias,
+        canonical=_canonical,
+        removal_version=_ALIAS_REMOVAL_VERSION,
+    )

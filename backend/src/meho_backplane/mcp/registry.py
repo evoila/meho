@@ -80,6 +80,7 @@ __all__ = [
     "eager_import_mcp_modules",
     "get_resource_for_uri",
     "get_tool",
+    "register_deprecated_mcp_tool_alias",
     "register_mcp_resource",
     "register_mcp_tool",
     "role_at_least",
@@ -224,6 +225,16 @@ class ToolDefinition(BaseModel):
     required_role: TenantRole = TenantRole.OPERATOR
     op_class: str = "read"
     required_capability: str | None = None
+    #: MEHO-internal deprecation marker (#1612). When set, this
+    #: definition is a deprecated alias for the named canonical tool:
+    #: same handler, same schema, kept resolvable for one release so
+    #: pinned callers keep working. The dispatcher emits a structured
+    #: ``mcp_tool_name_deprecated`` warning per call so operators can
+    #: watch consumers migrate before the alias is removed. Never
+    #: serialised to the wire (the MCP 2025-06-18 ``Tool`` object has
+    #: no deprecation field; the alias's *description* carries the
+    #: agent-visible DEPRECATED marker instead).
+    deprecated_alias_for: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         """Serialise to the MCP wire shape, dropping MEHO-internal fields.
@@ -342,6 +353,48 @@ def register_mcp_tool(definition: ToolDefinition, handler: ToolHandler) -> None:
         raise RuntimeError(f"MCP tool already registered: {definition.name!r}")
     _TOOLS[definition.name] = (definition, handler)
     _log.info("mcp_tool_registered", name=definition.name)
+
+
+def register_deprecated_mcp_tool_alias(
+    *,
+    alias: str,
+    canonical: str,
+    removal_version: str,
+) -> None:
+    """Register *alias* as a deprecated second name for the *canonical* tool.
+
+    The alias shares the canonical tool's handler **object** (callers can
+    assert identity), ``inputSchema``, role gate, op class, and capability
+    gate — only ``name`` and ``description`` differ, plus the
+    MEHO-internal :attr:`ToolDefinition.deprecated_alias_for` marker the
+    dispatcher keys its ``mcp_tool_name_deprecated`` warning on. The
+    description is generated here so every alias on the surface carries
+    the same DEPRECATED phrasing (the one-cycle alias convention from the
+    ``content``→``body`` / ``id``→``approval_request_id`` field shims,
+    lifted to whole tool names for #1612).
+
+    The canonical tool must already be registered — alias registration is
+    a strict follow-on so the pair is always created together at module
+    import and the alias can never outlive (or predate) its target.
+    """
+    entry = _TOOLS.get(canonical)
+    if entry is None:
+        raise RuntimeError(
+            f"cannot register alias {alias!r}: canonical MCP tool {canonical!r} is not registered",
+        )
+    definition, handler = entry
+    alias_definition = definition.model_copy(
+        update={
+            "name": alias,
+            "description": (
+                f"DEPRECATED alias for `{canonical}`; removed in "
+                f"v{removal_version}. Identical arguments and behaviour — "
+                f"new callers MUST use `{canonical}`."
+            ),
+            "deprecated_alias_for": canonical,
+        }
+    )
+    register_mcp_tool(alias_definition, handler)
 
 
 def register_mcp_resource(

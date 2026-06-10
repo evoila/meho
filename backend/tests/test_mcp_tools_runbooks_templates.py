@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the ``runbook_*_template`` MCP tools (G12.2-T4, #1298).
+"""Tests for the ``meho.runbook.*`` template-lifecycle MCP tools (G12.2-T4, #1298).
 
 Covers the task's acceptance criteria for the six template-lifecycle
 tools that wrap :class:`~meho_backplane.runbooks.service.RunbookTemplateService`
@@ -10,8 +10,13 @@ on the MCP transport:
 * All six tools register against the G0.5 registry with strict 2020-12
   ``inputSchema`` and the MEHO-internal RBAC fields stripped from the
   wire shape.
-* RBAC: five tools are ``TENANT_ADMIN``-only; ``runbook_list_templates``
+* RBAC: five tools are ``TENANT_ADMIN``-only; ``meho.runbook.list_templates``
   is ``OPERATOR``-readable.
+* #1612 naming + field canonicalisation: the dotted names are canonical;
+  the flat ``runbook_*`` names resolve as deprecated aliases routed to
+  the same handler objects; ``template_slug`` is the canonical input
+  field with ``slug`` as a deprecated XOR-guarded alias; responses
+  mirror ``slug`` as ``template_slug``.
 * The edit tool's draft-in-place vs fork-from-published paths round-trip
   through the dispatcher (``forked_from`` present iff a published version
   exists).
@@ -42,6 +47,7 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunbookRun
+from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.runbooks.schemas import DraftTemplateRequest, PublishTemplateRequest
 from meho_backplane.runbooks.service import RunbookTemplateService
@@ -53,18 +59,29 @@ from tests.mcp_test_fixtures import (
 )
 
 _ADMIN_TOOLS = {
-    "runbook_draft_template",
-    "runbook_edit_template",
-    "runbook_publish_template",
-    "runbook_deprecate_template",
+    "meho.runbook.draft_template",
+    "meho.runbook.edit_template",
+    "meho.runbook.publish_template",
+    "meho.runbook.deprecate_template",
 }
-# ``runbook_show_template`` is OPERATOR-readable at the dispatcher gate
+# ``meho.runbook.show_template`` is OPERATOR-readable at the dispatcher gate
 # (G12.3-T4 / #1309); the run-state-conditional opacity-floor check lives
 # inside the handler, not in :func:`required_role`. Operators see the tool
 # in ``tools/list`` but a call without a completed/abandoned run against
 # the resolved (slug, version) is refused by the handler with
 # ``-32602`` and the ``opacity_floor`` reason.
-_OPERATOR_TOOLS = {"runbook_list_templates", "runbook_show_template"}
+_OPERATOR_TOOLS = {"meho.runbook.list_templates", "meho.runbook.show_template"}
+
+#: Deprecated flat aliases (#1612) — kept resolvable for one release;
+#: each maps to its canonical dotted name.
+_FLAT_ALIASES = {
+    "runbook_draft_template": "meho.runbook.draft_template",
+    "runbook_edit_template": "meho.runbook.edit_template",
+    "runbook_publish_template": "meho.runbook.publish_template",
+    "runbook_deprecate_template": "meho.runbook.deprecate_template",
+    "runbook_list_templates": "meho.runbook.list_templates",
+    "runbook_show_template": "meho.runbook.show_template",
+}
 
 
 def _body(title: str = "Rotate cert", *, step_body: str = "Rotate the cert.") -> dict[str, Any]:
@@ -132,7 +149,7 @@ def test_all_six_tools_registered_with_strict_schema(
 def test_admin_tools_hidden_from_operator_list_is_visible(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC: an OPERATOR sees only ``runbook_list_templates``; the five admin tools are hidden."""
+    """AC: an OPERATOR sees only ``meho.runbook.list_templates``; admin tools hidden."""
     client, _op = client_with_operator
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tool_names = {t["name"] for t in response.json()["result"]["tools"]}
@@ -154,22 +171,22 @@ def test_tool_descriptions_include_load_bearing_text(
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
 
-    edit_desc = tools_by_name["runbook_edit_template"]["description"]
+    edit_desc = tools_by_name["meho.runbook.edit_template"]["description"]
     assert "MULTI-SESSION DRAFTING PATTERN" in edit_desc
     assert "forked_from" in edit_desc
     # Cross-link to the authoring doc T5 (#1299) ships.
     assert "docs/runbooks/authoring.md" in edit_desc
 
-    show_desc = tools_by_name["runbook_show_template"]["description"]
+    show_desc = tools_by_name["meho.runbook.show_template"]["description"]
     assert "TENANT_ADMIN" in show_desc
     assert "POST-COMPLETION EXCEPTION" in show_desc
     # The opacity-floor-lives-on-the-run-surface rationale.
-    assert "runbook_next" in show_desc
+    assert "meho.runbook.next" in show_desc
     assert "docs/runbooks/authoring.md" in show_desc
 
 
 # ---------------------------------------------------------------------------
-# runbook_draft_template
+# meho.runbook.draft_template
 # ---------------------------------------------------------------------------
 
 
@@ -181,9 +198,16 @@ async def test_draft_tool_invocation_success(
     """AC: admin call creates a draft scoped to the operator's tenant."""
     client, op = client_with_operator
     payload = _result_payload(
-        _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+        _call(
+            client, "meho.runbook.draft_template", {"template_slug": "cert-rotate", "body": _body()}
+        )
     )
-    assert payload == {"slug": "cert-rotate", "version": 1, "status": "draft"}
+    assert payload == {
+        "slug": "cert-rotate",
+        "template_slug": "cert-rotate",
+        "version": 1,
+        "status": "draft",
+    }
 
     # The row landed under the operator's JWT-bound tenant, never an input one.
     shown = await RunbookTemplateService().show_template(tenant_id=op.tenant_id, slug="cert-rotate")
@@ -197,10 +221,14 @@ def test_draft_duplicate_error_mapping(
 ) -> None:
     """AC: ``DuplicateDraftError`` surfaces as ``-32602``."""
     client, _op = client_with_operator
-    first = _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+    first = _call(
+        client, "meho.runbook.draft_template", {"template_slug": "cert-rotate", "body": _body()}
+    )
     assert first["result"]["isError"] is False
 
-    dupe = _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+    dupe = _call(
+        client, "meho.runbook.draft_template", {"template_slug": "cert-rotate", "body": _body()}
+    )
     assert dupe["error"]["code"] == INVALID_PARAMS
 
 
@@ -210,12 +238,14 @@ def test_draft_invalid_slug_error_mapping(
 ) -> None:
     """A bad slug fails the request-model validation → ``-32602``."""
     client, _op = client_with_operator
-    body = _call(client, "runbook_draft_template", {"slug": "Bad_Slug", "body": _body()})
+    body = _call(
+        client, "meho.runbook.draft_template", {"template_slug": "Bad_Slug", "body": _body()}
+    )
     assert body["error"]["code"] == INVALID_PARAMS
 
 
 # ---------------------------------------------------------------------------
-# runbook_edit_template — in-place vs fork
+# meho.runbook.edit_template — in-place vs fork
 # ---------------------------------------------------------------------------
 
 
@@ -225,13 +255,16 @@ def test_edit_in_place_path(
 ) -> None:
     """AC: editing an existing draft mutates in place — ``forked_from is None``."""
     client, _op = client_with_operator
-    _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+    _call(client, "meho.runbook.draft_template", {"template_slug": "cert-rotate", "body": _body()})
 
     payload = _result_payload(
         _call(
             client,
-            "runbook_edit_template",
-            {"slug": "cert-rotate", "body": _body(step_body="Rotate the cert, carefully.")},
+            "meho.runbook.edit_template",
+            {
+                "template_slug": "cert-rotate",
+                "body": _body(step_body="Rotate the cert, carefully."),
+            },
         )
     )
     assert payload["version"] == 1
@@ -262,7 +295,11 @@ async def test_edit_fork_path(
     )
 
     payload = _result_payload(
-        _call(client, "runbook_edit_template", {"slug": "cert-rotate", "body": _body("v2")})
+        _call(
+            client,
+            "meho.runbook.edit_template",
+            {"template_slug": "cert-rotate", "body": _body("v2")},
+        )
     )
     assert payload["version"] == 2
     assert payload["status"] == "draft"
@@ -277,12 +314,12 @@ def test_edit_missing_slug_error_mapping(
 ) -> None:
     """Editing a slug with no rows → ``TemplateNotFoundError`` → ``-32602``."""
     client, _op = client_with_operator
-    body = _call(client, "runbook_edit_template", {"slug": "ghost", "body": _body()})
+    body = _call(client, "meho.runbook.edit_template", {"template_slug": "ghost", "body": _body()})
     assert body["error"]["code"] == INVALID_PARAMS
 
 
 # ---------------------------------------------------------------------------
-# runbook_publish_template / runbook_deprecate_template
+# meho.runbook.publish_template / meho.runbook.deprecate_template
 # ---------------------------------------------------------------------------
 
 
@@ -292,14 +329,23 @@ def test_publish_tool_invocation(
 ) -> None:
     """AC: happy-path publish, plus ``-32602`` for a missing version."""
     client, _op = client_with_operator
-    _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+    _call(client, "meho.runbook.draft_template", {"template_slug": "cert-rotate", "body": _body()})
 
     ok = _result_payload(
-        _call(client, "runbook_publish_template", {"slug": "cert-rotate", "version": 1})
+        _call(
+            client, "meho.runbook.publish_template", {"template_slug": "cert-rotate", "version": 1}
+        )
     )
-    assert ok == {"slug": "cert-rotate", "version": 1, "status": "published"}
+    assert ok == {
+        "slug": "cert-rotate",
+        "template_slug": "cert-rotate",
+        "version": 1,
+        "status": "published",
+    }
 
-    missing = _call(client, "runbook_publish_template", {"slug": "cert-rotate", "version": 99})
+    missing = _call(
+        client, "meho.runbook.publish_template", {"template_slug": "cert-rotate", "version": 99}
+    )
     assert missing["error"]["code"] == INVALID_PARAMS
 
 
@@ -309,23 +355,32 @@ def test_deprecate_tool_invocation(
 ) -> None:
     """AC: deprecate a published version; deprecating a draft → ``-32602``."""
     client, _op = client_with_operator
-    _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+    _call(client, "meho.runbook.draft_template", {"template_slug": "cert-rotate", "body": _body()})
 
     # Deprecating a draft (not published) → TemplateNotPublishedError → -32602.
     not_published = _call(
-        client, "runbook_deprecate_template", {"slug": "cert-rotate", "version": 1}
+        client, "meho.runbook.deprecate_template", {"template_slug": "cert-rotate", "version": 1}
     )
     assert not_published["error"]["code"] == INVALID_PARAMS
 
-    _call(client, "runbook_publish_template", {"slug": "cert-rotate", "version": 1})
+    _call(client, "meho.runbook.publish_template", {"template_slug": "cert-rotate", "version": 1})
     ok = _result_payload(
-        _call(client, "runbook_deprecate_template", {"slug": "cert-rotate", "version": 1})
+        _call(
+            client,
+            "meho.runbook.deprecate_template",
+            {"template_slug": "cert-rotate", "version": 1},
+        )
     )
-    assert ok == {"slug": "cert-rotate", "version": 1, "status": "deprecated"}
+    assert ok == {
+        "slug": "cert-rotate",
+        "template_slug": "cert-rotate",
+        "version": 1,
+        "status": "deprecated",
+    }
 
 
 # ---------------------------------------------------------------------------
-# runbook_list_templates
+# meho.runbook.list_templates
 # ---------------------------------------------------------------------------
 
 
@@ -342,7 +397,7 @@ async def test_list_templates_operator_role_ok(
         request=DraftTemplateRequest.model_validate({"slug": "cert-rotate", "body": _body()}),
     )
 
-    payload = _result_payload(_call(client, "runbook_list_templates", {}))
+    payload = _result_payload(_call(client, "meho.runbook.list_templates", {}))
     assert isinstance(payload["templates"], list)
     assert len(payload["templates"]) == 1
     summary = payload["templates"][0]
@@ -374,13 +429,13 @@ async def test_list_templates_tenant_isolation(
         request=DraftTemplateRequest.model_validate({"slug": "theirs", "body": _body("Theirs")}),
     )
 
-    payload = _result_payload(_call(client, "runbook_list_templates", {}))
+    payload = _result_payload(_call(client, "meho.runbook.list_templates", {}))
     slugs = {t["slug"] for t in payload["templates"]}
     assert slugs == {"mine"}
 
 
 # ---------------------------------------------------------------------------
-# runbook_show_template
+# meho.runbook.show_template
 # ---------------------------------------------------------------------------
 
 
@@ -390,9 +445,11 @@ def test_show_template_admin_ok(
 ) -> None:
     """AC: an admin gets the full body including step contents."""
     client, _op = client_with_operator
-    _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+    _call(client, "meho.runbook.draft_template", {"template_slug": "cert-rotate", "body": _body()})
 
-    payload = _result_payload(_call(client, "runbook_show_template", {"slug": "cert-rotate"}))
+    payload = _result_payload(
+        _call(client, "meho.runbook.show_template", {"template_slug": "cert-rotate"})
+    )
     assert payload["slug"] == "cert-rotate"
     assert payload["version"] == 1
     assert len(payload["steps"]) == 1
@@ -410,9 +467,11 @@ def test_show_tool_admin_unchanged(
     run-state predicate consulted.
     """
     client, _op = client_with_operator
-    _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+    _call(client, "meho.runbook.draft_template", {"template_slug": "cert-rotate", "body": _body()})
 
-    payload = _result_payload(_call(client, "runbook_show_template", {"slug": "cert-rotate"}))
+    payload = _result_payload(
+        _call(client, "meho.runbook.show_template", {"template_slug": "cert-rotate"})
+    )
     assert payload["slug"] == "cert-rotate"
     assert payload["version"] == 1
     assert len(payload["steps"]) == 1
@@ -461,7 +520,9 @@ async def test_show_tool_operator_with_completed_run_succeeds(
         )
         await session.commit()
 
-    payload = _result_payload(_call(client, "runbook_show_template", {"slug": "cert-rotate"}))
+    payload = _result_payload(
+        _call(client, "meho.runbook.show_template", {"template_slug": "cert-rotate"})
+    )
     assert payload["slug"] == "cert-rotate"
     assert payload["version"] == 1
     # Full body including step contents.
@@ -495,7 +556,7 @@ async def test_show_tool_operator_with_no_run_denied(
         request=PublishTemplateRequest(slug="cert-rotate", version=1),
     )
 
-    body = _call(client, "runbook_show_template", {"slug": "cert-rotate"})
+    body = _call(client, "meho.runbook.show_template", {"template_slug": "cert-rotate"})
     assert body["error"]["code"] == INVALID_PARAMS
     assert "opacity_floor" in body["error"]["message"]
 
@@ -513,7 +574,7 @@ def test_show_tool_description_includes_post_completion_text(
     client, _op = client_with_operator
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
-    show_desc = tools_by_name["runbook_show_template"]["description"]
+    show_desc = tools_by_name["meho.runbook.show_template"]["description"]
     assert "POST-COMPLETION EXCEPTION" in show_desc
     # The two halves of the contract: the carve-out and the still-held
     # in_progress denial. Both are load-bearing.
@@ -527,5 +588,106 @@ def test_show_template_missing_error(
 ) -> None:
     """AC: ``TemplateNotFoundError`` surfaces as ``-32602``."""
     client, _op = client_with_operator
-    body = _call(client, "runbook_show_template", {"slug": "ghost"})
+    body = _call(client, "meho.runbook.show_template", {"template_slug": "ghost"})
     assert body["error"]["code"] == INVALID_PARAMS
+
+
+# ---------------------------------------------------------------------------
+# #1612 — deprecated flat-name aliases + slug/template_slug field shim
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_flat_aliases_listed_deprecated_and_route_to_same_handler(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC #1612: every flat alias resolves, is DEPRECATED-marked, shares the handler.
+
+    Three properties per template-side pair: (1) both names appear in
+    ``tools/list`` for an admin; (2) the alias's wire description is the
+    standard DEPRECATED pointer at its canonical name; (3) the registry
+    routes both names to the *same handler object* — the alias is a
+    second name, never a fork.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+
+    for alias, canonical in _FLAT_ALIASES.items():
+        assert canonical in tools_by_name, canonical
+        assert alias in tools_by_name, alias
+        alias_desc = tools_by_name[alias]["description"]
+        assert alias_desc.startswith(f"DEPRECATED alias for `{canonical}`"), alias_desc
+        # Identical schema on the wire — the alias accepts exactly what
+        # the canonical accepts.
+        assert tools_by_name[alias]["inputSchema"] == tools_by_name[canonical]["inputSchema"]
+
+        canonical_entry = get_tool(canonical)
+        alias_entry = get_tool(alias)
+        assert canonical_entry is not None and alias_entry is not None
+        assert alias_entry[1] is canonical_entry[1], alias
+        assert alias_entry[0].deprecated_alias_for == canonical
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_flat_alias_call_with_legacy_slug_field_still_works(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC #1612: the full pre-#1612 wire shape (flat name + ``slug``) still works.
+
+    A v0.12 caller pinned to ``runbook_draft_template`` + ``slug`` must
+    keep working unchanged for the deprecation window, and the response
+    now additionally mirrors ``template_slug``.
+    """
+    client, _op = client_with_operator
+    payload = _result_payload(
+        _call(client, "runbook_draft_template", {"slug": "cert-rotate", "body": _body()})
+    )
+    assert payload == {
+        "slug": "cert-rotate",
+        "template_slug": "cert-rotate",
+        "version": 1,
+        "status": "draft",
+    }
+
+    shown = _result_payload(_call(client, "runbook_show_template", {"slug": "cert-rotate"}))
+    assert shown["template_slug"] == "cert-rotate"
+    assert shown["slug"] == "cert-rotate"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_template_slug_and_slug_are_mutually_exclusive(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC #1612: supplying both names → -32602; supplying neither → -32602."""
+    client, _op = client_with_operator
+    both = _call(
+        client,
+        "meho.runbook.draft_template",
+        {"template_slug": "cert-rotate", "slug": "cert-rotate", "body": _body()},
+    )
+    assert both["error"]["code"] == INVALID_PARAMS
+    assert "not both" in both["error"]["message"]
+
+    # Neither name supplied — rejected by the server-side anyOf gate
+    # before the handler runs.
+    neither = _call(client, "meho.runbook.draft_template", {"body": _body()})
+    assert neither["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.asyncio
+async def test_list_templates_summaries_mirror_template_slug(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """AC #1612: list summaries carry ``template_slug`` == ``slug`` (round-trip key)."""
+    client, op = client_with_operator
+    await RunbookTemplateService().create_draft(
+        tenant_id=op.tenant_id,
+        operator_sub=op.sub,
+        request=DraftTemplateRequest.model_validate({"slug": "cert-rotate", "body": _body()}),
+    )
+
+    payload = _result_payload(_call(client, "meho.runbook.list_templates", {}))
+    summary = payload["templates"][0]
+    assert summary["template_slug"] == summary["slug"] == "cert-rotate"

@@ -114,6 +114,24 @@ connector-related release-notes line.
   keeps the keyed `{"templates": [...]}` / `{"runs": [...]}` defaults
   unchanged (#1611).
 
+### Deprecated
+
+- The 11 flat `runbook_*` MCP tool names (`runbook_start`,
+  `runbook_show_template`, …) are deprecated in favour of dotted
+  `meho.runbook.<verb>` canonical names, joining the
+  `meho.<noun>.<verb>` grammar every other multi-verb tool family
+  already uses; the template id is now `template_slug` on all 11 tools
+  (previously `slug` on the template verbs vs `template_slug` on the
+  run verbs), so an id returned by `meho.runbook.show_template` /
+  `.list_templates` is accepted by `meho.runbook.start` verbatim. The
+  flat names and the `slug` input field stay callable as deprecated
+  aliases for one release — identical handlers and schemas, DEPRECATED
+  wire descriptions, structured `mcp_tool_name_deprecated` /
+  `runbook_template_slug_field_deprecated` warning logs per use — and
+  are removed in v0.14.0. Migration recipe: replace `runbook_<verb>`
+  with `meho.runbook.<verb>` and rename `slug` → `template_slug` in
+  template-verb arguments (#1612).
+
 ### Fixed
 
 - `/ready` no longer fail-closes on the self-registered `corpus-http`

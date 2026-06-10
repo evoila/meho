@@ -14,13 +14,13 @@ The text format is fixed by Initiative #1199 and is **load-bearing**:
   <<RUNBOOK_PRIMING -- CRITICAL>>
   You are mid-runbook `<slug>` v<version> on step <n>/<total> (`<step_id>`).
   Follow only the current step. Do not look ahead. Do not improvise. Do not combine steps.
-  If the step looks wrong, call runbook_abort and escalate to a senior in chat.
-  Use runbook_next to advance once the current step's verify passes.
+  If the step looks wrong, call meho.runbook.abort and escalate to a senior in chat.
+  Use meho.runbook.next to advance once the current step's verify passes.
 
   <<END_RUNBOOK_PRIMING>>
 
 One block per in-progress run, capped at :data:`MAX_PRIMING_BLOCKS`. Beyond
-that, a single summary block points at ``runbook_list_runs`` so the
+that, a single summary block points at ``meho.runbook.list_runs`` so the
 preamble stays in budget.
 
 Priming is **UX hint, not enforcement**. Step opacity (G12.3, #1313) is
@@ -28,7 +28,7 @@ the real adherence mechanism; if priming breaks, opacity still holds.
 The phrasing is a high-confidence nudge to keep the agent inside the
 opacity floor's intended discipline -- "follow only the current step"
 mirrors the substrate's guarantee that only the current step is
-returned by ``runbook_next``.
+returned by ``meho.runbook.next``.
 
 Untrusted-content isolation
 ---------------------------
@@ -80,7 +80,7 @@ BLOCK_END: Final[str] = "<<END_RUNBOOK_PRIMING>>"
 #: Maximum number of per-run priming blocks before collapsing to a
 #: single summary block. Beyond ~5 runs the per-block text dominates
 #: the preamble's token budget; the summary form refers the agent to
-#: ``runbook_list_runs`` (the read tool from G12.3-T6, #1313) and
+#: ``meho.runbook.list_runs`` (the read tool from G12.3-T6, #1313) and
 #: tells them to proceed one at a time. Same opacity discipline still
 #: applies to each run when they advance it.
 MAX_PRIMING_BLOCKS: Final[int] = 5
@@ -137,7 +137,7 @@ async def assemble_runbook_priming(
       blank line between them.
       ``RunbookPrimingResult(text, len(runs), False)``.
     * **>N=5** -- one summary block referring the agent to
-      ``runbook_list_runs``. ``RunbookPrimingResult(text, len(runs), True)``.
+      ``meho.runbook.list_runs``. ``RunbookPrimingResult(text, len(runs), True)``.
 
     The helper makes no DB query beyond the single
     :meth:`list_runs` call; ``current_step_id`` and ``position`` arrive
@@ -203,9 +203,10 @@ def _render_run_block(run: RunSummary) -> str:
         f"on step {position_text} (`{run.current_step_id}`).\n"
         "Follow only the current step. Do not look ahead. Do not improvise. "
         "Do not combine steps.\n"
-        "If the step looks wrong, call runbook_abort and escalate to a "
+        "If the step looks wrong, call meho.runbook.abort and escalate to a "
         "senior in chat.\n"
-        "Use runbook_next to advance once the current step's verify passes."
+        "Use meho.runbook.next to advance once the current step's verify "
+        "passes."
     )
     return f"{BLOCK_START}\n{body}\n\n{BLOCK_END}"
 
@@ -213,7 +214,7 @@ def _render_run_block(run: RunSummary) -> str:
 def _render_summary_block(count: int) -> str:
     """Render the summary priming block for >N=5 in-progress runs.
 
-    Refers the agent to ``runbook_list_runs`` (the read tool from
+    Refers the agent to ``meho.runbook.list_runs`` (the read tool from
     G12.3-T6, #1313) and tells them to proceed one at a time. Re-
     states the opacity discipline so the summary form does not loosen
     the per-run wording's adherence floor.
@@ -221,7 +222,7 @@ def _render_summary_block(count: int) -> str:
     body = (
         f"You have {count} in-progress runbook runs assigned to you "
         f"(too many to list inline).\n"
-        "Call runbook_list_runs to see them and proceed one at a time.\n"
+        "Call meho.runbook.list_runs to see them and proceed one at a time.\n"
         "Follow the same opacity discipline: do not look ahead in any run."
     )
     return f"{BLOCK_START}\n{body}\n\n{BLOCK_END}"

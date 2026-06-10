@@ -292,12 +292,18 @@ six fell through to the dispatcher's generic `except Exception` and
 surfaced as a bare `-32603 "internal error: <ClassName>"` with the
 diagnostic message discarded — while the REST surface already attached
 the detail for all of them, so this closes the MCP↔REST asymmetry.
+(#1534's REST detail was still the bare `str(exc)` string for the
+five parser-family siblings; #1610 upgraded that 400 to the same
+structured envelopes, so both surfaces now ship the builders' dicts.)
 The structured `data` payload is built by the shared helpers in
 `operations/ingest/error_envelopes.py` (one `build_*_detail` per
 class) so the REST 4xx detail and the MCP `error.data` member share
 one source of truth; the MCP-side dispatch table that maps each class
 to its builder lives in `mcp/tools/_connector_shared.py`
-(`SPEC_ERROR_TYPES` + `raise_invalid_params_for_spec_error`). On the
+(`SPEC_ERROR_TYPES` + `raise_invalid_params_for_spec_error`), and the
+REST-side five-way 400 dispatch lives in
+`api/v1/connectors_ingest.py` (`_spec_error_http_exception`, #1610;
+the 422-mapped siblings keep their per-class `except` arms). On the
 **async** path the handle has already returned by the time the
 pipeline raises, so the same failures surface via `error` /
 `error_class` on the `ingest_status` poll response instead (the
@@ -498,7 +504,14 @@ SPEC_ERROR_TYPES` arm in
 `mcp/tools/_connector_shared.py`) dispatches each class to its
 builder before raising `McpInvalidParamsError(str(exc),
 data=detail)` — surfaced as JSON-RPC `-32602` with the detail on
-`error.data` (spec §5.1). The eight siblings and their builders:
+`error.data` (spec §5.1). The REST sync route catches the five
+parser-family siblings in one `except` arm and dispatches them
+through `_spec_error_http_exception` (in
+`api/v1/connectors_ingest.py`, #1610) onto an
+`HTTPException(400, detail=<builder dict>)` — the same envelopes on
+the `detail` key; the 422-mapped siblings (`VersionMismatchError`,
+`UncoveredVersionLabel`, `UpstreamNotSpecError`) keep their earlier
+per-class `except` arms. The eight siblings and their builders:
 
 * `build_version_mismatch_detail(exc)` — `VersionMismatchError`.
   REST embeds the returned dict in the

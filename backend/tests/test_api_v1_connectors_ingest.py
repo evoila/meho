@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import socket
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -67,8 +67,19 @@ from meho_backplane.db.models import (
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations.ingest import (
     GroupingResult,
+    IngestionPipelineService,
     IngestionResult,
+    InvalidSchemaError,
+    InvalidSpecError,
     LlmClient,
+    LlmOutputInvalid,
+    OpIdCollision,
+    UnsupportedSpecError,
+    build_invalid_schema_detail,
+    build_invalid_spec_detail,
+    build_llm_output_invalid_detail,
+    build_op_id_collision_detail,
+    build_unsupported_spec_detail,
     default_llm_client_factory,
 )
 from meho_backplane.settings import get_settings
@@ -1924,6 +1935,143 @@ def test_ingest_bad_spec_returns_400(client: TestClient, tmp_path: Any) -> None:
             headers=_authed(token),
         )
     assert response.status_code == 400
+
+
+def test_ingest_swagger_2_spec_returns_structured_unsupported_spec_400(
+    client: TestClient, tmp_path: Any
+) -> None:
+    """Swagger 2.0 spec → 400 carrying the ``unsupported_spec`` envelope.
+
+    #1610 regression (REST half of the MCP parity #1534 closed): the
+    route used to collapse the typed :exc:`UnsupportedSpecError` to a
+    bare ``detail="<str(exc)>"`` 400, so a REST/SDK caller had to
+    re-parse prose to learn the spec flavour was the problem. The
+    body now carries the shared builder's envelope — the stable
+    ``unsupported_spec`` classifier plus the message that names the
+    declared ``swagger`` version and the ``swagger2openapi`` /
+    converter.swagger.io conversion remediation.
+    """
+    spec_path = tmp_path / "swagger2.yaml"
+    spec_path.write_text(
+        """swagger: '2.0'
+info:
+  title: legacy harbor
+  version: '1.0'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="swagger2.yaml")
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "legacy",
+                "version": "1.0",
+                "impl_id": "legacy-impl",
+                "specs": [{"uri": spec_url}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert detail["detail"] == "unsupported_spec"
+    assert "swagger='2.0'" in detail["message"]
+    assert "swagger2openapi" in detail["message"]
+    assert "converter.swagger.io" in detail["message"]
+
+
+#: One case per parser-family ``SpecError`` sibling the REST 400 handler
+#: maps (#1610): the exception instance the stubbed pipeline raises and
+#: the shared builder whose envelope the wire body must equal verbatim.
+#: Builders are imported from ``operations/ingest/error_envelopes`` via
+#: the package root — the same single source of truth the MCP dispatch
+#: table uses — so this test fails if the route ever re-grows a local
+#: envelope shape.
+_SPEC_ERROR_FAMILY_CASES = [
+    pytest.param(
+        InvalidSpecError("OpenAPI document must parse to a mapping, got list"),
+        build_invalid_spec_detail,
+        id="invalid_spec",
+    ),
+    pytest.param(
+        UnsupportedSpecError("OpenAPI version '4.0.0' is not supported (expected 3.0.x or 3.1.x)"),
+        build_unsupported_spec_detail,
+        id="unsupported_spec",
+    ),
+    pytest.param(
+        InvalidSchemaError("$ref '#/components/schemas/Missing' does not resolve"),
+        build_invalid_schema_detail,
+        id="invalid_schema",
+    ),
+    pytest.param(
+        OpIdCollision(
+            op_ids=["GET:/api/items"],
+            product="test",
+            version="1.0",
+            impl_id="test-impl",
+            existing_spec_source="a.yaml",
+            incoming_spec_source="b.yaml",
+        ),
+        build_op_id_collision_detail,
+        id="op_id_collision",
+    ),
+    pytest.param(
+        LlmOutputInvalid(
+            pass_name="propose_groups",
+            raw_output="not json",
+            parse_error=ValueError("invalid JSON"),
+        ),
+        build_llm_output_invalid_detail,
+        id="llm_output_invalid",
+    ),
+]
+
+
+@pytest.mark.parametrize(("exc", "builder"), _SPEC_ERROR_FAMILY_CASES)
+def test_ingest_spec_error_family_returns_structured_400(
+    client: TestClient,
+    exc: Exception,
+    builder: Callable[[Any], dict[str, Any]],
+) -> None:
+    """Every parser-family ``SpecError`` → 400 with its builder's envelope.
+
+    #1610 — route-mapping test for the five-way dispatch in
+    ``_spec_error_http_exception``. The pipeline is stubbed to raise
+    each sibling so the test pins the route boundary only (the
+    parser/registration/grouping triggers have their own tests); the
+    load-bearing assertion is wire-body == builder output, which keeps
+    the REST 400 ``detail`` and the MCP ``-32602`` ``error.data``
+    member (same builders, see ``raise_invalid_params_for_spec_error``)
+    from drifting.
+    """
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch.object(IngestionPipelineService, "ingest", AsyncMock(side_effect=exc)),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "test",
+                "version": "1.0",
+                "impl_id": "test-impl",
+                "specs": [{"uri": "https://specs.example.test/never-fetched.yaml"}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == builder(exc)
 
 
 def test_ingest_vcenter_9_under_label_8_returns_422(client: TestClient, tmp_path: Any) -> None:

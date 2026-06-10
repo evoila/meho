@@ -69,8 +69,13 @@ The service-layer exceptions map to HTTP status codes uniformly:
   status code wins.
 * :class:`InvalidSpecError` / :class:`UnsupportedSpecError` /
   :class:`InvalidSchemaError` / :class:`OpIdCollision` /
-  :class:`LlmOutputInvalid` → 400 Bad Request (with the structured
-  detail message from the exception).
+  :class:`LlmOutputInvalid` → 400 Bad Request. The ``detail`` body
+  is the structured envelope from the shared per-class builders in
+  :mod:`~meho_backplane.operations.ingest.error_envelopes` — a
+  stable snake_case ``detail`` classifier + the rendered ``message``
+  + the class's machine-resolvable fields — the same dict the MCP
+  ingest tool ships on the JSON-RPC ``error.data`` member (#1610
+  closed the REST half of the parity; #1534 closed the MCP half).
 * :class:`VersionMismatchError` → 422 Unprocessable Entity. The
   request is syntactically valid but the spec's ``info.version``
   disagrees with the operator-supplied ``version`` label, or two
@@ -168,6 +173,11 @@ from meho_backplane.operations.ingest import (
     build_catalog_entry_not_found_detail,
     build_catalog_entry_typed_connector_detail,
     build_catalog_entry_upstream_not_spec_detail,
+    build_invalid_schema_detail,
+    build_invalid_spec_detail,
+    build_llm_output_invalid_detail,
+    build_op_id_collision_detail,
+    build_unsupported_spec_detail,
     build_upstream_not_spec_detail,
     build_version_mismatch_detail,
     default_llm_client_factory,
@@ -775,6 +785,51 @@ def _upstream_not_spec_http_exception(
     )
 
 
+def _spec_error_http_exception(
+    exc: InvalidSpecError
+    | UnsupportedSpecError
+    | InvalidSchemaError
+    | OpIdCollision
+    | LlmOutputInvalid,
+) -> HTTPException:
+    """Map a parser-family ``SpecError`` onto the structured 400 envelope.
+
+    #1610 — REST half of the MCP parity #1534 established. Every
+    sibling is a caller-input mistake (wrong OpenAPI flavour, a
+    structurally invalid document, a broken ``$ref``, colliding
+    op-ids, a bad grouping-LLM response), so the 400 ``detail`` body
+    carries the shared structured envelope from
+    :mod:`~meho_backplane.operations.ingest.error_envelopes` instead
+    of the bare ``str(exc)`` the route shipped before — a stable
+    snake_case ``detail`` classifier the caller branches on without
+    re-parsing prose, the rendered ``message``, and the per-class
+    machine-resolvable fields (``op_ids`` + spec sources for
+    :class:`OpIdCollision`, ``pass_name`` for
+    :class:`LlmOutputInvalid`). The builders are the single source of
+    truth shared with the MCP dispatch table
+    (``raise_invalid_params_for_spec_error`` in
+    ``mcp/tools/_connector_shared.py``), so the REST 400 ``detail``
+    and the MCP ``-32602`` ``error.data`` member can't drift; the
+    per-surface dispatch stays local because each surface funnels a
+    different exception subset (REST intercepts the 422-mapped
+    siblings earlier in the ``except`` chain).
+    """
+    if isinstance(exc, InvalidSchemaError):
+        # InvalidSchemaError before InvalidSpecError — a broken $ref is the
+        # narrower domain than a structurally invalid root document (same
+        # ordering as the MCP dispatch table).
+        detail = build_invalid_schema_detail(exc)
+    elif isinstance(exc, InvalidSpecError):
+        detail = build_invalid_spec_detail(exc)
+    elif isinstance(exc, UnsupportedSpecError):
+        detail = build_unsupported_spec_detail(exc)
+    elif isinstance(exc, OpIdCollision):
+        detail = build_op_id_collision_detail(exc)
+    else:
+        detail = build_llm_output_invalid_detail(exc)
+    return HTTPException(http_status.HTTP_400_BAD_REQUEST, detail)
+
+
 async def _run_ingest_with_http_mapping(
     *,
     service: IngestionPipelineService,
@@ -854,7 +909,9 @@ async def _run_ingest_with_http_mapping(
         OpIdCollision,
         LlmOutputInvalid,
     ) as exc:
-        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        # #1610 — structured envelope (shared builders), not bare str(exc);
+        # see _spec_error_http_exception for the parity rationale.
+        raise _spec_error_http_exception(exc) from exc
     except (yaml.YAMLError, JSONDecodeError) as exc:
         # The parser passes malformed YAML / JSON bubble-up by design (per
         # parse_openapi's docstring) so the loader's structured error message

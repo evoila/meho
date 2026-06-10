@@ -106,6 +106,13 @@ connector-related release-notes line.
   `vm.snapshot.revert`, `vm.migrate`) echo their blast-radius-naming
   params. Preview reads are GET-only by construction and fail-soft —
   the park always proceeds (#1608).
+- `GET /api/v1/runbooks/templates` and `GET /api/v1/runbooks/runs` now
+  honour the `?envelope=v2` opt-in and return the unified
+  `{items, next_cursor}` list shape (api-shape-conventions §2), joining
+  the seven sibling list endpoints widened in #1312/#1356. Both listings
+  are unpaged, so `next_cursor` is always `null`; omitting the param
+  keeps the keyed `{"templates": [...]}` / `{"runs": [...]}` defaults
+  unchanged (#1611).
 
 ### Fixed
 

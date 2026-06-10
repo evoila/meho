@@ -5419,11 +5419,14 @@ type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
 // ListRunsApiV1RunbooksRunsGetParams defines parameters for ListRunsApiV1RunbooksRunsGet.
 type ListRunsApiV1RunbooksRunsGetParams struct {
-	Assignee      *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
-	Status        *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	TemplateSlug  *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
-	Limit         *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
-	Authorization *string                                   `json:"authorization,omitempty"`
+	Assignee     *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
+	Status       *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TemplateSlug *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
+	Limit        *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // ListRunsApiV1RunbooksRunsGetParamsStatus defines parameters for ListRunsApiV1RunbooksRunsGet.
@@ -5451,10 +5454,13 @@ type ReassignRunApiV1RunbooksRunsRunIdReassignPostParams struct {
 
 // ListTemplatesApiV1RunbooksTemplatesGetParams defines parameters for ListTemplatesApiV1RunbooksTemplatesGet.
 type ListTemplatesApiV1RunbooksTemplatesGetParams struct {
-	Status        *ListTemplatesApiV1RunbooksTemplatesGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	TargetKind    *string                                             `form:"target_kind,omitempty" json:"target_kind,omitempty"`
-	Limit         *int                                                `form:"limit,omitempty" json:"limit,omitempty"`
-	Authorization *string                                             `json:"authorization,omitempty"`
+	Status     *ListTemplatesApiV1RunbooksTemplatesGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TargetKind *string                                             `form:"target_kind,omitempty" json:"target_kind,omitempty"`
+	Limit      *int                                                `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // ListTemplatesApiV1RunbooksTemplatesGetParamsStatus defines parameters for ListTemplatesApiV1RunbooksTemplatesGet.
@@ -14714,6 +14720,22 @@ func NewListRunsApiV1RunbooksRunsGetRequest(server string, params *ListRunsApiV1
 
 		}
 
+		if params.Envelope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -15038,6 +15060,22 @@ func NewListTemplatesApiV1RunbooksTemplatesGetRequest(server string, params *Lis
 		if params.Limit != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Envelope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

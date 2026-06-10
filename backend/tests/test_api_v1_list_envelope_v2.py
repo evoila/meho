@@ -9,12 +9,14 @@ passing ``?envelope=v2`` returns ``{items, next_cursor?, ...sidecars}``;
 omitting it keeps the v0.8.0 default shape so no client breaks.
 
 This module asserts the shape contract uniformly across the four sister
-list endpoints widened in this Task (``conventions``, ``audit/my-recent``,
-``broadcast/overrides``, ``connectors``) in one place. The two endpoints
-that adopted the opt-in in #1312 (``targets`` and the topology
-``dependents`` / ``dependencies`` endpoints) keep their own envelope
-tests in ``test_api_v1_targets.py`` / ``test_api_v1_topology.py``, so all
-five §2 surfaces are covered. The per-endpoint behavioural suites own the
+list endpoints widened in that Task (``conventions``, ``audit/my-recent``,
+``broadcast/overrides``, ``connectors``) plus the two runbook list
+endpoints (``runbooks/templates`` / ``runbooks/runs``) that shipped after
+the §2 sweep and joined the opt-in in G0.22-T6 (#1611), in one place. The
+two endpoints that adopted the opt-in in #1312 (``targets`` and the
+topology ``dependents`` / ``dependencies`` endpoints) keep their own
+envelope tests in ``test_api_v1_targets.py`` / ``test_api_v1_topology.py``,
+so every §2 surface is covered. The per-endpoint behavioural suites own the
 data-bearing pagination / sidecar assertions; this file pins the envelope
 *contract* — that every endpoint honours the param, returns the unified
 shape with the param, and is byte-shape-unchanged without it.
@@ -106,12 +108,15 @@ async def _seed_tenant() -> None:
 #: shape wraps its list under, or ``None`` when the default is a bare
 #: JSON array. The topology node-scoped endpoints + ``targets`` keep
 #: their envelope tests in their own suites; here we cover the four
-#: sister endpoints widened by this Task.
+#: sister endpoints widened by #1356 plus the two runbook list
+#: endpoints widened by #1611.
 _CASES = [
     pytest.param("/api/v1/conventions", "entries", id="conventions"),
     pytest.param("/api/v1/audit/my-recent", "rows", id="audit-my-recent"),
     pytest.param("/api/v1/broadcast/overrides", None, id="broadcast-overrides"),
     pytest.param("/api/v1/connectors", "connectors", id="connectors"),
+    pytest.param("/api/v1/runbooks/templates", "templates", id="runbook-templates"),
+    pytest.param("/api/v1/runbooks/runs", "runs", id="runbook-runs"),
 ]
 
 

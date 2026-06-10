@@ -473,6 +473,43 @@ def test_list_invalid_status_422(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_list_envelope_v2_unified_shape(client: TestClient) -> None:
+    """``?envelope=v2`` returns ``{items, next_cursor}``; the keyed field is absent.
+
+    G0.22-T6 (#1611): the same rows the default ``{"templates": [...]}``
+    shape carries ride under ``items``; the listing is unpaged so
+    ``next_cursor`` is always ``null``. The cross-endpoint contract pin
+    lives in ``test_api_v1_list_envelope_v2.py``; this test owns the
+    data-bearing assertion that the v2 items match the keyed payload.
+    """
+    key, token = _operator_token()
+    summary = TemplateSummary(
+        slug="rotate-cert",
+        version=1,
+        title="Rotate certificate",
+        status="draft",
+        target_kind="host",
+        edited_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    fake_list = AsyncMock(return_value=[summary])
+    with (
+        respx.mock as mock_router,
+        patch(f"{_ROUTE}.list_templates", fake_list),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/runbooks/templates?envelope=v2",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["slug"] for item in body["items"]] == ["rotate-cert"]
+    assert body["items"][0]["edited_at"] == "2026-01-02T00:00:00Z"
+    assert body["next_cursor"] is None
+    assert "templates" not in body
+
+
 # ---------------------------------------------------------------------------
 # GET /{slug} -- show
 # ---------------------------------------------------------------------------

@@ -177,6 +177,17 @@ connector-related release-notes line.
   `meho connector list` before re-running. Legacy synchronous `200`
   responses (and `--dry-run`, which always runs inline) are unchanged
   (#1609).
+- The REST `POST /api/v1/connectors/ingest` route now returns the same
+  structured detail envelopes for the five typed parser-family
+  `SpecError` rejections (`unsupported_spec` / `invalid_spec` /
+  `invalid_schema` / `op_id_collision` / `llm_output_invalid`) that the
+  MCP ingest tool has shipped on `error.data` since #1534, instead of
+  collapsing them to a bare `400` string. A Swagger 2.0 spec now yields
+  `detail.detail == "unsupported_spec"` with the actionable
+  swagger2openapi / converter.swagger.io conversion remediation in
+  `detail.message`, so REST/SDK callers branch on the stable classifier
+  instead of re-parsing prose; the human-readable message is carried
+  verbatim inside the envelope (#1610).
 
 ## [0.12.0] - 2026-06-08
 

@@ -101,6 +101,7 @@ if TYPE_CHECKING:  # pragma: no cover - imports for type checking only
 
 __all__ = [
     "COMPOSITE_DEPTH_TOP_LEVEL",
+    "CompositeL2DependencyDisabled",
     "CompositeL2DependencyMissing",
     "CompositeRecursionLimitExceeded",
     "DispatchChild",
@@ -232,6 +233,71 @@ class CompositeL2DependencyMissing(RuntimeError):  # noqa: N818 -- parallels Com
             f"composite_l2_missing: {composite_op_id!r} depends on L2 sub-ops "
             f"not registered in the catalog: [{missing_repr}]. Run "
             f"{catalog_command!r} to ingest them, then retry."
+        )
+
+
+class CompositeL2DependencyDisabled(RuntimeError):  # noqa: N818 -- parallels CompositeL2DependencyMissing
+    """Raised when a composite's L2 sub-ops are present in the catalog but **disabled**.
+
+    #1601. The sibling of :class:`CompositeL2DependencyMissing` for the
+    *ingested-but-disabled* deploy state. A descriptor row exists in
+    ``endpoint_descriptor`` for the sub-op, but ``is_enabled = false`` --
+    so :func:`~meho_backplane.operations._lookup.lookup_descriptor`
+    (which hard-filters ``is_enabled = TRUE``) returns ``None`` for it
+    exactly as it would for an absent op. The pre-flight disambiguates
+    the two via the ``is_enabled``-agnostic
+    :func:`~meho_backplane.operations._lookup.descriptor_exists_any_state`
+    probe: a sub-op that probe finds present is *disabled*, not *missing*.
+
+    The distinction matters because the two states need opposite
+    remediations. *Missing* -> ``meho connector ingest --catalog ...``
+    (the catalog has not been ingested). *Disabled* -> re-enable the op;
+    the catalog ingest has already happened, so steering the operator
+    back to ingest is wrong. The remediation this exception carries names
+    a **real** verb -- per-op ``meho connector edit-op <connector_id>
+    <op_id> --enable`` -- and explicitly warns that connector-level
+    ``meho connector enable`` does **not** cascade to spec-ingested ops
+    (they land ``group_id = NULL`` and the enable cascade filters on
+    ``group_id``), so per-op ``edit-op --enable`` is the reliable path.
+
+    The dispatcher catches this exception specifically (ahead of both the
+    generic exception branch and -- order does not matter, the two are
+    disjoint -- the :class:`CompositeL2DependencyMissing` branch) and
+    surfaces it as a structured ``composite_l2_disabled``
+    :class:`OperationResult` per the
+    ``docs/codebase/error-message-shape.md`` convention (#1141).
+
+    Attributes
+    ----------
+    composite_op_id:
+        The composite's own op_id (``vmware.composite.datastore.usage``)
+        -- the call site the operator dispatched.
+    disabled_op_ids:
+        Tuple of sub-op_ids that have a descriptor row in
+        ``endpoint_descriptor`` whose ``is_enabled = false``.
+    connector_id:
+        The connector_id the composite dispatches against
+        (``"vmware-rest-9.0"``). Surfaced so the remediation can name the
+        exact ``meho connector edit-op <connector_id> <op_id> --enable``
+        invocation per disabled op.
+    """
+
+    def __init__(
+        self,
+        *,
+        composite_op_id: str,
+        disabled_op_ids: tuple[str, ...],
+        connector_id: str,
+    ) -> None:
+        self.composite_op_id = composite_op_id
+        self.disabled_op_ids = disabled_op_ids
+        self.connector_id = connector_id
+        disabled_repr = ", ".join(disabled_op_ids) if disabled_op_ids else "(none)"
+        super().__init__(
+            f"composite_l2_disabled: {composite_op_id!r} depends on L2 sub-ops "
+            f"present in the catalog but disabled: [{disabled_repr}]. Re-enable "
+            f"them per-op with "
+            f"'meho connector edit-op {connector_id} <op_id> --enable', then retry."
         )
 
 

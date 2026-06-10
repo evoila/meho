@@ -236,6 +236,72 @@ def _rolled_back(
     }
 
 
+async def _resolve_vm_list(
+    *,
+    dispatch_child: DispatchChild,
+    filter_dict: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Resolve a VM filter to its listing rows via ``GET:/vcenter/vm``.
+
+    Read-only: issues exactly one listing GET, never a mutation. Filter
+    keys are forwarded as ``filter.<key>`` query params per the vCenter
+    listing contract.
+
+    Shared seam (#1608): the write handlers that fan out over a filtered
+    VM set (:func:`vm_power_bulk_composite`, :func:`host_evacuate_composite`,
+    :func:`host_detach_from_vds_composite`) call this at dispatch time,
+    and their park-time preview builders (:mod:`._write_preview`) call the
+    same function at approval-park time — so the entity set the reviewer
+    sees in ``proposed_effect`` is resolved by the same code path the
+    approved dispatch will use.
+
+    Raises :class:`RuntimeError` when the listing sub-op fails or returns
+    a non-list payload. Non-dict rows are dropped (the listing contract
+    yields summary objects); per-row key validation stays with callers.
+    """
+    listing = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_LIST_VMS,
+            params={f"filter.{k}": v for k, v in filter_dict.items()},
+        )
+    )
+    vms = _unwrap_value(listing)
+    if not isinstance(vms, list):
+        raise RuntimeError(f"expected list from {_OP_LIST_VMS!r}, got {type(vms).__name__}")
+    return [entry for entry in vms if isinstance(entry, dict)]
+
+
+async def _resolve_cluster_hosts(
+    *,
+    dispatch_child: DispatchChild,
+    cluster_moid: str,
+) -> list[dict[str, Any]]:
+    """Resolve a cluster's host listing rows via ``GET:/vcenter/cluster/{cluster}/host``.
+
+    Read-only single GET. Shared between :func:`cluster_patch_composite`
+    (dispatch time) and its park-time preview builder in
+    :mod:`._write_preview` (#1608) — same rationale as
+    :func:`_resolve_vm_list`.
+
+    Raises :class:`RuntimeError` when the listing sub-op fails or returns
+    a non-list payload. Non-dict rows are dropped.
+    """
+    listing = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_LIST_CLUSTER_HOSTS,
+            params={"cluster": cluster_moid},
+        )
+    )
+    entries = _unwrap_value(listing)
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            f"expected list from {_OP_LIST_CLUSTER_HOSTS!r}, got {type(entries).__name__}"
+        )
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
 # ===========================================================================
 # vm.create
 # ===========================================================================
@@ -760,26 +826,13 @@ async def vm_power_bulk_composite(
     # every per-VM dispatch must target the matching one.
     power_op_id = _power_vm_op_id(action)
 
-    listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_VMS,
-            params={f"filter.{k}": v for k, v in filter_dict.items()},
-        )
-    )
-    vms = _unwrap_value(listing)
-    if not isinstance(vms, list):
-        raise RuntimeError(
-            f"vm.power.bulk: expected list from {_OP_LIST_VMS!r}, got {type(vms).__name__}"
-        )
+    vms = await _resolve_vm_list(dispatch_child=dispatch_child, filter_dict=filter_dict)
 
     results: list[dict[str, Any]] = []
     ok_count = 0
     err_count = 0
     aborted = False
     for vm_entry in vms:
-        if not isinstance(vm_entry, dict):
-            continue
         vm_moid = vm_entry.get("vm")
         if not isinstance(vm_moid, str):
             continue
@@ -849,24 +902,11 @@ async def host_evacuate_composite(
     host_moid = params["host"]
     tolerate_partial = bool(params.get("tolerate_partial_failure", False))
 
-    listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_VMS,
-            params={"filter.hosts": [host_moid]},
-        )
-    )
-    vms = _unwrap_value(listing)
-    if not isinstance(vms, list):
-        raise RuntimeError(
-            f"host.evacuate: expected list from {_OP_LIST_VMS!r}, got {type(vms).__name__}"
-        )
+    vms = await _resolve_vm_list(dispatch_child=dispatch_child, filter_dict={"hosts": [host_moid]})
 
     migrated: list[str] = []
     failed: list[dict[str, str]] = []
     for vm_entry in vms:
-        if not isinstance(vm_entry, dict):
-            continue
         vm_moid = vm_entry.get("vm")
         if not isinstance(vm_moid, str):
             continue
@@ -960,24 +1000,11 @@ async def host_detach_from_vds_composite(
             params={"filter.hosts": [host_moid]},
         )
     )
-    vm_listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_VMS,
-            params={"filter.hosts": [host_moid]},
-        )
-    )
-    vms = _unwrap_value(vm_listing)
-    if not isinstance(vms, list):
-        raise RuntimeError(
-            f"host.detach_from_vds: expected list from {_OP_LIST_VMS!r}, got {type(vms).__name__}"
-        )
+    vms = await _resolve_vm_list(dispatch_child=dispatch_child, filter_dict={"hosts": [host_moid]})
 
     vms_migrated: list[str] = []
     migration_failures: list[dict[str, str]] = []
     for vm_entry in vms:
-        if not isinstance(vm_entry, dict):
-            continue
         vm_moid = vm_entry.get("vm")
         if not isinstance(vm_moid, str):
             continue
@@ -1091,25 +1118,12 @@ async def cluster_patch_composite(
     cluster_moid = params["cluster"]
     patch_method = params.get("patch_method", "default")
 
-    listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_CLUSTER_HOSTS,
-            params={"cluster": cluster_moid},
-        )
-    )
-    entries = _unwrap_value(listing)
-    if not isinstance(entries, list):
-        raise RuntimeError(
-            f"cluster.patch: expected list from {_OP_LIST_CLUSTER_HOSTS!r}, "
-            f"got {type(entries).__name__}"
-        )
+    entries = await _resolve_cluster_hosts(dispatch_child=dispatch_child, cluster_moid=cluster_moid)
     host_moids: list[str] = []
     for entry in entries:
-        if isinstance(entry, dict):
-            host_moid = entry.get("host")
-            if isinstance(host_moid, str):
-                host_moids.append(host_moid)
+        host_moid = entry.get("host")
+        if isinstance(host_moid, str):
+            host_moids.append(host_moid)
 
     patched: list[str] = []
     for i, host_moid in enumerate(host_moids):

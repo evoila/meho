@@ -67,6 +67,12 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 # registered by the time the runner iterates.
 register_typed_op_registrar(register_vmware_composite_operations)
 
+# Side-effect import: registers the 8 write composites' park-time
+# ``proposed_effect`` preview builders (#1608) onto the per-op hook in
+# :mod:`meho_backplane.operations._preview` — mirrors how
+# ``connectors/argocd/__init__`` wires ``ops_write_preview``.
+from meho_backplane.connectors.vmware_rest.composites import _write_preview  # noqa: E402,F401
+
 __all__ = [
     "cluster_drs_recommendations_composite",
     "cluster_patch_composite",

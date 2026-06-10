@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- Parked `vmware.composite.*` write approvals now carry a
+  connector-rendered preview in `proposed_effect` instead of the
+  identifier-only `{op_id, connector_id, target_id}` default, extending
+  the #1504/#1437 park-time preview pattern to all 8 vmware write
+  composites. The fan-out composites (`vm.power.bulk`, `host.evacuate`,
+  `host.detach_from_vds`, `cluster.patch`) resolve the entity set the
+  approved dispatch would act on — via the same read-only listing
+  helpers the handlers use — and store the requested action/filter plus
+  a capped `resolved` list with `total_resolved`, so a four-eyes
+  reviewer can tell a one-VM power cycle from a 1000-VM outage; the
+  single-entity composites (`vm.create`, `vm.clone`,
+  `vm.snapshot.revert`, `vm.migrate`) echo their blast-radius-naming
+  params. Preview reads are GET-only by construction and fail-soft —
+  the park always proceeds (#1608).
+
 ### Fixed
 
 - `/ready` no longer fail-closes on the self-registered `corpus-http`

@@ -355,6 +355,64 @@ write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
 revert.
 
+### Park-time approval previews (#1608)
+
+All 8 write composites ship `requires_approval=True`, so a human/agent
+dispatch parks as a durable `ApprovalRequest` row. Pre-#1608 that row's
+`proposed_effect` was the identifier-only default `{op_id, connector_id,
+target_id}` — and since the dispatch `params` are deliberately never
+serialised onto a reviewer-facing surface (#1503), the four-eyes
+approver could not tell a one-VM power cycle from a 1000-VM outage.
+
+`composites/_write_preview.py` registers one preview builder per write
+composite on the generic per-op hook (`register_preview_builder`,
+`operations/_preview.py`, #1437). The builder result lands under
+`proposed_effect["preview"]`, wrapped with the op's sensitivity
+`op_class` (see [`approvals.md`](approvals.md)). Two depths:
+
+| Composite | Preview | Depth |
+| --- | --- | --- |
+| `vm.power.bulk` | `{action, filter, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
+| `host.evacuate` | `{host, tolerate_partial_failure, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
+| `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
+| `cluster.patch` | `{cluster, patch_method, resolved, total_resolved}` | live read (`GET:/vcenter/cluster/{cluster}/host`) |
+| `vm.create` | creation-spec echo (name, guest_os, sizing, networks, power-on) | param echo, no I/O |
+| `vm.clone` | clone-coordinates echo | param echo, no I/O |
+| `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
+| `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
+
+The live-read previews resolve the same entity set the approved
+dispatch would act on, through the **same shared helpers** the handlers
+use at dispatch time (`_write._resolve_vm_list` /
+`_write._resolve_cluster_hosts`) — one resolution code path, two call
+sites. The `resolved` list is capped at 20 entries
+(`_PREVIEW_RESOLVED_CAP`), identity-only per row (`vm`/`host`, `name`,
+`power_state`); `total_resolved` always carries the uncapped count. The
+four param-echo composites name their full blast radius in params, so
+no read can change what the preview says; `vm.migrate` deliberately
+does **not** pre-resolve a DRS recommendation (point-in-time output
+would mislead the reviewer — the preview says
+`target_host_source="drs_at_execution"` instead).
+
+At park time the composite handler never runs, so the builders cannot
+receive the dispatcher's `dispatch_child`. They construct a **read-only
+adapter** (`_read_only_dispatch_child`) that satisfies the same
+`DispatchChild` protocol but executes the sub-op directly against the
+resolved connector (descriptor lookup → `dispatch_ingested` /
+`dispatch_typed`), never through `dispatch()`: no policy-gate re-entry
+(a read-gating policy could otherwise park the preview's own sub-op
+from inside the parent's park), no unparented audit rows (the
+`approval.request` row — the audit anchor — is written *after* the
+preview), and a fail-closed `GET:`-prefix guard so the park path can
+never mutate vSphere state. This mirrors how the k8s.apply dry-run
+(#1437), the argocd snapshot reads (#1452), and the vault capability
+probe (#1504) run their preview I/O — connector-level, un-dispatched.
+
+Everything is fail-soft: a builder that declines or raises (vCenter
+unreachable, listing op not ingested yet) degrades the row to the
+identifier-only default and the park always proceeds. The 5 read
+composites register no builder — they never park.
+
 ## Dependencies
 
 - `meho_backplane.connectors.adapters.http.HttpConnector` (G0.2-T3

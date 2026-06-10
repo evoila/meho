@@ -5,8 +5,8 @@ Copyright (c) 2026 evoila Group
 
 # Authoring runbooks
 
-> The human-facing companion to the agent-facing `runbook_*_template` tool
-> descriptions in
+> The human-facing companion to the agent-facing `meho.runbook.*`
+> template tool descriptions in
 > [`backend/src/meho_backplane/mcp/tools/runbooks.py`](../../backend/src/meho_backplane/mcp/tools/runbooks.py).
 > The tools teach the agent how to *call* the surface; this doc teaches a
 > senior how to *author* a runbook with that agent across one or several
@@ -44,7 +44,7 @@ same time.
   `TENANT_ADMIN`-only).
 - **Claude** — the authoring agent. During a drafting session it captures
   what the senior demonstrates (bash, SSH, the verification at each step)
-  into the template body and persists it through the `runbook_*_template`
+  into the template body and persists it through the `meho.runbook.*` template
   tools. It does not invent steps; it transcribes and structures.
 - **Junior** — the operator who later *runs* a published template. The junior
   never sees the authoring surface; at run time they see one step at a time
@@ -57,8 +57,15 @@ same time.
 Authoring a real procedure is rarely one sitting. A senior walks Claude
 through cert rotation across a few afternoons, and the draft has to survive
 the gaps between sessions. It does, because draft state lives server-side —
-each `runbook_edit_template` call persists the whole body, and a new session
-re-reads it with `runbook_show_template`.
+each `meho.runbook.edit_template` call persists the whole body, and a new
+session re-reads it with `meho.runbook.show_template`.
+
+> **Naming note (#1612).** The dotted `meho.runbook.<verb>` names are
+> canonical; the original flat `runbook_*` names remain callable as
+> deprecated aliases for one release (removed in v0.14.0). The template
+> id field is `template_slug` everywhere — `slug` is accepted as a
+> deprecated alias on the template verbs for the same window, and
+> responses carry both keys until the window closes.
 
 The load-bearing property: **drafts are mutable, and editing a draft does not
 bump the version.** A published version is pinned and immutable; a draft is a
@@ -66,30 +73,30 @@ scratchpad you keep appending to until the senior signs off.
 
 ### Step by step
 
-1. **Start a draft.** `runbook_draft_template(slug, body)` creates version 1
+1. **Start a draft.** `meho.runbook.draft_template(template_slug, body)` creates version 1
    with `status=draft`. The `body` can be minimal — a title, a description,
    and a couple of placeholder steps. There is exactly one draft per slug at a
-   time; a second `runbook_draft_template` for the same slug is refused
+   time; a second `meho.runbook.draft_template` for the same slug is refused
    (JSON-RPC `-32602`).
 
 2. **Walk the procedure and capture as you go.** As the senior demonstrates,
-   Claude calls `runbook_edit_template(slug, body)` periodically with the
+   Claude calls `meho.runbook.edit_template(template_slug, body)` periodically with the
    updated body. Each call mutates the draft **in place** — the version stays
    the same, only `edited_by` / `edited_at` advance. There is no "save" versus
    "checkpoint" distinction; every edit is the new draft.
 
 3. **Close the session mid-draft.** Nothing special to do. The last
-   `runbook_edit_template` call already persisted the state server-side. Close
+   `meho.runbook.edit_template` call already persisted the state server-side. Close
    Claude; the draft is safe.
 
 4. **Resume in a new session.** Open Claude and ask it to continue drafting
-   runbook `<slug>`. Claude calls `runbook_show_template(slug)` to read the
+   runbook `<slug>`. Claude calls `meho.runbook.show_template(template_slug)` to read the
    current draft back (the `version` argument is optional — omit it to get the
    latest version, which is the draft), then resumes appending via further
-   `runbook_edit_template(slug, body)` calls.
+   `meho.runbook.edit_template(template_slug, body)` calls.
 
 5. **Publish on sign-off.** Once the senior is happy,
-   `runbook_publish_template(slug, version)` flips the draft to `published`.
+   `meho.runbook.publish_template(template_slug, version)` flips the draft to `published`.
    From then on it is the latest start target for runs, and it is immutable —
    the next edit forks (see below).
 
@@ -100,7 +107,7 @@ deprecate is idempotent the same way.
 ## Fork-on-edit semantics
 
 Once a template is published it is immutable. Calling
-`runbook_edit_template(slug, body)` when the slug has **no draft** — only
+`meho.runbook.edit_template(template_slug, body)` when the slug has **no draft** — only
 published or deprecated versions — does not error and does not mutate the
 published row. Instead it **forks a new draft** at `max(version) + 1`.
 
@@ -131,13 +138,13 @@ What the fork does and does not change:
   started.
 - **New starts pick up the latest published version.** Until you publish the
   fork, new runs still start against the previous published version. Once you
-  `runbook_publish_template(slug, 2)`, new starts pick up version 2.
+  `meho.runbook.publish_template(template_slug, 2)`, new starts pick up version 2.
 - **Editing the in-flight procedure is not what fork-on-edit does.** If you
   need to change what an operator who is *currently mid-run* does, the fork
   does not reach them. The tool guidance is to abort the run and start over
   against the new version rather than expect the edit to retroactively apply.
 
-When the slug already has a draft, `runbook_edit_template` takes the in-place
+When the slug already has a draft, `meho.runbook.edit_template` takes the in-place
 path instead (`forked_from` is `null`) — you can only fork from a published
 version, and only when no draft is open.
 
@@ -190,8 +197,8 @@ Senior: We're going to write a runbook for rotating the vCenter 9.0 cert.
 
 Claude: Creating the draft now.
 
-  -> runbook_draft_template(
-       slug="vcenter-9.0-cert-rotation",
+  -> meho.runbook.draft_template(
+       template_slug="vcenter-9.0-cert-rotation",
        body={
          "title": "vCenter 9.0 certificate rotation",
          "description": "Rotate the machine SSL cert on a vCenter 9.0 appliance.",
@@ -221,20 +228,20 @@ Senior: Continue drafting the cert-rotation runbook. First we revoke the old
 
 Claude: Let me re-read the current draft first.
 
-  -> runbook_show_template(slug="vcenter-9.0-cert-rotation")
+  -> meho.runbook.show_template(template_slug="vcenter-9.0-cert-rotation")
   <- { "slug": "...", "version": 1, "status": "draft",
        "steps": [ { "id": "placeholder", ... } ], ... }
 
 Claude: Got it. I'll replace the placeholder with the three steps you
         described and persist after each one.
 
-  -> runbook_edit_template(slug="vcenter-9.0-cert-rotation", body={ ...revoke step... })
+  -> meho.runbook.edit_template(template_slug="vcenter-9.0-cert-rotation", body={ ...revoke step... })
   <- { "slug": "...", "version": 1, "status": "draft", "forked_from": null }
 
-  -> runbook_edit_template(slug="vcenter-9.0-cert-rotation", body={ ...revoke + issue... })
+  -> meho.runbook.edit_template(template_slug="vcenter-9.0-cert-rotation", body={ ...revoke + issue... })
   <- { "slug": "...", "version": 1, "status": "draft", "forked_from": null }
 
-  -> runbook_edit_template(slug="vcenter-9.0-cert-rotation", body={ ...revoke + issue + install... })
+  -> meho.runbook.edit_template(template_slug="vcenter-9.0-cert-rotation", body={ ...revoke + issue + install... })
   <- { "slug": "...", "version": 1, "status": "draft", "forked_from": null }
 
 Claude: Three steps captured, still version 1 (drafts edit in place). We can
@@ -252,14 +259,14 @@ Senior: Continue the cert-rotation runbook. Add a verify on the install step
 
 Claude: Re-reading the draft.
 
-  -> runbook_show_template(slug="vcenter-9.0-cert-rotation")
+  -> meho.runbook.show_template(template_slug="vcenter-9.0-cert-rotation")
   <- { "version": 1, "status": "draft", "steps": [revoke, issue, install], ... }
 
 Claude: Adding an operation_call verify to the install step that matches the
         live thumbprint against the expected value.
 
-  -> runbook_edit_template(
-       slug="vcenter-9.0-cert-rotation",
+  -> meho.runbook.edit_template(
+       template_slug="vcenter-9.0-cert-rotation",
        body={ ...install step now has verify:
          { "type": "operation_call",
            "op_id": "vmware.cert.get_thumbprint",
@@ -272,8 +279,8 @@ Senior: Looks right. Publish it.
 
 Claude: Publishing version 1.
 
-  -> runbook_publish_template(slug="vcenter-9.0-cert-rotation", version=1)
-  <- { "slug": "vcenter-9.0-cert-rotation", "version": 1, "status": "published" }
+  -> meho.runbook.publish_template(template_slug="vcenter-9.0-cert-rotation", version=1)
+  <- { "template_slug": "vcenter-9.0-cert-rotation", "slug": "vcenter-9.0-cert-rotation", "version": 1, "status": "published" }
 
 Claude: Published. New runs will start against version 1. Editing it now would
         fork a new draft at version 2.

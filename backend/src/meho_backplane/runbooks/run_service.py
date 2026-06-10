@@ -197,7 +197,7 @@ class RunNotFoundError(LookupError):
 
 
 class NotRunAssigneeError(PermissionError):
-    """Caller is not the run's assignee. Use ``runbook_reassign`` to take over.
+    """Caller is not the run's assignee. Use ``meho.runbook.reassign`` to take over.
 
     Raised by :meth:`RunbookRunService.next_step` for any caller other than
     ``run.assigned_to`` — including ``TENANT_ADMIN`` callers. The right way
@@ -640,7 +640,7 @@ class RunbookRunService:
             if run.assigned_to != operator_sub and not caller_is_admin:
                 raise NotRunAssigneeError(
                     f"caller {operator_sub!r} is not the assignee of run {run_id} "
-                    f"and does not have TENANT_ADMIN; use runbook_reassign to take over",
+                    f"and does not have TENANT_ADMIN; use meho.runbook.reassign to take over",
                 )
             self._refuse_if_terminal(run)
 
@@ -816,7 +816,7 @@ class RunbookRunService:
         ``in_progress`` run does **not** unlock the read (the opacity
         floor stays in place while the run is live). The predicate is
         the lookup G12.3-T4 (#1309) wires into the
-        ``runbook_show_template`` 403 path: an ``OPERATOR`` who has
+        ``meho.runbook.show_template`` 403 path: an ``OPERATOR`` who has
         completed or abandoned a run against this exact pinned
         ``(slug, version)`` can read the template for post-mortem; an
         ``OPERATOR`` with no such run still gets 403.
@@ -865,7 +865,7 @@ class RunbookRunService:
         if run.assigned_to != caller_sub:
             raise NotRunAssigneeError(
                 f"caller {caller_sub!r} is not the assignee of run {run_id}; "
-                f"use runbook_reassign to take over",
+                f"use meho.runbook.reassign to take over",
             )
         return run
 

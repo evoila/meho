@@ -226,7 +226,7 @@ async def test_five_runs_inline_form() -> None:
 async def test_six_runs_collapses_to_summary() -> None:
     """6 in-progress runs (> MAX_PRIMING_BLOCKS) -> one summary block.
 
-    The summary references runbook_list_runs and drops per-run blocks.
+    The summary references meho.runbook.list_runs and drops per-run blocks.
     """
     tenant_id = uuid.uuid4()
     await _seed_published_template(tenant_id, "drain", body=_two_step_template())
@@ -239,7 +239,7 @@ async def test_six_runs_collapses_to_summary() -> None:
     assert result.text.count(BLOCK_START) == 1
     assert result.text.count(BLOCK_END) == 1
     assert "6 in-progress" in result.text
-    assert "runbook_list_runs" in result.text
+    assert "meho.runbook.list_runs" in result.text
     # No per-run leakage in the summary form.
     assert "`drain`" not in result.text
     assert "step 1/2" not in result.text
@@ -385,7 +385,7 @@ async def test_priming_text_includes_no_skip_no_force_advance_implication() -> N
     """Body text contains the verbatim adherence phrases the agent is trained against.
 
     Regression guard -- a refactor that strips ``Follow only the current step``,
-    ``runbook_abort``, or ``runbook_next`` from the rendered text regresses
+    ``meho.runbook.abort``, or ``meho.runbook.next`` from the rendered text regresses
     the priming's UX-hint discipline. Initiative #1199 fixes the wording.
     """
     tenant_id = uuid.uuid4()
@@ -398,8 +398,8 @@ async def test_priming_text_includes_no_skip_no_force_advance_implication() -> N
     assert "Do not look ahead" in result.text
     assert "Do not improvise" in result.text
     assert "Do not combine steps" in result.text
-    assert "runbook_abort" in result.text
-    assert "runbook_next" in result.text
+    assert "meho.runbook.abort" in result.text
+    assert "meho.runbook.next" in result.text
 
 
 @pytest.mark.asyncio

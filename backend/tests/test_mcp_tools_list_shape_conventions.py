@@ -44,6 +44,8 @@ from meho_backplane.mcp.tools import (  # noqa: F401
     broadcast,
     connector_admin,
     operations,
+    runbook_runs,
+    runbooks,
     scheduler,
     topology,
 )
@@ -396,3 +398,102 @@ def test_list_operation_groups_paginates_keyset_on_group_key() -> None:
     assert output is not None
     assert "next_cursor" in output["properties"]
     assert "next_cursor" in output["required"]
+
+
+# ---------------------------------------------------------------------------
+# §14.9 — runbook family: dotted canonical names + template_slug field
+# ---------------------------------------------------------------------------
+
+#: The 11 runbook pairs (#1612): flat v0.12 name → canonical dotted name.
+_RUNBOOK_NAME_PAIRS = (
+    ("runbook_draft_template", "meho.runbook.draft_template"),
+    ("runbook_edit_template", "meho.runbook.edit_template"),
+    ("runbook_publish_template", "meho.runbook.publish_template"),
+    ("runbook_deprecate_template", "meho.runbook.deprecate_template"),
+    ("runbook_list_templates", "meho.runbook.list_templates"),
+    ("runbook_show_template", "meho.runbook.show_template"),
+    ("runbook_start", "meho.runbook.start"),
+    ("runbook_next", "meho.runbook.next"),
+    ("runbook_abort", "meho.runbook.abort"),
+    ("runbook_reassign", "meho.runbook.reassign"),
+    ("runbook_list_runs", "meho.runbook.list_runs"),
+)
+
+
+@pytest.mark.parametrize(("flat_name", "dotted_name"), _RUNBOOK_NAME_PAIRS)
+def test_runbook_tools_dotted_canonical_with_flat_deprecated_alias(
+    flat_name: str,
+    dotted_name: str,
+) -> None:
+    """Convention §14.9: runbooks follow the dotted `meho.<noun>.<verb>` grammar.
+
+    The runbook family was the last flat multi-verb family on the
+    surface (#1612). The dotted name is canonical; the flat name stays
+    registered as a deprecated alias routed to the same handler for one
+    release (removed in v0.14.0).
+    """
+    dotted_entry = mcp_registry.get_tool(dotted_name)
+    flat_entry = mcp_registry.get_tool(flat_name)
+    assert dotted_entry is not None, dotted_name
+    assert flat_entry is not None, flat_name
+    # Canonical carries no deprecation marker; the alias points home.
+    assert dotted_entry[0].deprecated_alias_for is None
+    assert flat_entry[0].deprecated_alias_for == dotted_name
+    assert flat_entry[0].description.startswith(f"DEPRECATED alias for `{dotted_name}`")
+    # Same handler object — alias, not fork.
+    assert flat_entry[1] is dotted_entry[1]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "other_required"),
+    (
+        ("meho.runbook.draft_template", ["body"]),
+        ("meho.runbook.edit_template", ["body"]),
+        ("meho.runbook.publish_template", ["version"]),
+        ("meho.runbook.deprecate_template", ["version"]),
+        ("meho.runbook.show_template", None),
+    ),
+)
+def test_runbook_template_tools_expose_template_slug_canonical_name(
+    tool_name: str,
+    other_required: list[str] | None,
+) -> None:
+    """Convention §14.9: the template id is `template_slug` on every input.
+
+    The v0.12 wire split the same identifier across `slug` (template
+    verbs) and `template_slug` (run verbs); #1612 unifies on the more
+    specific `template_slug` everywhere, keeping `slug` as a deprecated
+    alias for one cycle — the `cursor`/`since` and
+    `approval_request_id`/`id` migration shape applied to the runbook
+    family.
+    """
+    properties = _properties(tool_name)
+    assert "template_slug" in properties, (
+        f"{tool_name}: missing canonical `template_slug` (properties={sorted(properties)})"
+    )
+    assert "deprecated" not in properties["template_slug"]
+    assert properties["slug"].get("deprecated") is True
+    # Either alias name satisfies the schema-level required check; the
+    # handler enforces the XOR.
+    schema = _input_schema(tool_name)
+    assert schema["anyOf"] == [
+        {"required": ["template_slug"]},
+        {"required": ["slug"]},
+    ]
+    if other_required is None:
+        # The template id is the only required input — the anyOf is the
+        # only required-shape declaration (broadcast.watch precedent).
+        assert "required" not in schema
+    else:
+        assert schema["required"] == other_required
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ("meho.runbook.start", "meho.runbook.list_runs"),
+)
+def test_runbook_run_tools_keep_template_slug_field(tool_name: str) -> None:
+    """Convention §14.9: the run verbs already used `template_slug` — pinned."""
+    properties = _properties(tool_name)
+    assert "template_slug" in properties
+    assert "slug" not in properties

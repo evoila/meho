@@ -1014,6 +1014,28 @@ paginated. Convention: keyset on the natural sort key (`group_key`
 for `list_operation_groups`, `name` for `list_targets`) with the
 same `next_cursor` shape on the response.
 
+### §14.9 — Tool names: dotted `meho.<noun>.<verb>` for multi-verb families
+
+Every multi-verb domain family on the MCP surface uses the dotted
+`meho.<noun>.<verb>` grammar (`meho.agents.*`, `meho.approvals.*`,
+`meho.broadcast.*`, `meho.connector.*`, `meho.scheduler.*`,
+`meho.agent_principals.*`). The runbook family was the lone flat
+hold-out (`runbook_start`, `runbook_show_template`, …) until #1612
+canonicalised the 11 tools as `meho.runbook.<verb>`. The flat names
+stay registered as deprecated aliases — same handler object, same
+schema, DEPRECATED pointer description, per-call
+`mcp_tool_name_deprecated` warning log — for one release (removed in
+v0.14.0). The same change unified the template identifier on
+`template_slug` across all 11 tools (the template verbs previously
+took `slug` while the run verbs took `template_slug`); `slug` is
+accepted as a deprecated input alias on the template verbs for the
+same window, and template-verb responses mirror the id as
+`template_slug` so a value read from `show_template` /
+`list_templates` round-trips into `meho.runbook.start` verbatim.
+Alias mechanics live in `register_deprecated_mcp_tool_alias`
+(`backend/src/meho_backplane/mcp/registry.py`); see also
+[`mcp.md`](mcp.md) §Tool naming grammar.
+
 ### Code reference
 
 The pack of regression tests in

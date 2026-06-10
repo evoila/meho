@@ -20,14 +20,16 @@ A runbook captures tribal knowledge a senior runs twice a year and a junior has 
 Five run-lifecycle MCP tools (REST parallels at `/api/v1/runbooks/runs/*`):
 
 ```
-runbook_start(template_slug, target, params?) -> {kind: "current_step", run_id, current_step, ...}
-runbook_next(run_id, last_verified, verify_response?) -> {kind: "current_step" | "completed", ...}
-runbook_abort(run_id, reason) -> {run_id, state: "abandoned", abandoned_at}
-runbook_list_runs(filter?, assignee?, status?, limit?) -> [{run_id, template_slug, ...}]
-runbook_reassign(run_id, new_assignee) -> {run_id, assigned_to, reassigned_at}      # TENANT_ADMIN
+meho.runbook.start(template_slug, target, params?) -> {kind: "current_step", run_id, current_step, ...}
+meho.runbook.next(run_id, last_verified, verify_response?) -> {kind: "current_step" | "completed", ...}
+meho.runbook.abort(run_id, reason) -> {run_id, state: "abandoned", abandoned_at}
+meho.runbook.list_runs(filter?, assignee?, status?, limit?) -> [{run_id, template_slug, ...}]
+meho.runbook.reassign(run_id, new_assignee) -> {run_id, assigned_to, reassigned_at}  # TENANT_ADMIN
 ```
 
-The five template-lifecycle tools (`runbook_draft_template` / `_edit_template` / `_publish_template` / `_deprecate_template` / `_list_templates` / `_show_template`) live on the same MCP surface from G12.2 and are documented in the authoring counterpart.
+The six template-lifecycle tools (`meho.runbook.draft_template` / `.edit_template` / `.publish_template` / `.deprecate_template` / `.list_templates` / `.show_template`) live on the same MCP surface from G12.2 and are documented in the authoring counterpart.
+
+The dotted names are canonical as of #1612; the original flat `runbook_*` names remain callable as deprecated aliases for one release (removed in v0.14.0), and the template id is `template_slug` on every tool (`slug` accepted as a deprecated alias on the template verbs for the same window). See [`docs/codebase/mcp.md`](../codebase/mcp.md) §Tool naming grammar.
 
 ## The three entities
 
@@ -85,7 +87,7 @@ At `start_run` time the service inserts one row per step: the first marked `in_p
 
 ## The opacity contract
 
-The load-bearing adherence mechanism. **`runbook_next` returns the body of exactly one step — the one the operator is currently on, with `${run.target}` / `${run.params.X}` resolved — and the agent cannot see step 3 while the run is on step 2 because the response shape has no field for it.** Verification gating, session priming, and `runbook_list_runs` projections are downstream consequences of this invariant, not parallel safety layers.
+The load-bearing adherence mechanism. **`meho.runbook.next` returns the body of exactly one step — the one the operator is currently on, with `${run.target}` / `${run.params.X}` resolved — and the agent cannot see step 3 while the run is on step 2 because the response shape has no field for it.** Verification gating, session priming, and `meho.runbook.list_runs` projections are downstream consequences of this invariant, not parallel safety layers.
 
 Why opacity is the only mechanism that matters: an operator who can see the whole template can — and will, under pressure — skip ahead, run step 3 out of order, infer the verify shape from a future step and pre-answer it, or copy-paste step 5's command into a terminal while the substrate believes they are still on step 2. None of those moves are *attacks*; they are the path-of-least-resistance shape adherence loses to. Removing the substrate's *ability* to surface future steps removes the temptation by construction. This is [#1198](https://github.com/evoila/meho/issues/1198)'s framing argument and [#1177](https://github.com/evoila/meho/issues/1177)'s determinism-over-expressivity call applied to the run surface.
 
@@ -96,7 +98,7 @@ Opacity is enforced redundantly at **four layers**, because no single layer is t
 3. **Service layer.** [`run_service.RunbookRunService.next_step()`](../../backend/src/meho_backplane/runbooks/run_service.py) constructs the response as a `NextStepResponse` — the discriminated union of `CurrentStepResponse` (one body) and `RunCompletedResponse` (terminal marker, no step content). There is no third response variant. The service hands the engine one step id at a time; it never asks the engine for "the next two steps" or "the step list".
 4. **Transport layer.** Both REST ([`api/v1/runbook_runs.py`](../../backend/src/meho_backplane/api/v1/runbook_runs.py), T5 [#1311](https://github.com/evoila/meho/issues/1311)) and MCP ([`mcp/tools/runbook_runs.py`](../../backend/src/meho_backplane/mcp/tools/runbook_runs.py), T6 [#1313](https://github.com/evoila/meho/issues/1313)) type their responses as `NextStepResponse`. The MCP tool's load-bearing description spells out the contract in capitals (`THE OPACITY CONTRACT`, `WHEN A STEP FAILS`, `SINGLE-ASSIGNEE`, `no skip, no force_advance`), and a regression test pins down the verbatim strings so a future "polishing" edit cannot dilute them.
 
-The `runbook_list_runs` projection ([`runs_schemas.RunSummary`](../../backend/src/meho_backplane/runbooks/runs_schemas.py)) is the same shape on the read-many path — it carries `current_step_id` (so a UI can render "step 3: drain-node") but never the step body. The id is enough for routing; the body is the part adherence cares about.
+The `meho.runbook.list_runs` projection ([`runs_schemas.RunSummary`](../../backend/src/meho_backplane/runbooks/runs_schemas.py)) is the same shape on the read-many path — it carries `current_step_id` (so a UI can render "step 3: drain-node") but never the step body. The id is enough for routing; the body is the part adherence cares about.
 
 ## The verify state machine
 
@@ -139,7 +141,7 @@ The transitions are owned by [`engine.advance()`](../../backend/src/meho_backpla
 
 What the diagram does **not** show, by design:
 
-- **No `skip` transition.** There is no `runbook_skip_step` tool. A step the substrate can't verify stays `in_progress`; the operator's only path forward is `runbook_abort`.
+- **No `skip` transition.** There is no `runbook_skip_step` tool. A step the substrate can't verify stays `in_progress`; the operator's only path forward is `meho.runbook.abort`.
 - **No `force_advance` transition.** There is no `runbook_force_advance` tool. A step marked `failed` does not have a path back to `in_progress` — the operator either aborts or asks a senior to `reassign` to themselves and decide.
 - **No `set_state` transition.** There is no `runbook_set_step_state` tool. The state column is mutated only by the engine + service; the surface is "advance one" (`next_step`) or "tear down" (`abort_run`). The acceptance gate at the Initiative DoD enforces this with a lint-time grep.
 
@@ -190,17 +192,17 @@ Audit query path: `SELECT * FROM audit_log WHERE run_id = ?` reconstructs the fu
 
 One person at a time owns a run. The substrate refuses every other shape.
 
-- **Start auto-assigns.** [`run_service.RunbookRunService.start_run()`](../../backend/src/meho_backplane/runbooks/run_service.py) sets `assigned_to = operator.sub` unconditionally. There is no `assignee` parameter on `runbook_start` — you cannot start a run on someone else's behalf.
-- **`next_step` refuses non-assignees with 403.** The check at [`run_service._require_run_assignee()`](../../backend/src/meho_backplane/runbooks/run_service.py) runs before any state-machine logic. **TENANT_ADMIN callers who are not the assignee still get 403** — the role bypass is deliberately not wired in. The right path for a senior to take over is `runbook_reassign` (admin-only); the wrong path is "operate as admin around the assignee check," which would silently corrupt the audit story (`audit_log.operator_sub` would attribute the dispatch to the admin while `runbook_runs.assigned_to` still names the junior).
+- **Start auto-assigns.** [`run_service.RunbookRunService.start_run()`](../../backend/src/meho_backplane/runbooks/run_service.py) sets `assigned_to = operator.sub` unconditionally. There is no `assignee` parameter on `meho.runbook.start` — you cannot start a run on someone else's behalf.
+- **`next_step` refuses non-assignees with 403.** The check at [`run_service._require_run_assignee()`](../../backend/src/meho_backplane/runbooks/run_service.py) runs before any state-machine logic. **TENANT_ADMIN callers who are not the assignee still get 403** — the role bypass is deliberately not wired in. The right path for a senior to take over is `meho.runbook.reassign` (admin-only); the wrong path is "operate as admin around the assignee check," which would silently corrupt the audit story (`audit_log.operator_sub` would attribute the dispatch to the admin while `runbook_runs.assigned_to` still names the junior).
 - **`abort_run` widens to assignee-or-admin.** A senior who finds a stuck run someone else owns can abort it without first reassigning to themselves — the route layer passes a `caller_is_admin=True` flag to the service, which checks `caller_sub == run.assigned_to OR caller_is_admin`. The audit row the abort writes carries the admin's `operator_sub`, so the override is visible in the trail.
-- **`reassign_run` is admin-only.** The route gate at [`api/v1/runbook_runs.py`](../../backend/src/meho_backplane/api/v1/runbook_runs.py) requires `TENANT_ADMIN`; the MCP tool's `required_role` is the same. After reassign, the previous assignee's next `runbook_next` call is a 403; the new assignee's next call advances.
+- **`reassign_run` is admin-only.** The route gate at [`api/v1/runbook_runs.py`](../../backend/src/meho_backplane/api/v1/runbook_runs.py) requires `TENANT_ADMIN`; the MCP tool's `required_role` is the same. After reassign, the previous assignee's next `meho.runbook.next` call is a 403; the new assignee's next call advances.
 
 There are exactly two paths to take over a stuck run:
 
-- **Senior reassigns to self.** The senior reads the current state via `runbook_list_runs` (which returns every in-progress run for `TENANT_ADMIN`, only the caller's own runs for `OPERATOR`), decides the right move, then `runbook_reassign(run_id, new_assignee=<self>)` and continues forward.
-- **Junior aborts, senior restarts.** The junior calls `runbook_abort(run_id, reason="<why>")` to terminate the stuck run with an auditable reason; the senior starts a fresh run on the same template against the same target.
+- **Senior reassigns to self.** The senior reads the current state via `meho.runbook.list_runs` (which returns every in-progress run for `TENANT_ADMIN`, only the caller's own runs for `OPERATOR`), decides the right move, then `meho.runbook.reassign(run_id, new_assignee=<self>)` and continues forward.
+- **Junior aborts, senior restarts.** The junior calls `meho.runbook.abort(run_id, reason="<why>")` to terminate the stuck run with an auditable reason; the senior starts a fresh run on the same template against the same target.
 
-There is no parallel observer mode. A senior watching a junior do a cert rotation observes through the audit trail (the dispatch rows the junior writes as they advance) or by reading `runbook_list_runs` and pulling the current step from the run's recorded state. The substrate offers no `runbook_watch_run` or live-attach surface — that would have required a publish-subscribe layer the determinism postulate's minimalism call ruled out.
+There is no parallel observer mode. A senior watching a junior do a cert rotation observes through the audit trail (the dispatch rows the junior writes as they advance) or by reading `meho.runbook.list_runs` and pulling the current step from the run's recorded state. The substrate offers no `runbook_watch_run` or live-attach surface — that would have required a publish-subscribe layer the determinism postulate's minimalism call ruled out.
 
 ## The post-completion exception
 
@@ -208,7 +210,7 @@ The opacity floor is "while the run is in progress, the operator can read one st
 
 Mechanics:
 
-- The predicate lives at [`run_service.RunbookRunService.can_show_template_post_completion()`](../../backend/src/meho_backplane/runbooks/run_service.py) (lines 712-748). It checks `EXISTS(runbook_runs WHERE tenant_id = ? AND assigned_to = ? AND template_slug = ? AND template_version = ? AND state IN ('completed', 'abandoned'))` — pinned to the *exact* `(slug, version)` the operator finished, not the slug across all versions. The predicate keys on `assigned_to` at terminal state, **not** on `started_by` — after a reassign, only the final assignee (the operator accountable for the run's outcome) gets the post-completion read; the original starter does **not** retroactively inherit it. So a junior who started a run and then handed it off to a senior via `runbook_reassign` no longer holds the carve-out once the senior completes or abandons it. This matches the substrate's broader "the assignee is the operator of record" posture (`assigned_to` is mutable; `started_by` is immutable and lives on the row purely for forensics).
+- The predicate lives at [`run_service.RunbookRunService.can_show_template_post_completion()`](../../backend/src/meho_backplane/runbooks/run_service.py) (lines 712-748). It checks `EXISTS(runbook_runs WHERE tenant_id = ? AND assigned_to = ? AND template_slug = ? AND template_version = ? AND state IN ('completed', 'abandoned'))` — pinned to the *exact* `(slug, version)` the operator finished, not the slug across all versions. The predicate keys on `assigned_to` at terminal state, **not** on `started_by` — after a reassign, only the final assignee (the operator accountable for the run's outcome) gets the post-completion read; the original starter does **not** retroactively inherit it. So a junior who started a run and then handed it off to a senior via `meho.runbook.reassign` no longer holds the carve-out once the senior completes or abandons it. This matches the substrate's broader "the assignee is the operator of record" posture (`assigned_to` is mutable; `started_by` is immutable and lives on the row purely for forensics).
 - The decision lives at the boundary, not the service. [`api/v1/runbook_templates.py::_show_template_operator()`](../../backend/src/meho_backplane/api/v1/runbook_templates.py) (and its MCP twin [`_show_template_operator_path()`](../../backend/src/meho_backplane/mcp/tools/runbooks.py) in `mcp/tools/runbooks.py`, called from `_show_template_handler`) first runs the role gate (`OPERATOR` callers get 403 by default), then calls the predicate, and *lifts* the 403 to a 200 with the body when the predicate returns `True`. The service is intentionally caller-identity-blind — the boundary has the JWT, the boundary makes the call. The split keeps the predicate pure (testable in isolation, no JWT machinery) while keeping the gating decision auditable at the surface.
 
 Why `in_progress` does not qualify: the opacity floor is what makes adherence real *during* the run. An operator who can read the whole template mid-run can skip ahead just as freely as a substrate that surfaces every step. The post-completion lift only fires after the state has settled — by then the procedure either succeeded (and the operator earned the right to study it) or failed (and the operator earned the right to debug what they ran). Either way, the run is done, and the lift cannot affect adherence on the run it's attached to.
@@ -219,13 +221,13 @@ Why version-specific: completing v1 of `vcenter-cert-rotation` does not authoriz
 
 The template lifecycle has its own three-state machine, owned by G12.2. Recapped here so the run-side reader knows which template versions can be started against.
 
-- **`draft`.** Mutable in place. `runbook_edit_template(slug, body)` overwrites the body; `version` does not move. Exactly one draft per slug at any time — service-enforced, not DB-enforced ([`RunbookTemplateService.create_draft()`](../../backend/src/meho_backplane/runbooks/service.py) at lines 144-170 refuses a second draft via the `_resolve_latest_version` existence check; see also the invariant statement on `_load_draft` at lines 477-498). The senior can keep appending across multiple sessions — `runbook_show_template` reads the current draft back, the next `runbook_edit_template` persists the update.
-- **`published`.** Immutable. The body is pinned; the row is the source of truth for every run started against this `(slug, version)`. `runbook_publish_template(slug, version)` flips the status; idempotent on already-published rows.
-- **`deprecated`.** Read-only. New `runbook_start` against this version is refused with `DeprecatedTemplateError`. In-flight runs continue — they were pinned to the version at start time and they finish on it.
+- **`draft`.** Mutable in place. `meho.runbook.edit_template(template_slug, body)` overwrites the body; `version` does not move. Exactly one draft per slug at any time — service-enforced, not DB-enforced ([`RunbookTemplateService.create_draft()`](../../backend/src/meho_backplane/runbooks/service.py) at lines 144-170 refuses a second draft via the `_resolve_latest_version` existence check; see also the invariant statement on `_load_draft` at lines 477-498). The senior can keep appending across multiple sessions — `meho.runbook.show_template` reads the current draft back, the next `meho.runbook.edit_template` persists the update.
+- **`published`.** Immutable. The body is pinned; the row is the source of truth for every run started against this `(slug, version)`. `meho.runbook.publish_template(template_slug, version)` flips the status; idempotent on already-published rows.
+- **`deprecated`.** Read-only. New `meho.runbook.start` against this version is refused with `DeprecatedTemplateError`. In-flight runs continue — they were pinned to the version at start time and they finish on it.
 
-Editing a published version triggers **fork-on-edit**: `runbook_edit_template(slug, body)` when there is no open draft creates a new row at `max(version) + 1` with `status='draft'`, returns a `forked_from` block carrying `in_flight_run_count` (the number of in-progress runs still pinned to the version being forked from). The forked draft is independent — editing it does not retroactively change the in-flight runs' step list. See [`docs/runbooks/authoring.md`](../runbooks/authoring.md) for the full senior-facing semantics; the algebra lives in [`runbooks/service.py`](../../backend/src/meho_backplane/runbooks/service.py).
+Editing a published version triggers **fork-on-edit**: `meho.runbook.edit_template(template_slug, body)` when there is no open draft creates a new row at `max(version) + 1` with `status='draft'`, returns a `forked_from` block carrying `in_flight_run_count` (the number of in-progress runs still pinned to the version being forked from). The forked draft is independent — editing it does not retroactively change the in-flight runs' step list. See [`docs/runbooks/authoring.md`](../runbooks/authoring.md) for the full senior-facing semantics; the algebra lives in [`runbooks/service.py`](../../backend/src/meho_backplane/runbooks/service.py).
 
-What this means for `runbook_start`:
+What this means for `meho.runbook.start`:
 
 - Against a slug with at least one `published` (non-deprecated) version → pinned to the latest such version.
 - Against a slug whose only versions are `deprecated` → refused with `DeprecatedTemplateError` (the operator asks the senior to publish a fresh version).
@@ -240,7 +242,7 @@ The runbook substrate is deliberately small. The following are **not** part of G
 - **Parallel steps.** Single-threaded execution by design. Each step's verify gate must pass before the next step is shown; the gating does not compose with parallelism.
 - **Step-level templating engine beyond `${run.target}` / `${run.params.X}`.** No `${env.X}`, no `${secrets.X}`, no nested-path `${run.params.x.y}`, no shell-style `$VAR`. The two allowlisted patterns are the whole grammar.
 - **Verify DSL.** No JSONPath. No `<` / `>=` / `contains`. No `AND` / `OR`. Per [#1177](https://github.com/evoila/meho/issues/1177).
-- **Auto-escalation / paging / inbox surfaces.** Humans coordinate handoffs in chat. A stuck run is escalated by the junior pinging the senior in Slack; the senior reassigns via `runbook_reassign` and takes over. The substrate ships no notification, no inbox, no "needs attention" queue.
+- **Auto-escalation / paging / inbox surfaces.** Humans coordinate handoffs in chat. A stuck run is escalated by the junior pinging the senior in Slack; the senior reassigns via `meho.runbook.reassign` and takes over. The substrate ships no notification, no inbox, no "needs attention" queue.
 - **Orchestrator semantics.** MEHO is the substrate; the agent (Claude or a sibling) is the orchestrator. The substrate gates one step at a time; the agent decides what to ask the operator and how to render the answer. A "runbook engine" that drives the procedure on the agent's behalf is out of scope for the entire Goal.
 
 Each item is a deliberate "no" — the surface that was rejected was considered and ruled out, not forgotten. The combined effect is a substrate small enough to reason about end to end in one sitting; expressivity that would have made the substrate larger lives in the templates themselves (a senior writes more steps) or in the agent layer (the orchestrator asks better questions).

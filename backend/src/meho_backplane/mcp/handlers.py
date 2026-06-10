@@ -274,6 +274,19 @@ async def handle_tools_call(
         defn, handler = entry
         audit_payload["op_class"] = defn.op_class
 
+        # Deprecated-alias breadcrumb (#1612). A call arriving under a
+        # deprecated tool name still dispatches normally (the alias
+        # shares the canonical handler), but the structured warning
+        # gives operators a migration signal to watch before the alias
+        # is removed — same posture as the field-level
+        # ``add_to_memory_field_deprecated`` shim log.
+        if defn.deprecated_alias_for is not None:
+            _log.warning(
+                "mcp_tool_name_deprecated",
+                tool=name,
+                replacement=defn.deprecated_alias_for,
+            )
+
         # RBAC: the tool's required_role gates *invocation*, not just listing.
         # The list filter already hides tools the operator can't call, but
         # a client that knows the name could try to call anyway.

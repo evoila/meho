@@ -550,7 +550,7 @@ def test_next_admin_non_assignee_403(client: TestClient) -> None:
 
     The service raises ``NotRunAssigneeError`` regardless of role for ``next`` --
     the single-assignee invariant from Initiative #1198. A senior who wants to
-    take over uses ``runbook_reassign``, not bypass via role.
+    take over uses ``meho.runbook.reassign``, not bypass via role.
     """
     run_id = uuid.uuid4()
     key, token = _admin_token(sub="op-admin")
@@ -797,7 +797,7 @@ def test_abort_by_other_403(client: TestClient) -> None:
     fake_abort = AsyncMock(
         side_effect=NotRunAssigneeError(
             f"caller 'op-thief' is not the assignee of run {run_id} "
-            f"and does not have TENANT_ADMIN; use runbook_reassign to take over"
+            f"and does not have TENANT_ADMIN; use meho.runbook.reassign to take over"
         )
     )
     with (

@@ -20,7 +20,8 @@ single Task entry.
 * Entry-point module: `backend/src/meho_backplane/mcp/server.py`
 * Wire schemas: `backend/src/meho_backplane/mcp/schemas.py`
 * Tool / resource registries: `register_mcp_tool` /
-  `register_mcp_resource` in `mcp/server.py`
+  `register_mcp_resource` (plus the #1612
+  `register_deprecated_mcp_tool_alias`) in `mcp/registry.py`
 * Audit hook: `backend/src/meho_backplane/mcp/audit.py`
 
 The dispatch table lives at module scope and is populated at import
@@ -133,6 +134,71 @@ client identity should file a follow-up Task on
 [`evoila/meho`](https://github.com/evoila/meho) describing the
 mismatch pattern and what behaviour change would unblock them.
 
+## Tool naming grammar and deprecation aliases
+
+Multi-verb tool families on the MCP surface are named with the dotted
+`meho.<noun>.<verb>` grammar — `meho.agents.create`,
+`meho.approvals.approve`, `meho.connector.ingest`,
+`meho.runbook.start`, etc. An agent that has internalised one family
+can predict the rest. (A handful of single-purpose reference tools
+predating the grammar — `search_docs`, `add_to_memory`,
+`call_operation`, … — remain flat.)
+
+### Runbook family canonicalisation (#1612)
+
+The 11 runbook tools were the last flat multi-verb family
+(`runbook_start`, `runbook_show_template`, …) and additionally split
+the template identifier across two field names (`slug` on the five
+template verbs, `template_slug` on the run verbs). Both were unified
+in #1612:
+
+* **Canonical names** are `meho.runbook.<verb>` for all 11 verbs
+  (`draft_template`, `edit_template`, `publish_template`,
+  `deprecate_template`, `list_templates`, `show_template`, `start`,
+  `next`, `abort`, `reassign`, `list_runs`).
+* **Canonical field** for the template id is `template_slug` on every
+  input, and every template-verb response mirrors the model's `slug`
+  key as `template_slug` — so an id read from
+  `meho.runbook.show_template` or a `list_templates` summary is
+  accepted by `meho.runbook.start` verbatim, no rename.
+
+### Deprecation-window mechanics
+
+Renames on an agent-facing wire surface always ship with a one-release
+alias window (the `content`→`body`, `since`→`cursor`, and
+`id`→`approval_request_id` precedents). For #1612 the window covers
+two alias kinds, both **removed in v0.14.0**:
+
+* **Tool-name aliases.** The flat `runbook_*` names stay registered
+  via `register_deprecated_mcp_tool_alias`
+  (`backend/src/meho_backplane/mcp/registry.py`): the alias shares the
+  canonical tool's handler *object*, `inputSchema`, role gate, and
+  capability gate, differing only in name + a generated
+  `DEPRECATED alias for …` description. The MCP 2025-06-18 `Tool`
+  object has no first-class deprecation field, so the description is
+  the agent-visible marker; the MEHO-internal
+  `ToolDefinition.deprecated_alias_for` field (never serialised to the
+  wire) is the machine-readable one. `handle_tools_call` emits a
+  structured `mcp_tool_name_deprecated` warning (with `replacement=`)
+  per alias call, so operators can grep logs to confirm consumers have
+  migrated before the removal release. Audit rows keep recording the
+  *called* name — migration forensics stay queryable.
+* **Field aliases.** The five template verbs accept `slug` as a
+  deprecated alias for `template_slug` (schema-level: both properties
+  declared, the alias flagged `"deprecated": true`, a top-level
+  `anyOf` requiring exactly one of the two — stripped from the wire
+  copy per the Anthropic top-level-combinator restriction but enforced
+  server-side). The handler-level resolver enforces the XOR (`-32602`
+  when both are supplied) and logs
+  `runbook_template_slug_field_deprecated` on alias use. The mirrored
+  `slug` key in template-verb responses is part of the same window and
+  is dropped with the aliases.
+
+The conventions are structurally pinned in
+[`backend/tests/test_mcp_tools_list_shape_conventions.py`](../../backend/tests/test_mcp_tools_list_shape_conventions.py)
+(§14.9) and documented alongside the other tools/list shape rules in
+[`api-shape-conventions.md`](api-shape-conventions.md) §14.
+
 ## Audit URI redaction for query-bearing resources
 
 The `resources/read` dispatcher
@@ -209,4 +275,9 @@ resource.
   feature-gate visibility).
 * G0.14-T13 (#1202) — protocol-version mismatch observability
   (this section).
+* G0.22-T7 (#1612) — runbook tool-name + `template_slug`
+  canonicalisation; deprecated flat aliases removed in v0.14.0.
+* MCP spec (2025-06-18) §Tools (Tool object shape — no first-class
+  deprecation field):
+  https://modelcontextprotocol.io/specification/2025-06-18/server/tools
 * v0.6.0 release-body amendment — PR #1159, G0.13-T6 #1136.

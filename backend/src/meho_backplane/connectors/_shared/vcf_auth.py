@@ -72,6 +72,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
@@ -150,7 +151,12 @@ class VcfTargetLike(Protocol):
 
     Fields:
 
-    * ``name`` — per-target cache key (credentials + session token).
+    * ``id`` / ``tenant_id`` — the tenant-unique cache key
+      (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`).
+      Keying the credential / session cache on ``(tenant_id, id)`` instead
+      of ``name`` keeps two same-named targets in different tenants from
+      collapsing onto one cached credential (#1642).
+    * ``name`` — used in audit-log / error messages (no longer a cache key).
     * ``host`` / ``port`` — forwarded to
       :meth:`meho_backplane.connectors.adapters.http.HttpConnector._base_url`.
     * ``secret_ref`` — Vault path the loader resolves to a
@@ -163,6 +169,8 @@ class VcfTargetLike(Protocol):
       :func:`is_acceptable_auth_model`.
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None
@@ -255,10 +263,13 @@ class CredentialsCache:
     path (a typo in a production loader otherwise surfaces as a confusing
     ``KeyError`` deep inside the consuming code).
 
-    The cache is keyed on ``target.name``. Production deploys with multiple
-    connector instances each get their own cache — there is no
-    process-global cache by design, so connector-instance teardown
-    (``aclose``) clears credentials immediately.
+    The cache is keyed on the tenant-unique ``(tenant_id, target.id)``
+    tuple (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`,
+    #1642) so two same-named targets in different tenants never share a
+    cached credential. Production deploys with multiple connector instances
+    each get their own cache — there is no process-global cache by design,
+    so connector-instance teardown (``aclose``) clears credentials
+    immediately.
     """
 
     def __init__(
@@ -277,7 +288,7 @@ class CredentialsCache:
         """
         self._loader = loader
         self._product_label = product_label
-        self._cache: dict[str, dict[str, str]] = {}
+        self._cache: dict[tuple[str, str], dict[str, str]] = {}
         self._lock = asyncio.Lock()
 
     async def get(self, target: VcfTargetLike, operator: Operator) -> dict[str, str]:
@@ -287,8 +298,9 @@ class CredentialsCache:
         (:func:`load_credentials_from_vault`) performs the Vault read
         under the operator's Identity entity via
         :func:`~meho_backplane.auth.vault.vault_client_for_operator`. The
-        cache is keyed on ``target.name`` only — a single per-target
-        credential pair is shared across operators because the
+        cache is keyed on the tenant-unique ``(tenant_id, target.id)``
+        tuple (#1642) — a single per-target credential pair is shared
+        across operators of the same tenant because the
         ``shared_service_account`` auth model authenticates the connector
         with a Vault-sourced service account, not the operator's OIDC
         token. ``per_user`` / ``impersonation`` are explicitly out of
@@ -324,8 +336,9 @@ class CredentialsCache:
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
+        cache_key = target_cache_key(target)
         async with self._lock:
-            cached = self._cache.get(target.name)
+            cached = self._cache.get(cache_key)
             if cached is not None:
                 return cached
             raw = await self._loader(target, operator)
@@ -337,7 +350,7 @@ class CredentialsCache:
                         f"{required!r}; need "
                         "{'username': str, 'password': str}"
                     )
-            self._cache[target.name] = raw
+            self._cache[cache_key] = raw
             _log.info(
                 "vcf_credentials_loaded",
                 connector=self._product_label,
@@ -357,7 +370,7 @@ class CredentialsCache:
         surfaced via a future admin endpoint).
         """
         async with self._lock:
-            self._cache.pop(target.name, None)
+            self._cache.pop(target_cache_key(target), None)
 
     async def clear(self) -> None:
         """Drop all cached credentials.
@@ -378,8 +391,8 @@ class CredentialsCache:
             self._cache.clear()
 
     @property
-    def cached_targets(self) -> frozenset[str]:
-        """Frozen view of the cached target names (read-only, for tests/audit)."""
+    def cached_targets(self) -> frozenset[tuple[str, str]]:
+        """Frozen view of the cached ``(tenant_id, id)`` keys (read-only, for tests/audit)."""
         return frozenset(self._cache)
 
 

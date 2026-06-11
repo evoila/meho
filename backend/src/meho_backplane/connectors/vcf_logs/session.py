@@ -65,7 +65,12 @@ class VcfLogsTargetLike(Protocol):
 
     Fields:
 
-    * ``name`` -- per-target cache key (credentials + session token).
+    * ``id`` / ``tenant_id`` -- the tenant-unique ``(tenant_id, id)``
+      cache key
+      (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
+      the credential + session-token caches use, so two same-named targets
+      in different tenants never share a cached session (#1642).
+    * ``name`` -- used in audit-log / error messages (no longer a cache key).
     * ``host`` / ``port`` -- forwarded to
       :meth:`HttpConnector._base_url`.
     * ``secret_ref`` -- Vault path the loader resolves to a
@@ -79,6 +84,8 @@ class VcfLogsTargetLike(Protocol):
       wrapper's posture.
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

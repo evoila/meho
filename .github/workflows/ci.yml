@@ -161,7 +161,7 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -441,7 +441,7 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the
@@ -479,7 +479,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Set up Go
         # Same version + cache shape as cli-release.yml so a single
@@ -612,7 +612,7 @@ jobs:
         # persist-credentials: false — this job only does a read-only
         # checkout + a working-tree `git diff`; it never pushes, so it
         # has no need for the checkout token persisted in local git config.
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
@@ -688,7 +688,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Install Helm
         # Same version pin as chart.yml's validate + publish jobs so

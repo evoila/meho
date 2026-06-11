@@ -957,8 +957,9 @@ def _identifier_default_effect(
     Mirrors the default
     :func:`~meho_backplane.operations.approval_queue.create_pending_request`
     constructs when no preview is supplied, so a permission-preflight-only
-    park keeps the op identity on the row (``{op_id, connector_id,
-    target_id}``) and merely appends the preflight banner to it.
+    park — and a failed-preview park (#1628) — keeps the op identity on
+    the row (``{op_id, connector_id, target_id}``) and merely appends the
+    preflight banner / unavailability marker to it.
     """
     effect: dict[str, Any] = {"op_id": op_id, "connector_id": connector_id}
     raw_tid = getattr(target, "id", None) if target is not None else None
@@ -997,6 +998,11 @@ async def _build_proposed_effect(
     anything (the caller then stores the identifier-only default). When
     only the preflight fired, its result is merged onto the identifier
     default-shaped base so the reviewer still sees the denial banner.
+    A *failed* preview (the hook's ``preview_unavailable`` marker,
+    #1628) is likewise merged onto the identifier base — the reviewer
+    keeps the op identity and additionally sees that the blast radius
+    could not be resolved, instead of a bare identifier default
+    indistinguishable from a small action.
     Never raises: connector-resolution faults degrade to "no preview" so
     the park always proceeds.
     """
@@ -1014,6 +1020,15 @@ async def _build_proposed_effect(
             params=params,
         )
         preview = await build_proposed_effect(ctx)
+        if preview is not None and preview.get("preview_unavailable") is True:
+            # The registered builder *failed* (vs. declined) — keep the
+            # identifier fields the default would have carried and ride
+            # the marker + reason alongside them (#1628).
+            marked = _identifier_default_effect(
+                op_id=op_id, connector_id=connector_id, target=target
+            )
+            marked.update(preview)
+            preview = marked
         preflight = await build_permission_preflight(ctx)
         if preflight is None:
             # No permission preflight ran -- preserve the prior contract
@@ -1080,8 +1095,11 @@ async def _handle_needs_approval(
     # side-effect-free preview (notably ``k8s.apply``'s server-dry-run) a
     # chance to populate ``proposed_effect`` so the reviewer sees the diff
     # in the approval queue. Opt-in per op + fail-soft: ops without a
-    # registered builder (and any builder that raises) yield ``None`` and
-    # the queue stores the identifier-only default exactly as before.
+    # registered builder (or whose builder declines) yield ``None`` and
+    # the queue stores the identifier-only default exactly as before. A
+    # builder that *raises* parks with the identifier fields plus an
+    # explicit ``preview_unavailable`` marker + reason (#1628), so the
+    # reviewer can tell "blast-radius unknown" from a small action.
     #
     # G0.20-T4 (#1504): the same hook also runs the op's park-time
     # permission preflight (the Vault KV-write ops probe

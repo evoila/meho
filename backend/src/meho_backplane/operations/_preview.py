@@ -25,12 +25,18 @@ Design contract
 * **Opt-in per op.** A builder is registered against an ``op_id``; ops
   without a registered builder fall through to the identifier-only
   default exactly as before -- no extra work, no new failure mode.
-* **Fail-soft.** A builder that raises (a dry-run that hits the API
-  server and errors, a transient connector fault) must never block the
-  park: :func:`build_proposed_effect` swallows the exception, logs it,
-  and returns ``None`` so the caller uses the default. Parking an
-  approval is the durable, safety-relevant action; a missing preview is
-  a degraded-but-acceptable outcome, an exception is not.
+* **Fail-soft, never silent.** A builder that raises (a dry-run that
+  hits the API server and errors, a transient connector fault) must
+  never block the park: :func:`build_proposed_effect` swallows the
+  exception and logs it. Parking an approval is the durable,
+  safety-relevant action; a missing preview is a
+  degraded-but-acceptable outcome, an exception is not. But the
+  degradation is **visible** (#1628): the hook returns an explicit
+  ``{op_class, preview_unavailable: True, preview_error}`` marker
+  rather than ``None``, so the reviewer can tell "blast-radius
+  unknown" from a genuinely small action. Only a *declined* preview
+  (no builder registered, builder returns ``None``, credential-class
+  suppression) yields ``None`` → the identifier-only default.
 * **Redaction-safe.** The preview lands in a durable row surfaced over
   REST / MCP / CLI, so it must not carry secret material. The hook
   reuses the single-sourced sensitivity classification from
@@ -80,6 +86,26 @@ _SENSITIVE_CLASSES: frozenset[str] = frozenset(
     {"credential_read", "credential_mint", "credential_write"}
 )
 
+#: Truncation bound for the reviewer-facing ``preview_error`` reason. A
+#: builder fault is normally a one-line message; the cap keeps a
+#: pathological exception repr (an HTTP error echoing a response body)
+#: from ballooning the durable approval row.
+_PREVIEW_ERROR_MAX_LEN: int = 500
+
+
+def _preview_failure_reason(exc: Exception) -> str:
+    """Render a builder fault as the short reviewer-facing reason string.
+
+    Keeps the exception *message* front and centre (the type name alone
+    is opaque -- the lesson of the ``connector_error`` flattening,
+    sibling #1627) while staying robust for message-less exceptions.
+    """
+    message = str(exc)
+    reason = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+    if len(reason) > _PREVIEW_ERROR_MAX_LEN:
+        reason = reason[:_PREVIEW_ERROR_MAX_LEN] + " [truncated]"
+    return reason
+
 
 @dataclass(frozen=True)
 class PreviewContext:
@@ -113,7 +139,8 @@ class PreviewBuilder(Protocol):
     :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect`, or
     ``None`` to decline (caller falls back to the identifier-only
     default). May raise -- :func:`build_proposed_effect` treats a raise
-    as "no preview" rather than failing the park.
+    as "preview unavailable" (an explicit marker on the parked row,
+    #1628) rather than failing the park.
     """
 
     async def __call__(self, ctx: PreviewContext) -> dict[str, Any] | None: ...
@@ -174,9 +201,16 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     Looks up a builder for ``ctx.descriptor.op_id``; returns ``None``
     (caller uses the identifier-only default) when no builder is
     registered, when the op classifies as a credential class (the
-    preview is suppressed to stay redaction-safe), when the builder
-    declines, or when the builder raises (fail-soft -- the park proceeds
-    regardless).
+    preview is suppressed to stay redaction-safe), or when the builder
+    declines.
+
+    A builder that **raises** is still fail-soft -- the park proceeds
+    regardless -- but no longer silent (#1628): the hook returns an
+    explicit ``{"op_class", "preview_unavailable": True,
+    "preview_error"}`` marker so the reviewer-facing row can say
+    "blast-radius unknown" instead of degrading to a bare identifier
+    default indistinguishable from a small action. The dispatcher
+    merges the marker onto the identifier fields before parking.
 
     On success the returned dict is wrapped with a ``"preview"`` envelope
     key + the op's sensitivity ``"op_class"`` so the approval surface can
@@ -204,16 +238,26 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
 
     try:
         preview = await builder(ctx)
-    except Exception:
+    except Exception as exc:
         # Fail-soft: a preview is a convenience, the park is the
         # safety-relevant action. Never let a dry-run fault block it.
+        # But never silently (#1628): a registered builder that raised
+        # means the blast radius is UNKNOWN, and the reviewer must be
+        # able to distinguish that from a genuinely small action -- so
+        # the row carries an explicit marker + reason instead of the
+        # bare identifier-only default a server-side log line can't
+        # substitute for.
         _log.warning(
             "proposed_effect_preview_failed",
             op_id=op_id,
             operator_sub=getattr(ctx.operator, "sub", None),
             exc_info=True,
         )
-        return None
+        return {
+            "op_class": op_class,
+            "preview_unavailable": True,
+            "preview_error": _preview_failure_reason(exc),
+        }
 
     if preview is None:
         return None

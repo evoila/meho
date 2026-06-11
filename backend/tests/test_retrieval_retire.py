@@ -913,14 +913,20 @@ def test_route_operator_with_tenant_filter_returns_403(
             headers={"Authorization": f"Bearer {token}"},
         )
     assert response.status_code == 403
-    assert response.json() == {"detail": "tenant_filter_requires_tenant_admin"}
+    assert response.json() == {"detail": "cross_tenant_requires_platform_admin"}
 
 
-def test_route_tenant_admin_with_tenant_filter_returns_200(
+def test_route_platform_admin_with_tenant_filter_returns_200(
     retire_client: TestClient,
 ) -> None:
+    """Cross-tenant retire requires platform-admin (#1638); tenant-admin alone is denied."""
     key = _make_rsa_keypair("kid-A")
-    token = _mint_token(key, sub="op-admin", tenant_role=TenantRole.TENANT_ADMIN.value)
+    token = _mint_token(
+        key,
+        sub="op-admin",
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        platform_admin=True,
+    )
     fake_eval = AsyncMock(return_value=_stub_eval_result())
     with (
         respx.mock as mock_router,
@@ -1064,7 +1070,12 @@ async def test_route_audit_tenant_scope_other_for_cross_tenant_admin(
     retire_client: TestClient,
 ) -> None:
     key = _make_rsa_keypair("kid-A")
-    token = _mint_token(key, sub="op-admin", tenant_role=TenantRole.TENANT_ADMIN.value)
+    token = _mint_token(
+        key,
+        sub="op-admin",
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        platform_admin=True,
+    )
     fake_eval = AsyncMock(return_value=_stub_eval_result())
     with (
         respx.mock as mock_router,

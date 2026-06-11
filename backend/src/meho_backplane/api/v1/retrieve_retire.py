@@ -72,7 +72,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import authorize_tenant_scope, require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.retrieval.retire import (
     SURFACE_VERDICT_ORDER,
@@ -181,9 +181,10 @@ async def retire_checklist_endpoint(
     """Return the five-criterion retire-decision checklist per surface.
 
     Tenant scoping mirrors the sibling usage route:
-    ``operator`` / ``read_only`` callers are scoped to
-    ``operator.tenant_id``; passing a non-null ``tenant_filter`` query
-    parameter returns 403. Only ``tenant_admin`` may cross tenants.
+    Callers are scoped to ``operator.tenant_id``; a ``tenant_filter``
+    query parameter naming a different tenant returns 403
+    ``cross_tenant_requires_platform_admin`` unless the caller holds the
+    ``platform_admin`` cross-tenant capability (#1638).
     The request body's ``surface=all`` (default) walks every supported
     surface in the order :data:`SURFACE_VERDICT_ORDER` pins.
 
@@ -211,13 +212,7 @@ async def retire_checklist_endpoint(
         operator_tenant_id=operator.tenant_id,
     )
 
-    if tenant_filter is not None and operator.tenant_role != TenantRole.TENANT_ADMIN:
-        raise HTTPException(
-            status_code=403,
-            detail="tenant_filter_requires_tenant_admin",
-        )
-
-    target_tenant = tenant_filter if tenant_filter is not None else operator.tenant_id
+    target_tenant = authorize_tenant_scope(operator, tenant_filter)
 
     # ``blocker_counts`` may carry keys that aren't part of the
     # currently-requested surface scope; Pydantic has already pinned

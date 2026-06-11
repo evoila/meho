@@ -27,13 +27,14 @@ Route inventory
 Tenant scoping + cross-tenant admin
 -----------------------------------
 
-``operator`` / ``read_only`` callers are scoped to their JWT's
-``tenant_id`` claim and any attempt to pass ``tenant_id`` in the
-create body or ``tenant_filter`` in the query string surfaces as 403
-``tenant_filter_requires_tenant_admin`` (mirrors the
-``retrieve_usage`` precedent). ``tenant_admin`` callers may target
-another tenant by setting ``tenant_id`` in the body (create) or
-``tenant_filter`` in the query (list). A cross-tenant probe by id
+Callers are scoped to their JWT's ``tenant_id`` claim; passing a
+*different* ``tenant_id`` in the create body or ``tenant_filter`` in the
+query string surfaces as 403 ``cross_tenant_requires_platform_admin``
+(mirrors the ``retrieve_usage`` precedent) unless the caller holds the
+``platform_admin`` cross-tenant capability (#1638). Only a
+``platform_admin`` may target another tenant by setting ``tenant_id`` in
+the body (create) or ``tenant_filter`` in the query (list); tenant role
+alone no longer crosses the boundary. A cross-tenant probe by id
 surfaces as 404 ``trigger_not_found`` (never 403) -- the conflation
 prevents enumerating another tenant's triggers via a status-code
 differential.
@@ -62,7 +63,7 @@ from fastapi import status as http_status
 from fastapi.responses import Response
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import authorize_tenant_scope, require_role
 from meho_backplane.scheduler.schemas import (
     KindFilter,
     ScheduledTriggerCreate,
@@ -124,16 +125,13 @@ async def list_triggers(
 ) -> ScheduledTriggerListResponse:
     """List scheduled triggers for the operator's tenant, newest-first.
 
-    Tenant scoping: ``operator`` / ``read_only`` callers are scoped to
-    ``operator.tenant_id`` and any non-null ``tenant_filter`` returns
-    403. Only ``tenant_admin`` may cross tenants.
+    Tenant scoping: callers are scoped to ``operator.tenant_id``; a
+    ``tenant_filter`` naming a *different* tenant returns 403
+    ``cross_tenant_requires_platform_admin`` unless the caller holds the
+    ``platform_admin`` cross-tenant capability. Passing one's own tenant
+    id (or omitting the filter) is always allowed.
     """
-    if tenant_filter is not None and operator.tenant_role != TenantRole.TENANT_ADMIN:
-        raise HTTPException(
-            status_code=http_status.HTTP_403_FORBIDDEN,
-            detail="tenant_filter_requires_tenant_admin",
-        )
-    target_tenant = tenant_filter if tenant_filter is not None else operator.tenant_id
+    target_tenant = authorize_tenant_scope(operator, tenant_filter)
     structlog.contextvars.bind_contextvars(
         audit_op_id=_SCHEDULER_OP_IDS["list"],
         audit_op_class="read",
@@ -172,7 +170,7 @@ async def create_trigger(
     of ``cron_expr`` / ``fire_at`` / ``event_filter`` is set; the
     service runs the FK pre-flight.
     """
-    target_tenant = body.tenant_id if body.tenant_id is not None else operator.tenant_id
+    target_tenant = authorize_tenant_scope(operator, body.tenant_id)
     structlog.contextvars.bind_contextvars(
         audit_op_id=_SCHEDULER_OP_IDS["create"],
         audit_op_class="write",
@@ -226,12 +224,7 @@ async def cancel_trigger(
     ``tenant_admin``-gated, for forward-compat in case the role gate
     relaxes in a future release.
     """
-    if tenant_filter is not None and operator.tenant_role != TenantRole.TENANT_ADMIN:
-        raise HTTPException(
-            status_code=http_status.HTTP_403_FORBIDDEN,
-            detail="tenant_filter_requires_tenant_admin",
-        )
-    target_tenant = tenant_filter if tenant_filter is not None else operator.tenant_id
+    target_tenant = authorize_tenant_scope(operator, tenant_filter)
     structlog.contextvars.bind_contextvars(
         audit_op_id=_SCHEDULER_OP_IDS["cancel"],
         audit_op_class="write",

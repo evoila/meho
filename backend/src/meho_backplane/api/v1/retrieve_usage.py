@@ -60,7 +60,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import authorize_tenant_scope, require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.retrieval.usage import (
     DEFAULT_SINCE,
@@ -129,9 +129,10 @@ async def usage_endpoint(
 ) -> UsageReport:
     """Return audit-backed retrieval usage aggregates for *operator*.
 
-    Tenant scoping: ``operator`` / ``read_only`` callers are scoped
-    to ``operator.tenant_id``; passing a non-null ``tenant_filter``
-    returns 403. Only ``tenant_admin`` may cross tenants. *since*
+    Tenant scoping: callers are scoped to ``operator.tenant_id``; a
+    ``tenant_filter`` naming a different tenant returns 403
+    ``cross_tenant_requires_platform_admin`` unless the caller holds the
+    ``platform_admin`` cross-tenant capability (#1638). *since*
     accepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;
     malformed → 400. ``surface=all`` (default) covers all three;
     ``surface=<one>`` narrows. Empty result is a structured zero
@@ -139,11 +140,7 @@ async def usage_endpoint(
     bound before :func:`compute_usage` runs so a handler exception
     still produces an audit row with partial payload.
     """
-    if tenant_filter is not None and operator.tenant_role != TenantRole.TENANT_ADMIN:
-        raise HTTPException(
-            status_code=403,
-            detail="tenant_filter_requires_tenant_admin",
-        )
+    target_tenant = authorize_tenant_scope(operator, tenant_filter)
 
     surfaces = _resolve_surfaces(surface)
     now = datetime.now(UTC)
@@ -152,7 +149,6 @@ async def usage_endpoint(
     except SinceValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    target_tenant = tenant_filter if tenant_filter is not None else operator.tenant_id
     _bind_request_audit_context(
         surfaces=surfaces,
         since=since,

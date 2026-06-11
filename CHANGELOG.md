@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security
+
+- Closed a cross-tenant IDOR on the scheduler
+  (`GET`/`POST`/`DELETE /api/v1/scheduler/triggers`) and retrieval
+  (`GET /api/v1/retrieve/usage`, `POST /api/v1/retrieve/retire-checklist`)
+  routes: a caller-supplied `tenant_id` / `tenant_filter` was authorized on
+  `tenant_admin` **rank** alone, so a tenant-admin of tenant A could
+  read/act on tenant B. A new shared `authorize_tenant_scope` helper now
+  requires the cross-tenant `platform_admin` capability (#1638) to target
+  another tenant; requesting one's own tenant (or omitting the filter) is
+  unchanged. The 403 detail token changes from
+  `tenant_filter_requires_tenant_admin` to
+  `cross_tenant_requires_platform_admin` (#1640).
+
 ### Breaking changes
 
 - `meho connector edit-op --enable` no longer reports a silent

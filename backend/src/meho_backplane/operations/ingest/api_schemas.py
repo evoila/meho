@@ -527,6 +527,63 @@ class EditOpBody(BaseModel):
     is_enabled: bool | None = None
 
 
+class EditOpWarning(BaseModel):
+    """One advisory attached to an ``edit_op`` write (G0.23-T4 #1630).
+
+    Emitted when the edit is legal and **was applied**, but the
+    operator should know it leads somewhere unpleasant. The only
+    producer today is the enable-time auto-shim probe:
+    ``is_enabled=True`` on an op whose resolved connector is the
+    unconfigured ingest auto-shim
+    (:class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`)
+    — dispatch is then guaranteed to fail with the
+    ``connector_unsupported`` / ``cause='unreplaced_auto_shim'``
+    structured error (G0.23-T1 #1627), so this warning surfaces the
+    dead end at enable time instead of one dispatch later.
+
+    ``code`` reuses the dispatch-time cause vocabulary verbatim
+    (``unreplaced_auto_shim``) so an operator — or an SDK — can
+    correlate the proactive warning with the reactive dispatch error
+    without a translation table. Declared as a one-member ``Literal``
+    so the OpenAPI schema names the vocabulary; future advisory codes
+    extend the union (an additive, client-compatible change).
+
+    ``connector_class`` carries the resolved shim class's name
+    (``AutoShim_<product>_<version>_<impl_id>``) — the same key the
+    dispatch error's ``extras`` payload uses. ``message`` is the
+    operator-facing prose: what was applied, why dispatch will still
+    fail, and the remediation imperative (register the per-product
+    subclass; re-ingesting will not replace the shim).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    code: Literal["unreplaced_auto_shim"]
+    connector_class: str
+    message: str
+
+
+class EditOpResponse(BaseModel):
+    """Response body for ``PATCH /api/v1/connectors/{id}/operations/{op_id}``.
+
+    G0.23-T4 (#1630) promoted the route from ``204 No Content`` to
+    ``200`` with this envelope so enable-time advisories have a
+    structured home on the wire. ``warnings`` is empty on the
+    overwhelmingly common clean path; a non-empty list never blocks
+    the write it annotates (the PATCH semantics are unchanged — the
+    edit landed, audit row included, warnings or not).
+
+    Shaped as a list (not a single nullable field) so multiple
+    advisories can ride one response without another schema bump.
+    Required (no default) so the OpenAPI schema marks it as
+    always-present and the generated Go client gets a plain slice
+    instead of a pointer — same convention as
+    :class:`~meho_backplane.operations.ingest.payload.ConnectorReviewPayload.groups`.
+    """
+
+    warnings: list[EditOpWarning]
+
+
 #: Lifecycle of an async ingest job. Mirrors
 #: :data:`~meho_backplane.operations.ingest.jobs.IngestJobStatus` so
 #: the Pydantic projection and the internal dataclass share one

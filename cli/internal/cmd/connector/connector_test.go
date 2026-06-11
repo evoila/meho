@@ -1833,19 +1833,90 @@ func TestPatchOpEscapesOpID(t *testing.T) {
 			if decodedOp != "GET:/api/vcenter/cluster" {
 				t.Errorf("op_id round-trip: got %q (raw path %q)", decodedOp, raw)
 			}
-			// Canonical T6 response: 204 No Content with no body.
-			w.WriteHeader(http.StatusNoContent)
+			// Canonical response since G0.23-T4 (#1630): 200 with an
+			// EditOpResponse envelope (empty warnings on the clean path).
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"warnings": []}`))
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
 	safety := api.Dangerous
-	if err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", api.EditOpBody{SafetyLevel: &safety}); err != nil {
+	resp, err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", api.EditOpBody{SafetyLevel: &safety})
+	if err != nil {
 		t.Fatalf("patchOp: %v", err)
+	}
+	if len(resp.Warnings) != 0 {
+		t.Errorf("expected no warnings on the clean path; got %+v", resp.Warnings)
 	}
 	if !called {
 		t.Fatalf("mock handler not invoked")
+	}
+}
+
+// TestPatchOpSurfacesEnableTimeWarnings — the 200 EditOpResponse's
+// `warnings` field (G0.23-T4 #1630) must round-trip through patchOp so
+// runEditOp can render the unreplaced_auto_shim advisory on stderr.
+func TestPatchOpSurfacesEnableTimeWarnings(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != "PATCH" {
+				t.Errorf("expected PATCH; got %s", r.Method)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"warnings": [{
+				"code": "unreplaced_auto_shim",
+				"connector_class": "AutoShim_acme_1_2_acme_rest",
+				"message": "register the per-product Connector subclass"
+			}]}`))
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	enabled := true
+	resp, err := patchOp(context.Background(), srv.URL, "acme-rest-1.2", "GET:/api/v1/group-0/0", api.EditOpBody{IsEnabled: &enabled})
+	if err != nil {
+		t.Fatalf("patchOp: %v", err)
+	}
+	if len(resp.Warnings) != 1 {
+		t.Fatalf("expected 1 warning; got %+v", resp.Warnings)
+	}
+	warning := resp.Warnings[0]
+	if warning.Code != "unreplaced_auto_shim" {
+		t.Errorf("warning code: got %q", warning.Code)
+	}
+	if warning.ConnectorClass != "AutoShim_acme_1_2_acme_rest" {
+		t.Errorf("warning connector_class: got %q", warning.ConnectorClass)
+	}
+}
+
+// TestPrintEditOpWarnings — the stderr rendering names the stable code
+// so operators (and log scrapers) can grep `unreplaced_auto_shim`; the
+// clean path prints nothing.
+func TestPrintEditOpWarnings(t *testing.T) {
+	var buf bytes.Buffer
+	printEditOpWarnings(&buf, nil)
+	if buf.Len() != 0 {
+		t.Errorf("clean path must print nothing; got %q", buf.String())
+	}
+
+	printEditOpWarnings(&buf, []api.EditOpWarning{{
+		Code:           "unreplaced_auto_shim",
+		ConnectorClass: "AutoShim_acme_1_2_acme_rest",
+		Message:        "register the per-product Connector subclass",
+	}})
+	out := buf.String()
+	for _, want := range []string{
+		"warning (unreplaced_auto_shim):",
+		"register the per-product Connector subclass",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning render missing %q in:\n%s", want, out)
+		}
 	}
 }
 

@@ -2256,6 +2256,57 @@ type EditOpBody struct {
 // EditOpBodySafetyLevel defines model for EditOpBody.SafetyLevel.
 type EditOpBodySafetyLevel string
 
+// EditOpResponse Response body for “PATCH /api/v1/connectors/{id}/operations/{op_id}“.
+//
+// G0.23-T4 (#1630) promoted the route from “204 No Content“ to
+// “200“ with this envelope so enable-time advisories have a
+// structured home on the wire. “warnings“ is empty on the
+// overwhelmingly common clean path; a non-empty list never blocks
+// the write it annotates (the PATCH semantics are unchanged — the
+// edit landed, audit row included, warnings or not).
+//
+// Shaped as a list (not a single nullable field) so multiple
+// advisories can ride one response without another schema bump.
+// Required (no default) so the OpenAPI schema marks it as
+// always-present and the generated Go client gets a plain slice
+// instead of a pointer — same convention as
+// :class:`~meho_backplane.operations.ingest.payload.ConnectorReviewPayload.groups`.
+type EditOpResponse struct {
+	Warnings []EditOpWarning `json:"warnings"`
+}
+
+// EditOpWarning One advisory attached to an “edit_op“ write (G0.23-T4 #1630).
+//
+// Emitted when the edit is legal and **was applied**, but the
+// operator should know it leads somewhere unpleasant. The only
+// producer today is the enable-time auto-shim probe:
+// “is_enabled=True“ on an op whose resolved connector is the
+// unconfigured ingest auto-shim
+// (:class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`)
+// — dispatch is then guaranteed to fail with the
+// “connector_unsupported“ / “cause='unreplaced_auto_shim'“
+// structured error (G0.23-T1 #1627), so this warning surfaces the
+// dead end at enable time instead of one dispatch later.
+//
+// “code“ reuses the dispatch-time cause vocabulary verbatim
+// (“unreplaced_auto_shim“) so an operator — or an SDK — can
+// correlate the proactive warning with the reactive dispatch error
+// without a translation table. Declared as a one-member “Literal“
+// so the OpenAPI schema names the vocabulary; future advisory codes
+// extend the union (an additive, client-compatible change).
+//
+// “connector_class“ carries the resolved shim class's name
+// (“AutoShim_<product>_<version>_<impl_id>“) — the same key the
+// dispatch error's “extras“ payload uses. “message“ is the
+// operator-facing prose: what was applied, why dispatch will still
+// fail, and the remediation imperative (register the per-product
+// subclass; re-ingesting will not replace the shim).
+type EditOpWarning struct {
+	Code           string `json:"code"`
+	ConnectorClass string `json:"connector_class"`
+	Message        string `json:"message"`
+}
+
 // EditTemplateResponse Response for “runbook_edit_template“.
 //
 // :attr:`version` equals the input version when editing a draft in
@@ -21888,6 +21939,7 @@ func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) 
 type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON200      *EditOpResponse
 	JSON422      *HTTPValidationError
 }
 
@@ -28026,6 +28078,13 @@ func ParseEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse(rs
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest EditOpResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

@@ -26,7 +26,8 @@ Route inventory
 * ``PATCH /api/v1/connectors/{connector_id}/operations/{op_id}`` —
   edit a per-op override (``safety_level``, ``requires_approval``,
   ``custom_description``, ``is_enabled``). Body: :class:`EditOpBody`.
-  Returns 204. Role: ``tenant_admin``.
+  Returns 200 with :class:`EditOpResponse` (enable-time advisories
+  in ``warnings``, G0.23-T4 #1630). Role: ``tenant_admin``.
 * ``POST /api/v1/connectors/{connector_id}/enable`` — transition all
   groups to ``enabled``; cascade. Returns 204. Idempotent. Role:
   ``tenant_admin``.
@@ -148,6 +149,7 @@ from meho_backplane.operations.ingest import (
     ConnectorSpecEntry,
     EditGroupBody,
     EditOpBody,
+    EditOpResponse,
     IngestionPipelineResult,
     IngestionPipelineService,
     IngestJob,
@@ -1060,21 +1062,30 @@ async def edit_group_endpoint(
 
 @router.patch(
     "/{connector_id}/operations/{op_id:path}",
-    status_code=http_status.HTTP_204_NO_CONTENT,
-    response_class=Response,
+    response_model=EditOpResponse,
 )
 async def edit_op_endpoint(
     connector_id: str,
     op_id: str,
     body: EditOpBody,
     operator: Operator = _require_admin,
-) -> Response:
+) -> EditOpResponse:
     """Edit a per-op operator override.
 
     At least one of ``custom_description`` / ``safety_level`` /
     ``requires_approval`` / ``is_enabled`` must be set; an empty
     body yields 400. Writes one ``meho.connector.edit_op`` audit
-    row. Returns 204 on success.
+    row. Returns 200 with an :class:`EditOpResponse` on success.
+
+    G0.23-T4 (#1630) promoted the route from 204 No Content to 200
+    so enable-time advisories have a structured wire home:
+    ``is_enabled=true`` on an op whose resolved connector is the
+    unconfigured ingest auto-shim returns
+    ``warnings=[{code='unreplaced_auto_shim', ...}]`` — the edit
+    still lands (warnings never block the write), but the operator
+    learns about the guaranteed dispatch dead end here instead of
+    one ``call_operation`` later. The sibling ``edit_group`` route
+    stays at 204 — it has no advisory to carry.
 
     The ``op_id`` path parameter uses the ``:path`` converter so
     operations whose natural key contains slashes
@@ -1083,7 +1094,7 @@ async def edit_op_endpoint(
     """
     service = ReviewService(operator)
     try:
-        await service.edit_op(
+        warnings = await service.edit_op(
             connector_id,
             op_id,
             tenant_id=operator.tenant_id,
@@ -1102,7 +1113,7 @@ async def edit_op_endpoint(
             status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+    return EditOpResponse(warnings=warnings)
 
 
 @router.post(

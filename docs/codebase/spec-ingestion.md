@@ -500,11 +500,32 @@ which forwards it to `_validate_spec_versions`. Per-spec
 classification then bypasses the verbatim/major-band check for any
 spec whose `info.version` matches a pattern in the range, emitting
 `connector_ingest_version_label_decoupled` so the audit trail still
-records the decision. The explicit-quadruple shape doesn't carry
-the catalog row and therefore can't opt in — operators using it
-implicitly accept the historical strict check. See
+records the decision. See
 [`docs/cross-repo/connector-catalog.md`](../cross-repo/connector-catalog.md#label-vs-spec-decoupling-spec_info_versions_compatible)
 for the field definition and pattern syntax.
+
+**Manual `--spec` opt-in: `IngestRequest.spec_info_versions_compatible`
+(T1 #1646).** The explicit-quadruple shape carries the same opt-in as
+an optional body field (`meho connector ingest
+--spec-info-versions-compatible <band>`, repeatable or comma-separated)
+so a self-versioning vendor spec ingests on the manual path too — no
+catalog row required. The motivating case
+(claude-rdc-hetzner-dc#1136): the version-stable vRLI `/api/v2`
+surface reports `info.version="v2"` while the seeded `VcfLogsConnector`
+label is `9.0`; ingesting under `--version 9.0
+--spec-info-versions-compatible 2.x` decouples the cross-check (`v2`
+normalizes to `2`, inside the `2.x` → `>=2,<3` band) while the
+class-range pre-flight stays green (`9.0` ∈ `>=9.0,<10.0`). The route
+folds the body field together with the catalog-resolved band into the
+single value it hands `IngestionPipelineService.ingest` — the two are
+mutually exclusive (`IngestRequest` rejects a body that sets both
+`catalog_entry` and `spec_info_versions_compatible` with
+`catalog_entry_conflict`). Each entry is a glob (`2.x` / `9.0.x`) or a
+PEP 440 specifier set (`>=2,<3`); the field validator rejects any other
+shape (a bare `v2`, a typo) at request-validation time, so the operator
+gets the diagnostic before any spec is fetched. Omitting the field
+keeps the historical strict check — the opt-in is explicit, never
+default.
 
 ### Shared error-envelope builders (`ingest/error_envelopes.py`)
 

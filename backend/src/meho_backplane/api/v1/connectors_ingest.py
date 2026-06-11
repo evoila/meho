@@ -368,7 +368,18 @@ async def ingest_endpoint(
     # quadruple body with ``catalog_entry=None``, so we have to snapshot
     # before resolution.
     catalog_entry = body.catalog_entry
-    resolved, spec_info_versions_compatible = _resolve_catalog_entry_if_set(body)
+    resolved, catalog_compatible = _resolve_catalog_entry_if_set(body)
+    # The catalog-driven shape resolves its opt-in band from the catalog
+    # row (``catalog_compatible``); the explicit-quadruple shape carries
+    # the operator-supplied band on the body itself (T1 #1646). The two
+    # shapes are mutually exclusive (the ``IngestRequest`` validator
+    # rejects a body that sets both), so exactly one of these is ever
+    # non-None — fold them into one value the pipeline cross-check honours.
+    spec_info_versions_compatible = catalog_compatible or (
+        tuple(resolved.spec_info_versions_compatible)
+        if resolved.spec_info_versions_compatible is not None
+        else None
+    )
     service = IngestionPipelineService(
         operator=operator,
         llm_client_factory=llm_client_factory,

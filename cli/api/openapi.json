@@ -13374,6 +13374,15 @@
             "nullable": true,
             "title": "Base Url"
           },
+          "spec_info_versions_compatible": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "nullable": true,
+            "title": "Spec Info Versions Compatible"
+          },
           "dry_run": {
             "type": "boolean",
             "title": "Dry Run",

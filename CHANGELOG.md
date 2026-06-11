@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `meho connector edit-op --enable` no longer reports a silent
+  `ok` on an op whose resolved connector is the unconfigured
+  spec-ingest `GenericRestConnector` auto-shim: the CLI prints
+  `warning (unreplaced_auto_shim): ...` to stderr naming the missing
+  per-product Connector subclass (and that re-ingesting the spec will
+  not replace the shim), the REST route returns the same advisory as
+  a structured `warnings[]` field, and the `meho.connector.edit_op`
+  MCP tool mirrors it — closing the dead-end remediation chain where
+  `composite_l2_disabled` pointed at an enable that succeeded and
+  then dispatch failed one layer deeper with `connector_unsupported`
+  / `cause=unreplaced_auto_shim` (#1627's dispatch-time error; this
+  is its proactive enable-time counterpart). The enable still
+  applies — warnings never block the write. **Wire change:** to
+  carry the advisory, `PATCH
+  /api/v1/connectors/{id}/operations/{op_id}` now returns `200` with
+  an `EditOpResponse` body (`{"warnings": [...]}`) instead of `204
+  No Content`. Migration: clients asserting `status == 204` accept
+  `200` (and may read `warnings`); clients generated from
+  `cli/api/openapi.json` regenerate against the refreshed snapshot —
+  the bundled `meho` CLI in this release already is. (#1630)
+
 ### Fixed
 
 - A failed park-time `proposed_effect` preview no longer degrades

@@ -918,6 +918,53 @@ async def test_search_operations_filters_by_group(
 
 
 @pytest.mark.asyncio
+async def test_search_operations_group_scoped_on_partial_group_returns_enabled_ops(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """B1 (claude-rdc-hetzner-dc#1136): group-scoped search on a ``partial`` group.
+
+    A group still ``review_status=staged`` but holding per-op-enabled ops
+    is surfaced by ``list_operation_groups`` as ``partial`` — the agent is
+    told to then call ``search_operations(group=<key>)``. That path resolves
+    the group via :func:`resolve_group_id`, which must now honour per-op
+    enablement (not require ``review_status='enabled'``) so the scoped
+    search returns the live ops instead of ``[]``. Only the enabled ops
+    come back; the staged group's disabled op stays filtered out by
+    ``hybrid_search``.
+    """
+    group_id = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV v2",
+        when_to_use="use kv.",
+        review_status="staged",
+    )
+    # Two enabled ops + one disabled (the rest of the staged group).
+    await _seed_descriptors(
+        group_id=group_id,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        enabled_flags=[True, True, False],
+    )
+    operator = _make_operator()
+
+    scoped_hits = (
+        await search_operations(
+            operator,
+            {"connector_id": "vault-1.x", "query": "op", "group": "kv"},
+        )
+    )["hits"]
+
+    scoped_op_ids = sorted(h["op_id"] for h in scoped_hits)
+    # op0 + op1 are enabled; op2 is disabled and must not surface.
+    assert scoped_op_ids == ["vault.op0", "vault.op1"]
+
+
+@pytest.mark.asyncio
 async def test_search_operations_unknown_group_returns_empty_hits(
     stub_embedding_service: AsyncMock,
 ) -> None:

@@ -103,6 +103,14 @@ connector-related release-notes line.
   unchanged. The 403 detail token changes from
   `tenant_filter_requires_tenant_admin` to
   `cross_tenant_requires_platform_admin` (#1640).
+- Closed a cross-tenant enumeration hole on the MCP `list_targets` tool:
+  the caller-supplied `tenant_id` / `tenant` argument was resolved with
+  no equality check and gated on `tenant_admin` **rank** alone, so a
+  tenant-admin of tenant A could enumerate tenant B's targets. Cross-
+  tenant listing now requires the `platform_admin` capability (#1638);
+  naming one's own tenant (by slug or UUID) or omitting the argument is
+  unchanged, and an unauthorized cross-tenant request surfaces as the
+  MCP `-32602` (INVALID_PARAMS) error (#1641).
 
 ### Breaking changes
 

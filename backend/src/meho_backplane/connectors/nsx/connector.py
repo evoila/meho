@@ -49,8 +49,9 @@ consumer wrapper repo). The flow:
    subsequent requests through the same per-target client carry the
    cookie without manual plumbing.
 3. The response's ``X-XSRF-TOKEN`` header is captured into
-   :attr:`_session_tokens` keyed on ``target.name`` (mirrors
-   :class:`VmwareRestConnector._session_tokens` per-target isolation).
+   :attr:`_session_tokens` keyed on the tenant-unique
+   ``(tenant_id, target.id)`` tuple (#1642), so two same-named targets in
+   different tenants never share a cached session.
 4. :meth:`auth_headers` returns ``{"X-XSRF-TOKEN": <cached>}`` on
    subsequent calls; the cookie travels via the client jar.
 5. On HTTP 401 from a downstream call, :meth:`_get_json_with_session_retry`
@@ -114,6 +115,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.nsx.session import (
@@ -203,7 +205,7 @@ class NsxConnector(HttpConnector):
         session_loader: NsxSessionLoader | None = None,
     ) -> None:
         super().__init__()
-        self._session_tokens: dict[str, str] = {}
+        self._session_tokens: dict[tuple[str, str], str] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: NsxSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -264,8 +266,9 @@ class NsxConnector(HttpConnector):
         read; injected test loaders accept the same
         ``(target, operator)`` pair.
         """
+        cache_key = target_cache_key(target)
         async with self._session_lock:
-            cached = self._session_tokens.get(target.name)
+            cached = self._session_tokens.get(cache_key)
             if cached is not None:
                 return cached
             creds = await self._session_loader(target, operator)
@@ -309,7 +312,7 @@ class NsxConnector(HttpConnector):
                     f"POST {_SESSION_CREATE_PATH} returned 2xx with no "
                     f"{_XSRF_HEADER} response header"
                 )
-            self._session_tokens[target.name] = xsrf
+            self._session_tokens[cache_key] = xsrf
             _log.info(
                 "nsx_session_established",
                 target=target.name,
@@ -327,7 +330,9 @@ class NsxConnector(HttpConnector):
         the invalidation.
         """
         async with self._session_lock:
-            self._session_tokens.pop(target.name, None)
+            self._session_tokens.pop(target_cache_key(target), None)
+            # ``_clients`` (the shared HttpConnector pool) is keyed on
+            # ``target.name``; only the session-token cache is tenant-keyed.
             client = self._clients.get(target.name)
             if client is not None:
                 client.cookies.clear()

@@ -32,14 +32,15 @@ divergence: JSON body (not form), provider field, sessionId in body
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
-from uuid import UUID
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vcf_auth import VcfTargetLike
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
@@ -106,6 +107,10 @@ class _StubTarget:
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
     provider: str | None = None
+    # Tenant-unique cache key components (#1642). Distinct ``id`` per
+    # instance so two stub targets never collapse onto one cache entry.
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -307,8 +312,8 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
     assert h_a == {"Authorization": "Bearer token-a"}
     assert h_b == {"Authorization": "Bearer token-b"}
     assert connector._session_tokens == {
-        "vrli-a": "token-a",
-        "vrli-b": "token-b",
+        target_cache_key(_TARGET_A): "token-a",
+        target_cache_key(_TARGET_B): "token-b",
     }
     await connector.aclose()
 
@@ -500,7 +505,7 @@ async def test_downstream_401_triggers_relogin_and_retry_once() -> None:
     # Downstream GET fired twice -- the original 401 + the post-relogin retry.
     assert events_route.call_count == 2
     # The post-relogin token replaced the stale one.
-    assert connector._session_tokens == {"vrli-a": "token-second"}
+    assert connector._session_tokens == {target_cache_key(_TARGET_A): "token-second"}
     # Both downstream GETs carried Bearer headers (first the stale
     # token, second the refreshed one).
     requests = events_route.calls
@@ -684,9 +689,9 @@ async def test_aclose_clears_session_token_cache_and_credentials_and_pool() -> N
         mock.post("/api/v2/sessions").respond(200, json={"sessionId": "token", "ttl": 1800})
         await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
-    assert connector._session_tokens == {"vrli-a": "token"}
+    assert connector._session_tokens == {target_cache_key(_TARGET_A): "token"}
     # Credentials cache should also be populated after the first call.
-    assert "vrli-a" in connector._credentials.cached_targets
+    assert target_cache_key(_TARGET_A) in connector._credentials.cached_targets
     await connector.aclose()
     assert connector._session_tokens == {}
     assert connector._credentials.cached_targets == frozenset()

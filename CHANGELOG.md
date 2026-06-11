@@ -123,6 +123,12 @@ connector-related release-notes line.
   naming one's own tenant (by slug or UUID) or omitting the argument is
   unchanged, and an unauthorized cross-tenant request surfaces as the
   MCP `-32602` (INVALID_PARAMS) error (#1641).
+- Re-keyed the VCF (vROps / vRLI / Fleet), Harbor, NSX, and SDDC-Manager
+  connectors' per-target credential and session-token caches on the
+  tenant-unique `(tenant_id, target.id)` tuple instead of `target.name`.
+  Two same-named targets in different tenants previously collapsed onto one
+  cache entry, so one tenant could be served another tenant's cached
+  service-account credential or session token (#1642).
 
 ### Breaking changes
 

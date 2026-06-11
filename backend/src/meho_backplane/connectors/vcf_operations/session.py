@@ -69,11 +69,15 @@ class VcfOperationsTargetLike(Protocol):
       realm name, etc.) are operator-configured per vROps deployment; the
       connector passes the string through verbatim.
 
-    The base shared fields (``name``, ``host``, ``port``, ``secret_ref``,
-    ``auth_model``) are gated and consumed identically to the other G3.6
-    skeletons (see :class:`VcfTargetLike`).
+    The base shared fields (``id``, ``tenant_id``, ``name``, ``host``,
+    ``port``, ``secret_ref``, ``auth_model``) are gated and consumed
+    identically to the other G3.6 skeletons (see :class:`VcfTargetLike`).
+    ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)`` cache
+    key the shared :class:`CredentialsCache` uses (#1642).
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

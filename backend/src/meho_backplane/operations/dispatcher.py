@@ -101,7 +101,18 @@ Detail payloads land in ``extras``. Codes:
 * ``awaiting_approval`` -- the policy gate issued a ``needs_approval``
   verdict; a durable :class:`~meho_backplane.db.models.ApprovalRequest`
   row was created. ``extras["approval_request_id"]`` carries the UUID.
-* ``connector_error`` -- the connector / handler raised. The raised
+* ``connector_unsupported`` -- the connector / handler raised
+  :exc:`NotImplementedError`: it *deliberately* does not implement
+  what the dispatch requires (an unsupported ``target.auth_model``;
+  an unreplaced ingest auto-shim). G0.23-T1 (#1627). The exception
+  message is promoted verbatim into the ``error`` string and
+  ``extras["detail"]``; ``extras["cause"]`` distinguishes
+  ``unsupported_feature`` (fix the target config) from
+  ``unreplaced_auto_shim`` (register the per-product subclass).
+* ``connector_error`` -- the connector / handler raised any other
+  exception (and the reducer / redaction middleware raised *any*
+  exception -- the ``connector_unsupported`` classification applies
+  only to the source-kind branch where connector code runs). The raised
   exception's class name lands in ``extras["exception_class"]``;
   the (length-capped) message in ``extras["exception_message"]``.
 
@@ -143,7 +154,7 @@ import inspect
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import (
@@ -169,6 +180,7 @@ from meho_backplane.operations._errors import (
     result_composite_l2_disabled,
     result_composite_l2_missing,
     result_connector_error,
+    result_connector_unsupported,
     result_denied,
     result_handler_unreachable,
     result_invalid_params,
@@ -646,6 +658,13 @@ async def _run_branch_with_error_handling(
     pre-flight signal (the catalog-command remediation step) survives
     the audit + reduce pipeline rather than collapsing into the
     opaque ``connector_error`` envelope.
+
+    G0.23-T1 (#1627) adds the symmetric ``connector_unsupported``
+    catch for :exc:`NotImplementedError` -- the deliberate "this
+    connector doesn't do that" signal (unsupported
+    ``target.auth_model``; unreplaced ingest auto-shim) whose
+    already-descriptive message used to flatten into the same opaque
+    ``connector_error`` envelope.
     """
     try:
         return await _run_source_kind_branch(
@@ -715,6 +734,54 @@ async def _run_branch_with_error_handling(
         )
         return result_composite_l2_missing(
             op_id, l2_exc.missing_op_ids, l2_exc.catalog_command, duration_ms
+        )
+    except NotImplementedError as nie_exc:
+        # G0.23-T1 (#1627): a connector raising NotImplementedError is a
+        # deliberate "I don't do this" -- VmwareRestConnector.auth_headers
+        # on an unsupported target.auth_model, the ingest auto-shim's
+        # auth_headers/execute, a vendor connector's unwired session
+        # mode. The raise sites already carry actionable messages;
+        # flattening them into the generic ``connector_error`` below
+        # buried the diagnostic in extras.exception_message (the RDC
+        # cycle-8 dead end). NotImplementedError subclasses RuntimeError,
+        # not ImportError/TypeError, so this catch is disjoint from the
+        # handler_unreachable branch above; it sits ahead of the generic
+        # ``except Exception`` so the structured shape wins.
+        #
+        # The import is call-time on purpose: the dispatcher is imported
+        # everywhere, while ``operations.ingest`` drags the whole
+        # ingest-pipeline package (anthropic client, api schemas) in via
+        # its __init__. Deferring to the error path keeps dispatcher
+        # import light; in production the package is already loaded by
+        # the REST routes, so this is a dict lookup.
+        from meho_backplane.operations.ingest.connector_registration import (
+            GenericRestConnector,
+        )
+
+        cause: Literal["unsupported_feature", "unreplaced_auto_shim"] = (
+            "unreplaced_auto_shim"
+            if isinstance(connector_instance, GenericRestConnector)
+            else "unsupported_feature"
+        )
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="error",
+            duration_ms=duration_ms,
+        )
+        return result_connector_unsupported(
+            op_id,
+            nie_exc,
+            cause=cause,
+            connector_class=(
+                type(connector_instance).__name__ if connector_instance is not None else None
+            ),
+            duration_ms=duration_ms,
         )
     except Exception as exc:
         duration_ms = _elapsed_ms(started)

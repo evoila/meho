@@ -110,6 +110,19 @@ connector-related release-notes line.
   `k8s.logs tail=300` 5-of-300-sample finding — not a #1507 regression
   and not a k8s.logs-shape gap (pinned by repro tests); see
   `docs/codebase/result-spill.md` for the triage runbook. (#1629)
+- A connector raising `NotImplementedError` on dispatch now returns a
+  structured `connector_unsupported` error instead of the opaque
+  `connector_error: NotImplementedError` that buried the descriptive
+  raise-site message in `extras.exception_message`. The message is
+  promoted verbatim into the operator-facing `error` string and
+  `extras.detail`, and `extras.cause` distinguishes
+  `unsupported_feature` (e.g. a target `auth_model` the connector
+  doesn't support — fix the target config) from `unreplaced_auto_shim`
+  (the resolved connector is the spec-ingest auto-shim — register the
+  per-product Connector subclass), each with its remediation and doc
+  reference in the message. Reaches both the REST dispatch response
+  and the MCP `call_operation` tool, matching the `composite_l2_*`
+  envelope parity (#1627).
 
 ## [0.13.0] - 2026-06-11
 

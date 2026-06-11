@@ -517,6 +517,35 @@ remove maintenance — every per-tenant UUID rotation still touches
 every user. The recommended (groups + group attribute) shape is
 strictly better once a tenant has more than one operator.
 
+## Side note — the `platform_admin` cross-tenant flag (#1638)
+
+`tenant_role` is scoped **within** a single tenant. A separate,
+**optional** boolean claim — `platform_admin` — marks a principal that
+holds the cross-tenant *platform* capability (e.g. an MSP operator
+managing every tenant). The backplane reads it into
+`Operator.platform_admin` and defaults it to **`False`** when the claim
+is absent or malformed, so every existing token — and every agent /
+service principal — is non-platform-admin unless the realm explicitly
+grants the claim (fail-closed). The backplane reads the claim under the
+name `platform_admin` by default, overridable with
+`JWT_PLATFORM_ADMIN_CLAIM_NAME`.
+
+Recommended mapper shape: a **Hardcoded claim** mapper
+(`Token Claim Name: platform_admin`, `Claim value: true`,
+`Claim JSON Type: boolean`, *Add to access token: on*) attached to a
+dedicated realm role (e.g. `meho-platform-admin`), so only users granted
+that role carry `"platform_admin": true`. Users without the role carry no
+claim and resolve to `False`. A per-user boolean attribute + User
+Attribute mapper is the script-free alternative (mirrors `tenant_role`
+Shape B). The backplane also accepts the string forms `"true"` /
+`"false"` for realms whose mapper emits the claim as a string.
+
+> Status: the backplane primitive (the `platform_admin` field + claim
+> extraction) landed under [#1638]; no surface consumes it yet — it is
+> the substrate a later cross-tenant authorization gate checks. The
+> realm-side mapper is applied by the lab operator when the first
+> cross-tenant platform role is provisioned.
+
 ## Status
 
 | Item | Side | State |

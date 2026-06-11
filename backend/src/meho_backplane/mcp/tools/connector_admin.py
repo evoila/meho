@@ -197,6 +197,15 @@ async def _edit_op_handler(
 
     Same PATCH-semantic discipline as :func:`_edit_group_handler`:
     fields not present in ``arguments`` are never forwarded.
+
+    ``warnings`` mirrors the REST route's
+    :class:`~meho_backplane.operations.ingest.EditOpResponse` field
+    (G0.23-T4 #1630): enable-time advisories from the shared service
+    layer — today only the ``unreplaced_auto_shim`` probe —
+    serialized per-entry via ``model_dump(mode="json")``. Empty list
+    on the clean path; never blocks the write (``ok`` stays
+    ``True``). Surfacing it here keeps MCP↔REST parity, the same
+    discipline the ingest error envelopes follow (#1534 / #1610).
     """
     connector_id: str = arguments["connector_id"]
     op_id: str = arguments["op_id"]
@@ -211,13 +220,18 @@ async def _edit_op_handler(
     if "is_enabled" in arguments:
         patch["is_enabled"] = arguments["is_enabled"]
     service = ReviewService(operator)
-    await service.edit_op(
+    warnings = await service.edit_op(
         connector_id,
         op_id,
         tenant_id=tenant_id,
         **patch,
     )
-    return {"connector_id": connector_id, "op_id": op_id, "ok": True}
+    return {
+        "connector_id": connector_id,
+        "op_id": op_id,
+        "ok": True,
+        "warnings": [warning.model_dump(mode="json") for warning in warnings],
+    }
 
 
 async def _enable_handler(

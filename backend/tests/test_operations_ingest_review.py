@@ -50,8 +50,10 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGrou
 from meho_backplane.operations.ingest import (
     ConnectorNotFoundError,
     ConnectorReviewPayload,
+    EditOpWarning,
     InvalidStateTransitionError,
     ReviewService,
+    ensure_connector_class_registered,
     parse_connector_id,
 )
 from meho_backplane.settings import get_settings
@@ -649,6 +651,140 @@ async def test_edit_op_is_enabled_false_override_sticks_after_enable_connector()
     # The two non-overridden ops did flip to True.
     assert enabled_state["GET:/api/v1/group-0/1"] is True
     assert enabled_state["GET:/api/v1/group-0/2"] is True
+
+
+# ---------------------------------------------------------------------------
+# edit_op enable-time auto-shim advisory (G0.23-T4 #1630)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_edit_op_enable_on_auto_shim_connector_returns_warning() -> None:
+    """``is_enabled=True`` on a shim-backed op returns the advisory; the write still lands.
+
+    The connector triple is registered to the synthesised
+    ``GenericRestConnector`` auto-shim (the spec-ingest first-contact
+    state), so dispatch is a guaranteed ``connector_unsupported`` /
+    ``cause='unreplaced_auto_shim'`` dead end — the enable must say so
+    while still applying the flag and writing the audit row.
+    """
+    tenant_id = uuid.uuid4()
+    assert ensure_connector_class_registered(
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        base_url=None,
+    ), "expected a fresh auto-shim registration for the acme triple"
+    await _seed_connector(
+        tenant_id=tenant_id,
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        group_count=1,
+        ops_per_group=1,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    warnings = await service.edit_op(
+        "acme-rest-1.2",
+        "GET:/api/v1/group-0/0",
+        tenant_id=tenant_id,
+        is_enabled=True,
+    )
+
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert isinstance(warning, EditOpWarning)
+    assert warning.code == "unreplaced_auto_shim"
+    assert warning.connector_class == "AutoShim_acme_1_2_acme_rest"
+    # The message names the missing-subclass requirement, the concrete
+    # triple, the dispatch-time error it forecasts, and the doc ref —
+    # the same remediation story result_connector_unsupported tells.
+    assert "per-product Connector subclass" in warning.message
+    assert "'acme'" in warning.message
+    assert "'acme-rest'" in warning.message
+    assert "connector_unsupported" in warning.message
+    assert "re-ingesting the spec will NOT replace the shim" in warning.message
+    assert "docs/codebase/spec-ingestion.md" in warning.message
+
+    # Advisory, not a gate: the flag is set and the audit row written.
+    enabled_state = await _ops_enabled_state(
+        tenant_id=tenant_id,
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+    )
+    assert enabled_state["GET:/api/v1/group-0/0"] is True
+    assert await _count_audit_rows(op_id="meho.connector.edit_op") == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_op_enable_on_hand_rolled_connector_returns_no_warning() -> None:
+    """``is_enabled=True`` on a hand-rolled connector's op is unchanged — no advisory.
+
+    ``vmware-rest-9.0`` resolves to ``VmwareRestConnector`` (priority
+    1, hand-rolled — registered by the session-scoped connector-module
+    import in ``conftest.py``), so the auto-shim probe stays silent.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    warnings = await service.edit_op(
+        "vmware-rest-9.0",
+        "GET:/api/v1/group-0/0",
+        tenant_id=tenant_id,
+        is_enabled=True,
+    )
+
+    assert warnings == []
+    enabled_state = await _ops_enabled_state(tenant_id=tenant_id)
+    assert enabled_state["GET:/api/v1/group-0/0"] is True
+
+
+@pytest.mark.asyncio
+async def test_edit_op_non_enable_edits_skip_auto_shim_probe() -> None:
+    """Only ``is_enabled=True`` triggers the probe — disable and field edits stay silent.
+
+    Disabling a shim-backed op (or editing its safety level) is not a
+    dispatch dead end, so warning there would train operators to
+    ignore the advisory.
+    """
+    tenant_id = uuid.uuid4()
+    assert ensure_connector_class_registered(
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        base_url=None,
+    )
+    await _seed_connector(
+        tenant_id=tenant_id,
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        group_count=1,
+        ops_per_group=1,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    assert (
+        await service.edit_op(
+            "acme-rest-1.2",
+            "GET:/api/v1/group-0/0",
+            tenant_id=tenant_id,
+            is_enabled=False,
+        )
+        == []
+    )
+    assert (
+        await service.edit_op(
+            "acme-rest-1.2",
+            "GET:/api/v1/group-0/0",
+            tenant_id=tenant_id,
+            safety_level="dangerous",
+        )
+        == []
+    )
 
 
 # ---------------------------------------------------------------------------

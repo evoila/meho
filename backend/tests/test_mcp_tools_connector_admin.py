@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
@@ -50,6 +50,7 @@ from meho_backplane.operations.ingest import (
     ConnectorListItem,
     ConnectorReviewGroup,
     ConnectorReviewPayload,
+    EditOpWarning,
 )
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -64,7 +65,17 @@ from tests.mcp_test_fixtures import (
 
 
 class _FakeReviewService:
-    """Records every call + returns canned responses."""
+    """Records every call + returns canned responses.
+
+    ``edit_op_warnings`` is a class attribute so a test can
+    ``monkeypatch.setattr(_FakeReviewService, "edit_op_warnings", [...])``
+    *before* the handler constructs its instance mid-call (the
+    ``stubbed_services`` factory creates instances lazily, so there is
+    no instance to configure up-front). Default mirrors the real
+    service's clean path: no advisories.
+    """
+
+    edit_op_warnings: ClassVar[list[EditOpWarning]] = []
 
     def __init__(self, operator: Operator) -> None:
         self.operator = operator
@@ -114,10 +125,11 @@ class _FakeReviewService:
         connector_id: str,
         op_id: str,
         **kwargs: Any,
-    ) -> None:
+    ) -> list[EditOpWarning]:
         self.edit_op_calls.append(
             {"connector_id": connector_id, "op_id": op_id, **kwargs},
         )
+        return list(self.edit_op_warnings)
 
     async def enable_connector(self, connector_id: str, **_kwargs: Any) -> None:
         self.enable_calls.append(connector_id)
@@ -594,6 +606,55 @@ def test_call_meho_connector_edit_op_distinguishes_omitted_from_null(
     assert explicit_null_call["custom_description"] is None
     assert explicit_null_call["requires_approval"] is None
     assert explicit_null_call["is_enabled"] is None
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_meho_connector_edit_op_surfaces_enable_time_warnings(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``edit_op`` mirrors the REST ``warnings`` field (G0.23-T4 #1630).
+
+    The service layer's enable-time advisories must round-trip through
+    the MCP envelope as serialized dicts alongside ``ok: True`` — the
+    write landed, warnings or not (MCP↔REST parity).
+    """
+    client, _op = client_with_operator
+    warning = EditOpWarning(
+        code="unreplaced_auto_shim",
+        connector_class="AutoShim_acme_1_2_acme_rest",
+        message="register the per-product Connector subclass",
+    )
+    monkeypatch.setattr(_FakeReviewService, "edit_op_warnings", [warning])
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.edit_op",
+                "arguments": {
+                    "connector_id": "acme-rest-1.2",
+                    "op_id": "GET:/api/v1/group-0/0",
+                    "is_enabled": True,
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    payload = _unwrap_text_content(response.json())
+    assert payload == {
+        "connector_id": "acme-rest-1.2",
+        "op_id": "GET:/api/v1/group-0/0",
+        "ok": True,
+        "warnings": [warning.model_dump(mode="json")],
+    }
 
 
 @pytest.mark.parametrize(

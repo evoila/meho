@@ -125,7 +125,7 @@ jobs:
       RDC_DISPATCH_TOKEN: ${{ secrets.RDC_DISPATCH_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
       - name: Set up QEMU (arm64 emulation for cross-build)
         uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3  # v4.1.0
@@ -325,7 +325,7 @@ jobs:
         # scanning alerts. Requires `security-events: write` at the job or
         # workflow level — granted in the top-level permissions block.
         if: github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa  # v4.36.0
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
         with:
           sarif_file: trivy-results.sarif
           # Category disambiguates this run when other SARIF sources (e.g.

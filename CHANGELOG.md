@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `meho connector edit-op --enable` no longer reports a silent
+  `ok` on an op whose resolved connector is the unconfigured
+  spec-ingest `GenericRestConnector` auto-shim: the CLI prints
+  `warning (unreplaced_auto_shim): ...` to stderr naming the missing
+  per-product Connector subclass (and that re-ingesting the spec will
+  not replace the shim), the REST route returns the same advisory as
+  a structured `warnings[]` field, and the `meho.connector.edit_op`
+  MCP tool mirrors it — closing the dead-end remediation chain where
+  `composite_l2_disabled` pointed at an enable that succeeded and
+  then dispatch failed one layer deeper with `connector_unsupported`
+  / `cause=unreplaced_auto_shim` (#1627's dispatch-time error; this
+  is its proactive enable-time counterpart). The enable still
+  applies — warnings never block the write. **Wire change:** to
+  carry the advisory, `PATCH
+  /api/v1/connectors/{id}/operations/{op_id}` now returns `200` with
+  an `EditOpResponse` body (`{"warnings": [...]}`) instead of `204
+  No Content`. Migration: clients asserting `status == 204` accept
+  `200` (and may read `warnings`); clients generated from
+  `cli/api/openapi.json` regenerate against the refreshed snapshot —
+  the bundled `meho` CLI in this release already is. (#1630)
+
 ### Added
 
 - `Operator` now carries a `platform_admin: bool` flag, parsed from a
@@ -103,6 +126,40 @@ connector-related release-notes line.
   substrate a later cross-tenant authorization gate checks, so a
   `tenant_admin` is never mistaken for a platform operator on role rank
   alone (#1638).
+
+### Fixed
+
+- A failed park-time `proposed_effect` preview no longer degrades
+  silently to the identifier-only default: the parked approval now
+  carries `preview_unavailable: true` plus a `preview_error` reason
+  alongside the identifier fields (visible on REST
+  `GET /api/v1/approvals`, `meho.approvals.list` / `.get`, and `meho
+  approvals show`), so a four-eyes reviewer can tell "blast-radius
+  unknown" from a genuinely small action when a `vmware.composite.*`
+  preview's listing read cannot execute. The park itself still always
+  proceeds; successful previews are unchanged. (#1628)
+- A reduced result whose rows exceed the inline sample but could not be
+  spilled to the read-back store no longer fails silently: the handle's
+  `fetch_more.drill_in` now carries a machine-readable `reason`
+  (`no_tenant_context` / `result_store_unavailable`) next to a
+  reason-specific rationale, and every skipped spill logs a structured
+  `jsonflux_spill_skipped` warning. Diagnoses the RDC cycle-8
+  `k8s.logs tail=300` 5-of-300-sample finding — not a #1507 regression
+  and not a k8s.logs-shape gap (pinned by repro tests); see
+  `docs/codebase/result-spill.md` for the triage runbook. (#1629)
+- A connector raising `NotImplementedError` on dispatch now returns a
+  structured `connector_unsupported` error instead of the opaque
+  `connector_error: NotImplementedError` that buried the descriptive
+  raise-site message in `extras.exception_message`. The message is
+  promoted verbatim into the operator-facing `error` string and
+  `extras.detail`, and `extras.cause` distinguishes
+  `unsupported_feature` (e.g. a target `auth_model` the connector
+  doesn't support — fix the target config) from `unreplaced_auto_shim`
+  (the resolved connector is the spec-ingest auto-shim — register the
+  per-product Connector subclass), each with its remediation and doc
+  reference in the message. Reaches both the REST dispatch response
+  and the MCP `call_operation` tool, matching the `composite_l2_*`
+  envelope parity (#1627).
 
 ## [0.13.0] - 2026-06-11
 

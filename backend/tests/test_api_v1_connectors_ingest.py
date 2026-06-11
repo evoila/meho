@@ -81,6 +81,7 @@ from meho_backplane.operations.ingest import (
     build_op_id_collision_detail,
     build_unsupported_spec_detail,
     default_llm_client_factory,
+    ensure_connector_class_registered,
 )
 from meho_backplane.settings import get_settings
 
@@ -1569,7 +1570,9 @@ async def test_edit_op_updates_safety_level_and_writes_audit_row(
 
     Exercises the ``:path`` converter on the ``op_id`` segment so a
     colon-prefixed natural key (``"GET:/api/v1/group-0/0"``) survives
-    URL routing intact.
+    URL routing intact. Since G0.23-T4 (#1630) the route returns 200
+    with an ``EditOpResponse`` envelope (``warnings`` empty here — no
+    enable in the body, no advisory to carry).
     """
     tenant_a = uuid.uuid4()
     await _seed_connector(tenant_id=tenant_a)
@@ -1581,9 +1584,79 @@ async def test_edit_op_updates_safety_level_and_writes_audit_row(
             json={"safety_level": "dangerous", "requires_approval": True},
             headers=_authed(token),
         )
-    assert response.status_code == 204
+    assert response.status_code == 200
+    assert response.json() == {"warnings": []}
     audit_count = await _audit_row_count(op_id="meho.connector.edit_op")
     assert audit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_op_enable_on_auto_shim_connector_returns_structured_warning(
+    client: TestClient,
+) -> None:
+    """``is_enabled=true`` on a shim-backed op → 200 + ``unreplaced_auto_shim`` warning.
+
+    G0.23-T4 (#1630): the connector triple resolves to the synthesised
+    ``GenericRestConnector`` auto-shim, so dispatch is a guaranteed
+    ``connector_unsupported`` dead end — the REST response must carry
+    the structured advisory naming the missing per-product subclass
+    while the write itself still lands (audit row included).
+    """
+    tenant_a = uuid.uuid4()
+    assert ensure_connector_class_registered(
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        base_url=None,
+    ), "expected a fresh auto-shim registration for the acme triple"
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="acme",
+        version="1.2",
+        impl_id="acme-rest",
+        group_count=1,
+        ops_per_group=1,
+    )
+    key, token = _admin_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.patch(
+            "/api/v1/connectors/acme-rest-1.2/operations/GET:/api/v1/group-0/0",
+            json={"is_enabled": True},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["warnings"]) == 1
+    warning = body["warnings"][0]
+    assert warning["code"] == "unreplaced_auto_shim"
+    assert warning["connector_class"] == "AutoShim_acme_1_2_acme_rest"
+    assert "per-product Connector subclass" in warning["message"]
+    assert await _audit_row_count(op_id="meho.connector.edit_op") == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_op_enable_on_hand_rolled_connector_no_warning(
+    client: TestClient,
+) -> None:
+    """``is_enabled=true`` on a hand-rolled connector's op → 200 + empty warnings.
+
+    Regression guard for G0.23-T4 (#1630): ``vmware-rest-9.0``
+    resolves to ``VmwareRestConnector`` (priority 1, hand-rolled), so
+    enabling stays advisory-free.
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_a)
+    key, token = _admin_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.patch(
+            "/api/v1/connectors/vmware-rest-9.0/operations/GET:/api/v1/group-0/0",
+            json={"is_enabled": True},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+    assert response.json() == {"warnings": []}
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,7 @@ from meho_backplane.connectors.result_handle_store import (
     get_result_handle_store,
 )
 from meho_backplane.connectors.schemas import (
+    DrillInUnavailableReason,
     FetchMore,
     FetchMoreDrillIn,
     FetchMoreNativePagination,
@@ -82,13 +83,32 @@ _log = structlog.get_logger(__name__)
 #: prose every time) and so the tests can assert against a stable anchor.
 _RESULT_QUERY_TOOL = "result_query"
 
-_DRILL_IN_UNAVAILABLE_RATIONALE: str = (
-    "The full result set was not spilled to the read-back store for this "
-    "handle (the spill backend was unreachable, or this op did not run "
-    "through a tenant-scoped dispatch). To act on more than the sample, "
-    "re-call the operation with narrower params (see ``native_pagination`` "
-    "below)."
+#: Shared workaround tail for every no-spill rationale: whatever the
+#: cause, the recovery the agent can act on is the same.
+_DRILL_IN_WORKAROUND = (
+    "To act on more than the sample, re-call the operation with narrower "
+    "params (see ``native_pagination`` below)."
 )
+
+#: Per-reason rationale for the ``available=False`` drill-in branch
+#: (#1629). Keyed by the machine-readable
+#: :data:`~meho_backplane.connectors.schemas.DrillInUnavailableReason`
+#: that ships alongside it, so the prose and the ``reason`` field can
+#: never drift apart. Before #1629 a single ambiguous string named both
+#: causes at once and the operator could not tell which one fired.
+_DRILL_IN_UNAVAILABLE_RATIONALES: dict[DrillInUnavailableReason, str] = {
+    "no_tenant_context": (
+        "The full result set was not spilled to the read-back store for "
+        "this handle: the reduce ran without a usable tenant context "
+        "(``tenant_id`` / ``operator_sub``), so the rows could not be "
+        f"keyed to a tenant. {_DRILL_IN_WORKAROUND}"
+    ),
+    "result_store_unavailable": (
+        "The full result set was not spilled to the read-back store for "
+        "this handle: the result store did not persist the rows (backend "
+        f"unreachable, write rejected, or disabled). {_DRILL_IN_WORKAROUND}"
+    ),
+}
 
 
 def _drill_in_available_rationale(handle_id: UUID, stored_rows: int, total_rows: int) -> str:
@@ -215,6 +235,22 @@ class _MaterializedSet:
     full_rows: list[dict[str, Any]]
 
 
+@dataclass(frozen=True, slots=True)
+class _SpillOutcome:
+    """What :meth:`JsonFluxReducer._spill` reports back to the assembler.
+
+    Exactly one of the two fields is set: ``stored_rows`` (the spill
+    succeeded; how many rows are retrievable via ``result_query``) or
+    ``skip_reason`` (the spill was skipped or failed; the
+    machine-readable cause the drill-in branch surfaces, #1629). The
+    pre-#1629 shape was a bare ``int | None`` whose ``None`` collapsed
+    every distinct skip cause into one indistinguishable state.
+    """
+
+    stored_rows: int | None = None
+    skip_reason: DrillInUnavailableReason | None = None
+
+
 class JsonFluxReducer:
     """Materialize large set-shaped payloads; pass small ones through.
 
@@ -275,7 +311,9 @@ class JsonFluxReducer:
         the ``result_query`` MCP tool an agent can call to page beyond the
         inline sample. A spill that is skipped or fails (no tenant in
         context, store unreachable) leaves ``drill_in.available=False`` --
-        the inline sample still ships, exactly as before this Task.
+        the inline sample still ships, and (#1629) the branch carries a
+        machine-readable ``reason`` naming which skip fired so the
+        reduced-but-unspilled response is self-explanatory.
         """
         del schema  # schema is inferred from the registered table
 
@@ -289,8 +327,8 @@ class JsonFluxReducer:
             return payload, None
 
         materialized = self._materialize(rows, context)
-        spilled_rows = await self._spill(materialized, context)
-        return self._assemble(materialized, envelope_key, context, spilled_rows)
+        spill_outcome = await self._spill(materialized, context)
+        return self._assemble(materialized, envelope_key, context, spill_outcome)
 
     def _over_threshold(self, rows: list[Any], payload: Any) -> bool:
         """True when *rows* exceeds the row OR byte threshold.
@@ -353,27 +391,41 @@ class JsonFluxReducer:
         self,
         materialized: _MaterializedSet,
         context: dict[str, Any] | None,
-    ) -> int | None:
+    ) -> _SpillOutcome:
         """Persist the full materialized rows to the read-back store.
 
-        Returns the number of rows actually stored (so :meth:`_assemble`
-        can build the drill-in rationale and flag a capped tail), or
-        ``None`` when the spill was skipped or failed: no ``tenant_id`` /
-        ``operator_sub`` in context (e.g. a non-dispatch reduce), or the
-        store rejected/could-not-store the rows. The reducer never raises
+        Returns a :class:`_SpillOutcome`: ``stored_rows`` when the rows
+        were persisted (so :meth:`_assemble` can build the drill-in
+        rationale and flag a capped tail), or ``skip_reason`` when the
+        spill was skipped or failed -- ``no_tenant_context`` for a reduce
+        without a usable ``tenant_id`` / ``operator_sub`` pair (e.g. a
+        non-dispatch reduce), ``result_store_unavailable`` when the store
+        rejected or could not persist the rows. The reducer never raises
         from here -- the store itself is fail-open, and a missing tenant
-        is a skip, not an error.
+        is a skip, not an error. Every skip logs a structured
+        ``jsonflux_spill_skipped`` warning (#1629): the tenant-context
+        skip used to be fully silent, which left the RDC cycle-8
+        ``k8s.logs tail=300`` diagnosis with nothing to grep for.
         """
-        if not context:
-            return None
-        tenant_raw = context.get("tenant_id")
-        operator_sub = context.get("operator_sub")
+        tenant_raw = context.get("tenant_id") if context else None
+        operator_sub = context.get("operator_sub") if context else None
         if not tenant_raw or not operator_sub:
-            return None
+            return self._skip(
+                "no_tenant_context",
+                materialized,
+                context,
+                has_tenant_id=bool(tenant_raw),
+                has_operator_sub=bool(operator_sub),
+            )
         try:
             tenant_id = UUID(str(tenant_raw))
         except (ValueError, TypeError):
-            return None
+            return self._skip(
+                "no_tenant_context",
+                materialized,
+                context,
+                tenant_id_malformed=True,
+            )
 
         store = self._store if self._store is not None else get_result_handle_store()
         max_rows = (
@@ -385,36 +437,62 @@ class JsonFluxReducer:
             tenant_id=tenant_id,
             operator_sub=str(operator_sub),
             handle_id=materialized.handle_id,
-            op_id=context.get("op_id"),
+            op_id=context.get("op_id") if context else None,
             rows=materialized.full_rows,
             total_rows=materialized.total_rows,
             ttl_seconds=self._ttl_seconds,
             max_rows=max_rows,
         )
         if not stored:
-            return None
-        return min(materialized.total_rows, max_rows)
+            return self._skip("result_store_unavailable", materialized, context)
+        return _SpillOutcome(stored_rows=min(materialized.total_rows, max_rows))
+
+    @staticmethod
+    def _skip(
+        reason: DrillInUnavailableReason,
+        materialized: _MaterializedSet,
+        context: dict[str, Any] | None,
+        **detail: bool,
+    ) -> _SpillOutcome:
+        """Log a structured skip and return the no-spill outcome.
+
+        One event name (``jsonflux_spill_skipped``) for every branch so
+        operators triaging a reduced-but-unspilled response have a single
+        thing to grep; ``reason`` carries the same machine-readable value
+        the response's ``drill_in.reason`` ships, and *detail* adds
+        boolean breadcrumbs (which context key was absent / malformed)
+        without leaking identity values into logs.
+        """
+        _log.warning(
+            "jsonflux_spill_skipped",
+            reason=reason,
+            op_id=context.get("op_id") if context else None,
+            handle_id=str(materialized.handle_id),
+            total_rows=materialized.total_rows,
+            **detail,
+        )
+        return _SpillOutcome(skip_reason=reason)
 
     def _assemble(
         self,
         materialized: _MaterializedSet,
         envelope_key: str | None,
         context: dict[str, Any] | None,
-        spilled_rows: int | None,
+        spill_outcome: _SpillOutcome,
     ) -> tuple[dict[str, Any], ResultHandle]:
         """Build the inline summary + the :class:`ResultHandle`.
 
-        ``spilled_rows`` is the count :meth:`_spill` persisted (``None``
-        when nothing was spilled); it decides whether the handle's
-        drill-in branch is ``available=True`` (pointing at
-        ``result_query``) or stays on the unavailable workaround branch.
+        ``spill_outcome`` carries either the count :meth:`_spill`
+        persisted -- the handle's drill-in branch flips to
+        ``available=True`` pointing at ``result_query`` -- or the skip
+        reason the unavailable branch surfaces verbatim (#1629).
         """
         total_rows = materialized.total_rows
         fetch_more = _build_fetch_more(
             context,
             handle_id=materialized.handle_id,
             total_rows=total_rows,
-            spilled_rows=spilled_rows,
+            spill_outcome=spill_outcome,
             ttl_seconds=self._ttl_seconds,
         )
         sample_rows = materialized.sample_rows
@@ -595,7 +673,7 @@ def _build_fetch_more(
     *,
     handle_id: UUID,
     total_rows: int,
-    spilled_rows: int | None,
+    spill_outcome: _SpillOutcome,
     ttl_seconds: int,
 ) -> FetchMore:
     """Build the :class:`FetchMore` envelope from the reducer's *context*.
@@ -606,13 +684,14 @@ def _build_fetch_more(
     branches:
 
     * ``drill_in`` reflects whether the full set was spilled to the
-      read-back store. When ``spilled_rows`` is not ``None`` (the spill
-      succeeded), ``available=True`` and the envelope names the
-      ``result_query`` MCP tool, a ready-to-adapt ``example_call``, and
-      the handle's ``expires_at`` so an agent can page beyond the inline
-      sample without a discovery dance. When the spill was skipped or
-      failed, ``available=False`` and the rationale surfaces the
-      narrower-params workaround verbatim.
+      read-back store. When ``spill_outcome.stored_rows`` is not ``None``
+      (the spill succeeded), ``available=True`` and the envelope names
+      the ``result_query`` MCP tool, a ready-to-adapt ``example_call``,
+      and the handle's ``expires_at`` so an agent can page beyond the
+      inline sample without a discovery dance. When the spill was skipped
+      or failed, ``available=False`` and the branch carries the
+      machine-readable ``reason`` plus a reason-specific rationale ending
+      in the narrower-params workaround (#1629).
     * ``native_pagination`` is populated from the op's
       :class:`PaginationHint` (registered under
       ``llm_instructions.pagination_hint`` and threaded through the
@@ -636,7 +715,7 @@ def _build_fetch_more(
     drill_in = _build_drill_in(
         handle_id=handle_id,
         total_rows=total_rows,
-        spilled_rows=spilled_rows,
+        spill_outcome=spill_outcome,
         ttl_seconds=ttl_seconds,
     )
     native = _native_pagination_from_context(context)
@@ -647,25 +726,33 @@ def _build_drill_in(
     *,
     handle_id: UUID,
     total_rows: int,
-    spilled_rows: int | None,
+    spill_outcome: _SpillOutcome,
     ttl_seconds: int,
 ) -> FetchMoreDrillIn:
     """Build the drill-in branch: available when the set was spilled.
 
-    ``spilled_rows is None`` -> the spill was skipped or failed, so the
-    branch is ``available=False`` with the narrower-params workaround.
-    Otherwise the branch names the ``result_query`` tool, a first-page
-    ``example_call``, and the handle's ``expires_at`` (now + the spill
-    TTL).
+    ``spill_outcome.stored_rows is None`` -> the spill was skipped or
+    failed, so the branch is ``available=False`` carrying the outcome's
+    machine-readable ``skip_reason`` and the matching reason-specific
+    rationale (#1629) -- a reduced result whose rows exceed the inline
+    sample now states *why* it cannot be paged instead of silently
+    returning an N-of-M sample. Otherwise the branch names the
+    ``result_query`` tool, a first-page ``example_call``, and the
+    handle's ``expires_at`` (now + the spill TTL).
     """
-    if spilled_rows is None:
+    if spill_outcome.stored_rows is None:
+        # ``_spill`` always sets ``skip_reason`` on the no-spill path; the
+        # fallback covers a hand-built outcome and picks the value that
+        # stays factually true in that state (nothing is retrievable).
+        reason: DrillInUnavailableReason = spill_outcome.skip_reason or "result_store_unavailable"
         return FetchMoreDrillIn(
             available=False,
-            rationale=_DRILL_IN_UNAVAILABLE_RATIONALE,
+            rationale=_DRILL_IN_UNAVAILABLE_RATIONALES[reason],
+            reason=reason,
         )
     return FetchMoreDrillIn(
         available=True,
-        rationale=_drill_in_available_rationale(handle_id, spilled_rows, total_rows),
+        rationale=_drill_in_available_rationale(handle_id, spill_outcome.stored_rows, total_rows),
         mcp_tool=_RESULT_QUERY_TOOL,
         example_call={
             "tool": _RESULT_QUERY_TOOL,

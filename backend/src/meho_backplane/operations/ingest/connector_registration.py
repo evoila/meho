@@ -50,6 +50,7 @@ listing renders the synthesised class with a recognisable origin).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -73,6 +74,7 @@ __all__ = [
     "check_version_covered_by_registered_class",
     "derive_supported_version_range",
     "ensure_connector_class_registered",
+    "resolved_auto_shim_class",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -519,3 +521,78 @@ def check_version_covered_by_registered_class(
         accepted_by_cls=accepted_by[2],
         accepted_by_range=accepted_by[3],
     )
+
+
+@dataclass(frozen=True)
+class _EnableTimeTarget:
+    """Minimal duck-typed target for the enable-time resolver replay.
+
+    :func:`~meho_backplane.connectors.resolver.resolve_connector` reads
+    ``product`` / ``fingerprint`` / ``version`` / ``preferred_impl_id``
+    off the target via ``getattr``. At enable time there is no real
+    :class:`~meho_backplane.db.models.Target` row in play, so the op's
+    own ``version`` label stands in for the fingerprinted version
+    (``fingerprint=None`` makes the resolver fall back to
+    ``target.version``) and no operator preference participates.
+    """
+
+    product: str
+    version: str
+    fingerprint: None = None
+    preferred_impl_id: None = None
+
+
+def resolved_auto_shim_class(*, product: str, version: str) -> str | None:
+    """Return the auto-shim class name dispatch would resolve to, or ``None``.
+
+    G0.23-T4 (#1630). Enable-time counterpart of the dispatch-time
+    ``connector_unsupported`` / ``cause='unreplaced_auto_shim'``
+    classification (G0.23-T1 #1627): ``is_enabled=True`` on an op
+    whose dispatch is guaranteed to land on an unconfigured
+    :class:`GenericRestConnector` shim is a dead end, and
+    ``ReviewService.edit_op`` attaches an advisory naming the missing
+    per-product subclass when this helper returns a class name.
+
+    The check replays the production resolver
+    (:func:`~meho_backplane.connectors.resolver.resolve_connector`)
+    against a synthetic target carrying the op's ``(product,
+    version)`` — the same tie-break ladder dispatch runs, so a
+    hand-rolled subclass that would outrank the shim (more specific
+    range, higher priority) suppresses the warning exactly when
+    dispatch would route around the shim. The op's ``version`` label
+    proxies for the target's fingerprinted version; per-target state
+    (probe result, ``preferred_impl_id``) is unknowable at enable
+    time, which is why this stays advisory. ``impl_id`` deliberately
+    does not participate — the resolver routes by ``(product,
+    version)`` and reads ``impl_id`` only via
+    ``target.preferred_impl_id``.
+
+    Fail-soft: resolver misses (:exc:`NoMatchingConnector`, e.g. an
+    unparseable version label) and ties
+    (:exc:`AmbiguousConnectorResolution`) return ``None`` — a warning
+    probe must never break the enable write it decorates. Returns the
+    resolved class's ``__name__`` only when it is a
+    :class:`GenericRestConnector` subclass (the ``AutoShim_*`` shape).
+    """
+    # Call-time import mirrors ensure_connector_class_registered's
+    # deferred registry import: keep the resolver edge off this
+    # subpackage's module-import graph.
+    from meho_backplane.connectors.resolver import (
+        AmbiguousConnectorResolution,
+        NoMatchingConnector,
+        resolve_connector,
+    )
+
+    try:
+        cls = resolve_connector(_EnableTimeTarget(product=product, version=version))
+    except (NoMatchingConnector, AmbiguousConnectorResolution) as exc:
+        _log.debug(
+            "edit_op_auto_shim_probe_unresolved",
+            product=product,
+            version=version,
+            reason=type(exc).__name__,
+        )
+        return None
+    if issubclass(cls, GenericRestConnector):
+        return cls.__name__
+    return None

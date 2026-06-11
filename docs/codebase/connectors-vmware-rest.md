@@ -408,10 +408,18 @@ never mutate vSphere state. This mirrors how the k8s.apply dry-run
 (#1437), the argocd snapshot reads (#1452), and the vault capability
 probe (#1504) run their preview I/O — connector-level, un-dispatched.
 
-Everything is fail-soft: a builder that declines or raises (vCenter
-unreachable, listing op not ingested yet) degrades the row to the
-identifier-only default and the park always proceeds. The 5 read
-composites register no builder — they never park.
+Everything is fail-soft — the park always proceeds — but a decline and
+a failure degrade differently (#1628): a builder that *declines*
+(malformed params) parks with the identifier-only default, while a
+builder that *raises* (vCenter unreachable, listing op not ingested
+yet, the L2 read can't execute on this deploy) parks with the
+identifier fields **plus** `preview_unavailable: true` and a
+`preview_error` reason naming the failed read. The marker rides through
+every reviewer surface that renders `proposed_effect` verbatim (REST
+`GET /api/v1/approvals`, `meho.approvals.list` / `.get`, `meho
+approvals show`), so "blast-radius unknown" is distinguishable from a
+genuinely small action. The 5 read composites register no builder —
+they never park.
 
 ## Dependencies
 

@@ -381,6 +381,28 @@ subclass that adds the auth path. The shim makes the connector
 resolvable through the v2 registry so spec ingestion can proceed
 before the per-product Initiative work lands.
 
+Two operator-facing surfaces flag an unreplaced shim:
+
+* **Dispatch-time** (G0.23-T1 #1627) — the shim's
+  `NotImplementedError` maps to the structured
+  `connector_unsupported` error with
+  `extras.cause='unreplaced_auto_shim'` (see
+  `docs/codebase/error-message-shape.md`).
+* **Enable-time** (G0.23-T4 #1630) — `ReviewService.edit_op` with
+  `is_enabled=True` probes `resolved_auto_shim_class()` (same
+  module): a resolver replay against the op's `(product, version)`
+  label that returns the winning class's name when the production
+  tie-break ladder would still land on a `GenericRestConnector`
+  subclass. The PATCH `…/operations/{op_id}` route then returns 200
+  with `warnings=[{code='unreplaced_auto_shim', connector_class,
+  message}]` (it returned 204 before #1630), the
+  `meho.connector.edit_op` MCP tool mirrors the same `warnings`
+  list, and `meho connector edit-op --enable` prints
+  `warning (unreplaced_auto_shim): …` to stderr. Advisory only —
+  the flag is still set (a shim-backed op may be pre-enabled ahead
+  of its subclass landing), and resolver misses/ties fail soft to
+  "no warning" rather than blocking the write.
+
 ### `check_version_covered_by_registered_class()` (`ingest/connector_registration.py`)
 
 G0.9-T9 (#741) pre-flight that the operator's `version` label is

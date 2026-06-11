@@ -205,7 +205,7 @@
           "retrieval"
         ],
         "summary": "Usage Endpoint",
-        "description": "Return audit-backed retrieval usage aggregates for *operator*.\n\nTenant scoping: ``operator`` / ``read_only`` callers are scoped\nto ``operator.tenant_id``; passing a non-null ``tenant_filter``\nreturns 403. Only ``tenant_admin`` may cross tenants. *since*\naccepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;\nmalformed \u2192 400. ``surface=all`` (default) covers all three;\n``surface=<one>`` narrows. Empty result is a structured zero\nreport, not 404. Audit overrides + enrichment contextvars are\nbound before :func:`compute_usage` runs so a handler exception\nstill produces an audit row with partial payload.",
+        "description": "Return audit-backed retrieval usage aggregates for *operator*.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638). *since*\naccepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;\nmalformed \u2192 400. ``surface=all`` (default) covers all three;\n``surface=<one>`` narrows. Empty result is a structured zero\nreport, not 404. Audit overrides + enrichment contextvars are\nbound before :func:`compute_usage` runs so a handler exception\nstill produces an audit row with partial payload.",
         "operationId": "usage_endpoint_api_v1_retrieve_usage_get",
         "parameters": [
           {
@@ -344,7 +344,7 @@
           "retrieval"
         ],
         "summary": "Retire Checklist Endpoint",
-        "description": "Return the five-criterion retire-decision checklist per surface.\n\nTenant scoping mirrors the sibling usage route:\n``operator`` / ``read_only`` callers are scoped to\n``operator.tenant_id``; passing a non-null ``tenant_filter`` query\nparameter returns 403. Only ``tenant_admin`` may cross tenants.\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
+        "description": "Return the five-criterion retire-decision checklist per surface.\n\nTenant scoping mirrors the sibling usage route:\nCallers are scoped to ``operator.tenant_id``; a ``tenant_filter``\nquery parameter naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638).\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
         "operationId": "retire_checklist_endpoint_api_v1_retrieve_retire_checklist_post",
         "parameters": [
           {
@@ -6214,7 +6214,7 @@
           "scheduler"
         ],
         "summary": "List Triggers",
-        "description": "List scheduled triggers for the operator's tenant, newest-first.\n\nTenant scoping: ``operator`` / ``read_only`` callers are scoped to\n``operator.tenant_id`` and any non-null ``tenant_filter`` returns\n403. Only ``tenant_admin`` may cross tenants.",
+        "description": "List scheduled triggers for the operator's tenant, newest-first.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a *different* tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability. Passing one's own tenant\nid (or omitting the filter) is always allowed.",
         "operationId": "list_triggers_api_v1_scheduler_triggers_get",
         "parameters": [
           {

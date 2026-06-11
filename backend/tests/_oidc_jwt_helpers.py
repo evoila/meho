@@ -74,6 +74,7 @@ def mint_token(
     tenant_role: str = DEFAULT_TENANT_ROLE,
     audience: str | None = None,
     capabilities: list[str] | None = None,
+    platform_admin: bool | None = None,
 ) -> str:
     """Mint a happy-path JWT signed by *private_key*.
 
@@ -112,6 +113,8 @@ def mint_token(
             payload["email"] = email
         if capabilities is not None:
             payload["capabilities"] = capabilities
+        if platform_admin is not None:
+            payload["platform_admin"] = platform_admin
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}
         token: bytes | str = jwt.encode(header, payload, private_key)
         return token.decode("ascii") if isinstance(token, bytes) else token

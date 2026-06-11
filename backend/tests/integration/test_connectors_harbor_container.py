@@ -305,6 +305,7 @@ class _HarborTarget:
 
     def __post_init__(self) -> None:
         self.id = uuid.uuid4()
+        self.tenant_id = uuid.uuid4()
         self.preferred_impl_id: str | None = None
 
         class _FP:

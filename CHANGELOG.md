@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- `Operator` now carries a `platform_admin: bool` flag, parsed from a
+  configurable JWT claim (`JWT_PLATFORM_ADMIN_CLAIM_NAME`, default
+  `platform_admin`) and defaulting to `False` when the claim is absent or
+  malformed. The flag is **orthogonal** to `TenantRole` (which is scoped
+  *within* a tenant) and marks a genuine cross-tenant *platform*
+  operator. It is fail-closed — every existing token, and every agent /
+  service principal, materialises as non-platform-admin unless a realm
+  explicitly grants the claim — and no surface consumes it yet: it is the
+  substrate a later cross-tenant authorization gate checks, so a
+  `tenant_admin` is never mistaken for a platform operator on role rank
+  alone (#1638).
+
 ## [0.13.0] - 2026-06-11
 
 ### Added

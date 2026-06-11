@@ -101,6 +101,15 @@ connector-related release-notes line.
   unknown" from a genuinely small action when a `vmware.composite.*`
   preview's listing read cannot execute. The park itself still always
   proceeds; successful previews are unchanged. (#1628)
+- A reduced result whose rows exceed the inline sample but could not be
+  spilled to the read-back store no longer fails silently: the handle's
+  `fetch_more.drill_in` now carries a machine-readable `reason`
+  (`no_tenant_context` / `result_store_unavailable`) next to a
+  reason-specific rationale, and every skipped spill logs a structured
+  `jsonflux_spill_skipped` warning. Diagnoses the RDC cycle-8
+  `k8s.logs tail=300` 5-of-300-sample finding — not a #1507 regression
+  and not a k8s.logs-shape gap (pinned by repro tests); see
+  `docs/codebase/result-spill.md` for the triage runbook. (#1629)
 
 ## [0.13.0] - 2026-06-11
 

@@ -599,8 +599,10 @@ async def test_handle_carries_fetch_more_unavailable_branches_without_context() 
     )
     # The unavailable branch names the narrower-params workaround (G0.20-T7
     # #1507: no spill happened because there is no tenant in the bare
-    # reduce context), and leaves the available-only fields empty.
+    # reduce context), carries the machine-readable reason (#1629), and
+    # leaves the available-only fields empty.
     assert "narrower" in handle.fetch_more.drill_in.rationale.lower()
+    assert handle.fetch_more.drill_in.reason == "no_tenant_context"
     assert handle.fetch_more.drill_in.mcp_tool is None
     assert handle.fetch_more.drill_in.example_call is None
     assert handle.fetch_more.drill_in.expires_at is None
@@ -767,6 +769,7 @@ async def test_reduce_spills_full_rows_and_flips_drill_in_available() -> None:
 
     drill_in = handle.fetch_more.drill_in
     assert drill_in.available is True
+    assert drill_in.reason is None, "#1629: the reason field is no-spill-only"
     assert drill_in.mcp_tool == "result_query"
     assert drill_in.example_call is not None
     assert drill_in.example_call["tool"] == "result_query"
@@ -780,7 +783,8 @@ async def test_reduce_without_tenant_skips_spill_and_stays_unavailable() -> None
 
     A non-dispatch reduce (or an operator with no tenant) cannot key the
     spill, so the store is untouched and the handle keeps the
-    narrower-params workaround branch — exactly the pre-#1507 behaviour.
+    narrower-params workaround branch — exactly the pre-#1507 behaviour,
+    now with the explicit ``no_tenant_context`` reason (#1629).
     """
     store = _FakeStore()
     reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
@@ -793,7 +797,66 @@ async def test_reduce_without_tenant_skips_spill_and_stays_unavailable() -> None
     assert handle is not None
     assert store.spills == []
     assert handle.fetch_more.drill_in.available is False
+    assert handle.fetch_more.drill_in.reason == "no_tenant_context"
     assert handle.fetch_more.drill_in.mcp_tool is None
+
+
+async def test_reduce_with_malformed_tenant_id_reports_no_tenant_context() -> None:
+    """A tenant_id that does not parse as a UUID is unusable context (#1629).
+
+    The spill cannot be keyed, so the store stays untouched and the
+    drill-in branch carries the same ``no_tenant_context`` reason as the
+    absent-tenant case — the operator-facing taxonomy stays two-valued.
+    """
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    rows = [{"id": f"seg-{i}"} for i in range(60)]
+    context = {"op_id": "x", "operator_sub": "op-a", "tenant_id": "not-a-uuid"}
+
+    _reduced, handle = await reducer.reduce({"results": rows}, None, context)
+
+    assert handle is not None
+    assert store.spills == []
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is False
+    assert drill_in.reason == "no_tenant_context"
+
+
+async def test_reduce_store_rejection_reports_result_store_unavailable() -> None:
+    """A store that cannot persist the rows yields the store reason (#1629).
+
+    The Valkey-backed store is fail-open: ``spill`` returns ``False`` on
+    an unreachable backend / rejected write instead of raising. The
+    reduce must still ship the inline sample, and the drill-in branch
+    must say *why* paging is unavailable — ``result_store_unavailable``,
+    not the ambiguous catch-all the RDC cycle-8 ``k8s.logs tail=300``
+    operators hit.
+    """
+
+    class _DownStore:
+        async def spill(self, **_kwargs: Any) -> bool:
+            return False
+
+    reducer = JsonFluxReducer(sample_size=5, store=_DownStore(), max_spill_rows=10000)
+    rows = [{"id": f"seg-{i}"} for i in range(60)]
+    context = {
+        "op_id": "k8s.logs",
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+    }
+
+    reduced, handle = await reducer.reduce({"results": rows}, None, context)
+
+    assert handle is not None
+    assert reduced["row_count"] == 60
+    assert len(reduced["sample"]) == 5, "the inline sample must still ship"
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is False
+    assert drill_in.reason == "result_store_unavailable"
+    assert "store" in drill_in.rationale.lower()
+    assert "narrower" in drill_in.rationale.lower()
+    assert drill_in.mcp_tool is None
+    assert drill_in.example_call is None
 
 
 async def test_reduce_spill_capped_reports_truncated_tail() -> None:
@@ -816,6 +879,103 @@ async def test_reduce_spill_capped_reports_truncated_tail() -> None:
     # The rationale flags that only the first 40 of 60 rows are retrievable.
     assert "40" in drill_in.rationale
     assert "60" in drill_in.rationale
+
+
+# ---------------------------------------------------------------------------
+# #1629 — k8s.logs tail=300 diagnosis repro (RDC cycle-8, reported as a
+# #1507 regression; attribution disproved here)
+# ---------------------------------------------------------------------------
+
+
+def _k8s_logs_payload(line_count: int) -> dict[str, Any]:
+    """The exact response shape ``k8s_logs`` returns for ``tail=N``.
+
+    A flat dict whose ``lines`` list sits NEXT TO scalar keys — none of
+    the reducer's priority envelope keys (``value`` / ``results`` / ...)
+    match, so collection detection must fall through to the
+    largest-list branch and report ``source_key="lines"``, exactly what
+    the RDC cycle-8 consumer saw.
+    """
+    return {
+        "pod": "argocd-server-7d8f9c-x2x9z",
+        "namespace": "argocd",
+        "container": "argocd-server",
+        "lines": [f"2026-05-31T10:00:{i % 60:02d} log line {i}" for i in range(line_count)],
+        "truncated": False,
+    }
+
+
+async def test_k8s_logs_shape_with_tenant_context_spills_and_pages() -> None:
+    """The consumer's ``tail=300`` repro against a healthy store: NO shape gap.
+
+    Diagnosis evidence for #1629 acceptance criterion 1: the full
+    ``k8s.logs`` response shape (scalar siblings + a 300-element
+    ``lines`` list + the tail ordering hint) reduces, spills, and flips
+    drill-in available under a tenant-scoped context. The #1507 spill
+    infrastructure handles the k8s.logs shape correctly — the RDC
+    cycle-8 ``handle: null`` cannot be a k8s.logs-shape gap, leaving a
+    runtime skip (store or context) as the only candidates, both of
+    which now self-identify via ``drill_in.reason``.
+    """
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    context = {
+        "op_id": "k8s.logs",
+        "operator_sub": "rdc-operator",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+        "result_ordering": {"sample": "tail"},
+    }
+
+    reduced, handle = await reducer.reduce(_k8s_logs_payload(300), None, context)
+
+    assert handle is not None, "a reducing k8s.logs response always mints a handle"
+    assert reduced["row_count"] == 300
+    assert reduced["total"] == 300
+    assert reduced["source_key"] == "lines"
+    assert len(reduced["sample"]) == 5
+    # Tail ordering: the sample is the five most-recent lines.
+    assert reduced["sample"][-1]["value"].endswith("log line 299")
+    # The full 300 rows were spilled and the drill-in teaches the page-back.
+    assert len(store.spills) == 1
+    assert store.spills[0]["stored_rows"] == 300
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is True
+    assert drill_in.reason is None
+    assert drill_in.mcp_tool == "result_query"
+
+
+async def test_k8s_logs_shape_store_down_states_the_reason() -> None:
+    """The hardened #1629 envelope for the consumer's actual failure mode.
+
+    Same ``tail=300`` payload, but the spill store cannot persist —
+    the only no-spill branch reachable on a real authenticated dispatch
+    (``Operator.tenant_id`` / ``sub`` are required fields, so the
+    tenant-context branch cannot fire there). The 5-of-300 sample still
+    ships, and the response now says *why* it cannot be paged instead
+    of silently omitting the read-back route.
+    """
+
+    class _DownStore:
+        async def spill(self, **_kwargs: Any) -> bool:
+            return False
+
+    reducer = JsonFluxReducer(sample_size=5, store=_DownStore(), max_spill_rows=10000)
+    context = {
+        "op_id": "k8s.logs",
+        "operator_sub": "rdc-operator",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+        "result_ordering": {"sample": "tail"},
+    }
+
+    reduced, handle = await reducer.reduce(_k8s_logs_payload(300), None, context)
+
+    assert handle is not None
+    assert reduced["row_count"] == 300
+    assert len(reduced["sample"]) == 5
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is False
+    assert drill_in.reason == "result_store_unavailable"
+    assert "store" in drill_in.rationale.lower()
 
 
 async def _set_shaped_handler(

@@ -204,6 +204,24 @@ connector-related release-notes line.
   reference in the message. Reaches both the REST dispatch response
   and the MCP `call_operation` tool, matching the `composite_l2_*`
   envelope parity (#1627).
+- An upstream **403 Forbidden** on a write dispatch (e.g. a gh-rest
+  `POST /repos/{owner}/{repo}/issues` whose backing GitHub App has
+  `issues: read` but not `issues: write`) now returns a structured
+  `connector_http_403` error instead of the opaque `connector_error:
+  HTTPStatusError` that surfaced only httpx's status line and buried
+  GitHub's actionable 403 (the body message + the
+  `X-Accepted-GitHub-Permissions` / `x-oauth-scopes` headers) in
+  `extras.exception_message`. The operator-facing `error` names the
+  likely insufficient-permission cause **connector-agnostically** (the
+  credential authenticated but may lack the op's required scope — a
+  target-credential matter, not a meho transport fault), and `extras`
+  carries `http_status: 403`, the upstream `upstream_message`, and any
+  GitHub permission headers (`permission_headers`) the upstream sent.
+  Scoped to 403 — every other `HTTPStatusError` status still flattens to
+  `connector_error` unchanged. Extends #1627's dispatch structured-cause
+  pattern to the transport-error sibling; reaches both the REST dispatch
+  response and the MCP `call_operation` tool
+  (`claude-rdc-hetzner-dc#1138`) (#1649).
 
 ## [0.13.0] - 2026-06-11
 

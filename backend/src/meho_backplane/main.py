@@ -223,6 +223,40 @@ def _assert_mcp_resource_uri_configured() -> None:
         raise RuntimeError(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
 
 
+def _advise_vault_tenant_scope_unenforced() -> None:
+    """Emit a one-time startup advisory when the Vault tenant-scope guard is off.
+
+    The application-layer ``vault.kv.*`` tenant-scope guard (#1643) is
+    **opt-in** and **default-off** (``VAULT_KV_TENANT_SCOPE_PREFIX=""``),
+    because the shipped Vault layout scopes secrets per operator ``sub``
+    rather than per tenant, so a hard tenant prefix would deny every
+    existing call. The consequence is silent: an operator running a
+    **tenant-partitioned** Vault gets no signal that the guard is a no-op
+    and cross-tenant ``vault.kv.*`` isolation is therefore unenforced at
+    the app layer (the empty-prefix branch of
+    :func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`).
+
+    This logs **one** structured advisory at startup naming the env var
+    that enables the guard. It is purely observability — it does **not**
+    change dispatch behaviour or flip the default; whether to enable the
+    prefix (and migrate the Vault layout) is an explicit human/infra
+    decision, documented under "Choosing a layout" in
+    ``docs/codebase/connectors-vault-tenant-scope.md``. A deploy that
+    relies solely on the per-``sub`` Vault policy can ignore the line; a
+    tenant-partitioned deploy treats it as the cue to set the prefix.
+
+    Mirrors the loud-but-non-fatal advisory shape the rest of the
+    lifespan uses (e.g. :func:`_preload_embedding_model`): a single
+    ``structlog`` event, no f-strings, no raise.
+    """
+    if not get_settings().vault_kv_tenant_scope_prefix:
+        structlog.get_logger().warning(
+            "vault_tenant_scope_unenforced",
+            enable_via="VAULT_KV_TENANT_SCOPE_PREFIX",
+            doc="docs/codebase/connectors-vault-tenant-scope.md",
+        )
+
+
 async def _run_lifespan_shutdown() -> None:
     """Dispose every long-lived resource the lifespan opened.
 
@@ -269,9 +303,9 @@ async def _run_lifespan_startup() -> None:
        ``register_*`` calls run before the first request arrives.
     5. Typed-op registrars run **after** connector discovery (the
        registrars are appended during the import pass).
-    6. MCP audience guard last — the eager-init failures above raise
-       before this, so the guard's CrashLoopBackOff carries the
-       MCP-audience message, not a stale earlier failure.
+    6. MCP audience guard after the eager-init steps, so a failure there
+       carries the MCP-audience message, not a stale earlier one; the
+       Vault tenant-scope advisory (operability-only) follows it.
     """
     configure_logging()
     register_probe("keycloak", keycloak_readiness_probe)
@@ -335,12 +369,12 @@ async def _run_lifespan_startup() -> None:
     # as connector auto-discovery: top-level register_mcp_tool /
     # register_mcp_resource calls run at module import.
     eager_import_mcp_modules()
-    # MCP audience guard (G0.8-T4 #633). The /mcp router is mounted
-    # unconditionally; a deploy with neither MCP_RESOURCE_URI nor
-    # BACKPLANE_URL leaves the audience empty and every /mcp request
-    # 401s with no signal. Crash loudly here with the remediation
-    # instead of serving a dark, silent surface.
+    # Startup guards (each self-documented in its own docstring): MCP
+    # audience guard crashes loudly on an unresolvable /mcp audience
+    # (G0.8-T4 #633); the Vault tenant-scope advisory is operability-only
+    # (#1673).
     _assert_mcp_resource_uri_configured()
+    _advise_vault_tenant_scope_unenforced()
     # G10.0-T5 (#866) — ensure ``ui/static/dist/`` exists so the
     # StaticFiles mount does not crash on a fresh clone where
     # ``tailwindcss --watch`` has not yet materialised the compiled

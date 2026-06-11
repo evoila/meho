@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A failed park-time `proposed_effect` preview no longer degrades
+  silently to the identifier-only default: the parked approval now
+  carries `preview_unavailable: true` plus a `preview_error` reason
+  alongside the identifier fields (visible on REST
+  `GET /api/v1/approvals`, `meho.approvals.list` / `.get`, and `meho
+  approvals show`), so a four-eyes reviewer can tell "blast-radius
+  unknown" from a genuinely small action when a `vmware.composite.*`
+  preview's listing read cannot execute. The park itself still always
+  proceeds; successful previews are unchanged. (#1628)
+
 ## [0.13.0] - 2026-06-11
 
 ### Added

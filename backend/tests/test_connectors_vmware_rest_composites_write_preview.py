@@ -20,6 +20,11 @@ G0.22-T3 (#1608) acceptance criteria:
 4. All 8 write composites register a builder (4 live-read + 4 param
    echo); the wiring test pins the full set.
 
+Plus the #1628 follow-up: a *failed* live-read preview parks with the
+identifier fields **and** an explicit ``preview_unavailable`` marker +
+reason (visible through the REST / MCP serialisation helpers), so the
+reviewer can tell "blast-radius unknown" from a genuinely small action.
+
 Harness: mirrors :mod:`tests.test_connectors_vmware_rest_composites_write_e2e`
 (recording leaf typed-ops + in-process SQLite dispatcher), trimmed to the
 two listing leaves the park-time previews actually read — at park time
@@ -498,10 +503,19 @@ async def test_power_bulk_resolved_list_is_capped_with_true_total(
     assert preview["resolved"][0] == {"vm": "vm-0", "name": "node-0"}
 
 
-async def test_power_bulk_preview_failure_fails_soft_to_identifier_default(
+async def test_power_bulk_preview_failure_parks_with_unavailable_marker(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """A failing listing read degrades to the identifier-only default; the park proceeds."""
+    """A failing listing read parks with identifiers + an explicit marker (#1628).
+
+    Pre-#1628 the row degraded silently to the bare identifier-only
+    default — indistinguishable from a genuinely small action, defeating
+    the four-eyes purpose of the preview on any deploy where the L2 read
+    can't execute. The park (the safety-relevant action) still proceeds
+    — ``_park`` asserts ``awaiting_approval`` + a PENDING row — but the
+    reviewer now sees "blast-radius unknown" plus the read's failure
+    reason alongside the identifier fields.
+    """
     await _bootstrap_registry(stub_embedding_service)
     _FAILURES["GET:/vcenter/vm"] = "vCenter listing unavailable"
 
@@ -512,11 +526,52 @@ async def test_power_bulk_preview_failure_fails_soft_to_identifier_default(
         target=target,
     )
 
-    assert row.proposed_effect == {
-        "op_id": "vmware.composite.vm.power.bulk",
-        "connector_id": _CONNECTOR_ID,
-        "target_id": str(target.id),
-    }
+    effect = row.proposed_effect
+    # The identifier fields stay — the marker rides alongside them.
+    assert effect["op_id"] == "vmware.composite.vm.power.bulk"
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert effect["target_id"] == str(target.id)
+    assert effect["op_class"] == "other"
+    assert effect["preview_unavailable"] is True
+    # The reason names the failed listing read and its error, not just
+    # "failed" — the reviewer learns *what* could not be resolved.
+    assert "GET:/vcenter/vm" in effect["preview_error"]
+    assert "vCenter listing unavailable" in effect["preview_error"]
+    # No "preview" envelope key: a failed preview is structurally
+    # distinct from a successful one.
+    assert "preview" not in effect
+
+
+async def test_preview_unavailable_marker_reaches_reviewer_surfaces(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The marker is reviewer-visible on the REST view and the MCP row dict (#1628).
+
+    ``GET /api/v1/approvals[/{id}]`` serialises the row through
+    :func:`meho_backplane.api.v1.approvals._view` and
+    ``meho.approvals.list`` / ``.get`` through
+    :func:`meho_backplane.mcp.tools.approvals._row_to_dict`; both pass
+    ``proposed_effect`` through verbatim. Pinning the passthrough for
+    the marker keeps a future field projection from silently hiding a
+    failed preview from the approval queue.
+    """
+    from meho_backplane.api.v1.approvals import _view
+    from meho_backplane.mcp.tools.approvals import _row_to_dict
+
+    await _bootstrap_registry(stub_embedding_service)
+    _FAILURES["GET:/vcenter/vm"] = "vCenter listing unavailable"
+
+    _, row = await _park("vmware.composite.vm.power.bulk", {"action": "reset"})
+
+    rest_effect = _view(row).proposed_effect
+    mcp_effect = _row_to_dict(row)["proposed_effect"]
+    assert rest_effect["preview_unavailable"] is True
+    assert mcp_effect["preview_unavailable"] is True
+    assert (
+        rest_effect["preview_error"]
+        == mcp_effect["preview_error"]
+        == row.proposed_effect["preview_error"]
+    )
 
 
 # ===========================================================================

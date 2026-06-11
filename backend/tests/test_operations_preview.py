@@ -14,8 +14,11 @@ Coverage matrix (per Issue #1437 acceptance criteria):
   ``dry_run`` -- the preview never persists.
 * An op with no registered builder yields ``None`` (caller falls back to
   the identifier-only default).
-* A builder that raises is fail-soft: the hook returns ``None`` rather
-  than propagating, so the park always proceeds.
+* A builder that raises is fail-soft but not silent (#1628): the hook
+  returns an explicit ``preview_unavailable`` marker + reason rather
+  than propagating (the park always proceeds) or degrading to ``None``
+  (the reviewer must be able to tell "blast-radius unknown" from a
+  genuinely small action).
 * A credential-class op is suppressed (no raw preview in the durable
   row), reusing the :func:`classify_op` sensitivity classification.
 
@@ -165,8 +168,15 @@ async def test_no_builder_op_yields_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_builder_that_raises_is_fail_soft() -> None:
-    """A builder exception degrades to no-preview, never propagates."""
+async def test_builder_that_raises_yields_preview_unavailable_marker() -> None:
+    """A builder exception degrades to an explicit unavailability marker (#1628).
+
+    The raise never propagates -- the park (the safety-relevant action)
+    always proceeds -- but the degradation is no longer silent: pre-#1628
+    the hook returned ``None``, which collapsed to the identifier-only
+    default indistinguishable from a genuinely small action. The marker
+    + reason let the reviewer see "blast-radius unknown".
+    """
 
     async def _boom(_ctx: PreviewContext) -> dict[str, Any] | None:
         raise RuntimeError("dry-run hit the API and failed")
@@ -179,8 +189,54 @@ async def test_builder_that_raises_is_fail_soft() -> None:
         target=_FakeTarget(),
         params={},
     )
-    # No exception escapes; the park proceeds with the identifier-only default.
-    assert await build_proposed_effect(ctx) is None
+    # No exception escapes; the marker names the failure for the reviewer.
+    assert await build_proposed_effect(ctx) == {
+        "op_class": "other",
+        "preview_unavailable": True,
+        "preview_error": "RuntimeError: dry-run hit the API and failed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_builder_failure_reason_is_truncated_and_message_less_safe() -> None:
+    """The reviewer-facing reason is bounded and survives message-less raises.
+
+    A pathological exception repr (an HTTP error echoing a response
+    body) must not balloon the durable approval row; a bare
+    ``ValueError()`` must still produce a usable type name.
+    """
+
+    async def _boom_long(_ctx: PreviewContext) -> dict[str, Any] | None:
+        raise RuntimeError("x" * 2000)
+
+    register_preview_builder("test.preview.boomlong", _boom_long)
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="test.preview.boomlong"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["preview_unavailable"] is True
+    assert effect["preview_error"].endswith(" [truncated]")
+    assert len(effect["preview_error"]) == 500 + len(" [truncated]")
+
+    async def _boom_bare(_ctx: PreviewContext) -> dict[str, Any] | None:
+        raise ValueError
+
+    register_preview_builder("test.preview.boombare", _boom_bare)
+    ctx_bare = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="test.preview.boombare"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={},
+    )
+    effect_bare = await build_proposed_effect(ctx_bare)
+    assert effect_bare is not None
+    assert effect_bare["preview_error"] == "ValueError"
 
 
 @pytest.mark.asyncio

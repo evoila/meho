@@ -221,9 +221,19 @@ Three invariants make the hook safe to wire on the park path:
 
 1. **Opt-in / no regression.** An op with no registered builder yields
    `None` and parks exactly as before.
-2. **Fail-soft.** A builder that raises (a dry-run that hits the API and
-   errors) degrades to `None`; the park — the safety-relevant action —
-   always proceeds. Connector-resolution faults degrade the same way.
+2. **Fail-soft, never silent.** A builder that raises (a dry-run that
+   hits the API and errors, a preview listing read that can't execute)
+   never blocks the park — the safety-relevant action always proceeds.
+   But the failure is visible (#1628): the hook returns
+   `{op_class, preview_unavailable: true, preview_error}` and the
+   dispatcher merges that marker onto the identifier fields, so the
+   parked row reads "blast-radius unknown: <reason>" instead of a bare
+   identifier default a reviewer can't tell from a small action. The
+   reason string is the exception's type + message, truncated at 500
+   chars. A builder that *declines* (returns `None` — op not
+   previewable from these params) still collapses to the identifier-only
+   default with no marker, as do connector-resolution faults outside
+   the hook.
 3. **Redaction-safe.** `build_proposed_effect` classifies the op via
    `classify_op` (the same single-sourced sensitivity classification used
    for broadcast/audit redaction, #1401) and **suppresses** the preview

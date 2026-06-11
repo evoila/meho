@@ -210,6 +210,17 @@ connector-related release-notes line.
   reference in the message. Reaches both the REST dispatch response
   and the MCP `call_operation` tool, matching the `composite_l2_*`
   envelope parity (#1627).
+- `meho connector list --json` no longer silently drops the `state`,
+  `next_step` and `enabled_operation_count` fields the backend ships on
+  every `GET /api/v1/connectors` row — the machine surface was
+  advertising an incomplete row shape, so scripts and LLM consumers
+  could not tell a dispatchable (`ingested`) connector from a
+  registered-but-empty one, see the self-describing remediation verb
+  for half-registered connectors, or read the enabled-vs-total
+  operation split. The CLI's decode shape now mirrors all 13
+  `ConnectorListItem` fields and the canonical wire-shape test rejects
+  unknown fixture keys so the mirror cannot silently regress. The
+  human table is unchanged. (#1645)
 
 ## [0.13.0] - 2026-06-11
 

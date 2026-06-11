@@ -17,11 +17,21 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// listEntry mirrors the backend ConnectorListItem Pydantic model
-// (operations/ingest/api_schemas.py) verbatim: one row per ingested
-// connector with parsed coordinates + tenant scope + per-status group
-// counts + bulk op count for the operator's overview table. The full
-// per-op detail comes from `meho connector review <id>`.
+// listEntry mirrors all 13 fields of the backend ConnectorListItem
+// Pydantic model (operations/ingest/api_schemas.py): one row per
+// listed connector with parsed coordinates + tenant scope +
+// per-status group counts + the operation rollup — `operation_count`
+// total vs `enabled_operation_count` dispatchable subset (#1636) —
+// plus the dispatchability `state` ("ingested" = DB-backed, resolves
+// through the dispatcher; "registered" = v2-registry entry without
+// descriptor rows yet, #773) and the `next_step` remediation hint
+// shipped on registered rows (#1133). The full per-op detail comes
+// from `meho connector review <id>`. Keep the field set complete:
+// the `--json` path re-marshals this struct (not the raw response
+// body), so any ConnectorListItem field missing here silently
+// vanishes from machine-readable output — `encoding/json.Unmarshal`
+// ignores unknown keys. TestListEntryDecodesCanonical pins the
+// fixture⇄struct direction with DisallowUnknownFields.
 //
 // Kept as a package-private decode shape (not surfaced through the
 // generated `api.*` types) because the FastAPI list endpoint
@@ -48,16 +58,32 @@ import (
 // for built-in connectors. Pointer-to-string so we can distinguish
 // "field absent" from "empty string" in the rendered table.
 type listEntry struct {
-	ConnectorID        string  `json:"connector_id"`
-	Product            string  `json:"product"`
-	Version            string  `json:"version"`
-	ImplID             string  `json:"impl_id"`
-	TenantID           *string `json:"tenant_id"`
-	GroupCount         int     `json:"group_count"`
-	StagedGroupCount   int     `json:"staged_group_count"`
-	EnabledGroupCount  int     `json:"enabled_group_count"`
-	DisabledGroupCount int     `json:"disabled_group_count"`
-	OperationCount     int     `json:"operation_count"`
+	ConnectorID           string    `json:"connector_id"`
+	Product               string    `json:"product"`
+	Version               string    `json:"version"`
+	ImplID                string    `json:"impl_id"`
+	TenantID              *string   `json:"tenant_id"`
+	GroupCount            int       `json:"group_count"`
+	StagedGroupCount      int       `json:"staged_group_count"`
+	EnabledGroupCount     int       `json:"enabled_group_count"`
+	DisabledGroupCount    int       `json:"disabled_group_count"`
+	OperationCount        int       `json:"operation_count"`
+	EnabledOperationCount int       `json:"enabled_operation_count"`
+	State                 string    `json:"state"`
+	NextStep              *nextStep `json:"next_step"`
+}
+
+// nextStep mirrors the backend NextStep Pydantic model (same module):
+// the self-describing hint shipped on `state="registered"` rows —
+// the `meho connector ingest ...` verb that closes the workflow plus
+// the rationale for why that verb applies. The listEntry field is
+// pointer-typed because the backend ships JSON `null` on every
+// `state="ingested"` row (nothing left for the operator to do), and
+// `null` must decode to nil — same null-vs-absent discipline as
+// `TenantID` above.
+type nextStep struct {
+	Verb      string `json:"verb"`
+	Rationale string `json:"rationale"`
 }
 
 // connectorListEnvelope is the package-private decode shape for the

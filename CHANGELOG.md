@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-11
+
 ### Added
 
 - Parked `vmware.composite.*` write approvals now carry a
@@ -213,6 +215,22 @@ connector-related release-notes line.
   `detail.message`, so REST/SDK callers branch on the stable classifier
   instead of re-parsing prose; the human-readable message is carried
   verbatim inside the envelope (#1610).
+- SSE disconnect-path audit writes are no longer dropped silently under
+  a second cancellation. On a client disconnect `AuditMiddleware`
+  catches `CancelledError` and writes the audit row before re-raising
+  (#1389), but that write was **unshielded** — a second `CancelledError`
+  arriving mid-INSERT (task-tree teardown, server shutdown, an enclosing
+  `timeout()`/anyio cancel scope) propagated out of the bare `await`,
+  bypassed `_finalize`'s `except Exception` arm (`CancelledError` is a
+  `BaseException`), and dropped the row with no log line — a silent hole
+  in the "every authenticated action gets exactly one row" fail-closed
+  contract. The disconnect-path write is now scheduled as a task and
+  drained to completion under `asyncio.shield`, so redelivered
+  cancellations interrupt only the wait, never the shielded write; the
+  original `CancelledError` is re-raised once the row commits, leaving
+  enclosing `TaskGroup`/`timeout()` semantics unchanged. Only the
+  `CancelledError` arm is shielded; the normal return path is unchanged
+  (#1600).
 
 ## [0.12.0] - 2026-06-08
 

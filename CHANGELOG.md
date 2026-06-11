@@ -103,6 +103,18 @@ connector-related release-notes line.
   unchanged. The 403 detail token changes from
   `tenant_filter_requires_tenant_admin` to
   `cross_tenant_requires_platform_admin` (#1640).
+- Added a defense-in-depth tenant-scope guard on the agent-supplied
+  `vault.kv.*` ops (`read` / `list` / `versions` / `put` / `patch` /
+  `delete`): the requested `mount`/`path` is now checked against the
+  operator's tenant namespace **before** the hvac call, so a tenant-A
+  caller reaching for a tenant-B path is denied with a structured
+  `connector_error` (`exception_class=VaultTenantScopeError`) even if the
+  shared Vault `meho-mcp` policy is mis-provisioned too broadly. The guard
+  is **opt-in** via `VAULT_KV_TENANT_SCOPE_PREFIX` (a `{tenant_id}`
+  format template, e.g. `tenant-{tenant_id}/`); empty (the default) leaves
+  behaviour unchanged because the shipped Vault layout scopes per operator
+  `sub`, not per tenant. The convention is documented in
+  `docs/codebase/connectors-vault-tenant-scope.md` (#1643).
 
 ### Breaking changes
 

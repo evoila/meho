@@ -1084,6 +1084,22 @@ class Settings(BaseModel):
     #: ``True`` — fail-closed scope discipline. Consumed by T3, not by the
     #: transport in this Task.
     corpus_require_filters: bool = True
+    #: Application-layer tenant-scope guard for the agent-supplied
+    #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
+    #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
+    #: an operator's KV calls must stay within — defense-in-depth *behind*
+    #: the Vault ``meho-mcp`` policy, not a replacement for it
+    #: (``docs/codebase/connectors-vault-tenant-scope.md``). When a caller
+    #: requests a ``path`` outside their rendered prefix the handler raises
+    #: :class:`~meho_backplane.connectors.vault.tenant_scope.VaultTenantScopeError`
+    #: *before* the hvac call. **Empty (the default) disables the guard** —
+    #: the shipped deploy convention scopes per operator ``sub``
+    #: (``secret/data/targets/<sub>/*``, ``connector-vault-policy.md`` §2),
+    #: not per tenant, so enforcing a hard tenant prefix unconditionally
+    #: would break every existing call; a deploy whose KV layout *is*
+    #: tenant-partitioned opts in by setting e.g. ``"tenant-{tenant_id}/"``.
+    #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
+    vault_kv_tenant_scope_prefix: str = ""
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -1436,4 +1452,5 @@ def get_settings() -> Settings:
         corpus_require_filters=parse_bool_env(
             os.environ.get("CORPUS_REQUIRE_FILTERS", "true"),
         ),
+        vault_kv_tenant_scope_prefix=os.environ.get("VAULT_KV_TENANT_SCOPE_PREFIX", "").strip(),
     )

@@ -115,6 +115,14 @@ connector-related release-notes line.
   behaviour unchanged because the shipped Vault layout scopes per operator
   `sub`, not per tenant. The convention is documented in
   `docs/codebase/connectors-vault-tenant-scope.md` (#1643).
+- Closed a cross-tenant enumeration hole on the MCP `list_targets` tool:
+  the caller-supplied `tenant_id` / `tenant` argument was resolved with
+  no equality check and gated on `tenant_admin` **rank** alone, so a
+  tenant-admin of tenant A could enumerate tenant B's targets. Cross-
+  tenant listing now requires the `platform_admin` capability (#1638);
+  naming one's own tenant (by slug or UUID) or omitting the argument is
+  unchanged, and an unauthorized cross-tenant request surfaces as the
+  MCP `-32602` (INVALID_PARAMS) error (#1641).
 
 ### Breaking changes
 

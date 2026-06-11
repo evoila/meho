@@ -250,7 +250,18 @@ ready-to-adapt `example_call` carrying the handle id + a first-page
 `{offset, limit}`, and the handle's `expires_at` (the spill TTL). When
 the spill was skipped — the reduce ran outside a tenant-scoped dispatch
 — or the store was unreachable, `available=False` and `rationale`
-points at the narrower-params / native-pagination workaround. The spill
+points at the narrower-params / native-pagination workaround; since
+#1629 the branch additionally carries a machine-readable `reason`
+naming which no-spill branch fired — `no_tenant_context` (no usable
+`tenant_id` / `operator_sub` pair in the reducer context, so the spill
+could not be keyed) or `result_store_unavailable` (the Valkey-backed
+store did not persist the rows: unreachable, write rejected, or
+disabled). `reason` is `None` on the `available=True` branch, and every
+skip also logs a structured `jsonflux_spill_skipped` warning carrying
+the same reason plus `op_id` / `handle_id`, so a reduced-but-unspilled
+response is diagnosable from logs as well as from the envelope (see
+[`docs/codebase/result-spill.md`](../codebase/result-spill.md) for the
+triage runbook). The spill
 + read-back are described under *"Read-back: the `ResultHandleStore`"*
 below; the `mcp_resource_uri` field stays `None` in the current
 tool-only surface. `rationale` always carries the operator/agent-facing
@@ -333,7 +344,11 @@ learns when the tail was capped. The dispatcher threads `tenant_id` +
 `operator_sub` into `reducer_context`; a reduce with neither (a
 non-dispatch call) skips the spill, and a Valkey error is swallowed
 (`spill` returns `False`) — a read never fails because the spill backend
-is unreachable.
+is unreachable. Both skip shapes surface in the response as
+`drill_in.available=false` with the matching `reason`
+(`no_tenant_context` / `result_store_unavailable`, #1629) and log a
+`jsonflux_spill_skipped` warning; the store-level failure additionally
+logs `result_handle_spill_failed` with the underlying error.
 
 The `result_query` MCP meta-tool
 ([`mcp/tools/result_query.py`](../../backend/src/meho_backplane/mcp/tools/result_query.py))

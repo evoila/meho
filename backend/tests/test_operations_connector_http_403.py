@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for the ``connector_http_403`` structured error.
+"""Behavioural tests for the ``connector_http_403`` / ``connector_http_422`` errors.
 
 G0.24-T4 (#1649) acceptance criteria:
 
@@ -15,17 +15,23 @@ G0.24-T4 (#1649) acceptance criteria:
   the likely insufficient-permission cause; ``extras`` carries
   ``http_status=403``, the upstream ``upstream_message``, and the
   permission headers **when present**.
-* A non-403 :exc:`httpx.HTTPStatusError` (e.g. 500) is unchanged -- it
-  re-raises and falls through to the existing generic ``connector_error``
-  flatten.
+* A dispatch raising :exc:`httpx.HTTPStatusError` with ``status_code ==
+  422`` returns a structured ``connector_http_422`` result: the
+  operator-facing ``error`` names the invalid-payload cause; ``extras``
+  carries ``http_status=422``, the upstream ``upstream_message``, and the
+  GitHub-style ``validation_errors`` (the body's ``errors[]``) **when
+  present**.
+* A non-403/422 :exc:`httpx.HTTPStatusError` (e.g. 500) is unchanged --
+  it falls through to the existing generic ``connector_error`` flatten.
 * A successful dispatch is unaffected.
 * #1627's :exc:`NotImplementedError` -> ``connector_unsupported`` arm is
   not regressed.
 
-The cause is kept **connector-agnostic** -- any upstream 403, GitHub or
-not, yields the structured cause; the GitHub permission headers are
-echoed only when the upstream sent them. The builder-shape tests mirror
-the #1627 ``test_operations_connector_unsupported`` discipline
+The cause is kept **connector-agnostic** -- any upstream 403/422, GitHub
+or not, yields the structured cause; the GitHub permission headers
+(403) / ``errors[]`` array (422) are echoed only when the upstream sent
+them. The builder-shape tests mirror the #1627
+``test_operations_connector_unsupported`` discipline
 (``docs/codebase/error-message-shape.md``): stable code, diagnostic
 human message with a remediation imperative + doc reference, structured
 ``extras`` payload.
@@ -58,7 +64,10 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
-from meho_backplane.operations._errors import result_connector_http_403
+from meho_backplane.operations._errors import (
+    result_connector_http_403,
+    result_connector_http_422,
+)
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.settings import get_settings
 
@@ -163,7 +172,7 @@ class _FakeTarget:
         self.secret_ref: str | None = None
 
 
-def _make_403_status_error(
+def _make_http_status_error(
     *,
     headers: dict[str, str] | None = None,
     json_body: dict[str, Any] | None = None,
@@ -175,7 +184,8 @@ def _make_403_status_error(
     The error is produced the same way the production path produces it
     -- ``response.raise_for_status()`` on a non-2xx -- so the test
     exercises the genuine httpx exception shape (``exc.response`` access,
-    case-insensitive headers) rather than a hand-faked stand-in.
+    case-insensitive headers) rather than a hand-faked stand-in. Shared
+    by the 403 and 422 cases via the ``status_code`` argument.
     """
     request = httpx.Request("POST", "https://api.github.com/repos/o/r/issues")
     kwargs: dict[str, Any] = {"headers": headers or {}, "request": request}
@@ -227,7 +237,7 @@ class _Http403Connector(HttpConnector):
         operator: Operator,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        raise _make_403_status_error(
+        raise _make_http_status_error(
             headers=self.response_headers,
             json_body=self.response_body,
             status_code=self.status_code,
@@ -243,7 +253,7 @@ class _Http403Connector(HttpConnector):
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        raise _make_403_status_error(
+        raise _make_http_status_error(
             headers=self.response_headers,
             json_body=self.response_body,
             status_code=self.status_code,
@@ -271,12 +281,40 @@ class _Http403Connector(HttpConnector):
         raise NotImplementedError
 
 
+class _Http422Connector(_Http403Connector):
+    """Same shape as :class:`_Http403Connector` but raises a 422.
+
+    The gh-rest write whose request body the upstream rejected as invalid
+    (the requestBody-mangling bug T5 #1656). GitHub returns a
+    ``Validation Failed`` message + an ``errors[]`` array naming the
+    offending fields; the structured ``connector_http_422`` echoes both.
+    """
+
+    impl_id = "gh-rest-422"
+    status_code: ClassVar[int] = 422
+    #: No permission headers on a 422 -- a validation failure, not a scope one.
+    response_headers: ClassVar[dict[str, str]] = {"Content-Type": "application/json"}
+    response_body: ClassVar[dict[str, Any]] = {
+        "message": "Validation Failed",
+        "errors": [
+            {"resource": "Issue", "code": "missing_field", "field": "title"},
+            {
+                "resource": "Issue",
+                "code": "custom",
+                "field": "labels",
+                "message": "labels must be an array of strings",
+            },
+        ],
+        "documentation_url": "https://docs.github.com/rest/issues/issues#create-an-issue",
+    }
+
+
 class _Http500Connector(_Http403Connector):
     """Same shape as :class:`_Http403Connector` but raises a 500.
 
-    Pins the scope boundary: a non-403 ``HTTPStatusError`` re-raises out
-    of the dispatcher's ``connector_http_403`` arm and falls through to
-    the generic ``connector_error`` flatten unchanged.
+    Pins the scope boundary: a non-403/422 ``HTTPStatusError`` falls
+    through the dispatcher's ``connector_http_403`` / ``connector_http_422``
+    branches to the generic ``connector_error`` flatten unchanged.
     """
 
     impl_id = "gh-rest-500"
@@ -416,7 +454,7 @@ async def _insert_ingested_descriptor(
 
 def test_result_connector_http_403_shape_with_github_headers() -> None:
     """GitHub 403: code, http_status, upstream message, echoed headers, remediation."""
-    exc = _make_403_status_error(
+    exc = _make_http_status_error(
         headers={
             "X-Accepted-GitHub-Permissions": "issues=write",
             "x-oauth-scopes": "repo, read:org",
@@ -449,7 +487,7 @@ def test_result_connector_http_403_shape_with_github_headers() -> None:
 
 def test_result_connector_http_403_headers_matched_case_insensitively() -> None:
     """Lower-cased upstream header keys still echo under the canonical names."""
-    exc = _make_403_status_error(
+    exc = _make_http_status_error(
         headers={
             "x-accepted-github-permissions": "issues=write,metadata=read",
             "X-OAUTH-SCOPES": "repo",
@@ -465,7 +503,7 @@ def test_result_connector_http_403_headers_matched_case_insensitively() -> None:
 
 def test_result_connector_http_403_non_github_403_has_empty_headers() -> None:
     """A non-GitHub 403 (no permission headers) still yields the structured cause."""
-    exc = _make_403_status_error(
+    exc = _make_http_status_error(
         headers={"Content-Type": "application/json"},
         json_body={"message": "Forbidden"},
     )
@@ -481,7 +519,7 @@ def test_result_connector_http_403_non_github_403_has_empty_headers() -> None:
 
 def test_result_connector_http_403_non_json_body_falls_back_to_text() -> None:
     """A non-JSON 403 body is surfaced verbatim (capped) as the upstream message."""
-    exc = _make_403_status_error(text_body="Forbidden by WAF rule 42")
+    exc = _make_http_status_error(text_body="Forbidden by WAF rule 42")
     out = result_connector_http_403("POST:/x", exc, duration_ms=1.0)
     assert out.extras["upstream_message"] == "Forbidden by WAF rule 42"
     assert out.error is not None
@@ -490,7 +528,7 @@ def test_result_connector_http_403_non_json_body_falls_back_to_text() -> None:
 
 def test_result_connector_http_403_empty_body_yields_null_message() -> None:
     """An empty 403 body yields ``upstream_message=None`` (not an empty string)."""
-    exc = _make_403_status_error()
+    exc = _make_http_status_error()
     out = result_connector_http_403("POST:/x", exc, duration_ms=1.0)
     assert out.extras["upstream_message"] is None
     # The operator-facing string still names the permission cause.
@@ -502,12 +540,85 @@ def test_result_connector_http_403_empty_body_yields_null_message() -> None:
 
 def test_result_connector_http_403_caps_oversized_message() -> None:
     """A pathological upstream message is capped like the sibling builders."""
-    exc = _make_403_status_error(json_body={"message": "x" * 400})
+    exc = _make_http_status_error(json_body={"message": "x" * 400})
     out = result_connector_http_403("POST:/x", exc, duration_ms=0.5)
     message = out.extras["upstream_message"]
     assert isinstance(message, str)
     assert message.endswith("...<truncated>")
     assert len(message) == 256 + len("...<truncated>")
+
+
+def test_result_connector_http_422_shape_with_errors_array() -> None:
+    """GitHub 422: code, http_status, upstream message, echoed errors[], remediation."""
+    exc = _make_http_status_error(
+        status_code=422,
+        json_body={
+            "message": "Validation Failed",
+            "errors": [
+                {"resource": "Issue", "code": "missing_field", "field": "title"},
+                {"resource": "Issue", "code": "custom", "field": "labels"},
+            ],
+        },
+    )
+    out = result_connector_http_422("POST:/repos/o/r/issues", exc, duration_ms=1.0)
+
+    assert out.status == "error"
+    assert out.op_id == "POST:/repos/o/r/issues"
+    assert out.error is not None
+    assert out.error.startswith("connector_http_422:")
+    # The cause is named connector-agnostically as a payload-validation problem.
+    assert "rejected the request payload as invalid" in out.error
+    assert "422" in out.error
+    # Remediation imperative + doc reference.
+    assert "extras.validation_errors" in out.error
+    assert "docs/codebase/error-message-shape.md" in out.error
+    # The upstream body message tails the operator-facing string.
+    assert "Validation Failed" in out.error
+    # Structured, machine-usable extras.
+    assert out.extras["error_code"] == "connector_http_422"
+    assert out.extras["http_status"] == 422
+    assert out.extras["upstream_message"] == "Validation Failed"
+    assert out.extras["validation_errors"] == [
+        {"resource": "Issue", "code": "missing_field", "field": "title"},
+        {"resource": "Issue", "code": "custom", "field": "labels"},
+    ]
+
+
+def test_result_connector_http_422_non_github_422_has_empty_errors() -> None:
+    """A non-GitHub 422 (no errors[]) still yields the structured cause."""
+    exc = _make_http_status_error(
+        status_code=422,
+        json_body={"message": "Unprocessable Entity"},
+    )
+    out = result_connector_http_422("POST:/x", exc, duration_ms=1.0)
+    assert out.status == "error"
+    assert out.error is not None
+    assert out.error.startswith("connector_http_422:")
+    assert out.extras["http_status"] == 422
+    assert out.extras["upstream_message"] == "Unprocessable Entity"
+    # Echoed, never required -- empty when the upstream sent no errors[].
+    assert out.extras["validation_errors"] == []
+
+
+def test_result_connector_http_422_non_json_body_empty_errors_text_message() -> None:
+    """A non-JSON 422 body: empty errors[], raw text surfaced as the message."""
+    exc = _make_http_status_error(status_code=422, text_body="rejected by gateway")
+    out = result_connector_http_422("POST:/x", exc, duration_ms=1.0)
+    assert out.extras["validation_errors"] == []
+    assert out.extras["upstream_message"] == "rejected by gateway"
+    assert out.error is not None
+    assert "rejected by gateway" in out.error
+
+
+def test_result_connector_http_422_non_list_errors_field_ignored() -> None:
+    """An ``errors`` field that is not a list is not echoed (no fabricated shape)."""
+    exc = _make_http_status_error(
+        status_code=422,
+        json_body={"message": "Validation Failed", "errors": "not-a-list"},
+    )
+    out = result_connector_http_422("POST:/x", exc, duration_ms=1.0)
+    assert out.extras["validation_errors"] == []
+    assert out.extras["upstream_message"] == "Validation Failed"
 
 
 # ---------------------------------------------------------------------------
@@ -582,16 +693,90 @@ async def test_dispatch_converts_403_to_connector_http_403(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_non_403_status_error_falls_through_to_connector_error(
+async def test_dispatch_converts_422_to_connector_http_422(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """422 write dispatch -> structured ``connector_http_422`` + audit row + event.
+
+    The dispatcher catches the connector's :exc:`httpx.HTTPStatusError`
+    (422) ahead of the generic ``except Exception`` and emits the
+    structured shape -- not the pre-#1649 bare ``connector_error:
+    HTTPStatusError`` that buried GitHub's ``Validation Failed`` body +
+    ``errors[]`` array in ``extras["exception_message"]`` (the shape that
+    slowed the diagnosis of the requestBody-mangling bug T5 #1656).
+    """
+    register_connector_v2(
+        product="gh",
+        version="3",
+        impl_id="gh-rest-422",
+        cls=_Http422Connector,
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="gh",
+        version="3",
+        impl_id="gh-rest-422",
+        op_id="POST:/repos/o/r/issues",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="gh-rest-422-3",
+        op_id="POST:/repos/o/r/issues",
+        target=_FakeTarget(name="gh-prod"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_http_422:")
+    assert result.extras["error_code"] == "connector_http_422"
+    assert result.extras["http_status"] == 422
+    assert result.extras["upstream_message"] == "Validation Failed"
+    assert result.extras["validation_errors"] == [
+        {"resource": "Issue", "code": "missing_field", "field": "title"},
+        {
+            "resource": "Issue",
+            "code": "custom",
+            "field": "labels",
+            "message": "labels must be an array of strings",
+        },
+    ]
+    # NOT the pre-#1649 flattened shape, and not the 403 sibling.
+    assert "connector_error" not in result.error
+    assert result.extras["error_code"] != "connector_error"
+    assert "exception_message" not in result.extras
+    assert "connector_http_403" not in result.error
+    assert "permission_headers" not in result.extras
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "POST:/repos/o/r/issues")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "error"
+
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "error"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_non_403_or_422_status_error_falls_through_to_connector_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
     """A 500 ``HTTPStatusError`` is unchanged -- generic ``connector_error`` flatten.
 
-    Scope boundary (#1649 AC): only 403 is siphoned into
-    ``connector_http_403``; every other status re-raises out of that arm
-    and lands in the existing generic catch.
+    Scope boundary (#1649 AC): only 403 / 422 are siphoned into the
+    structured ``connector_http_*`` shapes; every other status falls
+    through those branches into the existing generic catch.
     """
     register_connector_v2(
         product="gh",
@@ -621,8 +806,9 @@ async def test_dispatch_non_403_status_error_falls_through_to_connector_error(
     assert result.error.startswith("connector_error:")
     assert result.extras["error_code"] == "connector_error"
     assert result.extras["exception_class"] == "HTTPStatusError"
-    # Did NOT get reclassified as the 403 shape.
+    # Did NOT get reclassified as the 403 / 422 shapes.
     assert "connector_http_403" not in (result.error or "")
+    assert "connector_http_422" not in (result.error or "")
     assert "http_status" not in result.extras
 
     assert len(captured_events) == 1

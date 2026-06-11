@@ -196,6 +196,7 @@ from meho_backplane.operations._errors import (
     result_composite_l2_missing,
     result_connector_error,
     result_connector_http_403,
+    result_connector_http_422,
     result_connector_unsupported,
     result_denied,
     result_handler_unreachable,
@@ -682,13 +683,15 @@ async def _run_branch_with_error_handling(
     already-descriptive message used to flatten into the same opaque
     ``connector_error`` envelope.
 
-    G0.24-T4 (#1649) adds a ``connector_http_403`` catch for an
-    upstream ``403`` :exc:`httpx.HTTPStatusError` -- an
-    insufficient-permission rejection (the credential authenticated but
-    lacks the op's required scope) whose useful upstream body + GitHub
-    permission headers used to flatten into the same opaque
-    ``connector_error``. Scoped to ``403``; every other status re-raises
-    to fall through to ``connector_error``.
+    G0.24-T4 (#1649) adds ``connector_http_403`` / ``connector_http_422``
+    catches for an upstream ``403`` / ``422`` :exc:`httpx.HTTPStatusError`
+    -- an insufficient-permission rejection (the credential authenticated
+    but lacks the op's required scope) and an invalid-payload rejection
+    (the upstream parsed the request but rejected its content), whose
+    useful upstream body + GitHub permission headers / ``errors[]``
+    validation array used to flatten into the same opaque
+    ``connector_error``. Scoped to ``403`` + ``422``; every other status
+    falls through to ``connector_error``.
     """
     try:
         return await _run_source_kind_branch(
@@ -808,21 +811,27 @@ async def _run_branch_with_error_handling(
             duration_ms=duration_ms,
         )
     except httpx.HTTPStatusError as http_exc:
-        # G0.24-T4 (#1649): an upstream 403 is an insufficient-permission
-        # rejection -- the credential reached the upstream and was
-        # authenticated, but lacks the scope the op requires (a GitHub
-        # App with ``issues: read`` but not ``issues: write`` on
-        # ``POST /repos/.../issues``). GitHub returns a useful 403 (a
-        # body message + ``X-Accepted-GitHub-Permissions`` /
-        # ``x-oauth-scopes`` headers), but the shared ``HttpConnector``
-        # adapter does no mapping, so flattening through the generic
-        # ``connector_error`` arm buries all of it in
+        # G0.24-T4 (#1649): an upstream 403 or 422 carries actionable
+        # detail the generic ``connector_error`` arm would bury in
         # ``extras.exception_message`` (consumer
-        # ``claude-rdc-hetzner-dc#1138``). The cause is kept
-        # connector-agnostic -- any upstream 403 -> "credential may lack
-        # permission" -- and the GitHub headers are echoed only when
-        # present. Scoped strictly to 403: every other status (401, 429,
-        # 5xx) flattens to the unchanged generic ``connector_error`` shape
+        # ``claude-rdc-hetzner-dc#1138``), because the shared
+        # ``HttpConnector`` adapter does no error mapping. Two distinct,
+        # connector-agnostic causes:
+        #
+        # * 403 -> insufficient permission: the credential reached the
+        #   upstream and was authenticated, but lacks the scope the op
+        #   requires (a GitHub App with ``issues: read`` but not
+        #   ``issues: write`` on ``POST /repos/.../issues``). GitHub
+        #   returns a body message + ``X-Accepted-GitHub-Permissions`` /
+        #   ``x-oauth-scopes`` headers.
+        # * 422 -> invalid payload: the upstream parsed the request and
+        #   rejected its *content* (a malformed/mis-nested body, a missing
+        #   field -- the requestBody-mangling bug T5 #1656). GitHub
+        #   returns a body message + an ``errors[]`` array naming the
+        #   offending fields.
+        #
+        # Scoped strictly to 403 + 422: every other status (401, 429, 5xx)
+        # flattens to the unchanged generic ``connector_error`` shape
         # (401/429 are deliberate follow-ups, not this surface). The
         # branch is taken *inside* this arm rather than re-``raise``-ing
         # to the ``except Exception`` below -- a re-raise from one except
@@ -839,8 +848,11 @@ async def _run_branch_with_error_handling(
             result_status="error",
             duration_ms=duration_ms,
         )
-        if http_exc.response.status_code == 403:
+        status_code = http_exc.response.status_code
+        if status_code == 403:
             return result_connector_http_403(op_id, http_exc, duration_ms)
+        if status_code == 422:
+            return result_connector_http_422(op_id, http_exc, duration_ms)
         return result_connector_error(op_id, http_exc, duration_ms)
     except Exception as exc:
         duration_ms = _elapsed_ms(started)

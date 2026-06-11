@@ -204,20 +204,26 @@ connector-related release-notes line.
   reference in the message. Reaches both the REST dispatch response
   and the MCP `call_operation` tool, matching the `composite_l2_*`
   envelope parity (#1627).
-- An upstream **403 Forbidden** on a write dispatch (e.g. a gh-rest
-  `POST /repos/{owner}/{repo}/issues` whose backing GitHub App has
-  `issues: read` but not `issues: write`) now returns a structured
-  `connector_http_403` error instead of the opaque `connector_error:
-  HTTPStatusError` that surfaced only httpx's status line and buried
-  GitHub's actionable 403 (the body message + the
-  `X-Accepted-GitHub-Permissions` / `x-oauth-scopes` headers) in
-  `extras.exception_message`. The operator-facing `error` names the
-  likely insufficient-permission cause **connector-agnostically** (the
-  credential authenticated but may lack the op's required scope — a
-  target-credential matter, not a meho transport fault), and `extras`
-  carries `http_status: 403`, the upstream `upstream_message`, and any
-  GitHub permission headers (`permission_headers`) the upstream sent.
-  Scoped to 403 — every other `HTTPStatusError` status still flattens to
+- An upstream **403 Forbidden** or **422 Unprocessable Entity** on a
+  write dispatch (e.g. a gh-rest `POST /repos/{owner}/{repo}/issues`)
+  now returns a structured `connector_http_403` / `connector_http_422`
+  error instead of the opaque `connector_error: HTTPStatusError` that
+  surfaced only httpx's status line and buried GitHub's actionable body
+  in `extras.exception_message`. Both causes are named
+  **connector-agnostically**: a 403 is an insufficient-permission
+  rejection (the backing credential — e.g. a GitHub App with
+  `issues: read` but not `issues: write` — authenticated but may lack
+  the op's required scope, a target-credential matter, not a meho
+  transport fault), with `extras` carrying `http_status: 403`, the
+  upstream `upstream_message`, and any GitHub permission headers
+  (`permission_headers`, `X-Accepted-GitHub-Permissions` /
+  `x-oauth-scopes`) the upstream sent; a 422 is an invalid-payload
+  rejection (the upstream parsed the request but rejected its content),
+  with `extras` carrying `http_status: 422`, the upstream
+  `upstream_message`, and the GitHub-style `validation_errors` (the
+  body's `errors[]` field-level array) when present — the detail that
+  slowed the diagnosis of the gh-rest write-body bug. Scoped to 403 +
+  422 — every other `HTTPStatusError` status still flattens to
   `connector_error` unchanged. Extends #1627's dispatch structured-cause
   pattern to the transport-error sibling; reaches both the REST dispatch
   response and the MCP `call_operation` tool

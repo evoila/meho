@@ -126,6 +126,16 @@ connector-related release-notes line.
   substrate a later cross-tenant authorization gate checks, so a
   `tenant_admin` is never mistaken for a platform operator on role rank
   alone (#1638).
+- `GET /api/v1/connectors` rows now split the operation rollup
+  enabled-vs-total: `enabled_operation_count` (ops whose per-op
+  `is_enabled` dispatchability flag is set) lands next to the
+  existing `operation_count` total, mirroring the `*_group_count`
+  family's naming, so an operator (or an LLM browsing the catalog)
+  can tell how many of a connector's operations are actually
+  dispatchable vs ingested-but-disabled (`vmware-rest-9.0`: ~2,211
+  ingested, only a fraction enabled). The `meho.connector.list` MCP
+  tool returns the same rows. Additive — existing `operation_count`
+  consumers are unaffected. (#1636)
 
 ### Fixed
 

@@ -173,6 +173,7 @@ def stubbed_services(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]
                 enabled_group_count=0,
                 disabled_group_count=0,
                 operation_count=42,
+                enabled_operation_count=7,
             ),
         ]
 
@@ -390,6 +391,9 @@ def test_call_meho_connector_list_dispatches_to_list_ingested_connectors(
     assert payload["connectors"][0]["connector_id"] == "vmware-rest-9.0"
     assert payload["connectors"][0]["staged_group_count"] == 3
     assert payload["connectors"][0]["operation_count"] == 42
+    # MCP rows ride the same ConnectorListItem model_dump as REST, so
+    # the enabled-vs-total op split lands here too (G0.23-T5 / #1636).
+    assert payload["connectors"][0]["enabled_operation_count"] == 7
 
     # The stubbed query helper recorded the status filter + operator.
     [call_kwargs] = stubbed_services["list_calls"]

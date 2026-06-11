@@ -106,8 +106,17 @@ async def seed_doc_collection(
 OPERATOR_TENANT_ID: UUID = UUID("00000000-0000-0000-0000-00000000a0a0")
 
 
-def build_operator(role: TenantRole = TenantRole.READ_ONLY) -> Operator:
-    """Build a fixture :class:`Operator` pinned to :data:`OPERATOR_TENANT_ID`."""
+def build_operator(
+    role: TenantRole = TenantRole.READ_ONLY,
+    *,
+    platform_admin: bool = False,
+) -> Operator:
+    """Build a fixture :class:`Operator` pinned to :data:`OPERATOR_TENANT_ID`.
+
+    ``platform_admin`` sets the cross-tenant capability primitive (#1638)
+    so tests can exercise the platform-admin-gated cross-tenant paths
+    (e.g. ``list_targets`` with a foreign ``tenant`` arg, #1641).
+    """
     return Operator(
         sub="op-test",
         name="Test",
@@ -115,6 +124,7 @@ def build_operator(role: TenantRole = TenantRole.READ_ONLY) -> Operator:
         raw_jwt="fixture-jwt-not-real",
         tenant_id=OPERATOR_TENANT_ID,
         tenant_role=role,
+        platform_admin=platform_admin,
     )
 
 
@@ -324,9 +334,18 @@ def client_with_operator(
     Operator role parameterisation: tests can request a non-default
     role via ``@pytest.mark.parametrize("client_with_operator", [TenantRole.X], indirect=True)``.
     Default is :class:`~meho_backplane.auth.operator.TenantRole.READ_ONLY`.
+
+    The param may also be a ``(role, platform_admin)`` tuple to set the
+    cross-tenant capability primitive (#1638) — e.g.
+    ``[(TenantRole.TENANT_ADMIN, True)]`` for a platform-admin operator
+    exercising the cross-tenant ``list_targets`` path (#1641).
     """
-    role: TenantRole = getattr(request, "param", TenantRole.READ_ONLY)
-    op = build_operator(role)
+    param = getattr(request, "param", TenantRole.READ_ONLY)
+    if isinstance(param, tuple):
+        role, platform_admin = param
+    else:
+        role, platform_admin = param, False
+    op = build_operator(role, platform_admin=platform_admin)
 
     async def _fake_verify() -> Operator:
         return op

@@ -1133,10 +1133,12 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "description": (
                 "Cross-tenant scope. Omit / null → the operator's own "
-                "tenant (the only choice for the `operator` role). A "
-                "tenant slug OR UUID selects another tenant's targets "
-                "and REQUIRES the `tenant_admin` role; an `operator`-"
-                "role caller passing this gets -32602. Canonical name "
+                "tenant. A tenant slug OR UUID naming a DIFFERENT tenant "
+                "selects that tenant's targets and REQUIRES the "
+                "`platform_admin` capability (#1641); a caller who is "
+                "not a platform-admin passing a foreign tenant gets "
+                "-32602 (naming your own tenant explicitly is always "
+                "allowed). Canonical name "
                 "(G0.18-T5 #1358); matches `tenant_id` on "
                 "`meho.connector.*` / `meho.scheduler.create`. "
                 "NOTE: `list_targets.tenant_id` accepts a slug OR a "
@@ -1190,7 +1192,7 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
     "WHEN TO CALL: the operator asks 'what can I act on?', or you need a "
     "concrete target name and only have a product in mind ('list the "
     "vCenters' → `connector_id=vmware-rest-9.0`). Tenant scope is the "
-    "operator's own tenant unless a `tenant_admin` passes `tenant`.\n\n"
+    "operator's own tenant unless a `platform_admin` passes `tenant`.\n\n"
     "Returns `{targets: [{id, name, aliases, product, host}, ...], "
     "next_cursor: <name|null>}` ordered by name; `next_cursor` is the "
     "last name on the page when more rows may exist, else null."
@@ -1198,49 +1200,59 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
 
 
 async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> Any:
-    """Resolve the tenant id to scope the listing to.
+    """Resolve the tenant id to scope the listing to, authorizing a cross-tenant claim.
 
-    No ``tenant_id`` argument → the operator's own tenant (the only
-    path open to an ``operator``-role caller). A ``tenant_id``
-    argument is a cross-tenant request: it requires ``tenant_admin``
-    and is resolved by slug first then UUID. An unknown tenant, or a
-    non-admin passing ``tenant_id``, surfaces as ``-32602``
-    (operator-actionable input problem) rather than silently falling
-    back to the own-tenant scope — a silent fallback would make a
-    typo'd cross-tenant query look like an empty tenant.
+    No ``tenant_id`` argument → the operator's own tenant (the common,
+    same-tenant path open to any role). A ``tenant_id`` argument is
+    resolved by slug first then UUID; an unknown tenant surfaces as
+    ``-32602`` (operator-actionable input problem) rather than silently
+    falling back to the own-tenant scope — a silent fallback would make
+    a typo'd cross-tenant query look like an empty tenant.
+
+    Authorization mirrors the REST ``authorize_tenant_scope`` helper
+    (#1640): resolving to the operator's *own* tenant is always allowed
+    (a caller may name their own tenant explicitly by slug or UUID);
+    resolving to a *different* tenant is the cross-tenant case and is
+    permitted **only** for a ``platform_admin`` (#1638). A non-platform-
+    admin naming a foreign tenant is denied with ``-32602``.
+
+    The gate moved off ``tenant_admin`` *rank*: tenant role governs what
+    an operator may do *within* their tenant, while crossing the tenant
+    boundary is a separate, platform-level capability — gating cross-
+    tenant enumeration on ``tenant_admin`` alone let a tenant-admin of A
+    enumerate B's targets (a cross-tenant IDOR, #1641).
     """
     if tenant_arg is None:
         return operator.tenant_id
-    if operator.tenant_role != TenantRole.TENANT_ADMIN:
-        raise McpInvalidParamsError(
-            "list_targets: the `tenant_id` argument (cross-tenant scope) "
-            "requires the tenant_admin role",
-        )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         by_slug = await session.execute(
             select(Tenant.id).where(Tenant.slug == tenant_arg),
         )
-        tenant_id = by_slug.scalar_one_or_none()
-        if tenant_id is not None:
-            return tenant_id
-        # Slug miss — try the argument as a tenant UUID.
-        try:
-            from uuid import UUID
-
-            candidate = UUID(tenant_arg)
-        except ValueError:
-            candidate = None
-        if candidate is not None:
-            by_id = await session.execute(
-                select(Tenant.id).where(Tenant.id == candidate),
-            )
-            tenant_id = by_id.scalar_one_or_none()
-            if tenant_id is not None:
-                return tenant_id
-    raise McpInvalidParamsError(
-        f"list_targets: no tenant matches {tenant_arg!r} (tried slug then UUID)",
-    )
+        resolved = by_slug.scalar_one_or_none()
+        if resolved is None:
+            # Slug miss — try the argument as a tenant UUID.
+            try:
+                candidate = uuid.UUID(tenant_arg)
+            except ValueError:
+                candidate = None
+            if candidate is not None:
+                by_id = await session.execute(
+                    select(Tenant.id).where(Tenant.id == candidate),
+                )
+                resolved = by_id.scalar_one_or_none()
+    if resolved is None:
+        raise McpInvalidParamsError(
+            f"list_targets: no tenant matches {tenant_arg!r} (tried slug then UUID)",
+        )
+    if resolved == operator.tenant_id:
+        return resolved
+    if not operator.platform_admin:
+        raise McpInvalidParamsError(
+            "list_targets: the `tenant_id` argument (cross-tenant scope) "
+            "requires the platform_admin capability",
+        )
+    return resolved
 
 
 async def _list_targets_handler(

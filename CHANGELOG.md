@@ -173,6 +173,18 @@ connector-related release-notes line.
 
 ### Fixed
 
+- An ingested **L2** write op no longer mangles its HTTP request body: the
+  dispatcher now serializes the single `x-meho-param-loc: "body"` container
+  param's *value* as the JSON body (unwrapped) on every body-carrying arm,
+  instead of wrapping it under the param name (`{"body": {…}}`). Every
+  ingested-L2 REST write (gh-rest issue-create / issue-comment / add-labels /
+  create-PR, …) previously 422'd because the upstream saw the requestBody
+  schema nested one level too deep; a gh-rest issue-create with
+  `body: {"title": "X"}` now sends exactly `{"title": "X"}` on the wire.
+  Generic to all ingested-L2 connectors with a requestBody; reads (no body)
+  and path/query/header routing are unchanged. Diagnoses the RDC log-sentry
+  issue-filing finding (`gh api` 201 vs meho 422 on identical `{title}`);
+  see claude-rdc-hetzner-dc#1138. (#1656)
 - A failed park-time `proposed_effect` preview no longer degrades
   silently to the identifier-only default: the parked approval now
   carries `preview_unavailable: true` plus a `preview_error` reason

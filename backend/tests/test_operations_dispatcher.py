@@ -1151,6 +1151,197 @@ async def test_dispatch_ingested_builds_request_via_request_json(
 
 
 # ---------------------------------------------------------------------------
+# Ingested write-body round-trip (#1656): the ``loc=="body"`` container
+# param's *value* must go on the wire unwrapped. Drives the REAL
+# ``HttpConnector._post_json`` httpx transport and captures the outbound
+# request with respx, so the assertion is on the actual bytes a vendor API
+# (here gh-rest issue-create) would receive — not a mocked transport seam.
+# ---------------------------------------------------------------------------
+
+
+class _RoundTripHttpConnector(HttpConnector):
+    """Ingested-dispatch fixture exercising the real httpx ``_post_json``.
+
+    Unlike :class:`_FakeHttpConnector` (which records ``_request_json``
+    calls), this connector keeps :class:`HttpConnector`'s real transport so
+    the request is genuinely serialized and sent — respx intercepts it at
+    the wire. Only ``auth_headers`` and the three ABC methods are
+    overridden; ``_base_url`` derives ``https://{target.host}`` from the
+    target, which the test mocks via ``respx.mock(base_url=...)``.
+    """
+
+    product = "gh"
+    version = "3.0"
+    impl_id = "gh-rest"
+    supported_version_range = ">=3.0,<4.0"
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self,
+        target: Any,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        raise NotImplementedError
+
+    async def auth_headers(  # type: ignore[override]
+        self,
+        target: Any,
+        operator: Operator,
+    ) -> dict[str, str]:
+        return {"authorization": "Bearer test-token"}
+
+
+def _gh_issue_create_descriptor(embedding: Any) -> Any:
+    """Build a gh-rest ``POST:/repos/{owner}/{repo}/issues`` ingested descriptor.
+
+    Mirrors the G0.7 ingester's output shape: ``owner``/``repo`` are
+    ``x-meho-param-loc='path'`` and the requestBody is a single ``body``
+    property tagged ``x-meho-param-loc='body'`` (see ``ingest.openapi``).
+    """
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    return EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="gh",
+        version="3.0",
+        impl_id="gh-rest",
+        op_id="POST:/repos/{owner}/{repo}/issues",
+        source_kind="ingested",
+        method="POST",
+        path="/repos/{owner}/{repo}/issues",
+        handler_ref=None,
+        summary="Create an issue",
+        description="Create an issue on a repository.",
+        tags=[],
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "x-meho-param-loc": "path"},
+                "repo": {"type": "string", "x-meho-param-loc": "path"},
+                "body": {"type": "object", "x-meho-param-loc": "body"},
+            },
+            "required": ["owner", "repo", "body"],
+        },
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="caution",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=embedding,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "issue_body",
+    [
+        pytest.param({"title": "X"}, id="title-only"),
+        pytest.param({"title": "X", "body": "Y"}, id="title-and-body"),
+    ],
+)
+async def test_dispatch_ingested_post_sends_unwrapped_request_body(
+    issue_body: dict[str, Any],
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """gh-rest issue-create sends the body param's *value* (unwrapped) on the wire.
+
+    Regression for #1656: the dispatcher previously serialized
+    ``{"body": {"title": "X"}}`` (the ``{name: value}`` bucket) instead of
+    ``{"title": "X"}`` (the value), which GitHub 422s. Asserts the captured
+    outbound body is exactly the requestBody value and that a recorded 201
+    round-trips to ``status='ok'``.
+    """
+    import json as _json
+
+    import respx
+
+    register_connector_v2(
+        product="gh",
+        version="3.0",
+        impl_id="gh-rest",
+        cls=_RoundTripHttpConnector,
+    )
+
+    session.add(_gh_issue_create_descriptor(stub_embedding_service.encode_one.return_value))
+    await session.commit()
+
+    operator = _make_operator()
+    target = _FakeTarget(product="gh", version="3.0", host="api.github.test", port=443)
+
+    with respx.mock(base_url="https://api.github.test", assert_all_called=True) as mock:
+        route = mock.post("/repos/octocat/hello/issues").respond(
+            201, json={"number": 7, "title": issue_body["title"]}
+        )
+        result = await dispatch(
+            operator=operator,
+            connector_id="gh-rest-3.0",
+            op_id="POST:/repos/{owner}/{repo}/issues",
+            target=target,
+            params={"owner": "octocat", "repo": "hello", "body": issue_body},
+        )
+
+    assert route.called
+    sent = route.calls.last.request
+    # The path params substitute into the URL; the body param's *value* is
+    # the wire body — never wrapped under the ``"body"`` key.
+    assert sent.url.path == "/repos/octocat/hello/issues"
+    # Exact-equality is the load-bearing check: a wire body equal to the
+    # requestBody value proves the dispatcher did NOT wrap it under "body".
+    assert _json.loads(sent.content) == issue_body
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["number"] == 7
+    assert len(captured_events) == 1
+
+
+def test_unwrap_body_returns_value_not_wrapper() -> None:
+    """`_unwrap_body` yields the body param's value (unwrapped), or None when empty.
+
+    Locks the serialization contract shared by both body-carrying dispatch
+    arms (POST/PUT/PATCH/DELETE *and* GET-with-body): the single
+    `x-meho-param-loc='body'` param's value is the request body, never a
+    `{name: value}` wrapper (#1656).
+    """
+    from meho_backplane.operations._branches import _unwrap_body
+
+    # Empty bucket -> no body (httpx omits the request body).
+    assert _unwrap_body({}) is None
+    # Single body param -> its value, unwrapped (the GitHub issue-create shape).
+    assert _unwrap_body({"body": {"title": "X"}}) == {"title": "X"}
+    # The param name is irrelevant — the *value* is returned regardless.
+    assert _unwrap_body({"payload": [1, 2, 3]}) == [1, 2, 3]
+
+
+def test_unwrap_body_rejects_multiple_body_params() -> None:
+    """More than one `loc=='body'` param is an ingest-modelling fault -> raise.
+
+    A descriptor must carry exactly one requestBody container param. Failing
+    loud beats silently picking one and sending a body the caller never
+    asked for.
+    """
+    from meho_backplane.operations._branches import _unwrap_body
+
+    with pytest.raises(RuntimeError, match="multiple 'body' params"):
+        _unwrap_body({"body": {"title": "X"}, "extra": {"k": "v"}})
+
+
+# ---------------------------------------------------------------------------
 # Composite dispatch + audit-tree linkage
 # ---------------------------------------------------------------------------
 

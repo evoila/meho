@@ -404,8 +404,26 @@ class ConnectorListItem(BaseModel):
     review-queue backlog at a glance.
 
     ``operation_count`` is the sum of operations across all groups
-    in scope. Useful for the CLI's
-    ``meho connector list --status staged`` summary view.
+    in scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the
+    subset of those rows whose per-op ``is_enabled`` flag is set --
+    the operations the dispatcher will actually resolve
+    (dispatchable), vs ingested-but-disabled rows that only surface
+    in review. The naming mirrors the ``*_group_count`` family above:
+    the unprefixed field is the total, the ``enabled_``-prefixed
+    field is the subset. Kept additive (rather than renaming the
+    total to ``total_operation_count``) so existing consumers of
+    ``operation_count`` -- the CLI's ``listEntry`` decode shape and
+    every ``meho.connector.list`` client -- keep working unchanged.
+    Mind the axis difference between the two ``enabled_*`` fields:
+    ``enabled_group_count`` buckets groups by *review_status*, while
+    ``enabled_operation_count`` counts the per-op ``is_enabled`` bit
+    (the dispatchability flag that survives connector-level
+    enable/disable cycles via operator overrides). Useful for the
+    CLI's ``meho connector list --status staged`` summary view and
+    for an LLM browsing the catalog: ``vmware-rest-9.0`` ingests
+    ~2,211 ops of which only a fraction are enabled, and before the
+    split nothing on the row said which of the two numbers
+    ``operation_count`` was.
 
     ``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows
     (``"ingested"`` — DB-backed, resolves through the dispatcher) from
@@ -448,6 +466,7 @@ class ConnectorListItem(BaseModel):
     enabled_group_count: int
     disabled_group_count: int
     operation_count: int
+    enabled_operation_count: int
     state: ConnectorState = "ingested"
     next_step: NextStep | None = None
 

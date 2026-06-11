@@ -113,6 +113,19 @@ connector-related release-notes line.
   `cli/api/openapi.json` regenerate against the refreshed snapshot —
   the bundled `meho` CLI in this release already is. (#1630)
 
+### Added
+
+- `GET /api/v1/connectors` rows now split the operation rollup
+  enabled-vs-total: `enabled_operation_count` (ops whose per-op
+  `is_enabled` dispatchability flag is set) lands next to the
+  existing `operation_count` total, mirroring the `*_group_count`
+  family's naming, so an operator (or an LLM browsing the catalog)
+  can tell how many of a connector's operations are actually
+  dispatchable vs ingested-but-disabled (`vmware-rest-9.0`: ~2,211
+  ingested, only a fraction enabled). The `meho.connector.list` MCP
+  tool returns the same rows. Additive — existing `operation_count`
+  consumers are unaffected. (#1636)
+
 ### Fixed
 
 - A failed park-time `proposed_effect` preview no longer degrades

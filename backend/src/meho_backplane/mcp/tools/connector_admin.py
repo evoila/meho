@@ -268,13 +268,18 @@ register_mcp_tool(
         name="meho.connector.list",
         description=(
             "List ingested connectors visible to the operator's tenant "
-            "(plus built-in / global). Returns per-connector counts and "
-            "the aggregate review status (staged / enabled / disabled). "
-            "Use as the entry point when an operator needs to find a "
-            "connector to review or to see what's already in place. "
-            "Filter via status=staged to surface only connectors that "
-            "need review. Pair with meho.connector.review to drill into "
-            "an individual connector. Read-only; visible to operator and "
+            "(plus built-in / global). Returns per-connector counts — "
+            "group counts split by review status, plus the operation "
+            "rollup split enabled-vs-total (enabled_operation_count = "
+            "ops whose per-op is_enabled flag is set, i.e. actually "
+            "dispatchable; operation_count = every ingested/typed/"
+            "composite op) — and the aggregate review status (staged / "
+            "enabled / disabled). Use as the entry point when an "
+            "operator needs to find a connector to review or to see "
+            "what's already in place. Filter via status=staged to "
+            "surface only connectors that need review. Pair with "
+            "meho.connector.review to drill into an individual "
+            "connector. Read-only; visible to operator and "
             "tenant_admin roles."
         ),
         inputSchema={

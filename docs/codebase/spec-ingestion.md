@@ -600,11 +600,24 @@ The renamer "list_*ingested*_connectors" is now misleading and is a
 follow-up cleanup; the function lists every connector with at least
 one visible :class:`OperationGroup` row.
 
+Since G0.23-T5 (#1636) the op rollup also splits enabled-vs-total,
+mirroring the group rollup's `CASE WHEN` technique:
+`enabled_operation_count` counts the rows whose per-op `is_enabled`
+flag is set (the dispatchable subset) while `operation_count` stays
+the total over the same unfiltered `source_kind` universe. The two
+`enabled_*` fields count different axes — `enabled_group_count`
+buckets groups by `review_status`; `enabled_operation_count` reads
+the per-op dispatchability bit — so an operator (or an LLM browsing
+the catalog) can tell "~2,211 ops ingested" from "the fraction
+actually callable" on a `vmware-rest-9.0` row without drilling into
+`/review`.
+
 Class-side registrations from the v2 connector registry that have
 no DB-side state yet (T5 #733 — "State 0.5" connectors registered
 via `register_connector_v2` but without any rows in
 `operation_group` / `endpoint_descriptor`) are unioned into the
-response with `group_count: 0, operation_count: 0` and
+response with every count zeroed (`group_count: 0,
+operation_count: 0, enabled_operation_count: 0`) and
 `state: "registered"` so operators see `connector registered ⇒
 visible in list` but the agent knows the dispatcher won't resolve
 calls against them yet. Class-only rows are always built-in
@@ -745,6 +758,11 @@ consume so the wire contract is defined once:
   completion hint: a `NextStep` object (verb + rationale) on
   `state="registered"` rows, `null` on `state="ingested"` rows — see
   the next-step hint section above.
+  `ConnectorListItem.enabled_operation_count` (G0.23-T5 / #1636)
+  splits the op rollup enabled-vs-total next to the existing
+  `operation_count` — naming mirrors the `*_group_count` family
+  (unprefixed = total, `enabled_`-prefixed = subset), kept additive
+  so existing `operation_count` consumers don't break.
 * `NextStep` (G0.13-T3 / #1133) — `{verb, rationale}` pair surfaced
   on `state="registered"` rows. `verb` is a copy/pasteable
   `meho connector ingest ...` invocation; `rationale` is one

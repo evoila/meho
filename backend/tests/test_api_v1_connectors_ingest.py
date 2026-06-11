@@ -674,6 +674,10 @@ async def test_list_status_enabled_requires_uniform_state(
     assert item["connector_id"] == "vmware-rest-9.0"
     assert item["enabled_group_count"] == item["group_count"]
     assert item["operation_count"] == 6  # 2 groups x 3 ops
+    # The op rollup reads the per-op ``is_enabled`` bit, not the
+    # group review_status: every group is enabled here but the
+    # seeded ops carry ``is_enabled=False`` (G0.23-T5 / #1636).
+    assert item["enabled_operation_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -729,6 +733,58 @@ async def test_list_operation_count_includes_typed_and_composite(
     assert by_id["vmware-rest-9.0"]["operation_count"] == 3
     assert by_id["bind9-ssh-9.0"]["operation_count"] == 4
     assert by_id["vmware-composite-9.0"]["operation_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_list_splits_enabled_vs_total_operation_count(
+    client: TestClient,
+) -> None:
+    """``enabled_operation_count`` counts ``is_enabled`` rows; ``operation_count`` counts all.
+
+    G0.23-T5 (#1636): the v0.12.0 vmware campaign observed
+    ``vmware-rest-9.0`` listing ~2,211 ingested ops of which only a
+    small fraction were enabled (dispatchable), and nothing on the
+    listing row said which of the two numbers ``operation_count``
+    was. Seeds the same connector with 6 ops all disabled, flips 2
+    to ``is_enabled=True``, and asserts the row splits 6-total /
+    2-enabled -- the two numbers differing is the point of the test.
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="vmware",
+        impl_id="vmware-rest",
+        group_count=2,
+        ops_per_group=3,
+        op_is_enabled=False,
+    )
+    # Flip two ops to enabled so the two rollups must differ;
+    # deterministic pick via op_id ordering.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor)
+            .where(EndpointDescriptor.tenant_id == tenant_a)
+            .order_by(EndpointDescriptor.op_id)
+            .limit(2),
+        )
+        for descriptor in result.scalars().all():
+            descriptor.is_enabled = True
+        await session.commit()
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    # The unfiltered listing unions class-side "registered" rows for
+    # every v2-registered connector; key on connector_id like the
+    # sibling rollup tests instead of expecting a single row.
+    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    item = by_id["vmware-rest-9.0"]
+    assert item["state"] == "ingested"
+    assert item["operation_count"] == 6
+    assert item["enabled_operation_count"] == 2
 
 
 @pytest.fixture
@@ -843,6 +899,7 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     assert harbor["enabled_group_count"] == 0
     assert harbor["disabled_group_count"] == 0
     assert harbor["operation_count"] == 0
+    assert harbor["enabled_operation_count"] == 0
     assert harbor["state"] == "registered"
 
     assert "sddc-rest-9.0" in by_id
@@ -858,6 +915,7 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     assert sddc["impl_id"] == "sddc-rest"
     assert sddc["version"] == "9.0"
     assert sddc["operation_count"] == 0
+    assert sddc["enabled_operation_count"] == 0
     assert sddc["group_count"] == 0
     assert sddc["state"] == "registered"
 

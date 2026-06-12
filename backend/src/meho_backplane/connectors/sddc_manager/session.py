@@ -90,8 +90,15 @@ class SddcTargetLike(Protocol):
     constructing the Basic auth header (``username@sso_realm``). Defaults
     to ``"vsphere.local"`` per the consumer wrapper contract; operators
     managing a custom domain override this at the target level.
+
+    ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)``
+    cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
+    the credential + HTTP-client caches use, so two same-named targets in
+    different tenants never share a cached credential (#1642).
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

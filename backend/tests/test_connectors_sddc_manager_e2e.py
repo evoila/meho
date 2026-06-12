@@ -38,6 +38,7 @@ from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.sddc_manager import (
     SDDC_CONNECTOR_ID,
@@ -176,6 +177,7 @@ def _resolve_connector() -> SddcManagerConnector:
 class _SddcE2EBundle:
     target_name: str
     connector_instance: SddcManagerConnector
+    db_target: Any
 
 
 @pytest.fixture
@@ -193,7 +195,7 @@ async def sddc_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_SddcE2EB
        register the 9 read-op routes.
     """
     await _insert_sddc_descriptors()
-    await _seed_target()
+    seeded_target = await _seed_target()
     instance = _resolve_connector()
 
     async with respx.mock(
@@ -206,6 +208,7 @@ async def sddc_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_SddcE2EB
             yield _SddcE2EBundle(
                 target_name=_E2E_TARGET_NAME,
                 connector_instance=instance,
+                db_target=seeded_target,
             )
         finally:
             await instance.aclose()
@@ -259,8 +262,11 @@ async def test_sddc_e2e_credentials_cached_after_first_dispatch(
     """
     instance = sddc_e2e_canary.connector_instance
     target_name = sddc_e2e_canary.target_name
+    # The credential cache is keyed on the tenant-unique (tenant_id, id)
+    # tuple (#1642), not the bare name.
+    cache_key = target_cache_key(sddc_e2e_canary.db_target)
 
-    assert target_name not in instance._creds_cache, (
+    assert cache_key not in instance._creds_cache, (
         "Expected empty credential cache before first dispatch; "
         f"got _creds_cache={list(instance._creds_cache.keys())!r}"
     )
@@ -275,7 +281,7 @@ async def test_sddc_e2e_credentials_cached_after_first_dispatch(
         },
     )
     assert result["status"] == "ok"
-    assert target_name in instance._creds_cache, (
+    assert cache_key in instance._creds_cache, (
         "Expected credentials cached after first dispatch; "
         f"got _creds_cache={list(instance._creds_cache.keys())!r}"
     )

@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Iterator
-from dataclasses import dataclass
-from uuid import UUID
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import (
     SYSTEM_OPERATOR_SUB,
     synthesise_system_operator,
@@ -86,6 +87,10 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    # Tenant-unique cache key components (#1642). Distinct ``id`` per
+    # instance so two stub targets never collapse onto one cache entry.
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -337,6 +342,63 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_same_name_targets_in_different_tenants_get_distinct_credentials() -> None:
+    """Same-named targets in DIFFERENT tenants never share a cached credential.
+
+    Regression guard for #1642: the credential cache used to key on
+    ``target.name`` alone, so two same-named targets in different tenants
+    collapsed onto one entry and one tenant could be served another
+    tenant's cached credential. The cache keys on the tenant-unique
+    ``(tenant_id, id)`` tuple instead.
+    """
+    load_count = 0
+
+    async def _counting_loader(target: HarborTargetLike, _operator: Operator) -> dict[str, str]:
+        nonlocal load_count
+        load_count += 1
+        return {"username": f"svc-{target.tenant_id}", "password": "pass"}
+
+    tenant_one = _StubTarget(
+        name="harbor-shared",
+        host="harbor-shared.test.invalid",
+        port=443,
+        secret_ref="harbor/harbor-shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="harbor-shared",
+        host="harbor-shared.test.invalid",
+        port=443,
+        secret_ref="harbor/harbor-shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+
+    connector = HarborConnector(credentials_loader=_counting_loader)
+    h_one = await connector.auth_headers(tenant_one, operator=_make_operator())
+    h_two = await connector.auth_headers(tenant_two, operator=_make_operator())
+
+    user_one, _ = _decode_basic_auth(h_one["Authorization"])
+    user_two, _ = _decode_basic_auth(h_two["Authorization"])
+    # Each tenant triggered its own load -- no cross-tenant cache hit.
+    assert load_count == 2
+    assert user_one == f"svc-{tenant_one.tenant_id}"
+    assert user_two == f"svc-{tenant_two.tenant_id}"
+    assert user_one != user_two
+    assert connector._creds_cache.keys() == {
+        target_cache_key(tenant_one),
+        target_cache_key(tenant_two),
+    }
+
+    # Same-tenant re-fetch is a cache HIT -- behaviour unchanged.
+    h_one_again = await connector.auth_headers(tenant_one, operator=_make_operator())
+    assert h_one_again == h_one
+    assert load_count == 2
+    await connector.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Credential loading failure modes
 # ---------------------------------------------------------------------------
@@ -582,7 +644,7 @@ async def test_aclose_clears_credential_cache_and_pool() -> None:
     """aclose() clears the in-memory credential cache and tears down the httpx pool."""
     connector = _make_connector()
     await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    assert "harbor-a" in connector._creds_cache
+    assert target_cache_key(_TARGET_A) in connector._creds_cache
     await connector.aclose()
     assert connector._creds_cache == {}
     assert connector._clients == {}

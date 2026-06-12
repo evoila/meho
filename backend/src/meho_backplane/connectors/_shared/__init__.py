@@ -17,6 +17,10 @@ Exports:
   reusable operator-context Vault KV-v2 basic-credentials reader
   (G3.9-T2 #941). Every REST connector loader resolves a target's
   ``secret_ref`` to vendor credentials through it.
+* :mod:`meho_backplane.connectors._shared.cache_key` — the canonical
+  tenant-unique ``(tenant_id, id)`` per-target cache key (#1642). Every
+  connector credential / session / client cache derives its key here so
+  same-named targets in different tenants never collapse to one entry.
 
 New cross-connector shared modules land alongside these — keep each
 module focused on a single concern (auth, retries, pagination, etc.)
@@ -24,9 +28,10 @@ rather than growing this package into a god-module.
 """
 
 from meho_backplane.connectors._shared import (
+    cache_key,
     system_operator,
     vault_creds,
     vcf_auth,
 )
 
-__all__ = ["system_operator", "vault_creds", "vcf_auth"]
+__all__ = ["cache_key", "system_operator", "vault_creds", "vcf_auth"]

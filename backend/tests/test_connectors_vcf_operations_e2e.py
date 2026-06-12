@@ -57,6 +57,7 @@ from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_operations import (
     VROPS_CONNECTOR_ID,
@@ -211,6 +212,7 @@ def _resolve_connector() -> VcfOperationsConnector:
 class _VropsE2EBundle:
     target_name: str
     connector_instance: VcfOperationsConnector
+    db_target: Any
 
 
 @pytest.fixture
@@ -231,7 +233,7 @@ async def vcf_operations_e2e_canary(captured_events: list[Any]) -> AsyncIterator
        payloads.
     """
     await _insert_vrops_descriptors()
-    await _seed_target()
+    seeded_target = await _seed_target()
     instance = _resolve_connector()
 
     async with respx.mock(
@@ -244,6 +246,7 @@ async def vcf_operations_e2e_canary(captured_events: list[Any]) -> AsyncIterator
             yield _VropsE2EBundle(
                 target_name=_E2E_TARGET_NAME,
                 connector_instance=instance,
+                db_target=seeded_target,
             )
         finally:
             await instance.aclose()
@@ -306,9 +309,11 @@ async def test_vcf_operations_e2e_credentials_cached_after_first_dispatch(
     """
     instance = vcf_operations_e2e_canary.connector_instance
     target_name = vcf_operations_e2e_canary.target_name
+    # The shared CredentialsCache holds entries keyed by the tenant-unique
+    # (tenant_id, id) tuple (#1642), not the bare name.
+    cache_key = target_cache_key(vcf_operations_e2e_canary.db_target)
 
-    # The shared CredentialsCache holds entries keyed by target name.
-    assert target_name not in instance._creds._cache, (
+    assert cache_key not in instance._creds._cache, (
         "Expected empty credential cache before first dispatch; "
         f"got _creds._cache={list(instance._creds._cache.keys())!r}"
     )
@@ -323,7 +328,7 @@ async def test_vcf_operations_e2e_credentials_cached_after_first_dispatch(
         },
     )
     assert result["status"] == "ok"
-    assert target_name in instance._creds._cache, (
+    assert cache_key in instance._creds._cache, (
         "Expected credentials cached after first dispatch; "
         f"got _creds._cache={list(instance._creds._cache.keys())!r}"
     )

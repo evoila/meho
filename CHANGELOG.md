@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- Connector DELETE surface for the zero-op registry stubs aborted
+  ingests leave behind: `DELETE /api/v1/connectors/{connector_id}`
+  (204, tenant_admin, always operator-tenant-scoped) and the
+  `meho.connector.delete` MCP tool (optional `tenant_id`, omitted =
+  built-in / global scope). Removes the scoped `operation_group` +
+  `endpoint_descriptor` rows with one `meho.connector.delete` audit
+  row, deregisters the triple's `GenericRestConnector` auto-shim when
+  no rows remain anywhere (hand-coded classes never), warns —
+  advisory, not error — when enabled operations are deleted, and
+  re-ingest revives the connector from scratch (#1700)
+
 ### Changed
 
 - Document and pin the ingest tenant-scope contract across surfaces:

@@ -41,6 +41,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "AUDIT_METHOD",
+    "OP_DELETE_CONNECTOR",
     "OP_DISABLE_CONNECTOR",
     "OP_EDIT_GROUP",
     "OP_EDIT_OP",
@@ -67,12 +68,13 @@ __all__ = [
 #: the three surfaces cleanly.
 AUDIT_METHOD: Final[str] = "SERVICE"
 
-#: Op-ids (audit-row ``path`` column) for the five mutating actions.
+#: Op-ids (audit-row ``path`` column) for the mutating actions.
 OP_ENABLE_CONNECTOR: Final[str] = "meho.connector.enable"
 OP_DISABLE_CONNECTOR: Final[str] = "meho.connector.disable"
 OP_ENABLE_GROUP: Final[str] = "meho.connector.enable_group"
 OP_EDIT_GROUP: Final[str] = "meho.connector.edit_group"
 OP_EDIT_OP: Final[str] = "meho.connector.edit_op"
+OP_DELETE_CONNECTOR: Final[str] = "meho.connector.delete"
 OP_LLM_GROUPING: Final[str] = "meho.connector.llm_grouping"
 
 #: Allowed values for :attr:`EndpointDescriptor.safety_level`. The

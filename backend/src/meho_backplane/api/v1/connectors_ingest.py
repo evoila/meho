@@ -3,8 +3,8 @@
 
 """``/api/v1/connectors*`` -- REST surface for spec-ingestion + review.
 
-G0.7-T6 (#406) of Initiative #389. Seven routes mounted under
-``/api/v1/connectors*`` that drive the spec-ingestion pipeline (T1
+G0.7-T6 (#406) of Initiative #389. The routes mounted under
+``/api/v1/connectors*`` drive the spec-ingestion pipeline (T1
 parser + T2 register_ingested + T3 LLM grouping) and the
 review-queue state machine (T4 :class:`ReviewService`).
 
@@ -34,6 +34,10 @@ Route inventory
 * ``POST /api/v1/connectors/{connector_id}/disable`` — transition all
   groups to ``disabled``; cascade. Returns 204. Idempotent. Role:
   ``tenant_admin``.
+* ``DELETE /api/v1/connectors/{connector_id}`` — delete the connector:
+  remove its rows under the operator's tenant scope and, when no rows
+  remain for the triple anywhere, deregister the auto-registered
+  ingest shim (G0.25-T2 #1700). Returns 204. Role: ``tenant_admin``.
 
 Tenant scoping
 --------------
@@ -1218,6 +1222,62 @@ async def disable_endpoint(
     except InvalidStateTransitionError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+
+
+@router.delete(
+    "/{connector_id}",
+    status_code=http_status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_endpoint(
+    connector_id: str,
+    operator: Operator = _require_admin,
+) -> Response:
+    """Delete *connector_id* — rows under the operator's tenant + the ingest shim.
+
+    G0.25-T2 (#1700): clean-up surface for the zero-op registry stubs
+    aborted ingests leave behind, and for removing an unwanted
+    ingested connector outright. Removes the connector's
+    ``endpoint_descriptor`` + ``operation_group`` rows and writes one
+    ``meho.connector.delete`` audit row in the same transaction; when
+    no rows remain for the triple under any scope, the
+    auto-registered ``GenericRestConnector`` shim is also popped from
+    the v2 registry (hand-coded connector classes are never
+    deregistered). A zero-op stub — registered class, no rows — is
+    deletable here too: that delete is registry-only.
+
+    Tenant scoping (#1699 contract): this route exposes **no**
+    ``tenant_id`` parameter — the delete scope is always the calling
+    operator's tenant from the JWT. Built-in / global connectors
+    (``tenant_id IS NULL`` rows) are deleted via the MCP sibling
+    ``meho.connector.delete`` with ``tenant_id`` omitted
+    (tenant_admin only). Unknown ids, cross-tenant probes, and rows
+    visible only under a scope this route cannot name all collapse
+    into the same 404 the other connector routes use; a repeat
+    DELETE therefore returns 404 once the first one landed.
+
+    A connector that still has enabled operations is deleted anyway —
+    the advisory is deliberate, not an error: it surfaces as the
+    ``connector_delete_enabled_ops`` structured log event plus the
+    audit payload's ``enabled_operations_deleted`` count. The wire
+    response stays ``204 No Content`` per the task contract, so the
+    structured warning body lives on the MCP sibling (the
+    ``edit_op`` 200-promotion precedent from #1630 remains available
+    if a REST wire home is ever needed). Re-ingesting the same triple
+    afterwards re-registers the connector from scratch.
+    """
+    service = ReviewService(operator)
+    try:
+        await service.delete_connector(
+            connector_id,
+            tenant_id=operator.tenant_id,
+        )
+    except ConnectorNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)

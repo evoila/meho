@@ -82,6 +82,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.ingest._internals import (
+    OP_DELETE_CONNECTOR,
     OP_DISABLE_CONNECTOR,
     OP_EDIT_GROUP,
     OP_EDIT_OP,
@@ -100,6 +101,11 @@ from meho_backplane.operations.ingest._internals import (
     write_audit_row,
 )
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
+from meho_backplane.operations.ingest.delete_connector import (
+    DeleteConnectorResult,
+    deregister_staged_auto_shims,
+    stage_connector_delete,
+)
 from meho_backplane.operations.ingest.exceptions import (
     ConnectorNotFoundError,
     InvalidStateTransitionError,
@@ -577,6 +583,59 @@ class ReviewService:
                 },
             )
             await session.commit()
+
+    async def delete_connector(
+        self,
+        connector_id: str,
+        *,
+        tenant_id: UUID | None,
+    ) -> DeleteConnectorResult:
+        """Delete *connector_id* in *tenant_id*'s scope (G0.25-T2 #1700).
+
+        Removes the scope's ``endpoint_descriptor`` + ``operation_group``
+        rows and, when no rows remain for the triple under any scope,
+        pops the triple's auto-registered
+        :class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`
+        shim from the v2 registry — the zero-op stubs aborted ingests
+        leave behind are the primary target, and for those (no rows
+        anywhere) the delete is registry-only. Hand-coded connector
+        classes are never deregistered.
+
+        Unknown connector, cross-tenant probe, and a triple whose rows
+        live only under a scope the caller did not name all raise
+        :class:`ConnectorNotFoundError` — the same 404 conflation every
+        other connector route uses. Exactly one
+        ``meho.connector.delete`` audit row commits atomically with the
+        row deletes; the registry pop runs strictly after the commit so
+        a failed transaction never leaves the process-local registry
+        ahead of the database. A connector that still had enabled
+        operations is deleted anyway and the returned
+        :attr:`DeleteConnectorResult.warnings` carries the advisory
+        (warnings never block the write — the
+        :meth:`edit_op` discipline). Re-ingesting the same triple
+        afterwards re-registers the connector from scratch.
+        """
+        scope = self._resolve_scope(connector_id, tenant_id)
+        sessionmaker = self._sessionmaker()
+        async with sessionmaker() as session:
+            staged = await stage_connector_delete(session, scope, connector_id)
+            await write_audit_row(
+                session,
+                operator_sub=self._operator.sub,
+                operator_tenant_id=self._operator.tenant_id,
+                op_id=OP_DELETE_CONNECTOR,
+                payload=staged.audit_payload,
+            )
+            await session.commit()
+        deregister_staged_auto_shims(staged)
+        for warning in staged.result.warnings:
+            _log.warning(
+                "connector_delete_enabled_ops",
+                connector_id=connector_id,
+                enabled_op_count=warning.enabled_op_count,
+                code=warning.code,
+            )
+        return staged.result
 
     # -- internal connector-wide transition --------------------------------
 

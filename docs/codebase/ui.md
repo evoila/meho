@@ -1531,8 +1531,15 @@ before calling the service.
   rendered fragment. Same convention T1's delete-confirm modal uses.
 * Form encoding is `application/x-www-form-urlencoded`. The chassis
   `CSRFMiddleware` accepts the double-submit token from either the
-  `X-CSRF-Token` header (HTMX inherits it from the page-level
-  `hx-headers` directive) or the `csrf_token` form field.
+  `X-CSRF-Token` header or the `csrf_token` form field. The create
+  form declares its own `hx-headers` echo of the token its render
+  minted (#1693): each modal GET re-mints + re-sets the `meho_csrf`
+  cookie, so the token inherited from the page-level directive is
+  stale by the time the operator submits. htmx 2 does inherit
+  `hx-headers`, and a child declaration overrides a parent one
+  (https://htmx.org/attributes/hx-headers/), so the form-level echo
+  keeps the double-submit pair aligned — and the body textarea's
+  debounced preview `hx-post` inherits the fresh token from the form.
 * `hx-trigger="keyup changed delay:300ms"` on the create modal's
   body textarea drives the debounced server-side preview — see
   https://htmx.org/attributes/hx-trigger/. `delay:300ms` matches
@@ -1579,7 +1586,8 @@ The full suite lives in
 * the create submit (persists the row + HX-Redirects to the list,
   blank slug auto-generates, tenant scope as operator 403s, empty
   body 422s, target-scoped without `target_name` 422s, missing CSRF
-  cookie 403s),
+  cookie 403s, and the real modal cookie/header pair round-trips to
+  204 — the #1693 desync regression),
 * the Markdown preview (renders Markdown to HTML, empty body returns
   the placeholder, raw `<script>` escapes),
 * the promote-modal render (USER source lists USER_TENANT +

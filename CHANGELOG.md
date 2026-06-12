@@ -128,6 +128,12 @@ connector-related release-notes line.
   loaded after Alpine had already started; component registration now
   loads from a head-level `component_scripts` block that precedes
   `alpine.min.js` (#1692)
+- Operator console: every Memory create-modal submit silently 403'd
+  (`csrf_token_invalid`) because the modal render rotates the
+  `meho_csrf` cookie while the form still echoed the stale page-level
+  `X-CSRF-Token`; the create form now declares its own `hx-headers`
+  echo of the token minted with the modal, so the double-submit pair
+  always matches and the create round-trips to 204 + redirect (#1693)
 
 ## [0.14.0] - 2026-06-12
 

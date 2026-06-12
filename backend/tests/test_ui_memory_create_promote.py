@@ -38,6 +38,7 @@ token; ``_authenticated_client`` returns a TestClient + a respx mock
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 import warnings
 from collections.abc import Iterator
@@ -622,6 +623,75 @@ def test_create_submit_missing_csrf_token_returns_403() -> None:
     finally:
         mock.stop()
     assert response.status_code == 403, response.text
+
+
+#: Pull the ``meho_csrf`` value out of the raw ``Set-Cookie`` header. Read the
+#: raw header (not the TestClient cookie jar): ``set_csrf_cookie`` marks the
+#: cookie ``Secure``, which the http-scheme TestClient jar refuses to store.
+_CSRF_SETCOOKIE_RE = re.compile(rf"{CSRF_COOKIE_NAME}=([^;]+)")
+
+#: Pull the ``X-CSRF-Token`` the create form echoes via its ``hx-headers``
+#: attribute out of the rendered modal fragment -- the header half of the
+#: double-submit pair the create POST will present.
+_FORM_HX_HEADERS_RE = re.compile(r'hx-headers=\'\{"X-CSRF-Token": "([^"]+)"\}\'')
+
+
+def test_create_submit_real_modal_cookie_header_pair_returns_204() -> None:
+    """Create POST through the REAL modal cookie/header CSRF pair -> 204.
+
+    Regression for #1693: the create form used to rely on the page-level
+    ``hx-headers`` directive on ``index.html``, but ``GET /ui/memory/create``
+    re-mints + re-sets the ``meho_csrf`` cookie, so the inherited header
+    still carried the stale list-render token and the chassis middleware
+    403'd every modal create. The sibling submit tests hand-mint one token
+    into both cookie and header, which is exactly why they missed the
+    desync. This test drives the genuine flow instead: GET the modal,
+    capture the ``Set-Cookie`` token AND the token the form echoes via its
+    own ``hx-headers`` attribute, assert they are the same minted value,
+    then POST presenting that captured pair verbatim.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    access_token = _mint_token(
+        keypair,
+        sub=_OP_A,
+        tenant_id=str(_TENANT_A),
+        tenant_role=TenantRole.OPERATOR.value,
+    )
+    session_id = _seed_session_sync(
+        tenant_id=_TENANT_A, access_token=access_token, operator_sub=_OP_A
+    )
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        modal = client.get("/ui/memory/create", headers={"HX-Request": "true"})
+        assert modal.status_code == 200, modal.text
+
+        cookie_match = _CSRF_SETCOOKIE_RE.search(modal.headers.get("set-cookie", ""))
+        assert cookie_match, "modal render set no meho_csrf cookie"
+        cookie_token = cookie_match.group(1)
+
+        header_tokens = _FORM_HX_HEADERS_RE.findall(modal.text)
+        assert len(header_tokens) == 1, (
+            "expected exactly one hx-headers X-CSRF-Token echo in the create "
+            f"modal (the form's own), found {len(header_tokens)}"
+        )
+        assert cookie_token == header_tokens[0], (
+            "modal CSRF cookie does not match the form's hx-headers token -- the #1693 desync"
+        )
+
+        # Echo the captured pair back verbatim -- the browser round-trip.
+        client.cookies.set(CSRF_COOKIE_NAME, cookie_token)
+        with _stub_embedding_service():
+            response = client.post(
+                "/ui/memory/create",
+                data={"scope": "user", "body": "# pair test\n\nbody text"},
+                headers=_csrf_headers(header_tokens[0]),
+            )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    assert response.headers.get("HX-Redirect") == "/ui/memory"
+    assert _count_documents(_TENANT_A, MemoryScope.USER) == 1
 
 
 # ---------------------------------------------------------------------------

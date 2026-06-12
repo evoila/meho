@@ -21,8 +21,9 @@ place (T3, #1308).
 Naming canonicalisation (#1612): the dotted names above are canonical,
 matching the ``meho.<noun>.<verb>`` grammar of every other multi-verb
 family; the original flat ``runbook_*`` names remain registered as
-deprecated aliases (same handler object) for one release and are
-removed in v0.14.0. The run-side wire fields already used the canonical
+deprecated aliases (same handler object) and are removed in v0.15.0 —
+deferred from the original one-release v0.14.0 window by #1702. The
+run-side wire fields already used the canonical
 ``template_slug`` name, so only the template-side module needed the
 field shim.
 
@@ -154,10 +155,12 @@ _DEFAULT_LIST_LIMIT: Final[int] = 100
 _MAX_LIST_LIMIT: Final[int] = 500
 
 #: Release that drops the deprecated flat ``runbook_*`` tool-name
-#: aliases (#1612). Must stay in lockstep with the template-side
-#: constant in :mod:`meho_backplane.mcp.tools.runbooks` — the 11 aliases
-#: are announced and removed as one set.
-_ALIAS_REMOVAL_VERSION: Final[str] = "0.14.0"
+#: aliases (#1612); deferred from the original v0.14.0 window by #1702
+#: after v0.14.0 was tagged with the aliases still registered. Must
+#: stay in lockstep with the template-side constant in
+#: :mod:`meho_backplane.mcp.tools.runbooks` — the 11 aliases are
+#: announced and removed as one set.
+_ALIAS_REMOVAL_VERSION: Final[str] = "0.15.0"
 
 
 def _to_invalid_params(tool: str, exc: Exception) -> McpInvalidParamsError:
@@ -691,8 +694,9 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# Deprecated flat-name aliases (#1612) — one release, removed in
-# v0.14.0 (`_ALIAS_REMOVAL_VERSION`). Registered strictly after their
+# Deprecated flat-name aliases (#1612) — removed in v0.15.0
+# (`_ALIAS_REMOVAL_VERSION`; deferred from the original one-release
+# v0.14.0 window by #1702). Registered strictly after their
 # canonical targets; each shares the canonical handler object and
 # schema, differing only in name + DEPRECATED pointer description.
 # ---------------------------------------------------------------------------

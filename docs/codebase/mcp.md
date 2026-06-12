@@ -167,7 +167,14 @@ in #1612:
 Renames on an agent-facing wire surface always ship with a one-release
 alias window (the `content`→`body`, `since`→`cursor`, and
 `id`→`approval_request_id` precedents). For #1612 the window covers
-two alias kinds, both **removed in v0.14.0**:
+two alias kinds, both **removed in v0.15.0** (originally pinned to
+v0.14.0, but v0.14.0 was tagged with the aliases still registered and
+no release-notes line, so #1702 re-pinned the deadline to v0.15.0 and
+published a `### Deprecated` erratum on the v0.14.0 CHANGELOG section;
+removal executes as the scheduled task #1625, re-scheduled to the
+v0.15.0 cycle, and `removal_version` is warning/description text only
+— deliberately not a runtime version gate, because `__version__` is
+build-metadata-dependent; see #1698):
 
 * **Tool-name aliases.** The flat `runbook_*` names stay registered
   via `register_deprecated_mcp_tool_alias`
@@ -276,7 +283,8 @@ resource.
 * G0.14-T13 (#1202) — protocol-version mismatch observability
   (this section).
 * G0.22-T7 (#1612) — runbook tool-name + `template_slug`
-  canonicalisation; deprecated flat aliases removed in v0.14.0.
+  canonicalisation; deprecated flat aliases removed in v0.15.0
+  (deferred from v0.14.0 by #1702).
 * MCP spec (2025-06-18) §Tools (Tool object shape — no first-class
   deprecation field):
   https://modelcontextprotocol.io/specification/2025-06-18/server/tools

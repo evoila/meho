@@ -1024,8 +1024,10 @@ hold-out (`runbook_start`, `runbook_show_template`, …) until #1612
 canonicalised the 11 tools as `meho.runbook.<verb>`. The flat names
 stay registered as deprecated aliases — same handler object, same
 schema, DEPRECATED pointer description, per-call
-`mcp_tool_name_deprecated` warning log — for one release (removed in
-v0.14.0). The same change unified the template identifier on
+`mcp_tool_name_deprecated` warning log — until removal in v0.15.0
+(the original one-release v0.14.0 deadline slipped past the v0.14.0
+tag and was re-pinned, with a public CHANGELOG erratum, by #1702).
+The same change unified the template identifier on
 `template_slug` across all 11 tools (the template verbs previously
 took `slug` while the run verbs took `template_slug`); `slug` is
 accepted as a deprecated input alias on the template verbs for the

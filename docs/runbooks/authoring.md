@@ -62,7 +62,8 @@ session re-reads it with `meho.runbook.show_template`.
 
 > **Naming note (#1612).** The dotted `meho.runbook.<verb>` names are
 > canonical; the original flat `runbook_*` names remain callable as
-> deprecated aliases for one release (removed in v0.14.0). The template
+> deprecated aliases (removed in v0.15.0, deferred from the original
+> one-release v0.14.0 window by #1702). The template
 > id field is `template_slug` everywhere — `slug` is accepted as a
 > deprecated alias on the template verbs for the same window, and
 > responses carry both keys until the window closes.

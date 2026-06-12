@@ -925,7 +925,9 @@ def test_check_version_covered_logs_orphan_when_no_class_registered(
     assert events[0]["impl_id"] == "brand-new-impl"
 
 
-def test_check_version_covered_ignores_other_impls_of_same_product() -> None:
+def test_check_version_covered_ignores_other_impls_of_same_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Class for ``(product, impl_id_A)`` does not constrain ingest under ``impl_id_B``.
 
     The pre-flight filters by the full ``(product, impl_id)`` pair, so
@@ -933,21 +935,36 @@ def test_check_version_covered_ignores_other_impls_of_same_product() -> None:
     (``vmware-pyvmomi`` vs ``vmware-rest``) leaves the ``impl_id_B``
     pre-flight in the no-class-registered branch and proceeds with
     the orphan warning.
+
+    Capture surface (#1254): a private :class:`structlog.testing.LogCapture`
+    monkeypatched onto the subject module's ``_log`` rather than
+    ``capture_logs`` — see the docstring on
+    ``test_check_version_covered_logs_orphan_when_no_class_registered``
+    and ``docs/codebase/backend.md`` for why bare ``capture_logs`` flakes
+    under the xdist lane.
     """
+    from meho_backplane.operations.ingest import connector_registration
+
     register_connector_v2(
         product="vmware",
         version="9.0",
         impl_id="vmware-rest",
         cls=_FakeRangedConnector,
     )
-    with structlog.testing.capture_logs() as captured:
-        check_version_covered_by_registered_class(
-            product="vmware",
-            version="7.0",
-            impl_id="vmware-pyvmomi",
-        )
+    capture = structlog.testing.LogCapture()
+    private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    monkeypatch.setattr(connector_registration, "_log", private_log)
+
+    check_version_covered_by_registered_class(
+        product="vmware",
+        version="7.0",
+        impl_id="vmware-pyvmomi",
+    )
+
     orphan_events = [
-        entry for entry in captured if entry.get("event") == "connector_ingest_orphaned_class"
+        entry
+        for entry in capture.entries
+        if entry.get("event") == "connector_ingest_orphaned_class"
     ]
     assert len(orphan_events) == 1
     assert orphan_events[0]["impl_id"] == "vmware-pyvmomi"
@@ -996,24 +1013,39 @@ async def test_register_ingested_blocks_when_version_outside_existing_class_rang
 @pytest.mark.asyncio
 async def test_register_ingested_warns_and_proceeds_when_no_class_registered(
     stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No class for ``(product, impl_id)`` → ingest proceeds and emits
     ``connector_ingest_orphaned_class``.
+
+    Capture surface (#1254): a private :class:`structlog.testing.LogCapture`
+    monkeypatched onto the subject module's ``_log`` rather than
+    ``capture_logs`` — see the docstring on
+    ``test_check_version_covered_logs_orphan_when_no_class_registered``
+    and ``docs/codebase/backend.md`` for why bare ``capture_logs`` flakes
+    under the xdist lane.
     """
+    from meho_backplane.operations.ingest import connector_registration
+
+    capture = structlog.testing.LogCapture()
+    private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    monkeypatch.setattr(connector_registration, "_log", private_log)
+
     # Registry empty for ``(unknown-vendor, brand-new-impl)``.
-    with structlog.testing.capture_logs() as captured:
-        result = await register_ingested_operations(
-            product="unknown-vendor",
-            version="1.0",
-            impl_id="brand-new-impl",
-            spec_source="vendor.yaml",
-            operations=[_proto("GET:/things", path="/things")],
-            embedding_service=stub_embedding_service,
-        )
+    result = await register_ingested_operations(
+        product="unknown-vendor",
+        version="1.0",
+        impl_id="brand-new-impl",
+        spec_source="vendor.yaml",
+        operations=[_proto("GET:/things", path="/things")],
+        embedding_service=stub_embedding_service,
+    )
     assert result.inserted_count == 1
     # The orphan event is logged with the full triple.
     orphan_events = [
-        entry for entry in captured if entry.get("event") == "connector_ingest_orphaned_class"
+        entry
+        for entry in capture.entries
+        if entry.get("event") == "connector_ingest_orphaned_class"
     ]
     assert len(orphan_events) == 1
     event = orphan_events[0]

@@ -49,6 +49,7 @@ import structlog
 from fastapi import FastAPI, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from meho_backplane import __version__
 from meho_backplane.agent.reaper import (
@@ -140,7 +141,10 @@ from meho_backplane.topology import (
     stop_topology_history_retention_sweeper,
     stop_topology_refresh_scheduler,
 )
-from meho_backplane.ui.auth import UISessionMiddleware
+from meho_backplane.ui.auth import (
+    UISessionMiddleware,
+    ui_session_expired_exception_handler,
+)
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.csrf import CSRFMiddleware
 from meho_backplane.ui.paths import ensure_static_dist_dir, static_root_dir
@@ -581,6 +585,17 @@ app.add_middleware(BroadcastDetailMiddleware)
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(UISessionMiddleware)
+
+# G0.25 (#1694): app-level HTTPException handler. Intercepts exactly
+# the BFF refresh path's ``401 session_expired`` on ``/ui/*`` paths
+# and maps it to a ``302 /ui/auth/login?return_to=...`` for HTML
+# requests (cookie cleared); every other HTTPException -- including
+# the ``/api/*`` structured 401 codes -- delegates to FastAPI's stock
+# ``http_exception_handler`` byte-for-byte. Registered against the
+# Starlette base class so the one registration covers
+# ``fastapi.HTTPException`` raises from route dependencies too (the
+# FastAPI handling-errors override pattern).
+app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
 
 app.include_router(health_router)
 app.include_router(version_router)

@@ -46,11 +46,13 @@ Locked decisions:
 | `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.version.deployed_version_label()` -- the deployed-build label (`v<CHART_VERSION>`, else 12-char `GIT_SHA` truncation, else `unknown`) read from the same env vars `GET /version` reports, bound once at env construction because the values are process-immutable (#1698; the global used to bind the static package `__version__`, so every deploy's footer said `0.1.0-dev`). Routes must not pass their own `app_version` context key -- render context shadows env globals. `get_templates()` registers `_ui_session_context_processor` so every render sees a `session_tenant` dict ({id, slug, name}, or None on unauthenticated auth surfaces) -- G0.15-T9 #1217. |
 | `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), the real KB routes (`GET /ui/kb` + search + detail + preview, G10.2-T1 #870), and the remaining surface stubs (`GET /ui/{connectors,memory}`, `_stub.html` placeholders). Real routers are included **before** the stubs so their concrete paths win the first-match-wins lookup. G10.3-G10.4 replace the remaining stubs the same way. |
 | `meho_backplane.ui.csrf` | T5 (#866) double-submit-cookie CSRF middleware on state-changing `/ui/*` requests (POST/PATCH/PUT/DELETE). Signed-double-submit per OWASP -- the token is `hmac_sha256(session_secret, session_id || random) + "." + random`; the cookie is JS-readable (`meho_csrf`) so HTMX can echo it in `X-CSRF-Token`. Mismatch / missing token / forged signature -> 403. Read-only methods + out-of-prefix paths pass through. |
-| `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware. |
-| `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. |
+| `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware; G0.25 (#1694) wires the rotation primitive into the request path (`refresh` + `errors` modules). |
+| `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `load_session_for_update` (side-effect-free `SELECT ... FOR UPDATE` variant for the refresh path, G0.25 #1694), `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. `rotate_refresh` optionally extends `expires_at` by a refreshed token's lifetime (`new_lifetime=`), monotonic and clamped to `created_at + ui_session_absolute_lifetime_seconds`. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. |
 | `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter) and registers the per-flow verifier in a server-side `PKCEVerifierStore`. `exchange_code_for_tokens` pops the verifier and exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
 | `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Callback verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks. Sets `meho_session` cookie with `HttpOnly; Secure; SameSite=Strict; Path=/`. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
-| `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session. Bypasses `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. |
+| `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session. Bypasses `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. `require_ui_admin` (the write-route RBAC gate) loads + verifies the stored access token through `meho_backplane.ui.auth.refresh`, so expired tokens silently refresh instead of 401ing (G0.25 #1694). |
+| `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). This is the session seam the dashboard-feed proxy (#1696) builds on. |
+| `meho_backplane.ui.auth.errors` | App-level `HTTPException` handler registered in `main.py` for the whole app (G0.25 #1694). Intercepts exactly `401 session_expired` on `/ui/*`: HTML requests (`Accept: text/html`) get `302 /ui/auth/login?return_to=<path>` + `meho_session` cookie clear; non-HTML callers keep the JSON body (cookie cleared too). Every other HTTPException delegates byte-for-byte to FastAPI's stock `http_exception_handler`, so `/api/*` 401 codes are untouched. |
 
 The Jinja2 `Environment` is a module-level singleton (constructed on
 first `get_jinja_env()` call); the template cache it holds is keyed
@@ -195,18 +197,39 @@ Per-flow state custody:
 | --- | --- | --- |
 | `code_verifier` | Server-side `PKCEVerifierStore` keyed on `state` | One authorization round-trip (≤10 min) |
 | `state` (CSRF) | On the IdP's authorization URL + echoed in callback | Same one round-trip |
-| `meho_session` cookie | Browser, `HttpOnly` + `Secure` + `SameSite=Strict` | Session lifetime (until access-token expiry minus 60s margin) |
-| Access + refresh tokens | `web_session` row, Fernet-encrypted | Same session lifetime |
+| `meho_session` cookie | Browser, `HttpOnly` + `Secure` + `SameSite=Strict` | Session lifetime (seeded at login from access-token expiry minus 60s margin; extended by the sliding window #869 and by every successful token refresh #1694, both capped at `created_at + ui_session_absolute_lifetime_seconds`) |
+| Access + refresh tokens | `web_session` row, Fernet-encrypted | Rotated in place on every silent refresh (#1694); the row -- and therefore the cookie value -- survives rotation unchanged |
 
 The `code_verifier` deliberately does NOT live in a cookie -- a
 verifier alongside the code on the redirect URI would defeat the
 property PKCE protects (an attacker capturing one captures both).
 Server-side custody is the whole point.
 
+Mid-session token refresh (G0.25 #1694): Keycloak's access token
+(~5 min TTL) routinely dies long before the session row does --
+the sliding extension keeps an active row alive for hours. When a
+token-consuming dependency (`require_ui_admin`) finds the row near
+expiry, or the JWT chain reports `token_expired`, the
+`meho_backplane.ui.auth.refresh` module silently POSTs the RFC 6749
+§ 6 refresh grant and rotates the row via `rotate_refresh`
+(one-time-use, RFC 9700 § 4.14), serialised per session with
+`SELECT ... FOR UPDATE`. The handler then runs against the fresh
+token; the browser sees nothing. A failed refresh raises `401
+session_expired`, which the `meho_backplane.ui.auth.errors` handler
+maps to a `302 /ui/auth/login?return_to=<path>` + cookie clear for
+HTML requests (JSON callers keep the structured body) -- never raw
+JSON at a browser. The refresh path performs zero `Set-Cookie`
+operations: `meho_session` (the row id) and `meho_csrf` (HMAC-keyed
+on that id) are byte-identical before and after a rotation, so
+already-rendered pages and their forms keep working -- the
+cookie-rotation desync class #1706 diagnosed cannot occur here.
+
 Logout: revoke the row, clear the cookie, 302 to Keycloak's
 `end_session_endpoint` with `client_id` + `post_logout_redirect_uri`
 pointing back to `/ui/auth/login`. The IdP-side hop is best-effort
 -- the local session is already revoked when the redirect fires.
+A revoked row never reaches the refresh path -- the middleware
+bounces the next request to login before any token validation runs.
 
 ## Vendored asset versions
 

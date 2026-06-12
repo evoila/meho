@@ -55,14 +55,17 @@ ASGI-level pattern below is the canonical "wrap send" recipe.
 Why no session refresh here
 ---------------------------
 
-T5 (#866) will register a separate path that performs the
-RFC-9700-compliant refresh-token rotation when the access token is
-about to expire. Doing the refresh inside the middleware would
-require the middleware to know which surface needs the access
-token (most ``/ui/*`` page renders do not), and would inflate the
-hot path's DB cost. The session-store layer landed the rotation
-primitive in :func:`session_store.rotate_refresh`; the middleware
-only loads + validates the existing session row.
+The RFC-9700-compliant refresh lives in
+:mod:`meho_backplane.ui.auth.refresh` (G0.25 #1694) and hooks in at
+:func:`require_ui_admin` -- the dependency that actually presents
+the access token to the JWT chain -- not in this middleware. Doing
+the refresh inside the middleware would require the middleware to
+know which surface needs the access token (most ``/ui/*`` page
+renders do not), and would inflate the hot path's DB cost. The
+middleware only loads + validates the existing session row;
+token-consuming dependencies refresh proactively (row near
+``expires_at``) and reactively (JWT chain reports
+``token_expired``) through the refresh module's seams.
 
 References
 ----------
@@ -77,7 +80,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 from urllib.parse import quote
 
 import structlog
@@ -90,6 +93,9 @@ from meho_backplane.db.models import Tenant
 from meho_backplane.ui.audit import bind_ui_view_audit
 from meho_backplane.ui.auth.routes import LOGIN_PATH, SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import load_session
+
+if TYPE_CHECKING:
+    from meho_backplane.auth.operator import TenantRole
 
 __all__ = [
     "AUTH_PREFIX",
@@ -460,10 +466,19 @@ async def require_ui_admin(
     :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience` to extract the
     :class:`~meho_backplane.auth.operator.TenantRole`. Raises ``403
     Forbidden`` when the role is below ``tenant_admin`` (i.e. ``operator``
-    or ``read_only``). Raises ``401`` when the session's access token is
-    missing or fails JWT validation (which should not happen in normal flow
-    since the middleware already verified the session is alive, but can occur
-    if the access token expired between session load and this call).
+    or ``read_only``). Raises ``401`` when the session is gone or the
+    token fails JWT validation for any non-expiry reason.
+
+    Token-expiry handling (G0.25 #1694): the load + verify steps run
+    through :mod:`meho_backplane.ui.auth.refresh` -- the session is
+    refreshed proactively when the row is within 60 s of
+    ``expires_at``, and reactively when the JWT chain reports
+    ``token_expired`` (the common case under the default sliding
+    extension, where the row deliberately outlives the ~5-minute
+    access token). A terminal refresh failure surfaces as ``401
+    session_expired``, which the app-level handler in
+    :mod:`meho_backplane.ui.auth.errors` maps to a login redirect for
+    HTML requests instead of raw JSON.
 
     This is the T2 upload-RBAC gate: the :class:`UISessionContext` returned
     by :func:`require_ui_session` deliberately omits the role to keep the
@@ -478,18 +493,17 @@ async def require_ui_admin(
     # auth.jwt (ok) but auth.jwt → settings → (no ui module import).
     # The lazy import is inside the async function body (not module-level)
     # so it runs once per request; the overhead is negligible compared to
-    # a DB round-trip + JWT decode.
-    from meho_backplane.auth.jwt import verify_jwt_for_audience
-    from meho_backplane.auth.operator import TenantRole
+    # a DB round-trip + JWT decode. The refresh-module import follows the
+    # same discipline for consistency within this function.
     from meho_backplane.settings import get_settings
+    from meho_backplane.ui.auth.refresh import (
+        load_fresh_session,
+        verify_access_token_with_refresh,
+    )
 
     log = structlog.get_logger(__name__)
     settings = get_settings()
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session, db_session.begin():
-        from meho_backplane.ui.auth.session_store import load_session as _load_session
-
-        decrypted = await _load_session(db_session, session.session_id)
+    decrypted = await load_fresh_session(session.session_id)
 
     if decrypted is None:
         # Session disappeared between middleware check and here (revoked /
@@ -504,8 +518,8 @@ async def require_ui_admin(
         )
 
     try:
-        operator = await verify_jwt_for_audience(
-            f"Bearer {decrypted.access_token}",
+        _refreshed, operator = await verify_access_token_with_refresh(
+            decrypted,
             expected_audience=settings.keycloak_audience,
         )
     except HTTPException as exc:
@@ -516,28 +530,7 @@ async def require_ui_admin(
         )
         raise
 
-    _role_order: tuple[TenantRole, ...] = (
-        TenantRole.READ_ONLY,
-        TenantRole.OPERATOR,
-        TenantRole.TENANT_ADMIN,
-    )
-    try:
-        actual_rank = _role_order.index(operator.tenant_role)
-        required_rank = _role_order.index(TenantRole.TENANT_ADMIN)
-    except ValueError:
-        actual_rank = -1
-        required_rank = len(_role_order)
-
-    if actual_rank < required_rank:
-        log.info(
-            "ui_admin_gate_forbidden",
-            session_id=str(session.session_id),
-            actual_role=operator.tenant_role.value,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="tenant_admin_required",
-        )
+    _assert_tenant_admin_role(operator.tenant_role, session_id=session.session_id)
 
     # Bind operator identity into structlog contextvars so AuditMiddleware
     # can attribute the write operation (reads operator_sub + tenant_id from
@@ -548,3 +541,38 @@ async def require_ui_admin(
     )
 
     return session
+
+
+def _assert_tenant_admin_role(tenant_role: TenantRole, *, session_id: uuid.UUID) -> None:
+    """Raise 403 unless *tenant_role* ranks at least ``tenant_admin``.
+
+    Extracted from :func:`require_ui_admin` (the gate's only caller)
+    purely to keep the dependency under the chassis function-size
+    budget; the rank semantics are unchanged from the T2 upload-RBAC
+    landing.
+    """
+    from meho_backplane.auth.operator import TenantRole
+
+    _role_order: tuple[TenantRole, ...] = (
+        TenantRole.READ_ONLY,
+        TenantRole.OPERATOR,
+        TenantRole.TENANT_ADMIN,
+    )
+    try:
+        actual_rank = _role_order.index(tenant_role)
+        required_rank = _role_order.index(TenantRole.TENANT_ADMIN)
+    except ValueError:
+        actual_rank = -1
+        required_rank = len(_role_order)
+
+    if actual_rank < required_rank:
+        log = structlog.get_logger(__name__)
+        log.info(
+            "ui_admin_gate_forbidden",
+            session_id=str(session_id),
+            actual_role=tenant_role.value,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="tenant_admin_required",
+        )

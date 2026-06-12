@@ -98,7 +98,7 @@ from authlib.integrations.base_client.errors import (
     MismatchingStateError,
     OAuthError,
 )
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 
 from meho_backplane.auth.jwt import verify_jwt_for_audience
@@ -121,7 +121,9 @@ from meho_backplane.ui.auth.session_store import (
 __all__ = [
     "LOGIN_PATH",
     "SESSION_COOKIE_NAME",
+    "SESSION_TTL_MARGIN_SECONDS",
     "build_router",
+    "clear_session_cookie",
     "compute_redirect_uri",
     "set_session_cookie",
 ]
@@ -143,8 +145,11 @@ SESSION_COOKIE_NAME: Final[str] = "meho_session"
 #: the session lifetime. Keeps the session from outliving the access
 #: token it represents -- if the token expires at T, the session
 #: expires no later than T - margin so a refresh round-trip can still
-#: succeed.
-_SESSION_TTL_MARGIN_SECONDS: Final[int] = 60
+#: succeed. Public because the inline refresh path
+#: (:mod:`meho_backplane.ui.auth.refresh`, G0.25 #1694) applies the
+#: same margin when it recomputes the session lifetime from a
+#: refreshed token's ``expires_in``.
+SESSION_TTL_MARGIN_SECONDS: Final[int] = 60
 
 #: Default landing path when no ``?return_to`` is supplied on
 #: ``/ui/auth/login``. T5 (#866) lands the dashboard at ``/ui/``.
@@ -223,7 +228,7 @@ def set_session_cookie(response: RedirectResponse, session_id: uuid.UUID) -> Non
     )
 
 
-def _clear_session_cookie(response: RedirectResponse) -> None:
+def clear_session_cookie(response: Response) -> None:
     """Erase the ``meho_session`` cookie via the same attribute set.
 
     Setting a cookie with the same name + ``Max-Age=0`` + ``Path=/``
@@ -232,6 +237,14 @@ def _clear_session_cookie(response: RedirectResponse) -> None:
     ``SameSite=Strict``) -- some user agents are picky about
     attribute parity on overwrite, so matching them removes the
     ambiguity.
+
+    Public (G0.25 #1694) because the ``session_expired`` exception
+    handler in :mod:`meho_backplane.ui.auth.errors` drops the cookie
+    on terminal refresh failure -- the dead session id has no further
+    use client-side, and clearing it here keeps every cookie-erase in
+    the codebase on this one attribute set. Accepts the base
+    :class:`fastapi.Response` so both redirect and JSON shapes can be
+    cleared.
     """
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
@@ -390,7 +403,7 @@ async def _persist_session_from_tokens(
         f"Bearer {tokens.access_token}",
         expected_audience=settings.keycloak_audience,
     )
-    lifetime = timedelta(seconds=max(tokens.expires_in - _SESSION_TTL_MARGIN_SECONDS, 60))
+    lifetime = timedelta(seconds=max(tokens.expires_in - SESSION_TTL_MARGIN_SECONDS, 60))
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         decrypted = await create_session(
@@ -509,7 +522,7 @@ async def _handle_logout(request: Request) -> RedirectResponse:
     await _revoke_session_if_present(request.cookies.get(SESSION_COOKIE_NAME))
     target = await _resolve_end_session_target(get_settings())
     response = RedirectResponse(url=target, status_code=status.HTTP_302_FOUND)
-    _clear_session_cookie(response)
+    clear_session_cookie(response)
     return response
 
 

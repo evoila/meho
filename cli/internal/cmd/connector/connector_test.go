@@ -403,6 +403,65 @@ func TestValidateIngestModeTable(t *testing.T) {
 	}
 }
 
+// TestBuildIngestRequestSpecInfoVersionsCompatible — the manual-mode
+// --spec-info-versions-compatible flag (T1 #1646) threads onto the
+// request body so the backend's spec-vs-label cross-check can widen
+// against the operator-declared band; catalog mode and an unset flag
+// both leave the field nil.
+func TestBuildIngestRequestSpecInfoVersionsCompatible(t *testing.T) {
+	t.Run("manual sets the band", func(t *testing.T) {
+		body, err := buildIngestRequest(ingestOptions{
+			Product:    "vcf-logs",
+			Version:    "9.0",
+			ImplID:     "vrli-rest",
+			Specs:      []string{"https://specs.example.test/vrli.yaml"},
+			Compatible: []string{"2.x", ">=2,<3"},
+		})
+		if err != nil {
+			t.Fatalf("buildIngestRequest: %v", err)
+		}
+		if body.SpecInfoVersionsCompatible == nil {
+			t.Fatal("SpecInfoVersionsCompatible: want populated, got nil")
+		}
+		got := *body.SpecInfoVersionsCompatible
+		if len(got) != 2 || got[0] != "2.x" || got[1] != ">=2,<3" {
+			t.Errorf("SpecInfoVersionsCompatible = %v, want [2.x >=2,<3]", got)
+		}
+	})
+
+	t.Run("unset leaves the field nil", func(t *testing.T) {
+		body, err := buildIngestRequest(ingestOptions{
+			Product: "vcf-logs",
+			Version: "9.0",
+			ImplID:  "vrli-rest",
+			Specs:   []string{"https://specs.example.test/vrli.yaml"},
+		})
+		if err != nil {
+			t.Fatalf("buildIngestRequest: %v", err)
+		}
+		if body.SpecInfoVersionsCompatible != nil {
+			t.Errorf("SpecInfoVersionsCompatible = %v, want nil", *body.SpecInfoVersionsCompatible)
+		}
+	})
+
+	t.Run("catalog mode never carries the band", func(t *testing.T) {
+		// Catalog mode returns before the manual-mode tail, so a
+		// stray --spec-info-versions-compatible value is dropped on
+		// the wire; the backend validator rejects the combination
+		// up front anyway (catalog_entry_conflict).
+		body, err := buildIngestRequest(ingestOptions{
+			Catalog:    "vmware/9.0",
+			Compatible: []string{"2.x"},
+		})
+		if err != nil {
+			t.Fatalf("buildIngestRequest: %v", err)
+		}
+		if body.SpecInfoVersionsCompatible != nil {
+			t.Errorf("SpecInfoVersionsCompatible = %v, want nil", *body.SpecInfoVersionsCompatible)
+		}
+	})
+}
+
 // ---------- renderers ----------
 
 // TestPrintIngestSummaryDryRun — dry-run header + counts; no

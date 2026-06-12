@@ -51,6 +51,7 @@ func newIngestCmd() *cobra.Command {
 		versionFlag       string
 		implID            string
 		specs             []string
+		compatible        []string
 		catalog           string
 		dryRun            bool
 		noWait            bool
@@ -79,6 +80,13 @@ func newIngestCmd() *cobra.Command {
 			"      $CLAUDE_RDC_DOCS; read + uploaded by the CLI like file://)\n" +
 			"  Repeat --spec to merge multiple specs under one connector_id\n" +
 			"  (vSphere is the canonical case: vcenter.yaml + vi-json.yaml).\n\n" +
+			"  When a vendor spec self-versions independently of the product\n" +
+			"  line (e.g. a version-stable /api/v2 surface reports\n" +
+			"  info.version=v2 while the connector label is 9.0), pass\n" +
+			"  --spec-info-versions-compatible with a glob (2.x, 9.0.x) or a\n" +
+			"  PEP 440 specifier set (>=2,<3) to declare the band; the backplane\n" +
+			"  then accepts the spec under --version instead of rejecting the\n" +
+			"  major mismatch.\n\n" +
 			"v0.12+ backplanes run the pipeline off the request thread and\n" +
 			"answer 202 Accepted + a job handle. The CLI polls the job to a\n" +
 			"terminal status and renders the usual summary on success; pass\n" +
@@ -98,6 +106,7 @@ func newIngestCmd() *cobra.Command {
 				Version:           versionFlag,
 				ImplID:            implID,
 				Specs:             specs,
+				Compatible:        compatible,
 				Catalog:           catalog,
 				DryRun:            dryRun,
 				NoWait:            noWait,
@@ -114,6 +123,12 @@ func newIngestCmd() *cobra.Command {
 		"impl identifier (e.g. vmware-rest, k8s-go); manual mode")
 	cmd.Flags().StringArrayVar(&specs, "spec", nil,
 		"spec URI; repeat for multi-spec merge under one connector_id; manual mode")
+	cmd.Flags().StringSliceVar(&compatible, "spec-info-versions-compatible", nil,
+		"manual mode: declare that the spec's info.version is compatible with --version even when "+
+			"they differ (e.g. a vendor /api/v2 surface self-versioning as info.version=v2 ingested "+
+			"under --version 9.0). Each entry is a glob (2.x, 9.0.x) or a PEP 440 specifier set "+
+			"(>=2,<3); repeatable or comma-separated. Without it, a spec/label major mismatch is "+
+			"rejected; mutually exclusive with --catalog (the catalog row carries its own band)")
 	cmd.Flags().StringVar(&catalog, "catalog", "",
 		"catalog mode: ingest the curated entry for <product>/<version> (e.g. vmware/9.0); "+
 			"mutually exclusive with --product/--version/--impl/--spec")
@@ -134,6 +149,7 @@ type ingestOptions struct {
 	Version           string
 	ImplID            string
 	Specs             []string
+	Compatible        []string
 	Catalog           string
 	DryRun            bool
 	NoWait            bool
@@ -228,6 +244,16 @@ func buildIngestRequest(opts ingestOptions) (api.IngestRequest, error) {
 	body.Version = &version
 	body.ImplId = &implID
 	body.Specs = &specs
+	if len(opts.Compatible) > 0 {
+		// Explicit-quadruple opt-in (T1 #1646): the operator declares a
+		// spec-info-version compatibility band so the backplane's
+		// spec-vs-label cross-check widens against it instead of rejecting
+		// a self-versioning vendor spec. Catalog mode returns above, so
+		// this only ever rides the manual shape — the backend validator
+		// rejects the field alongside catalog_entry.
+		compatible := append([]string(nil), opts.Compatible...)
+		body.SpecInfoVersionsCompatible = &compatible
+	}
 	return body, nil
 }
 

@@ -189,6 +189,18 @@ connector-related release-notes line.
   `docs/codebase/connectors-vault-tenant-scope.md` documents the
   per-`sub` vs tenant-partitioned choice and what enabling the prefix
   requires (#1673).
+- The manual `--spec` connector-ingest path now accepts an
+  operator-supplied `spec_info_versions_compatible` band (REST body
+  field + `meho connector ingest --spec-info-versions-compatible`,
+  repeatable or comma-separated), mirroring the catalog opt-in (#1307).
+  A vendor spec that self-versions independently of the connector's
+  product-line label — e.g. the version-stable vRLI `/api/v2` surface
+  reporting `info.version="v2"` while the seeded `VcfLogsConnector`
+  label is `9.0` — now ingests under `--version 9.0
+  --spec-info-versions-compatible 2.x` instead of failing the
+  spec/label cross-check; omitting the band keeps the strict check, and
+  a non-pattern token (a bare `v2`) is rejected at request validation.
+  (#1646; consumer signal claude-rdc-hetzner-dc#1136)
 
 ### Fixed
 

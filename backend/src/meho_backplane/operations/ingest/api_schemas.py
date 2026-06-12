@@ -58,7 +58,9 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from meho_backplane.operations.ingest.catalog import _compatibility_pattern_to_specifier
 
 __all__ = [
     "ConnectorListItem",
@@ -181,6 +183,32 @@ class IngestRequest(BaseModel):
     specs: list[SpecSource] = Field(default_factory=list, max_length=16)
     catalog_entry: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = Field(default=None, max_length=2048)
+    #: Explicit-quadruple counterpart to the catalog row's
+    #: :attr:`ConnectorSpecEntry.spec_info_versions_compatible` opt-in
+    #: (G0.16-T5 #1307). Lets an operator running the manual ``--spec``
+    #: path declare that a self-versioning vendor spec — whose
+    #: ``info.version`` is orthogonal to the connector's product-line
+    #: ``version`` label — is compatible with that label, so the
+    #: spec-vs-label cross-check in ``_validate_spec_versions`` widens
+    #: against the declared band instead of raising
+    #: :exc:`VersionMismatchError`. Each entry is a glob (``"2.x"`` /
+    #: ``"9.0.x"``) or a PEP 440 specifier set (``">=2,<3"``); the
+    #: field validator below rejects any other shape at request-
+    #: validation time. ``None`` (the default) keeps the historical
+    #: strict check. The route forwards a populated value to
+    #: :meth:`IngestionPipelineService.ingest`; it is mutually
+    #: exclusive with ``catalog_entry`` (the catalog row carries its
+    #: own band) — see the ``catalog_entry_conflict`` validator below.
+    #:
+    #: T1 (#1646) — the vRLI catch-22 (claude-rdc-hetzner-dc#1136):
+    #: the version-stable ``/api/v2`` surface self-identifies as
+    #: ``info.version="v2"`` while the seeded ``VcfLogsConnector``
+    #: label is ``9.0``; no label ingested the canonical artifact
+    #: until the manual path gained this catalog-parity opt-in.
+    spec_info_versions_compatible: list[str] | None = Field(
+        default=None,
+        max_length=16,
+    )
     dry_run: bool = False
     #: Background-mode opt-out. ``True`` (default) fires the
     #: pipeline off the request thread and returns
@@ -238,6 +266,18 @@ class IngestRequest(BaseModel):
                 "supply only one request shape. "
                 "See docs/codebase/error-message-shape.md.",
             )
+        if catalog_set and self.spec_info_versions_compatible is not None:
+            # The catalog row carries its own
+            # ``spec_info_versions_compatible`` band (#1307); an
+            # explicit one on a catalog-driven body would be silently
+            # discarded during resolution, so reject it loudly rather
+            # than let the operator believe their override took effect.
+            raise ValueError(
+                "catalog_entry_conflict: 'spec_info_versions_compatible' is "
+                "the explicit-quadruple counterpart of the catalog row's own "
+                "compatibility band; drop it when using 'catalog_entry'. "
+                "See docs/codebase/error-message-shape.md.",
+            )
         if not catalog_set and not quadruple_set:
             raise ValueError(
                 "ingest_request_underspecified: supply either "
@@ -270,6 +310,35 @@ class IngestRequest(BaseModel):
                     "See docs/codebase/error-message-shape.md.",
                 )
         return self
+
+    @field_validator("spec_info_versions_compatible")
+    @classmethod
+    def _compatibility_patterns_are_parseable(cls, value: list[str] | None) -> list[str] | None:
+        """Reject malformed compat patterns at request-validation time.
+
+        Mirrors the catalog field's
+        :meth:`ConnectorSpecEntry._compatibility_patterns_are_parseable`
+        so the manual ``--spec`` opt-in fails the same way the catalog
+        opt-in does: a glob (``"2.x"`` / ``"9.0.x"``) or a PEP 440
+        specifier set (``">=2,<3"``) passes; anything else (a bare
+        product-line token like ``"v2"``, a typo, a blank) raises a
+        ``ValueError`` the route surfaces as 422 ``extra``-class
+        validation. Compiling here — rather than only inside
+        ``_validate_spec_versions`` mid-pipeline — gives the operator
+        the diagnostic before any spec is fetched or parsed.
+        """
+        if value is None:
+            return value
+        if not value:
+            raise ValueError(
+                "spec_info_versions_compatible must be null (no opt-in) or a non-empty list"
+            )
+        normalized: list[str] = []
+        for raw_pattern in value:
+            pattern = raw_pattern.strip()
+            _compatibility_pattern_to_specifier(pattern)
+            normalized.append(pattern)
+        return normalized
 
 
 class IngestionResultModel(BaseModel):

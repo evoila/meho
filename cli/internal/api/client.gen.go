@@ -2682,14 +2682,15 @@ type IngestKbRequest struct {
 // and the operator only finds out at review-time.
 type IngestRequest struct {
 	// Async Run the pipeline off the request thread (202 + job handle); set to false for the legacy blocking response. Ignored when dry_run=true.
-	Async        *bool         `json:"async,omitempty"`
-	BaseUrl      *string       `json:"base_url"`
-	CatalogEntry *string       `json:"catalog_entry"`
-	DryRun       *bool         `json:"dry_run,omitempty"`
-	ImplId       *string       `json:"impl_id"`
-	Product      *string       `json:"product"`
-	Specs        *[]SpecSource `json:"specs,omitempty"`
-	Version      *string       `json:"version"`
+	Async                      *bool         `json:"async,omitempty"`
+	BaseUrl                    *string       `json:"base_url"`
+	CatalogEntry               *string       `json:"catalog_entry"`
+	DryRun                     *bool         `json:"dry_run,omitempty"`
+	ImplId                     *string       `json:"impl_id"`
+	Product                    *string       `json:"product"`
+	SpecInfoVersionsCompatible *[]string     `json:"spec_info_versions_compatible"`
+	Specs                      *[]SpecSource `json:"specs,omitempty"`
+	Version                    *string       `json:"version"`
 }
 
 // IngestResponse Response shape for “POST /api/v1/connectors/ingest“.

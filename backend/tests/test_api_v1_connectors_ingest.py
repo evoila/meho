@@ -2318,6 +2318,174 @@ paths:
 
 
 # ---------------------------------------------------------------------------
+# T1 (#1646) — manual --spec spec_info_versions_compatible opt-in
+#
+# The vRLI catch-22 (claude-rdc-hetzner-dc#1136): the version-stable
+# vRLI ``/api/v2`` surface self-identifies as ``info.version="v2"``
+# while the seeded ``VcfLogsConnector`` label is ``9.0``
+# (supported_version_range ``>=9.0,<10.0``). Ingesting under ``9.0``
+# clears the class-range check (9.0 ∈ the range), so the only gate is
+# the spec-vs-label cross-check — which the explicit-quadruple
+# ``spec_info_versions_compatible`` band now decouples, exactly as the
+# catalog opt-in (#1307) does on the catalog path.
+# ---------------------------------------------------------------------------
+
+
+def _vrli_v2_spec_yaml() -> str:
+    """A minimal vRLI-shaped spec that self-versions as ``info.version=v2``.
+
+    Stands in for the pinned 136-op vRLI artifact: the cross-check only
+    reads ``info.version`` (via the lightweight ``read_spec_info_version``
+    helper), so a single-op spec exercises the same label-vs-spec gate
+    the real spec trips. ``packaging`` normalizes ``v2`` to ``2``, which
+    is why a ``2.x`` band (→ ``>=2,<3``) covers it while a bare ``v2``
+    token is not a valid pattern.
+    """
+    return """openapi: 3.0.3
+info:
+  title: VMware Aria Operations for Logs
+  version: 'v2'
+paths:
+  /api/v2/events:
+    get:
+      summary: query events
+      responses:
+        '200':
+          description: ok
+"""
+
+
+def test_ingest_manual_spec_info_versions_compatible_accepts_self_versioned_spec(
+    client: TestClient,
+    tmp_path: Any,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """vRLI ``info.version=v2`` under ``--version 9.0`` + compat ``["2.x"]`` ingests.
+
+    The manual ``--spec`` opt-in (T1 #1646) carries an operator-declared
+    compatibility band to ``_validate_spec_versions``, which widens the
+    label-vs-spec cross-check against it: ``v2`` normalizes to ``2``,
+    inside the ``2.x`` (→ ``>=2,<3``) band, so the otherwise-fatal
+    spec/label major mismatch is decoupled and the pipeline runs to
+    completion (ops inserted). The seeded ``VcfLogsConnector``
+    (``supported_version_range='>=9.0,<10.0'``) covers ``9.0``, so the
+    class-range pre-flight stays green — only the cross-check needed the
+    opt-in.
+    """
+    spec_path = tmp_path / "vrli.yaml"
+    spec_path.write_text(_vrli_v2_spec_yaml())
+    propose_json = (
+        '[{"group_key": "events", "name": "Events", '
+        '"when_to_use": "Use these operations to query log events."}]'
+    )
+    assign_json = '{"GET:/api/v2/events": "events"}'
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="vrli-v2.yaml")
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "vcf-logs",
+                "version": "9.0",
+                "impl_id": "vrli-rest",
+                "specs": [{"uri": spec_url}],
+                "spec_info_versions_compatible": ["2.x"],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # The cross-check did not raise: the single op was parsed + inserted.
+    assert body["ingestion"]["inserted_count"] == 1
+
+
+def test_ingest_manual_self_versioned_spec_without_opt_in_returns_422(
+    client: TestClient, tmp_path: Any
+) -> None:
+    """Same ingest **without** the opt-in still raises the spec/label mismatch.
+
+    Regression guard: the opt-in is explicit and never default. Omitting
+    ``spec_info_versions_compatible`` leaves the historical strict
+    cross-check in force, so ``info.version=v2`` under ``--version 9.0``
+    is a cross-major mismatch → 422 ``spec_label_mismatch`` naming both
+    versions, exactly as it did before T1.
+    """
+    spec_path = tmp_path / "vrli.yaml"
+    spec_path.write_text(_vrli_v2_spec_yaml())
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="vrli-v2-noopt.yaml")
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "vcf-logs",
+                "version": "9.0",
+                "impl_id": "vrli-rest",
+                "specs": [{"uri": spec_url}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["kind"] == "spec_label_mismatch"
+    assert detail["requested_version"] == "9.0"
+    assert detail["spec_info_versions"] == [{"spec_uri": spec_url, "info_version": "v2"}]
+    assert "v2" in detail["message"]
+    assert "9.0" in detail["message"]
+
+
+def test_ingest_manual_invalid_compat_pattern_returns_422(
+    client: TestClient, tmp_path: Any
+) -> None:
+    """A bare ``["v2"]`` compat token is rejected at request validation.
+
+    ``v2`` is neither a glob nor a PEP 440 specifier set, so the
+    ``IngestRequest`` field validator (mirroring the catalog row's)
+    rejects it before any spec is fetched — the operator hears about the
+    bad band immediately rather than mid-pipeline. FastAPI surfaces the
+    ``ValueError`` as a 422 whose body names the offending field.
+    """
+    spec_path = tmp_path / "vrli.yaml"
+    spec_path.write_text(_vrli_v2_spec_yaml())
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="vrli-v2-badpat.yaml")
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "vcf-logs",
+                "version": "9.0",
+                "impl_id": "vrli-rest",
+                "specs": [{"uri": spec_url}],
+                "spec_info_versions_compatible": ["v2"],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    messages = [err.get("msg", "") for err in response.json()["detail"]]
+    assert any("spec_info_versions_compatible" in m for m in messages), messages
+
+
+# ---------------------------------------------------------------------------
 # set_llm_client_factory contract
 # ---------------------------------------------------------------------------
 

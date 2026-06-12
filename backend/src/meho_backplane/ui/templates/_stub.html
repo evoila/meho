@@ -3,39 +3,56 @@
   Copyright (c) 2026 evoila Group
 
   Surface-stub template (Initiative #337, Task #866). Rendered by the
-  five "coming soon" routes (broadcast / knowledge / topology /
-  connectors / memory) the chassis lands before the surface
-  Initiatives G10.1-G10.5 replace them.
+  "coming soon" routes (knowledge / connectors / memory) the chassis
+  lands before the surface Initiatives G10.1-G10.5 replace them.
 
-  Inherits base.html so the chrome (sidebar, navbar, footer) matches
-  every other surface. Carries the same hx-headers CSRF wiring as
-  the dashboard so any future placeholder form has the double-submit
+  Inherits base.html so the chrome (sidebar, status) matches every
+  other surface. Carries the same hx-headers CSRF wiring as the
+  dashboard so any future placeholder form has the double-submit
   chain set up.
 -#}
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block page_title %}{{ surface_title }} &middot; MEHO Operator Console{% endblock %}
 
+{#- The sidebar registry in base.html owns surface→icon; mirror it
+    here for the page header so the two can't drift apart visually
+    without the diff showing both. -#}
+{% set stub_icons = {
+  "broadcast": "radio-tower",
+  "knowledge": "book-open",
+  "topology": "waypoints",
+  "connectors": "plug",
+  "memory": "brain",
+} %}
+
 {% block content %}
 <section
-  class="mx-auto max-w-2xl space-y-4"
+  class="mx-auto max-w-2xl space-y-6"
   hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
 >
-  <header>
-    <h1 class="text-2xl font-semibold">{{ surface_title }}</h1>
-    <p class="text-sm opacity-70">Operator surface placeholder.</p>
+  <header class="meho-reveal">
+    <div class="meho-overline mb-2">Operator surface</div>
+    <h1 class="font-display text-3xl font-bold tracking-tight">{{ surface_title }}</h1>
   </header>
 
-  <article class="card bg-base-100 border-base-300 border shadow-sm">
-    <div class="card-body">
-      <h2 class="card-title">Coming soon</h2>
-      <p>{{ summary }}</p>
-      <p class="text-sm opacity-70">
-        This surface ships with Initiative <code>#{{ initiative_number }}</code>.
-        The chassis (G10.0) routes this URL to a placeholder so the
-        sidebar navigation renders end-to-end; the surface Initiative
-        replaces the route handler with the real view.
-      </p>
+  <article class="meho-card meho-reveal" style="animation-delay: 80ms">
+    <div class="p-6">
+      <div class="flex items-start gap-4">
+        <span class="grid size-11 shrink-0 place-items-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
+          {{ icon(stub_icons.get(active_surface, "zap"), class="size-5") }}
+        </span>
+        <div class="min-w-0">
+          <h2 class="text-lg font-semibold">Coming soon</h2>
+          <p class="mt-1 leading-relaxed text-base-content/80">{{ summary }}</p>
+        </div>
+      </div>
+      <div class="mt-5 flex items-center gap-2 border-t border-base-content/8 pt-4 text-xs text-base-content/55">
+        <span>Ships with Initiative</span>
+        <code class="rounded-md bg-base-100/80 px-1.5 py-0.5 font-mono text-[0.7rem] text-base-content/75 ring-1 ring-base-content/10">#{{ initiative_number }}</code>
+        <span class="hidden sm:inline">&mdash; the chassis routes this URL so navigation renders end-to-end.</span>
+      </div>
     </div>
   </article>
 </section>

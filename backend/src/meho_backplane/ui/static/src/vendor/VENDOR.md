@@ -115,3 +115,18 @@ Never bump a vendored library in a feature PR — the supply-chain
 audit trail wants every input movement on its own commit, mirroring
 the `chore(backend): bump python:3.12-slim base digest to <new>`
 discipline `backend/Dockerfile` already follows.
+
+## Embedded icon artwork (not a vendored file)
+
+The console's inline-SVG icon macro
+([`../../../templates/_icons.html`](../../../templates/_icons.html))
+embeds path data copied from **Lucide** (https://lucide.dev),
+ISC License, Copyright (c) Lucide Contributors (fork of Feather Icons,
+MIT). The artwork lives as string constants inside the Jinja template —
+there is no served vendor *file*, so no SHA256 row in the table above;
+this section is the license record. Refreshing or adding icons follows
+the normal template-change path (the ISC notice in the macro header
+travels with the artwork).
+
+Webfonts have their own manifest: see
+[`../fonts/FONTS.md`](../fonts/FONTS.md).

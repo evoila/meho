@@ -377,9 +377,10 @@ def test_dashboard_authenticated_renders_console_html() -> None:
     # Sidebar links to every one of the 5 surface routes.
     for route in _SURFACE_ROUTES:
         assert f'href="{route}"' in body, f"sidebar link to {route} missing"
-    # 3x2 surface card grid present (DaisyUI ``card`` markup).
-    # Five surface cards + one deploy card = 6 ``card`` blocks.
-    assert body.count('class="card-body"') >= 6
+    # Bento surface grid present (branded ``meho-card`` markup; the
+    # rebrand replaced DaisyUI's ``card``/``card-body`` shell).
+    # Five surface cards + one deploy card = 6 card blocks.
+    assert body.count("meho-card") >= 6
     # HTMX SSE wiring on the recent-activity tray. The dashboard
     # subscribes to ``/api/v1/feed`` with no query parameters; the
     # feed endpoint (G6.1-T4 #310) does not accept a ``limit`` knob

@@ -1,0 +1,32 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Shared <head> asset block — included by base.html AND the standalone
+  wall.html so the two heads can never drift (the wall is its own
+  document by design; see broadcast/wall.html).
+
+  Contents: compiled Tailwind/DaisyUI bundle, brand font preloads,
+  vendored HTMX 2 + SSE extension + Alpine 3. Script order is
+  load-bearing: ``sse.min.js`` calls ``htmx.defineExtension`` at load,
+  so it must execute after ``htmx.min.js``; ``defer`` preserves
+  document order across all three. Zero inline script — CSP-ready.
+-#}
+{# Theme bootstrap — synchronous on purpose (NO defer): it must set
+   <html data-theme> from localStorage / OS preference BEFORE first
+   paint or light-theme operators get a dark flash. External file,
+   not inline, to preserve the zero-inline-script CSP posture. #}
+<script src="/ui/static/src/app/theme.js"></script>
+{# Compiled Tailwind 4 + DaisyUI 5 bundle; built by the ``tailwindcss``
+   CLI step in backend/Dockerfile from static/src/styles.css. #}
+<link rel="stylesheet" href="/ui/static/dist/tailwind.css" />
+{# Brand fonts (self-hosted; see static/src/fonts/FONTS.md). The
+   ``crossorigin`` attribute is required on font preloads even for
+   same-origin fetches — font requests are CORS-mode per spec. #}
+<link rel="preload" href="/ui/static/src/fonts/schibsted-grotesk-latin-var.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/ui/static/src/fonts/bricolage-grotesque-latin-var.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/ui/static/src/fonts/ibm-plex-mono-latin-400.woff2" as="font" type="font/woff2" crossorigin />
+{# Vendored JS — pinned SHA256 in static/src/vendor/VENDOR.md. #}
+<script src="/ui/static/src/vendor/htmx.min.js" defer></script>
+<script src="/ui/static/src/vendor/sse.min.js" defer></script>
+<script src="/ui/static/src/vendor/alpine.min.js" defer></script>

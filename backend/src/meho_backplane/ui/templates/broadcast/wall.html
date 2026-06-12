@@ -41,16 +41,14 @@
   non-200 (login redirect) that would permanently kill it.
 -#}
 <!doctype html>
-<html lang="en" data-theme="corporate" class="h-full">
+<html lang="en" data-theme="meho-dark" class="h-full">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Broadcast wall &middot; MEHO Operator Console</title>
-    <link rel="stylesheet" href="/ui/static/dist/tailwind.css" />
-    {# Same vendored bundle + load order as base.html. #}
-    <script src="/ui/static/src/vendor/htmx.min.js" defer></script>
-    <script src="/ui/static/src/vendor/sse.min.js" defer></script>
-    <script src="/ui/static/src/vendor/alpine.min.js" defer></script>
+    {# Shared asset block — same CSS/fonts/JS + load order as base.html
+       (the include is what keeps the two heads from drifting). #}
+    {% include "_head_assets.html" %}
   </head>
   <body class="bg-base-200 text-base-content flex h-full flex-col overflow-hidden">
     <section

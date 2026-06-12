@@ -7,21 +7,24 @@
   the operator's session.
 
   Structure:
-    * <body> inherits the DaisyUI drawer chrome from base.html.
-    * <header>'s ``hx-headers`` directive wires every HTMX-issued
+    * <body> inherits the drawer chrome from base.html.
+    * <section>'s ``hx-headers`` directive wires every HTMX-issued
       state-changing request from this page to echo the CSRF token
       via the X-CSRF-Token header (double-submit cookie pattern).
-    * Three content blocks:
-      1. The 3x2 surface card grid (5 cards + 1 "deploy info" cell).
-      2. The live recent-activity snippet -- HTMX SSE extension
-         subscribes to /api/v1/feed and swaps events into the
-         ``#meho-feed-tray`` container as they arrive. Pre-render
-         placeholder text covers the SSE-not-yet-connected window.
-         (Trim-to-last-N is G10.1 client-side surface work; the feed
-         endpoint streams the live tail.)
-      3. Version + readiness card.
+    * Bento layout (rebrand): asymmetric 12-col grid — the Broadcast
+      tile is the signal-washed hero (5 cols), the other surfaces
+      step down (4/3 then 3/4), the Deploy cell closes the second row
+      (5 cols). Below: live-feed tray (8) + readiness checks (4).
+      Cards stagger in via the CSS-only ``meho-reveal`` animation.
+    * The live recent-activity snippet -- HTMX SSE extension
+      subscribes to /api/v1/feed and swaps events into the
+      ``#meho-feed-tray`` container as they arrive. Pre-render
+      placeholder text covers the SSE-not-yet-connected window.
+      (Trim-to-last-N is G10.1 client-side surface work; the feed
+      endpoint streams the live tail.)
 -#}
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block page_title %}MEHO Operator Console{% endblock %}
 
@@ -37,117 +40,141 @@
   page subtree.
 -#}
 <section
-  class="space-y-6"
+  class="space-y-8"
   hx-ext="sse"
   hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
 >
 
   {# -------- Greeting -------- #}
-  <header class="flex items-center justify-between">
-    <div>
-      <h1 class="text-2xl font-semibold">Operator Console</h1>
-      <p class="text-sm opacity-70">
-        Signed in as <code class="badge badge-outline">{{ operator_sub }}</code>
-        in tenant <code class="badge badge-outline">{{ tenant_id }}</code>.
-      </p>
-    </div>
+  <header class="meho-reveal">
+    <h1 class="font-display text-3xl font-bold tracking-tight">Operator Console</h1>
+    <p class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-base-content/60">
+      <span>Signed in as</span>
+      <code class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-base-content/80 ring-1 ring-base-content/10">{{ operator_sub }}</code>
+      <span>in tenant</span>
+      <code class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-base-content/80 ring-1 ring-base-content/10">{{ tenant_id }}</code>
+    </p>
   </header>
 
-  {# -------- 3x2 surface grid -------- #}
+  {# -------- Bento surface grid --------
+     Span rhythm: 5-4-3 / 3-4-5 across two lg rows. The map is keyed
+     by loop.index0; the Broadcast hero additionally gets the
+     signal-washed card face. -#}
+  {% set tile_spans = [
+    "md:col-span-6 lg:col-span-5",
+    "md:col-span-6 lg:col-span-4",
+    "md:col-span-6 lg:col-span-3",
+    "md:col-span-6 lg:col-span-3",
+    "md:col-span-6 lg:col-span-4",
+  ] %}
   <div
-    class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3"
+    class="meho-stagger grid grid-cols-1 gap-4 md:grid-cols-12"
     aria-label="Operator surfaces"
   >
     {% for tile in surface_tiles %}
       <a
         href="{{ tile.href }}"
-        class="card bg-base-100 border-base-300 hover:border-primary border shadow-sm transition"
+        class="meho-card meho-reveal group col-span-1 {{ tile_spans[loop.index0] }}"
       >
-        <div class="card-body">
-          <div class="flex items-center gap-3">
-            <span class="text-2xl" aria-hidden="true">{{ tile.icon }}</span>
-            <h2 class="card-title">{{ tile.title }}</h2>
+        <div class="flex h-full flex-col gap-3 p-5{% if loop.first %} min-h-40{% endif %}">
+          <div class="flex items-center justify-between">
+            <span class="grid size-9 place-items-center rounded-lg bg-base-content/5 text-base-content/80 ring-1 ring-base-content/10{% if loop.first %} bg-primary/15 text-primary ring-primary/25{% endif %}">
+              {{ icon(tile.icon, class="size-4.5") }}
+            </span>
+            <span class="text-base-content/25 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-base-content/60">
+              {{ icon("arrow-right", class="size-4") }}
+            </span>
           </div>
-          <p class="text-sm opacity-80">{{ tile.summary }}</p>
+          <div class="mt-auto">
+            <h2 class="text-base font-semibold">{{ tile.title }}</h2>
+            <p class="mt-1 text-sm leading-snug text-base-content/65">{{ tile.summary }}</p>
+          </div>
         </div>
       </a>
     {% endfor %}
 
-    {# Sixth tile: deploy info. Keeps the grid 3x2 balanced. #}
-    <article class="card bg-base-100 border-base-300 border shadow-sm">
-      <div class="card-body">
-        <div class="flex items-center gap-3">
-          <span class="text-2xl" aria-hidden="true">&#x2699;</span>
-          <h2 class="card-title">Deploy</h2>
+    {# Deploy cell: closes the second bento row. #}
+    <article class="meho-card meho-reveal col-span-1 md:col-span-6 lg:col-span-5">
+      <div class="flex h-full flex-col gap-3 p-5">
+        <div class="flex items-center justify-between">
+          <span class="grid size-9 place-items-center rounded-lg bg-base-content/5 text-base-content/80 ring-1 ring-base-content/10">
+            {{ icon("package", class="size-4.5") }}
+          </span>
+          <span
+            class="badge badge-sm {% if ready %}badge-success{% else %}badge-warning{% endif %} badge-soft font-mono text-[0.65rem] uppercase tracking-wider"
+          >
+            {% if ready %}ready{% else %}starting{% endif %}
+          </span>
         </div>
-        <dl class="text-sm opacity-80">
-          <div class="flex justify-between">
-            <dt>Backplane version</dt>
-            <dd><code>v{{ app_version }}</code></dd>
-          </div>
-          <div class="mt-1 flex items-center justify-between">
-            <dt>Readiness</dt>
-            <dd>
-              <span
-                class="badge {% if ready %}badge-success{% else %}badge-warning{% endif %}"
-              >
-                {% if ready %}ready{% else %}starting{% endif %}
-              </span>
-            </dd>
-          </div>
-        </dl>
+        <div class="mt-auto">
+          <h2 class="text-base font-semibold">Deploy</h2>
+          <dl class="mt-2 space-y-1 text-sm text-base-content/65">
+            <div class="flex items-center justify-between gap-4">
+              <dt>Backplane version</dt>
+              <dd><code class="font-mono text-xs text-base-content/80">v{{ app_version }}</code></dd>
+            </div>
+          </dl>
+        </div>
       </div>
     </article>
   </div>
 
-  {# -------- Live feed snippet (HTMX SSE) -------- #}
-  <section
-    class="card bg-base-100 border-base-300 border shadow-sm"
-    aria-label="Recent broadcast events (live)"
-  >
-    <div class="card-body">
-      <div class="flex items-baseline justify-between">
-        <h2 class="card-title">Recent activity</h2>
-        <a href="/ui/broadcast" class="link link-hover text-xs">
-          Open broadcast surface &rarr;
-        </a>
-      </div>
-      <ul
-        id="meho-feed-tray"
-        class="divide-base-300 divide-y text-sm"
-        sse-connect="{{ feed_endpoint }}"
-        sse-swap="broadcast"
-        hx-swap="afterbegin"
-      >
-        <li class="py-2 opacity-60">
-          Connecting to live feed&hellip;
-        </li>
-      </ul>
-    </div>
-  </section>
+  {# -------- Live feed tray + readiness, side by side -------- #}
+  <div class="grid grid-cols-1 gap-4 lg:grid-cols-12">
 
-  {# -------- Readiness card (expanded; the badge above is the summary) -------- #}
-  {% if readiness_checks %}
-    <section class="card bg-base-100 border-base-300 border shadow-sm">
-      <div class="card-body">
-        <h2 class="card-title">Readiness checks</h2>
-        <ul class="text-sm">
-          {% for check in readiness_checks %}
-            <li class="flex items-center gap-2 py-1">
-              <span
-                class="inline-block h-2 w-2 rounded-full {% if check.ok %}bg-success{% else %}bg-warning{% endif %}"
-                aria-hidden="true"
-              ></span>
-              <span class="font-mono text-xs">{{ check.name }}</span>
-              {% if check.detail %}
-                <span class="opacity-60">&mdash; {{ check.detail }}</span>
-              {% endif %}
-            </li>
-          {% endfor %}
+    {# Live feed snippet (HTMX SSE). #}
+    <section
+      class="meho-card meho-reveal col-span-1 lg:col-span-8"
+      aria-label="Recent broadcast events (live)"
+    >
+      <div class="flex h-full flex-col p-5">
+        <div class="flex items-baseline justify-between gap-4">
+          <h2 class="flex items-center gap-2 text-base font-semibold">
+            <span class="meho-live-dot" aria-hidden="true"></span>
+            Recent activity
+          </h2>
+          <a href="/ui/broadcast" class="link link-hover flex items-center gap-1 text-xs text-base-content/60 hover:text-base-content">
+            Open broadcast surface {{ icon("arrow-right", class="size-3") }}
+          </a>
+        </div>
+        <ul
+          id="meho-feed-tray"
+          class="mt-3 max-h-72 divide-y divide-base-content/6 overflow-y-auto overflow-x-hidden font-mono text-xs leading-6 text-base-content/70 [overflow-wrap:anywhere]"
+          sse-connect="{{ feed_endpoint }}"
+          sse-swap="broadcast"
+          hx-swap="afterbegin"
+        >
+          <li class="py-2 text-base-content/50">
+            Connecting to live feed&hellip;
+          </li>
         </ul>
       </div>
     </section>
-  {% endif %}
+
+    {# Readiness card (expanded; the deploy badge is the summary). #}
+    {% if readiness_checks %}
+      <section class="meho-card meho-reveal col-span-1 lg:col-span-4">
+        <div class="p-5">
+          <h2 class="text-base font-semibold">Readiness checks</h2>
+          <ul class="mt-3 space-y-1.5 text-sm">
+            {% for check in readiness_checks %}
+              <li class="flex items-start gap-2.5 py-0.5">
+                <span
+                  class="mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full {% if check.ok %}bg-success{% else %}bg-warning{% endif %}"
+                  aria-hidden="true"
+                ></span>
+                <span class="font-mono text-xs leading-5 text-base-content/80">{{ check.name }}</span>
+                {% if check.detail %}
+                  <span class="min-w-0 truncate text-xs leading-5 text-base-content/50">{{ check.detail }}</span>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </section>
+    {% endif %}
+
+  </div>
 
 </section>
 {% endblock %}

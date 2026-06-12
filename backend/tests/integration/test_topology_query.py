@@ -37,7 +37,9 @@ Coverage matrix (mirrors the Task #451 acceptance criteria):
   ``AmbiguousNodeError``; an explicit ``kind`` pins the right closure.
 * The converging-DAG dedupe holds: a node reachable by several paths
   appears exactly once at its minimum depth.
-* A 10k-node fixture completes a depth-16 traversal in under 100 ms.
+* A 10k-node fixture keeps a depth-16 traversal within a bounded
+  multiple of a depth-1 baseline (a runner-load-invariant ratio gate
+  that trips on a dropped-index regression but not on CI-runner noise).
 """
 
 from __future__ import annotations
@@ -67,6 +69,13 @@ TENANT_A_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 TENANT_B_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
 
 _skip_no_docker = pytest.mark.skipif(not DOCKER_AVAILABLE, reason=SKIP_REASON)
+
+# Perf-gate calibration for ``test_depth_16_traversal_scales_sub_linearly_on_10k_nodes``
+# (#1434). See that test's docstring for the measured healthy (~1.8) vs
+# regressed (~11.4) ratios these thresholds bracket.
+_PERF_SAMPLES = 7  # median over an odd count drops a single spike
+_PERF_RATIO_CEILING = 6.0  # depth-16 / depth-1; ~3.3x over healthy, ~1.9x under regressed
+_PERF_ABS_CEILING_MS = 2000.0  # secondary catastrophic-regression backstop, not the gate
 
 
 def _operator(tenant_id: uuid.UUID) -> Operator:
@@ -396,19 +405,71 @@ async def test_tenant_boundary_isolates_same_named_node(
     assert "app" not in b_names
 
 
+async def _median_traversal_ms(
+    operator: Operator,
+    *,
+    depth: int,
+    samples: int = _PERF_SAMPLES,
+) -> tuple[float, list[Any]]:
+    """Median wall-clock (ms) of ``samples`` depth-bounded traversals.
+
+    Returns the median elapsed time *and* the last result list so the
+    caller can assert on reachable node count. The median (rather than
+    a single shot or the mean) discards the occasional GC / scheduler
+    spike that a CI runner injects mid-run without needing an outlier
+    filter.
+    """
+    elapsed: list[float] = []
+    nodes: list[Any] = []
+    for _ in range(samples):
+        started = time.monotonic()
+        nodes = await find_dependents(operator, "perf-hub", depth=depth)
+        elapsed.append((time.monotonic() - started) * 1000.0)
+    elapsed.sort()
+    return elapsed[len(elapsed) // 2], nodes
+
+
 @_skip_no_docker
-async def test_depth_16_traversal_on_10k_nodes_under_100ms(
+async def test_depth_16_traversal_scales_sub_linearly_on_10k_nodes(
     pg_engine: None,
 ) -> None:
-    """A 10k-node fixture: a depth-16 traversal completes in < 100 ms.
+    """A 10k-node fixture: depth-16 stays within a bounded multiple of depth-1.
 
     Build a wide-but-shallow forest: 16 chains of ~625 nodes each
     rooted at a single hub so a depth-16 dependents traversal from the
-    hub touches the whole structure. The assertion is on the query
-    wall-clock only (seeding is excluded) — the
-    ``graph_edge_tenant_to_idx`` / ``graph_edge_tenant_from_idx``
-    indexes migration 0007 ships are what keep the recursive join
-    sub-linear per level.
+    hub touches the whole structure. The ``graph_edge_tenant_to_idx`` /
+    ``graph_edge_tenant_from_idx`` indexes migration 0007 ships are
+    what keep the recursive join sub-linear per level — that is the
+    property under test.
+
+    Why a **ratio** gate, not an absolute wall-clock ceiling
+    (#1434): the original ``assert elapsed_ms < 100.0`` was calibrated
+    to a fast, quiet machine and flaked ~2.5x over budget on shared CI
+    runners (observed 252-266 ms), red-flagging the required
+    ``Python (integration testcontainers)`` lane on unrelated PRs.
+    Absolute timing on a shared runner is dominated by host contention,
+    not algorithmic cost. The fix measures *scaling* instead: depth-1
+    and depth-16 are timed in the same run, so runner load inflates
+    both denominators and numerator together and divides out. The ratio
+    is therefore load-invariant while still catching the regression
+    this test exists to catch.
+
+    Calibration (measured on the seeded fixture):
+
+    * healthy (indexes present): depth-16 / depth-1 ~= 1.8
+    * regressed (both 0007 indexes dropped → per-level sequential scan):
+      depth-16 / depth-1 ~= 11.4
+
+    The ``_PERF_RATIO_CEILING`` of 6.0 sits ~3.3x above the healthy
+    ratio (ample headroom for runner jitter) and ~1.9x below the
+    regressed ratio, so dropping either index trips it deterministically
+    regardless of host speed. ``_PERF_ABS_CEILING_MS`` is a generous
+    secondary smoke signal, not the load-bearing gate — it backstops a
+    catastrophic regression that somehow also slowed the depth-1
+    baseline (which would mask the ratio). This mirrors the precedent
+    in ``test_topology_history_integration.py`` (see
+    ``docs/codebase/topology.md`` §Indexes): the load-invariant
+    property is primary, a wide wall-clock bound rides along.
     """
     total = 10_000
     chains = 16
@@ -439,18 +500,32 @@ async def test_depth_16_traversal_on_10k_nodes_under_100ms(
                 prev = nxt
 
     operator = _operator(TENANT_A_ID)
-    # Warm the connection/plan once so the timed run measures steady
+    # Warm the connection/plan once so the timed runs measure steady
     # state, not first-call connection setup.
     await find_dependents(operator, "perf-hub", depth=1)
 
-    started = time.monotonic()
-    nodes = await find_dependents(operator, "perf-hub", depth=16)
-    elapsed_ms = (time.monotonic() - started) * 1000.0
+    baseline_ms, _ = await _median_traversal_ms(operator, depth=1)
+    deep_ms, nodes = await _median_traversal_ms(operator, depth=16)
 
     # depth 0 hub + 16 levels across 16 chains = 1 + 16*16 = 257 nodes
-    # reachable within the depth-16 budget.
+    # reachable within the depth-16 budget. Deterministic, runner-load
+    # independent — the correctness half of this test.
     assert len(nodes) == 1 + chains * 16
-    assert elapsed_ms < 100.0, f"depth-16 traversal took {elapsed_ms:.1f} ms"
+
+    ratio = deep_ms / baseline_ms
+    assert ratio < _PERF_RATIO_CEILING, (
+        f"depth-16 / depth-1 traversal ratio {ratio:.1f} exceeds "
+        f"{_PERF_RATIO_CEILING} (baseline {baseline_ms:.1f} ms, "
+        f"depth-16 {deep_ms:.1f} ms) — recursive join is no longer "
+        f"sub-linear per level; check the migration-0007 "
+        f"graph_edge_tenant_{{from,to}}_idx indexes."
+    )
+    # Secondary smoke signal only (see docstring): a wide absolute
+    # backstop for a regression that also slowed the depth-1 baseline.
+    assert deep_ms < _PERF_ABS_CEILING_MS, (
+        f"depth-16 traversal took {deep_ms:.1f} ms (median), over the "
+        f"{_PERF_ABS_CEILING_MS:.0f} ms catastrophic-regression backstop"
+    )
 
 
 @_skip_no_docker

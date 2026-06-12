@@ -276,6 +276,15 @@ def test_ingest_tool_schemas_are_strict_and_describe_async(
     assert _INGEST_STATUS_TOOL in tools[_INGEST_TOOL]["description"]
     # The poll tool takes a job_id handle.
     assert "job_id" in tools[_INGEST_STATUS_TOOL]["inputSchema"]["properties"]
+    # #1699: the ingest description documents the tenant-scope contract —
+    # omitted tenant_id targets the global scope, the REST endpoint never
+    # exposes the parameter, and a cross-scope re-ingest shadow-copies
+    # (the cross-surface behaviour itself is pinned in
+    # tests/test_api_v1_connectors_ingest.py).
+    ingest_desc = tools[_INGEST_TOOL]["description"]
+    assert "tenant_id" in ingest_desc
+    assert "/api/v1/connectors/ingest" in ingest_desc
+    assert "shadow copy" in ingest_desc
 
 
 @pytest.mark.parametrize(

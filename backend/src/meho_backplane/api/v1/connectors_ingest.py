@@ -351,15 +351,16 @@ async def ingest_endpoint(
       spec sources. The MCP admin tool and historical clients use
       this shape.
 
-    Tenant scoping: the operator's tenant_id from the JWT is used
-    as the write scope unless the operator is ``tenant_admin``
-    (built-in ingest, ``tenant_id=NULL``). For v0.2 the route always
-    writes under the operator's tenant_id; built-in ingest is the
-    same call shape from a tenant_admin operator whose tenant_id
-    happens to be the "built-in" admin tenant. The CLI / MCP
-    siblings can target the built-in scope explicitly when needed
-    by hitting :class:`IngestionPipelineService` directly with
-    ``tenant_id=None``.
+    Tenant scoping (#1699): this route exposes **no** ``tenant_id``
+    parameter — the write scope is always the calling operator's
+    ``tenant_id`` from the JWT (the CLI verb drives this route and
+    inherits the same scope). The MCP sibling
+    ``meho.connector.ingest`` accepts an optional ``tenant_id`` and
+    targets the built-in / global scope (``tenant_id=NULL``) when it
+    is omitted (tenant_admin only). The dedup lookup
+    (``operations/ingest/_upsert``) is scope-aware, so re-ingesting
+    the same spec under the other scope re-inserts every op as a
+    shadow copy there — verify the scope matches your intent.
     """
     # Remember the original ``catalog_entry`` (pre-resolution) so the
     # ``UpstreamNotSpecError`` path -- raised deep inside the parser

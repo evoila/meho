@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- Document and pin the ingest tenant-scope contract across surfaces:
+  REST `POST /api/v1/connectors/ingest` always writes under the calling
+  operator's tenant (no `tenant_id` parameter), the MCP
+  `meho.connector.ingest` tool targets the built-in / global scope when
+  `tenant_id` is omitted, and re-ingesting the same spec under the
+  other scope re-inserts every op as a shadow copy (scope-aware dedup,
+  by design). The MCP tool description, the REST route description, and
+  the registered-row `next_step` rationale now name the right surface
+  per scope (#1699).
+
 ### Fixed
 
 - Operator console: broadcast feed/wall and the connectors recent-ops

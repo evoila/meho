@@ -886,6 +886,25 @@ to the operator-facing HTTP surface. RBAC: read paths (GET /, GET
 derives from the JWT — there is no body / query parameter that can
 override the operator's tenant.
 
+**Cross-surface write-scope contract (#1699).** The two ingest
+surfaces intentionally default to *different* write scopes:
+`POST /ingest` (and the `meho connector ingest` CLI verb that drives
+it) always writes under the calling operator's `tenant_id`, while
+the MCP tool `meho.connector.ingest` accepts an optional `tenant_id`
+argument and targets the built-in / global scope
+(`tenant_id IS NULL`) when the argument is omitted (tenant_admin
+only). The dedup lookup in `operations/ingest/_upsert.py` scopes its
+natural-key match by `tenant_id`, so re-ingesting the same spec
+under the other scope matches nothing and re-inserts every operation
+as a shadow copy in the other namespace — by design (the namespaces
+are isolated), but surprising when an operator mixes surfaces
+expecting an idempotent re-ingest. Both surfaces document the
+contract (the route docstring, the MCP tool description, and the
+registered-row `next_step` rationale all name the right surface per
+scope); the cross-surface behaviour is pinned by
+`test_cross_surface_reingest_under_global_scope_creates_shadow_copy`
+in `tests/test_api_v1_connectors_ingest.py`.
+
 Both read paths apply the same "operator's-tenant rows + built-ins
 (`tenant_id IS NULL`)" scope: the listing query does it via a
 single `WHERE tenant_id IS NULL OR tenant_id = X` clause, and

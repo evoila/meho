@@ -69,6 +69,7 @@ under ``product="sddc-manager"`` while the listing emits
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Final
 from uuid import UUID
 
 import structlog
@@ -95,6 +96,23 @@ from meho_backplane.operations.ingest.catalog import (
 __all__ = ["list_ingested_connectors", "next_step_for_registered_connector"]
 
 _log = structlog.get_logger(__name__)
+
+#: Tenant-scope guidance appended to every registered-row ``next_step``
+#: rationale (#1699). The suggested ``meho connector ingest`` verb drives
+#: ``POST /api/v1/connectors/ingest``, which always writes under the
+#: calling operator's tenant (the route exposes no ``tenant_id``);
+#: built-in / global ingest is only reachable via the MCP tool
+#: ``meho.connector.ingest`` with ``tenant_id`` omitted. Naming the
+#: split in the hint keeps an operator from populating one namespace and
+#: then re-ingesting into the other — the dedup lookup is scope-aware,
+#: so the second pass re-inserts every op as a shadow copy instead of
+#: skipping.
+_TENANT_SCOPE_GUIDANCE: Final[str] = (
+    "The verb writes under your own tenant scope (the CLI / REST ingest "
+    "surface exposes no tenant_id); for built-in / global scope use the "
+    "MCP tool meho.connector.ingest with tenant_id omitted (tenant_admin "
+    "only)."
+)
 
 
 def next_step_for_registered_connector(
@@ -195,7 +213,10 @@ def _next_step_for_registered(
     if entry is not None and entry.catalog_ingest == "supported":
         return NextStep(
             verb=f"meho connector ingest --catalog {entry.product}/{entry.version}",
-            rationale="spec available in catalog; run ingest to populate operations",
+            rationale=(
+                "spec available in catalog; run ingest to populate "
+                "operations. " + _TENANT_SCOPE_GUIDANCE
+            ),
         )
     if entry is not None and entry.catalog_ingest == "spec-only":
         return NextStep(
@@ -207,7 +228,8 @@ def _next_step_for_registered(
             rationale=(
                 "catalog upstream is HTML-portal or fqdn-templated and "
                 "cannot drive --catalog ingest server-side; fetch the "
-                "raw OpenAPI spec from the appliance and pass via --spec"
+                "raw OpenAPI spec from the appliance and pass via "
+                "--spec. " + _TENANT_SCOPE_GUIDANCE
             ),
         )
     return NextStep(
@@ -221,7 +243,7 @@ def _next_step_for_registered(
             "vendor OpenAPI spec (file:// / https:// / docs:<...>). If the "
             "product publishes no OpenAPI spec at all, author a minimal "
             "OpenAPI 3.x covering just the ops you need and pass it via "
-            "--spec file://… (see connector-ingestion.md)"
+            "--spec file://… (see connector-ingestion.md). " + _TENANT_SCOPE_GUIDANCE
         ),
     )
 

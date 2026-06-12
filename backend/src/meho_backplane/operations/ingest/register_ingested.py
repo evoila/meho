@@ -104,6 +104,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations._lookup import dispatch_product
 from meho_backplane.operations.ingest._upsert import (
     build_upsert_context,
     upsert_one_operation,
@@ -262,14 +263,18 @@ async def register_ingested_operations(
     (multi-spec merge, idempotency invariant, connector auto-shim
     semantics, transaction-boundary discipline).
 
+    Persisted rows carry the *dispatch-canonical* product (see
+    :func:`_reconciled_row_product`), not necessarily the supplied
+    ``product`` — the VCF-family long↔short reconciliation. The
+    pre-flight + auto-shim registration stay on the supplied product.
+
     Args:
-        product, version, impl_id: Connector triple. Natural key on
-            every persisted row is ``(product, version, impl_id,
+        product, version, impl_id: Connector triple. The persisted row's
+            natural key is ``(reconciled_product, version, impl_id,
             op_id)`` with ``tenant_id IS NULL`` for built-in rows.
-        spec_source: Logical-source tag (e.g. ``"vcenter.yaml"``).
-            The helper appends ``f"spec:{spec_source}"`` to every
-            persisted row's ``tags`` so the operator can distinguish
-            rows when a single connector ingests multiple specs.
+        spec_source: Logical-source tag (e.g. ``"vcenter.yaml"``)
+            appended as ``f"spec:{spec_source}"`` to every row's
+            ``tags`` so multi-spec ingests stay distinguishable.
         operations: Parser output from
             :func:`~meho_backplane.operations.ingest.openapi.parse_openapi`.
         base_url: Optional default base URL for the auto-registered
@@ -288,18 +293,12 @@ async def register_ingested_operations(
         runs grouping next).
 
     Raises:
-        OpIdCollision: Either (a) two operations in *operations*
-            share an ``op_id`` -- raised before any DB write by the
-            within-batch set scan, or (b) a prior
-            :func:`register_ingested_operations` call under the
-            same ``(product, version, impl_id)`` triple persisted
-            this ``op_id`` from a different ``spec_source`` --
-            raised per-row in :func:`_upsert.upsert_one_operation`
-            after the natural-key lookup, before the embedding
-            hash comparison. The exception's
-            ``existing_spec_source`` / ``incoming_spec_source``
-            attributes name both colliding specs in the cross-call
-            case.
+        OpIdCollision: Either (a) two operations in *operations* share an
+            ``op_id`` (raised before any DB write by the within-batch
+            scan), or (b) a prior call under the same triple persisted
+            this ``op_id`` from a different ``spec_source`` (raised
+            per-row in :func:`_upsert.upsert_one_operation`); the
+            exception names both colliding specs.
     """
     _detect_op_id_collisions(
         operations,
@@ -307,35 +306,24 @@ async def register_ingested_operations(
         version=version,
         impl_id=impl_id,
     )
-    # G0.9-T9 (#741) — pre-flight that the operator's ``version`` label
-    # is dispatchable against at least one already-registered class for
-    # ``(product, impl_id)``. Runs **before** the auto-shim is
-    # synthesised: the shim's ``supported_version_range`` is derived
-    # from the operator's own ``version`` so a post-shim check would
-    # always pass vacuously. Raises :exc:`UncoveredVersionLabel` (mapped
-    # to HTTP 422 by the REST router) when a class is registered but
-    # none accepts the label; logs ``connector_ingest_orphaned_class``
-    # and proceeds when no class is registered yet (v0.4-staging path).
-    check_version_covered_by_registered_class(
-        product=product,
-        version=version,
-        impl_id=impl_id,
-    )
-    connector_registered = ensure_connector_class_registered(
+    connector_registered = _preflight_and_register_class(
         product=product,
         version=version,
         impl_id=impl_id,
         base_url=base_url,
     )
+    # Rows persist under the dispatch-canonical product (no-op for
+    # aligned connectors; the VCF-family reconciliation).
+    coords = _BatchCoordinates(
+        tenant_id=tenant_id,
+        product=_reconciled_row_product(product=product, version=version, impl_id=impl_id),
+        version=version,
+        impl_id=impl_id,
+        spec_source=spec_source,
+    )
     counts = await _run_upsert_loop(
         session=session,
-        coords=_BatchCoordinates(
-            tenant_id=tenant_id,
-            product=product,
-            version=version,
-            impl_id=impl_id,
-            spec_source=spec_source,
-        ),
+        coords=coords,
         operations=operations,
         embedding_service=embedding_service,
     )
@@ -346,6 +334,74 @@ async def register_ingested_operations(
         connector_registered=connector_registered,
         operations_grouped=False,
     )
+
+
+def _preflight_and_register_class(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+    base_url: str | None,
+) -> bool:
+    """Run the version-coverage pre-flight, then ensure the v2 class exists.
+
+    G0.9-T9 (#741). The pre-flight confirms the operator's ``version``
+    label is dispatchable against at least one already-registered class
+    for ``(product, impl_id)`` — it must run **before** the auto-shim is
+    synthesised, because the shim's ``supported_version_range`` is
+    derived from the operator's own ``version`` and would make a
+    post-shim check pass vacuously. Raises :exc:`UncoveredVersionLabel`
+    (HTTP 422 at the router) when a class is registered but none accepts
+    the label; logs ``connector_ingest_orphaned_class`` and proceeds when
+    no class is registered yet (the v0.4-staging path).
+
+    Both calls take the *supplied* (registry) product — not the
+    dispatch-canonical one the rows persist under — so the coverage check
+    finds the real registered class (e.g. ``VcfLogsConnector`` under
+    ``product="vcf-logs"``) and no redundant shim is synthesised.
+
+    Returns the ``connector_registered`` flag (``True`` when a fresh
+    auto-shim was registered).
+    """
+    check_version_covered_by_registered_class(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    )
+    return ensure_connector_class_registered(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        base_url=base_url,
+    )
+
+
+def _reconciled_row_product(*, product: str, version: str, impl_id: str) -> str:
+    """Return the product the persisted rows must carry to be dispatchable.
+
+    The dispatch/query surface keys on the product
+    :func:`~meho_backplane.operations._lookup.parse_connector_id` derives
+    from the connector_id, not the operator-supplied one. For aligned
+    connectors the two are identical (no-op); for the VCF-family long↔short
+    splits the supplied product (``vcf-logs``) diverges from the derived
+    spelling (``vrli``), and rows written under the supplied product are
+    invisible to every dispatch probe (the catalog reports
+    ``registered, 0 ops``). The pre-flight + auto-shim registration in
+    :func:`register_ingested_operations` deliberately stay on the *supplied*
+    (registry) product so the version-coverage check finds the real
+    ``VcfLogsConnector`` class and no redundant shim is synthesised; only
+    the persisted rows are reconciled here. claude-rdc-hetzner-dc#1136.
+    """
+    row_product = dispatch_product(product=product, version=version, impl_id=impl_id)
+    if row_product != product:
+        _log.info(
+            "ingested_rows_product_reconciled",
+            supplied_product=product,
+            row_product=row_product,
+            version=version,
+            impl_id=impl_id,
+        )
+    return row_product
 
 
 async def _register_in_session(

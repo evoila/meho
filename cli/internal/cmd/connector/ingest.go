@@ -372,7 +372,10 @@ func postIngest(ctx context.Context, authed *api.AuthedClient, body api.IngestRe
 //     regardless of whether the backplane ran the pipeline inline
 //     or off-thread. A failed job renders the job's error_class +
 //     capped error message as unexpected_response (exit 4), the
-//     same family the sync path's pipeline failures land in.
+//     same family the sync path's pipeline failures land in. A
+//     degraded job (the pipeline ran but persisted nothing
+//     dispatchable — claude-rdc-hetzner-dc#1136) renders the same
+//     way so a non-dispatchable ingest is never mistaken for success.
 //
 // The progress notice goes to stderr in both output modes: stdout
 // stays reserved for the final result (Goal #11 §5 output
@@ -429,6 +432,44 @@ func runIngestAsync(
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
 				"ingest job %s failed: %s: %s", st.JobId, errClass, detail)),
+			opts.JSONOut,
+		)
+	case api.IngestJobStatusResponseStatusDegraded:
+		// The pipeline ran to completion but left the connector
+		// non-dispatchable (claude-rdc-hetzner-dc#1136): a bare
+		// "succeeded" here was the false-success the server now refuses
+		// to report. Surface it as an error (non-zero exit) carrying the
+		// structured error_class + detail so the operator knows the
+		// catalog row will read "registered, 0 ops" and what to do. The
+		// ingestion counts ride along in --json output for diagnosis.
+		errClass := "ingested_not_dispatchable"
+		if st.ErrorClass != nil && *st.ErrorClass != "" {
+			errClass = *st.ErrorClass
+		}
+		detail := "(no error detail recorded)"
+		if st.Error != nil && *st.Error != "" {
+			detail = *st.Error
+		}
+		if opts.JSONOut {
+			// Emit the full job document (counts + error_class) to stdout
+			// for diagnosis, then still exit non-zero: a degraded job is a
+			// terminal failure (#1647), and a --json consumer that read this
+			// as exit 0 is the exact false-success this task closes, moved
+			// to the CLI tier. jsonOut=false on RenderError keeps stdout the
+			// clean JSON document (the human one-liner goes to stderr) while
+			// the returned silentError carries ExitUnexpected.
+			if err := output.PrintJSON(cmd.OutOrStdout(), st); err != nil {
+				return err
+			}
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf(
+					"ingest job %s degraded: %s: %s", st.JobId, errClass, detail)),
+				false,
+			)
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"ingest job %s degraded: %s: %s", st.JobId, errClass, detail)),
 			opts.JSONOut,
 		)
 	default:

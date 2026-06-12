@@ -65,6 +65,11 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.operations._lookup import (
+    connector_exists,
+    dispatch_product,
+    parse_connector_id,
+)
 from meho_backplane.operations.ingest import (
     EndpointDescriptorProto,
     GenericRestConnector,
@@ -1045,3 +1050,143 @@ async def test_register_ingested_passes_pre_flight_for_compatible_version(
     # alongside the pre-existing (vmware, 9.0, vmware-rest) entry — the pre-flight
     # checks coverage, it does not require the triple to already exist.
     assert ("vmware", "9.0.3", "vmware-rest") in all_connectors_v2()
+
+
+# ---------------------------------------------------------------------------
+# Product-slug reconciliation (claude-rdc-hetzner-dc#1136)
+#
+# The VCF-family connectors register under a long product
+# (``product="vcf-logs"``) while the dispatch/query surface derives the
+# short product (``"vrli"``) from the connector_id's impl_id segment.
+# Ingesting under the long product used to persist rows the dispatcher
+# never queries → the catalog reported ``registered, 0 ops``. These
+# tests pin that an ingest under the long (registry) product now lands
+# rows under the short (dispatch) product so ``connector_exists`` — the
+# gate ``search_operations`` / ``list_operation_groups`` enforce —
+# returns True.
+# ---------------------------------------------------------------------------
+
+
+def _register_split_connector(*, registry_product: str, version: str, impl_id: str) -> None:
+    """Register a fake connector class under a long↔short *split* product.
+
+    Mirrors the real VCF-family classes (e.g. ``VcfLogsConnector`` ->
+    ``product="vcf-logs"`` / ``impl_id="vrli-rest"``) closely enough for
+    the ingest pre-flight + auto-shim skip path: the class registers
+    under the registry (long) product with a ``>=MAJOR,<MAJOR+1`` range
+    that covers *version*.
+    """
+    cls = type(
+        f"_FakeSplit_{registry_product}",
+        (_FakeRangedConnector,),
+        {
+            "product": registry_product,
+            "version": version,
+            "impl_id": impl_id,
+            "supported_version_range": ">=9.0,<10.0",
+            "priority": 1,
+        },
+    )
+    register_connector_v2(
+        product=registry_product,
+        version=version,
+        impl_id=impl_id,
+        cls=cls,
+    )
+
+
+#: Every VCF-family long↔short split, as ``(registry_product, impl_id,
+#: dispatch_product)``. The registry product is what the connector class
+#: registers under (and what the catalog / pre-#1136 next_step verb hand
+#: the operator); the dispatch product is what ``parse_connector_id``
+#: derives from ``f"{impl_id}-{version}"`` and what the rows must persist
+#: under to be dispatchable. Mirrors ``_KNOWN_LISTING_PRODUCT_DRIFT`` in
+#: ``test_operations_ingest_catalog.py`` plus the already-handled SDDC
+#: case (same split shape).
+_VCF_PRODUCT_SPLITS: list[tuple[str, str, str]] = [
+    ("hetzner-robot", "hetzner-rest", "hetzner"),
+    ("sddc-manager", "sddc-rest", "sddc"),
+    ("vcf-automation", "vcfa-rest", "vcfa"),
+    ("vcf-fleet", "fleet-rest", "fleet"),
+    ("vcf-logs", "vrli-rest", "vrli"),
+    ("vcf-operations", "vrops-rest", "vrops"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("registry_product", "impl_id", "dispatch_product"), _VCF_PRODUCT_SPLITS)
+async def test_ingest_under_registry_product_persists_dispatchable_rows(
+    stub_embedding_service: AsyncMock,
+    registry_product: str,
+    impl_id: str,
+    dispatch_product: str,
+) -> None:
+    """Ingesting under the long (registry) product lands rows under the short (dispatch) one.
+
+    For every VCF-family split, an operator ingesting ``--product
+    <registry_product>`` (what the catalog row / next_step verb name)
+    must produce a connector the dispatch/query surface resolves. Rows
+    persist under the parser-derived short product and ``connector_exists``
+    — the exact gate ``search_operations`` enforces — returns True.
+    """
+    version = "9.0"
+    _register_split_connector(registry_product=registry_product, version=version, impl_id=impl_id)
+
+    result = await register_ingested_operations(
+        product=registry_product,  # the LONG product the operator was told to use
+        version=version,
+        impl_id=impl_id,
+        spec_source="upstream.yaml",
+        operations=[_proto("GET:/api/v2/version", path="/api/v2/version")],
+        embedding_service=stub_embedding_service,
+    )
+    assert result.inserted_count == 1
+
+    # Rows persisted under the SHORT (dispatch) product, never the long one.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].product == dispatch_product, (
+        f"row persisted under {rows[0].product!r}; expected the dispatch product "
+        f"{dispatch_product!r} so the dispatcher (which parses it out of the "
+        f"connector_id) can resolve it"
+    )
+
+    # connector_exists — the dispatch/query gate — keyed on the parsed
+    # natural key returns True (the connector is dispatchable).
+    parsed_product, parsed_version, parsed_impl_id = parse_connector_id(f"{impl_id}-{version}")
+    assert parsed_product == dispatch_product
+    exists = await connector_exists(
+        tenant_id=uuid.uuid4(),
+        product=parsed_product,
+        version=parsed_version,
+        impl_id=parsed_impl_id,
+    )
+    assert exists is True
+
+
+@pytest.mark.asyncio
+async def test_aligned_product_ingest_is_unchanged(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A connector whose product already equals the parsed one is a no-op for reconciliation.
+
+    ``vmware`` / ``vmware-rest`` has no split, so the reconciliation
+    must not move the row product — guards against the normalisation
+    accidentally rewriting the common case.
+    """
+    result = await register_ingested_operations(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        spec_source="vcenter.yaml",
+        operations=[_proto("GET:/api/vcenter/cluster", path="/api/vcenter/cluster")],
+        embedding_service=stub_embedding_service,
+    )
+    assert result.inserted_count == 1
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
+    assert rows[0].product == "vmware"
+    assert dispatch_product(product="vmware", version="9.0", impl_id="vmware-rest") == "vmware"

@@ -1665,6 +1665,75 @@ func TestRunIngestAsyncJobFailure(t *testing.T) {
 	}
 }
 
+// TestRunIngestAsyncJSONDegradedExitsNonZero pins B1 (#1647): a
+// degraded terminal status under --json must STILL exit non-zero.
+// The pre-fix code returned PrintJSON directly (nil on a successful
+// encode), so cobra saw exit 0 — the exact false-success this task
+// closes, moved to the CLI tier. The JSON job document still rides
+// out on stdout for diagnosis; the non-zero exit + human detail go
+// via stderr.
+func TestRunIngestAsyncJSONDegradedExitsNonZero(t *testing.T) {
+	errClass := "ingested_not_dispatchable"
+	errMsg := "ingest completed but persisted no new operations (inserted_count=0)"
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 202, asyncIngestHandle())
+		},
+		"GET /api/v1/connectors/ingest/jobs/" + asyncIngestJobID.String(): func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, 200, api.IngestJobStatusResponse{
+				JobId:      asyncIngestJobID,
+				Status:     api.IngestJobStatusResponseStatusDegraded,
+				ErrorClass: &errClass,
+				Error:      &errMsg,
+				Ingestion: &api.IngestionResultModel{
+					ConnectorId:   "vrli-rest-9.0",
+					InsertedCount: 0,
+				},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	err := runIngest(cmd, ingestOptions{
+		Catalog:           "vmware/9.0",
+		JSONOut:           true,
+		BackplaneOverride: srv.URL,
+		pollInterval:      time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("degraded --json job must exit non-zero")
+	}
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() == 0 {
+		t.Fatalf("want a non-zero ExitCoder, got %v / %T", err, err)
+	}
+	if coder.ExitCode() != output.ExitUnexpected {
+		t.Errorf("want exit %d (unexpected_response), got %d", output.ExitUnexpected, coder.ExitCode())
+	}
+	// stdout stays the clean JSON job document (payload still emitted).
+	var st api.IngestJobStatusResponse
+	if jErr := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &st); jErr != nil {
+		t.Fatalf("stdout is not a single IngestJobStatusResponse document: %v\n%s", jErr, stdout.String())
+	}
+	if st.Status != api.IngestJobStatusResponseStatusDegraded {
+		t.Errorf("stdout JSON lost the degraded status: %+v", st)
+	}
+	// The human detail (job id + class) routes to stderr, not stdout.
+	errOut := stderr.String()
+	for _, want := range []string{asyncIngestJobID.String(), errClass} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr missing %q:\n%s", want, errOut)
+		}
+	}
+}
+
 // TestRunIngestAsyncPollLost404 pins the pod-restart story: the
 // poll 404s (registry is process-local), the CLI exits non-zero
 // with the check-before-re-running guidance, and crucially never

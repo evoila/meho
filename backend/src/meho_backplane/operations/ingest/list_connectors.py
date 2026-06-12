@@ -154,51 +154,42 @@ def _next_step_for_registered(
     """Build the ``next_step`` hint for a ``state="registered"`` row.
 
     Looks up the registry's ``(product, version)`` in the connector-spec
-    catalog (#743). The registry product is the right lookup key (not the
-    parser-derived one): the catalog stores ``product="sddc-manager"`` but
-    the listing emits ``product="sddc"`` per
-    :func:`parse_connector_id`'s deterministic shortening, and looking up
-    ``("sddc", "9.0")`` would always miss for SDDC.
+    catalog (#743) — the right lookup key, since the catalog stores
+    ``product="sddc-manager"`` while the listing emits the parser-derived
+    ``"sddc"``, and ``("sddc", "9.0")`` would always miss for SDDC.
 
-    Three branches:
+    The **catalog-miss** verb emits ``registry_product`` — the spelling
+    the connector class actually registers under (``vcf-logs`` for
+    ``VcfLogsConnector``, not the parser-derived ``vrli``). Two halves of
+    the ingest write path are keyed on the **supplied** ``--product``:
+    ``check_version_covered_by_registered_class`` (the version-coverage
+    pre-flight) and ``ensure_connector_class_registered``. Handing the
+    operator the registry product is what lets both find the real
+    ``VcfLogsConnector`` — emitting the short ``vrli`` instead would miss
+    it, synthesise a redundant ``AutoShim_vrli_*`` under the wrong key,
+    and make the coverage pre-flight vacuous (an out-of-range
+    ``--version`` would no longer be caught). The PR's register-time row
+    reconciliation (``register_ingested_operations`` →
+    ``_reconciled_row_product``) then persists the rows under the
+    parser-derived dispatch product (``vrli``) regardless, so the verb
+    still round-trips to a *dispatchable* connector — keying the
+    pre-flight and class lookup on ``registry_product`` is therefore both
+    correct and dispatchable. (Emitting ``vcf-logs`` while the row carried
+    ``product="vrli"`` *was* the claude-rdc-hetzner-dc#1136 false-success
+    before that reconciliation existed; the reconciliation is what closes
+    it, not switching the verb to the short product.) The catalog-hit
+    branches keep ``entry.product``.
 
-    * **Catalog hit, ``catalog_ingest="supported"``** — verb points at
-      ``meho connector ingest --catalog <product>/<version>``; rationale
-      says the spec is available in the catalog. The CLI form is the
-      same one the curated-on-ramp ships (#915 / G0.7-T5); copying the
-      verb verbatim closes the workflow.
-    * **Catalog hit, ``catalog_ingest="spec-only"``** — verb points at
-      the manual-mode ``meho connector ingest --product <p> --version
-      <v> --impl <i> --spec <uri>`` form using the catalog's native
-      product/version/impl triple. Rationale calls out that the
-      catalog row exists but its upstream is HTML-portal or
-      fqdn-templated, so catalog-driven ingest would 422 -- the
-      operator must fetch the spec themselves. Closes the v0.8.1
-      RDC dogfood signal (#789 N8): the previous "spec available in
-      catalog; run ingest" hint over-promised the VCF-family rows
-      whose upstream is fundamentally not raw YAML/JSON (G0.18-T8 /
-      #1361). The same triple the operator would have used after a
-      hit lands here, so the verb still copies-and-runs.
-    * **Catalog miss** — verb points at the manual-mode ``meho connector
-      ingest --product <p> --version <v> --impl <i> --spec <uri>``;
-      rationale calls out the missing catalog entry so the operator
-      knows they need to source the OpenAPI spec themselves. Manual
-      mode is the same path G0.7-T5 already supports for one-off /
-      not-yet-curated specs (see ``ingest.go``'s mode dispatch). The
-      rationale also names the **hand-authored** route so a spec-less
-      product (the vendor publishes no OpenAPI at all — VCF Fleet /
-      vRSLCM, Hetzner Robot) doesn't read as a dead end: author a
-      minimal OpenAPI 3.x covering just the ops you need and pass it
-      via ``--spec file://…`` (#1533 / ci-07). See
-      ``docs/cross-repo/connector-ingestion.md`` §"Product publishes
-      no OpenAPI spec".
+    Three branches: **supported** catalog hit → ``--catalog`` verb;
+    **spec-only** catalog hit → manual ``--spec`` verb on the catalog's
+    native triple (upstream is HTML-portal / fqdn-templated, #789 N8 /
+    #1361); **catalog miss** → manual ``--spec`` verb on
+    *registry_product* + the hand-authored-spec on-ramp for spec-less
+    vendors (#1533 / ci-07, see ``connector-ingestion.md``).
 
-    *catalog* is ``None`` when the package-data load failed (a malformed
-    catalog at startup would have crashed the lifespan, so this branch
-    only fires in tests where the loader was monkeypatched or the
-    process is mid-catalog-reload); the helper degrades to the
-    manual-mode rationale rather than raising, because the operator's
-    workflow doesn't depend on the catalog being live.
+    *catalog* ``None`` (load failed — only in tests / mid-reload, a
+    malformed catalog would have crashed the lifespan) degrades to the
+    manual-mode rationale rather than raising.
     """
     entry = catalog.get(registry_product, registry_version) if catalog is not None else None
     if entry is not None and entry.catalog_ingest == "supported":
@@ -678,13 +669,16 @@ def _maybe_build_class_only_item(
         enabled_operation_count=0,
         state="registered",
         next_step=_next_step_for_registered(
-            catalog=catalog,
             # Lookup against the registry triple (the catalog's native
             # key) rather than the parsed one — for SDDC the registry
             # holds ``product="sddc-manager"`` while the listing emits
             # ``product="sddc"``. The catalog is keyed on the registry
-            # side; this is the lookup the operator-facing verb
-            # resolves against.
+            # side, and the manual-mode verb hands back ``registry_product``
+            # so the operator's ingest finds the real connector class and
+            # runs a real version-coverage pre-flight; register-time row
+            # reconciliation persists the rows under the dispatch product,
+            # so it still round-trips dispatchably (claude-rdc-hetzner-dc#1136).
+            catalog=catalog,
             registry_product=registry_product,
             registry_version=registry_version,
             registry_impl_id=registry_impl_id,

@@ -3,7 +3,7 @@
 
 """Admin MCP tools for the connector review + state-machine surface (G0.7-T7).
 
-Six tools under the ``meho.connector.*`` namespace, deliberately
+Seven tools under the ``meho.connector.*`` namespace, deliberately
 separate from the agent-surface meta-tools
 (:mod:`~meho_backplane.mcp.tools.operations`):
 
@@ -13,6 +13,8 @@ separate from the agent-surface meta-tools
 * ``meho.connector.edit_op`` — edit one op override. **tenant_admin**.
 * ``meho.connector.enable`` — flip the connector to enabled. **tenant_admin**.
 * ``meho.connector.disable`` — flip the connector to disabled. **tenant_admin**.
+* ``meho.connector.delete`` — delete the connector's rows + auto-shim
+  registration (G0.25-T2 #1700). **tenant_admin**.
 
 The ingest-pipeline tools (``meho.connector.ingest`` +
 ``meho.connector.ingest_status``) live in the sibling
@@ -256,6 +258,48 @@ async def _disable_handler(
     service = ReviewService(operator)
     await service.disable_connector(connector_id, tenant_id=tenant_id)
     return {"connector_id": connector_id, "status": "disabled", "ok": True}
+
+
+async def _delete_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Delete one connector's rows + its auto-registered ingest shim.
+
+    Delegates to :meth:`ReviewService.delete_connector` — the same
+    service path ``DELETE /api/v1/connectors/{connector_id}`` drives.
+    ``warnings`` mirrors the ``edit_op`` advisory discipline
+    (G0.23-T4 #1630): a connector deleted while it still had enabled
+    operations completes the delete and reports the advisory here
+    (this tool is the structured wire home; the REST sibling stays
+    ``204 No Content`` and logs/audits instead). The ``deleted``
+    block carries the row counts plus the ``registry_only`` /
+    ``class_deregistered`` flags so an operator can tell a zero-op
+    stub clean-up apart from a full row delete.
+    """
+    connector_id: str = arguments["connector_id"]
+    tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
+    service = ReviewService(operator)
+    result = await service.delete_connector(connector_id, tenant_id=tenant_id)
+    return {
+        "connector_id": connector_id,
+        "ok": True,
+        "deleted": {
+            "groups_deleted": result.groups_deleted,
+            "operations_deleted": result.operations_deleted,
+            "enabled_operations_deleted": result.enabled_operations_deleted,
+            "class_deregistered": result.class_deregistered,
+            "registry_only": result.registry_only,
+        },
+        "warnings": [
+            {
+                "code": warning.code,
+                "enabled_op_count": warning.enabled_op_count,
+                "message": warning.message,
+            }
+            for warning in result.warnings
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -502,4 +546,56 @@ register_mcp_tool(
         op_class=_OP_CLASS_WRITE,
     ),
     handler=_disable_handler,
+)
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="meho.connector.delete",
+        description=(
+            "Delete one connector (tenant_admin only): remove its "
+            "operation_group + endpoint_descriptor rows under the "
+            "target scope and, when no rows remain for the triple "
+            "anywhere, deregister the auto-registered ingest shim "
+            "from the v2 registry. Use to clean up the zero-op stubs "
+            "an aborted ingest leaves behind (spec parsed to zero "
+            "operations, batch failed mid-way) or to remove an "
+            "unwanted ingested connector outright. The tenant_id "
+            "parameter controls the scope: omit it or pass null for "
+            "built-in / global connectors; pass the operator's own "
+            "tenant UUID for tenant-curated rows. The REST sibling "
+            "DELETE /api/v1/connectors/{connector_id} does NOT expose "
+            "this parameter and always scopes to the calling "
+            "operator's tenant — for global rows use this tool. "
+            "Deleting a connector that still has enabled operations "
+            "completes and returns an enabled_operations_deleted "
+            "warning (advisory, never blocks). One "
+            "meho.connector.delete audit row is written. Do NOT use "
+            "this for a temporary roll-back — pair with "
+            "meho.connector.disable for reversible state instead; "
+            "delete is permanent (no undo), though re-running ingest "
+            "for the same product/version/impl re-registers the "
+            "connector from scratch. Hand-coded connector classes "
+            "(Vault, K8s, bind9, …) are never deregistered — for "
+            "those only the rows under the named scope are removed. "
+            "Unknown or cross-tenant connector ids fail with the "
+            "same not-found error every other connector tool uses."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connector_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": _CONNECTOR_ID_DESCRIPTION,
+                },
+                "tenant_id": _TENANT_ID_PROPERTY,
+            },
+            "required": ["connector_id"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.TENANT_ADMIN,
+        op_class=_OP_CLASS_WRITE,
+    ),
+    handler=_delete_handler,
 )

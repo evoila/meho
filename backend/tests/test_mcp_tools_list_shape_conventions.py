@@ -429,8 +429,9 @@ def test_runbook_tools_dotted_canonical_with_flat_deprecated_alias(
 
     The runbook family was the last flat multi-verb family on the
     surface (#1612). The dotted name is canonical; the flat name stays
-    registered as a deprecated alias routed to the same handler for one
-    release (removed in v0.14.0).
+    registered as a deprecated alias routed to the same handler
+    (removed in v0.15.0 — deferred from the original one-release
+    v0.14.0 window by #1702).
     """
     dotted_entry = mcp_registry.get_tool(dotted_name)
     flat_entry = mcp_registry.get_tool(flat_name)

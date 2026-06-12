@@ -373,7 +373,7 @@ async def _write_audit_row(
     sessionmaker = get_sessionmaker()
     # work_ref I1-T1 #1655 -- read the external change-ticket reference
     # off the contextvar. The ``work_ref`` column is added by migration
-    # ``0038``; guard on the attribute so the writer stays
+    # ``0039``; guard on the attribute so the writer stays
     # forward-compatible if the model predates the migration (the same
     # discipline the dispatcher writer uses for the runbook columns).
     # ``None`` until the bind source (I1-T2) lands.

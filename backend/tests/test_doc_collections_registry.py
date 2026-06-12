@@ -635,23 +635,23 @@ def test_migration_0037_downgrade_drops_table(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``upgrade head`` → ``downgrade "0036"`` is clean: the table is gone.
+    """``upgrade 0037`` → ``downgrade -1`` is clean: the table is gone.
 
-    Targets the explicit predecessor revision (``0036``) rather than the
-    relative ``"-1"``: ``0037`` is no longer the migration head (later
-    audit-column migrations chain past it), so ``"-1"`` from head would
-    undo the wrong revision and leave ``doc_collections`` standing. The
-    explicit-revision form matches every other migration downgrade test
-    and stays correct as the head advances.
+    The upgrade target is pinned to ``0037`` (not ``head``) so the
+    relative ``-1`` always exercises *this* migration's
+    ``downgrade()`` -- with later revisions present (``0038``'s data
+    backfill ships a documented-no-op downgrade), ``head`` → ``-1``
+    would walk the newest migration instead and the table would
+    survive. Same pin-the-target discipline as the 0011 replay test.
     """
     from alembic import command
 
     cfg, sync_url = _alembic_cfg(monkeypatch, tmp_path)
     try:
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0037")
         assert "doc_collections" in _table_names(sync_url)
 
-        command.downgrade(cfg, "0036")
+        command.downgrade(cfg, "-1")
         assert "doc_collections" not in _table_names(sync_url)
     finally:
         get_settings.cache_clear()

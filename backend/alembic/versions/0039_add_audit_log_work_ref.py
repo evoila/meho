@@ -3,8 +3,8 @@
 
 """Add ``audit_log.work_ref`` for external change-ticket correlation.
 
-Revision ID: 0038
-Revises: 0037
+Revision ID: 0039
+Revises: 0038
 Create Date: 2026-06-12
 
 Schema keystone of Task #1655 (work_ref I1-T1) under Initiative #1652,
@@ -57,8 +57,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0038"
-down_revision: str | None = "0037"
+revision: str = "0039"
+down_revision: str | None = "0038"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

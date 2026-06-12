@@ -513,7 +513,7 @@ class AuditLog(Base):
     # system-internal writers (memory/topology/reaper/ui-session) leave it
     # NULL by design. No FK -- same soft-reference discipline as
     # ``tenant_id`` / ``target_id`` / ``parent_audit_id``. Added by
-    # migration ``0038``.
+    # migration ``0039``.
     work_ref: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

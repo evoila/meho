@@ -148,7 +148,7 @@ step_id_var: ContextVar[str | None] = ContextVar(
 #: :func:`meho_backplane.audit._write_audit_row`, this module's
 #: :func:`write_audit_row` dispatcher path, and the MCP
 #: :func:`meho_backplane.mcp.audit.write_mcp_audit_row`) into the real
-#: ``audit_log.work_ref`` column added by migration ``0038``.
+#: ``audit_log.work_ref`` column added by migration ``0039``.
 #:
 #: Same source-of-truth-contextvar mechanism as
 #: :data:`parent_audit_id_var` / :data:`agent_session_id_var` /
@@ -431,7 +431,7 @@ async def write_audit_row(
     # work_ref I1-T1 #1655 -- read the external change-ticket reference
     # off the contextvar. Same hasattr forward-compat guard as the
     # runbook columns: the ``work_ref`` column is added by migration
-    # ``0038`` and the bind source is a separate task (I1-T2), so this
+    # ``0039`` and the bind source is a separate task (I1-T2), so this
     # is ``None`` until a caller binds the var.
     if hasattr(AuditLog, "work_ref"):
         runbook_kwargs["work_ref"] = work_ref_var.get()

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0038_add_audit_log_work_ref``.
+"""Behavioural tests for Alembic migration ``0039_add_audit_log_work_ref``.
 
 Initiative #1652, Task #1655 (work_ref I1-T1). Adds the nullable
 ``audit_log.work_ref`` column + its b-tree index -- the external
@@ -35,7 +35,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL (sync fixture)."""
-    db_path = tmp_path / "migration_0038.db"
+    db_path = tmp_path / "migration_0039.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -93,13 +93,13 @@ def test_upgrade_adds_work_ref_column_and_index(alembic_cfg: tuple[Config, str])
     command.upgrade(cfg, "head")
 
     assert "work_ref" in _audit_log_columns(sync_url), (
-        "migration 0038 must add audit_log.work_ref on upgrade head"
+        "migration 0039 must add audit_log.work_ref on upgrade head"
     )
     assert _audit_log_column_is_nullable(sync_url, "work_ref"), (
         "work_ref must be nullable -- NULL when no change ticket is in scope"
     )
     assert "audit_log_work_ref_idx" in _audit_log_indexes(sync_url), (
-        "migration 0038 must create audit_log_work_ref_idx on upgrade head"
+        "migration 0039 must create audit_log_work_ref_idx on upgrade head"
     )
 
 
@@ -122,15 +122,15 @@ def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> 
 
 
 def test_prior_audit_columns_untouched(alembic_cfg: tuple[Config, str]) -> None:
-    """The pre-existing soft-FK columns + indexes survive 0038."""
+    """The pre-existing soft-FK columns + indexes survive 0039."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
 
     columns = _audit_log_columns(sync_url)
-    # A representative slice of the prior soft-FK columns 0038 sits beside.
-    assert "actor_sub" in columns, "0021's actor_sub must survive 0038"
-    assert "run_id" in columns, "0034's run_id must survive 0038"
-    assert "agent_session_id" in columns, "0014's agent_session_id must survive 0038"
+    # A representative slice of the prior soft-FK columns 0039 sits beside.
+    assert "actor_sub" in columns, "0021's actor_sub must survive 0039"
+    assert "run_id" in columns, "0034's run_id must survive 0039"
+    assert "agent_session_id" in columns, "0014's agent_session_id must survive 0039"
     assert "work_ref" in columns
 
     indexes = _audit_log_indexes(sync_url)

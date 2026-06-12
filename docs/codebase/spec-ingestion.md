@@ -1287,6 +1287,64 @@ through it is a separate, larger change. A keyless air-gapped deploy
 (agent runtime on an on-prem backend, no Anthropic key) therefore still
 gets the 503 on `--catalog` grouping until that work lands.
 
+## Connector deletion (G0.25-T2 #1700)
+
+Aborted ingests leave junk behind: a spec that parses to zero
+operations (or a batch that fails mid-way) has already registered its
+`GenericRestConnector` auto-shim before the upsert loop ran, so the
+catalog shows a permanent `state="registered"` stub with nothing to
+dispatch. The DELETE surface removes it:
+
+* **REST** — `DELETE /api/v1/connectors/{connector_id}` → `204 No
+  Content`. `tenant_admin` role. Always scoped to the calling
+  operator's tenant (the #1699 contract: the route exposes no
+  `tenant_id` parameter).
+* **MCP** — `meho.connector.delete(connector_id, tenant_id=None)` →
+  `{ok: true, deleted: {...}, warnings: [...]}`. `tenant_id` omitted
+  targets the built-in / global scope (the only path that can remove
+  `tenant_id IS NULL` rows), mirroring `meho.connector.ingest`.
+
+Both delegate to `ReviewService.delete_connector`
+(`operations/ingest/delete_connector.py` is the engine). Semantics:
+
+* **Row removal, not a status flag.** The scoped
+  `endpoint_descriptor` + `operation_group` rows are deleted in one
+  transaction together with one `meho.connector.delete` audit row
+  (group keys, op counts, enabled-op count, deregistration flag — the
+  forensic trail). The task's original `review_status='deleted'`
+  sketch would have required widening the
+  `ck_operation_group_review_status` CHECK (an Alembic migration) and
+  an "exclude deleted" filter on every reader; row removal needs
+  neither, and the scoped-out undo path was already "re-ingest brings
+  it back" (deviation recorded on #1700).
+* **Auto-shims only, and only when nothing remains.** The v2-registry
+  class is popped only when (a) it is a `GenericRestConnector`
+  subclass and (b) no rows remain for the triple under *any* tenant
+  scope after the delete (the registry is process-global; popping it
+  while another tenant still has rows would break that tenant's
+  dispatch). Hand-coded classes are never deregistered — they
+  re-register at every boot, so the connector reverts to the truthful
+  `state="registered"` listing row instead.
+* **Zero-op stubs are registry-only deletes.** No rows anywhere + a
+  matching auto-shim → pop + audit + 204. The registry match uses the
+  parsed-natural-key round-trip, so the VCF-family long↔short product
+  splits resolve (`vrli` rows ↔ `vcf-logs`-registered shim).
+* **404 conflation.** Unknown id, cross-tenant probe, rows visible
+  only under a scope the caller did not name, and repeat deletes all
+  return the same 404 the other connector routes use.
+* **Enabled ops warn, never block.** The delete completes; the
+  advisory rides the MCP response body (`warnings[]`, the `edit_op`
+  #1630 discipline), the `connector_delete_enabled_ops` log event,
+  and the audit payload. The REST response stays a body-less 204.
+* **Re-ingest revives.** A later ingest of the same triple
+  re-registers the shim (`connector_registered=True`) and re-lands
+  rows from scratch.
+* **Process-local deregistration.** The registry pop applies to the
+  serving pod; sibling replicas keep the class until their next
+  restart (no startup path re-registers ingest shims, so restarts
+  converge every pod on the post-delete state). The DB rows are the
+  durable truth and are gone everywhere immediately.
+
 ## Known issues
 
 * **`--catalog` ingest grouping requires `ANTHROPIC_API_KEY`.** The

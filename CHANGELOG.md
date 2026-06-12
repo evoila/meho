@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- Connector DELETE surface for the zero-op registry stubs aborted
+  ingests leave behind: `DELETE /api/v1/connectors/{connector_id}`
+  (204, tenant_admin, always operator-tenant-scoped) and the
+  `meho.connector.delete` MCP tool (optional `tenant_id`, omitted =
+  built-in / global scope). Removes the scoped `operation_group` +
+  `endpoint_descriptor` rows with one `meho.connector.delete` audit
+  row, deregisters the triple's `GenericRestConnector` auto-shim when
+  no rows remain anywhere (hand-coded classes never), warns —
+  advisory, not error — when enabled operations are deleted, and
+  re-ingest revives the connector from scratch (#1700)
+
 ### Changed
 
 - Document and pin the ingest tenant-scope contract across surfaces:
@@ -102,6 +115,24 @@ connector-related release-notes line.
   the registered-row `next_step` rationale now name the right surface
   per scope (#1699).
 
+### Deprecated
+
+- Deferred the removal of the 11 flat `runbook_*` MCP tool-name aliases
+  and the `slug` template-id input alias from v0.14.0 to **v0.15.0**.
+  v0.14.0 shipped with all 11 aliases still registered and callable and
+  its release notes carried no removal or deferral line, so the
+  deadline is moved explicitly rather than slipping silently: the
+  `runbook_template_slug_field_deprecated` warning and the DEPRECATED
+  wire descriptions now name v0.15.0 (the per-call
+  `mcp_tool_name_deprecated` breadcrumb stays unversioned — it logs
+  tool + replacement only), a `### Deprecated` erratum was added to
+  the v0.14.0 section below, and the removal itself stays tracked in
+  #1625 (re-scheduled to the v0.15.0 cycle). Nothing else changes:
+  consumers already on `meho.runbook.<verb>` + `template_slug` are
+  unaffected, and the migration recipe is unchanged — replace
+  `runbook_<verb>` with `meho.runbook.<verb>` and rename `slug` →
+  `template_slug` in template-verb arguments (#1612, #1702).
+
 ### Fixed
 
 - Operator console: broadcast feed/wall and the connectors recent-ops
@@ -110,6 +141,23 @@ connector-related release-notes line.
   loaded after Alpine had already started; component registration now
   loads from a head-level `component_scripts` block that precedes
   `alpine.min.js` (#1692)
+- Operator console: every Memory create-modal submit silently 403'd
+  (`csrf_token_invalid`) because the modal render rotates the
+  `meho_csrf` cookie while the form still echoed the stale page-level
+  `X-CSRF-Token`; the create form now declares its own `hx-headers`
+  echo of the token minted with the modal, so the double-submit pair
+  always matches and the create round-trips to 204 + redirect (#1693)
+- Alembic data backfill (`0038`) reconciles pre-v0.14.0 ingested rows
+  persisted under the long VCF-family / SDDC / Hetzner-Robot product
+  spellings (`vcf-logs`, `vcf-automation`, `vcf-fleet`,
+  `vcf-operations`, `sddc-manager`, `hetzner-robot`) to the
+  dispatch-canonical short spellings (`vrli`, `vcfa`, `fleet`,
+  `vrops`, `sddc`, `hetzner`) that v0.14.0's register-time
+  reconciliation (#1647) writes for new ingests — the connectors'
+  pre-existing operations become dispatchable again after upgrade
+  instead of reporting `registered, 0 ops`. Built-in rows only
+  (`tenant_id IS NULL`); idempotent; rows whose short-spelling twin
+  already exists (post-upgrade re-ingest) are left untouched (#1701)
 
 ## [0.14.0] - 2026-06-12
 
@@ -272,6 +320,19 @@ connector-related release-notes line.
   spec/label cross-check; omitting the band keeps the strict check, and
   a non-pattern token (a bare `v2`) is rejected at request validation.
   (#1646; consumer signal claude-rdc-hetzner-dc#1136)
+
+### Deprecated
+
+- *Erratum — added 2026-06-12, after the v0.14.0 tag (#1702).* Deferral
+  of flat `runbook_*` alias removal to v0.15.0 (originally scheduled
+  per the #1612 migration recipe announced in v0.13.0; execution
+  deferred to the next release). v0.14.0 ships with the 11 flat
+  `runbook_*` MCP tool names and the `slug` template-id input alias
+  still callable as deprecated aliases; they are removed in v0.15.0,
+  tracked in #1625 (re-scheduled to the v0.15.0 cycle). Consumers who
+  already migrated to `meho.runbook.<verb>` + `template_slug` are
+  unaffected; consumers still on the flat names keep working through
+  v0.14.x and must migrate before v0.15.0.
 
 ### Fixed
 

@@ -3,10 +3,10 @@
 
 """Tests for the connector review / state-machine admin MCP tools (G0.7-T7 #407).
 
-Covers the six ``meho.connector.*`` review / edit / enable / disable
-tools. The ingest-pipeline tools (``meho.connector.ingest`` +
-``meho.connector.ingest_status``) split out into their own handler
-module (#1531) and are tested in
+Covers the seven ``meho.connector.*`` review / edit / enable /
+disable / delete tools. The ingest-pipeline tools
+(``meho.connector.ingest`` + ``meho.connector.ingest_status``) split
+out into their own handler module (#1531) and are tested in
 ``test_mcp_tools_connector_ingest.py``.
 
 Coverage matrix:
@@ -50,6 +50,8 @@ from meho_backplane.operations.ingest import (
     ConnectorListItem,
     ConnectorReviewGroup,
     ConnectorReviewPayload,
+    DeleteConnectorResult,
+    DeleteConnectorWarning,
     EditOpWarning,
 )
 from tests.mcp_test_fixtures import (
@@ -77,6 +79,20 @@ class _FakeReviewService:
 
     edit_op_warnings: ClassVar[list[EditOpWarning]] = []
 
+    #: Canned :meth:`delete_connector` result — class attribute for the
+    #: same lazy-construction reason as ``edit_op_warnings``. Default
+    #: mirrors the clean row-bearing path: rows deleted, shim popped,
+    #: no advisory.
+    delete_result: ClassVar[DeleteConnectorResult] = DeleteConnectorResult(
+        connector_id="vmware-rest-9.0",
+        groups_deleted=2,
+        operations_deleted=8,
+        enabled_operations_deleted=0,
+        class_deregistered=True,
+        registry_only=False,
+        warnings=(),
+    )
+
     def __init__(self, operator: Operator) -> None:
         self.operator = operator
         self.review_calls: list[tuple[str, Any]] = []
@@ -84,6 +100,7 @@ class _FakeReviewService:
         self.edit_op_calls: list[dict[str, Any]] = []
         self.enable_calls: list[str] = []
         self.disable_calls: list[str] = []
+        self.delete_calls: list[dict[str, Any]] = []
 
     async def get_review_payload(
         self,
@@ -136,6 +153,14 @@ class _FakeReviewService:
 
     async def disable_connector(self, connector_id: str, **_kwargs: Any) -> None:
         self.disable_calls.append(connector_id)
+
+    async def delete_connector(
+        self,
+        connector_id: str,
+        **kwargs: Any,
+    ) -> DeleteConnectorResult:
+        self.delete_calls.append({"connector_id": connector_id, **kwargs})
+        return self.delete_result
 
 
 @pytest.fixture
@@ -205,6 +230,7 @@ _ADMIN_TOOL_NAMES = {
     "meho.connector.edit_op",
     "meho.connector.enable",
     "meho.connector.disable",
+    "meho.connector.delete",
 }
 
 _READ_ADMIN_TOOL_NAMES = {
@@ -694,6 +720,126 @@ def test_call_meho_connector_enable_dispatches(
 
     [review] = stubbed_services["review"]
     assert review.enable_calls == ["vmware-rest-9.0"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_meho_connector_delete_defaults_to_global_scope(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+) -> None:
+    """``delete`` with ``tenant_id`` omitted targets the built-in scope.
+
+    Pins the #1699 tenant-scope contract on the delete tool: an
+    omitted ``tenant_id`` forwards ``None`` (global / built-in) to
+    :meth:`ReviewService.delete_connector` — the mirror of the REST
+    route, which always forwards the operator's own tenant.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.delete",
+                "arguments": {"connector_id": "vmware-rest-9.0"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    payload = _unwrap_text_content(response.json())
+    assert payload == {
+        "connector_id": "vmware-rest-9.0",
+        "ok": True,
+        "deleted": {
+            "groups_deleted": 2,
+            "operations_deleted": 8,
+            "enabled_operations_deleted": 0,
+            "class_deregistered": True,
+            "registry_only": False,
+        },
+        "warnings": [],
+    }
+
+    [review] = stubbed_services["review"]
+    assert review.delete_calls == [
+        {"connector_id": "vmware-rest-9.0", "tenant_id": None},
+    ]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_meho_connector_delete_surfaces_enabled_ops_warning(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The enabled-operations advisory rides the MCP response body.
+
+    The REST sibling stays ``204 No Content`` per the task contract,
+    so this tool is the structured wire home for the advisory — the
+    same MCP↔REST split the ``edit_op`` warnings established
+    (G0.23-T4 #1630). The explicit tenant UUID also pins the
+    tenant-scoped call shape.
+    """
+    client, op = client_with_operator
+    warning = DeleteConnectorWarning(
+        code="enabled_operations_deleted",
+        enabled_op_count=3,
+        message="connector 'vmware-rest-9.0' still had 3 enabled operation(s).",
+    )
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "delete_result",
+        DeleteConnectorResult(
+            connector_id="vmware-rest-9.0",
+            groups_deleted=1,
+            operations_deleted=3,
+            enabled_operations_deleted=3,
+            class_deregistered=False,
+            registry_only=False,
+            warnings=(warning,),
+        ),
+    )
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.delete",
+                "arguments": {
+                    "connector_id": "vmware-rest-9.0",
+                    "tenant_id": str(op.tenant_id),
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    payload = _unwrap_text_content(response.json())
+    assert payload["ok"] is True
+    assert payload["deleted"]["enabled_operations_deleted"] == 3
+    assert payload["warnings"] == [
+        {
+            "code": "enabled_operations_deleted",
+            "enabled_op_count": 3,
+            "message": "connector 'vmware-rest-9.0' still had 3 enabled operation(s).",
+        },
+    ]
+
+    [review] = stubbed_services["review"]
+    assert review.delete_calls == [
+        {"connector_id": "vmware-rest-9.0", "tenant_id": op.tenant_id},
+    ]
 
 
 # ---------------------------------------------------------------------------

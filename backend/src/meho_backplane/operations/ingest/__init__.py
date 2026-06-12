@@ -50,6 +50,10 @@ from meho_backplane.operations.ingest.connector_registration import (
     check_version_covered_by_registered_class,
     ensure_connector_class_registered,
 )
+from meho_backplane.operations.ingest.delete_connector import (
+    DeleteConnectorResult,
+    DeleteConnectorWarning,
+)
 from meho_backplane.operations.ingest.error_envelopes import (
     build_catalog_entry_malformed_detail,
     build_catalog_entry_not_found_detail,
@@ -137,6 +141,8 @@ __all__ = [
     "ConnectorSpecCatalog",
     "ConnectorSpecEntry",
     "ConnectorStatusFilter",
+    "DeleteConnectorResult",
+    "DeleteConnectorWarning",
     "EditGroupBody",
     "EditOpBody",
     "EditOpResponse",

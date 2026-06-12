@@ -83,10 +83,12 @@ async def render_create_modal(
 
     Scope selector is filtered via :func:`writable_scopes_for` so the
     operator never sees a scope they can't write to (defence-in-depth:
-    the service-layer matrix re-checks on submit). The modal carries
-    its own CSRF token via the page-level ``hx-headers`` directive on
-    the form -- the route also sets the cookie so the chassis
-    double-submit pair lines up.
+    the service-layer matrix re-checks on submit). The form carries
+    its own ``hx-headers`` echo of the token minted here, and the
+    route sets the matching ``meho_csrf`` cookie on the same response,
+    so the chassis double-submit pair lines up (#1693 -- the
+    page-level directive's inherited token goes stale the moment this
+    render rotates the cookie).
     """
     writable = writable_scopes_for(operator)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))

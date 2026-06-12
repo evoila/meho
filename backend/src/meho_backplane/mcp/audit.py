@@ -271,7 +271,7 @@ async def write_mcp_audit_row(
     # the shared :data:`work_ref_var` ContextVar (not the structlog
     # ``audit_*`` payload-merge convention the graph columns above use),
     # so all three primary writers source it from one place. The
-    # ``work_ref`` column is added by migration ``0038``; guard on the
+    # ``work_ref`` column is added by migration ``0039``; guard on the
     # attribute for forward-compat. ``None`` until the bind source
     # (I1-T2) lands.
     soft_fk_kwargs: dict[str, Any] = {}

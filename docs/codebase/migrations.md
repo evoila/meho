@@ -132,9 +132,21 @@ Migrations that INSERT, UPDATE, or DELETE rows. Rules:
    `datetime.now(UTC).isoformat()` string as a bind parameter.
 5. **Idempotent.** `ON CONFLICT DO NOTHING` / `ON CONFLICT DO UPDATE` so a
    re-run on an already-migrated DB is a no-op.
-6. **Reversible.** `downgrade()` must undo the data (delete seeded rows by a
-   stable discriminant such as `actor_sub` or slug) without touching rows the
-   operator authored independently.
+6. **Reversible — or a documented no-op.** Seed migrations undo their data in
+   `downgrade()` (delete seeded rows by a stable discriminant such as
+   `actor_sub` or slug) without touching rows the operator authored
+   independently. Backfill-rewrite migrations (`0011`, `0038`) instead ship a
+   **documented no-op** `downgrade()` when the pre-upgrade value carries no
+   operator-recoverable state (restoring it would need a copy column, and the
+   restored value serves no one). The no-op must say *why* in its docstring —
+   explicit refusal beats silent partial recovery.
+7. **Guard natural-key rewrites against collisions.** An UPDATE that rewrites
+   part of a unique key (e.g. `0038` rewriting `product`) must carry a
+   correlated `NOT EXISTS` twin check on the target key, or a row inserted
+   under the new spelling after the fix-forward release will make the
+   migration Job die with `IntegrityError` mid-deploy. Skip-and-leave beats
+   delete: the skipped row stays in its pre-migration state, and destructive
+   cleanup remains operator-driven.
 
 ## Additive-only constraint
 
@@ -232,6 +244,9 @@ avoid "event loop already running" errors.
 - `backend/alembic/versions/0018_seed_rdc_internal_conventions.py`: the
   canonical data-migration reference implementation with `_uuid_param` and
   `_coerce_uuid` helpers.
+- `backend/alembic/versions/0038_backfill_endpoint_descriptor_product_splits.py`:
+  the canonical collision-guarded backfill-rewrite (correlated `NOT EXISTS`
+  twin check on a partial-unique natural key, documented no-op downgrade).
 - `backend/tests/test_alembic_uuid_param_consistency.py`: drift-guard test.
 - `backend/tests/test_alembic_seed_rdc_conventions.py`: 0018 behavioural tests.
 - `backend/tests/test_migration_compat.py`: additive-only CI guard tests.

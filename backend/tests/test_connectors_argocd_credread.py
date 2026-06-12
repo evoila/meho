@@ -162,6 +162,9 @@ class _CredReadTarget:
         self.fingerprint = type("_FP", (), {"version": "3.3.9"})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
+        # Tenant-unique cache key component (#1642/#1672); without it
+        # ``target_cache_key`` raises AttributeError at runtime.
+        self.tenant_id: UUID = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
         self.name = "argocd-credread"
         self.host = _ARGOCD_HOST
         self.port = 443

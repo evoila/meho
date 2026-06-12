@@ -177,8 +177,15 @@ class GitHubTargetLike(Protocol):
     splits ``host`` at the first ``/`` so the bare API URL drives the
     httpx base URL and the trailing path (if any) drives the
     fingerprint endpoint selection.
+
+    ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)``
+    cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
+    the installation-token + PAT caches use, so two same-named targets in
+    different tenants never share a cached token (#1642/#1672).
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

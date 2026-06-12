@@ -158,6 +158,11 @@ async def test_client_get_encodes_traversal_id_in_request_path() -> None:
     target_stub.secret_ref = "stub/secret"
     target_stub.auth_model = "shared_service_account"
     target_stub.extras = {}
+    # Tenant-unique cache key components (#1642/#1672); a MagicMock with a
+    # Protocol spec does not auto-expose annotation-only attributes, so set
+    # them explicitly or target_cache_key raises AttributeError.
+    target_stub.id = uuid.UUID(int=0xCE)
+    target_stub.tenant_id = uuid.UUID(int=0)
 
     # Patch the connector to use our mock transport via respx.
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -198,6 +203,11 @@ async def test_role_mapping_get_encodes_traversal_id_in_request_path() -> None:
     target_stub.secret_ref = "stub/secret"
     target_stub.auth_model = "shared_service_account"
     target_stub.extras = {}
+    # Tenant-unique cache key components (#1642/#1672); a MagicMock with a
+    # Protocol spec does not auto-expose annotation-only attributes, so set
+    # them explicitly or target_cache_key raises AttributeError.
+    target_stub.id = uuid.UUID(int=0xCE)
+    target_stub.tenant_id = uuid.UUID(int=0)
 
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         mock.post("/realms/master/protocol/openid-connect/token").respond(

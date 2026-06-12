@@ -16,13 +16,14 @@ no username component; the stored token is sent verbatim.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
-from uuid import UUID
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import (
     SYSTEM_OPERATOR_SUB,
     synthesise_system_operator,
@@ -85,6 +86,9 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    # Tenant-unique cache key components (#1642/#1672).
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -212,6 +216,56 @@ async def test_per_target_isolation_keeps_tokens_separate() -> None:
     assert h_a == {"Authorization": "Bearer token-argocd-infra"}
     assert h_b == {"Authorization": "Bearer token-argocd-ci"}
     assert call_log == ["argocd-infra", "argocd-ci"]
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> None:
+    """Same-named targets in DIFFERENT tenants never share a cached token.
+
+    Regression guard for #1642/#1672: the credential cache used to key on
+    ``target.name`` alone, so two same-named targets in different tenants
+    collapsed onto one entry and one tenant could be served another
+    tenant's token. The cache keys on the tenant-unique ``(tenant_id, id)``
+    tuple instead.
+    """
+    tenant_one = _StubTarget(
+        name="argocd-shared",
+        host="argocd-shared.test.invalid",
+        port=443,
+        secret_ref="targets/argocd-shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="argocd-shared",
+        host="argocd-shared.test.invalid",
+        port=443,
+        secret_ref="targets/argocd-shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+    call_log: list[tuple[str, str]] = []
+
+    async def _tracking_loader(target: ArgoCdTargetLike, _operator: Operator) -> dict[str, str]:
+        call_log.append((str(target.tenant_id), str(target.id)))
+        return {"token": f"token-{target.tenant_id}"}
+
+    connector = ArgoCdConnector(credentials_loader=_tracking_loader)
+    h_one = await connector.auth_headers(tenant_one, operator=_make_operator())
+    h_two = await connector.auth_headers(tenant_two, operator=_make_operator())
+
+    # Each tenant loaded its own token — no cross-tenant cache hit.
+    assert h_one != h_two
+    assert len(call_log) == 2
+    assert connector._creds_cache == {
+        target_cache_key(tenant_one): {"token": f"token-{tenant_one.tenant_id}"},
+        target_cache_key(tenant_two): {"token": f"token-{tenant_two.tenant_id}"},
+    }
+
+    # Same-tenant re-fetch is a cache HIT — loader not re-invoked.
+    await connector.auth_headers(tenant_one, operator=_make_operator())
+    assert len(call_log) == 2
     await connector.aclose()
 
 
@@ -452,7 +506,7 @@ async def test_aclose_clears_token_cache_and_pool() -> None:
     """aclose() clears the in-memory token cache and tears down the httpx pool."""
     connector = _make_connector()
     await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    assert "argocd-infra" in connector._creds_cache
+    assert target_cache_key(_TARGET_A) in connector._creds_cache
     await connector.aclose()
     assert connector._creds_cache == {}
     assert connector._clients == {}

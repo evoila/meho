@@ -129,6 +129,16 @@ connector-related release-notes line.
   Two same-named targets in different tenants previously collapsed onto one
   cache entry, so one tenant could be served another tenant's cached
   service-account credential or session token (#1642).
+- Extended the same `(tenant_id, target.id)` cache re-keying (via the shared
+  `target_cache_key` helper) to the remaining seven connectors that still
+  keyed credential/session/token caches on `target.name`: VCF Automation
+  (both per-plane token caches), ArgoCD, gcloud (token + impersonated-creds +
+  per-target lock), Keycloak (admin token), GitHub (installation token + PAT),
+  Hetzner Robot, and vmware-rest (session token + endpoint paths). Two
+  same-named targets in different tenants no longer collapse onto one cache
+  entry, closing the same cross-tenant credential/session bleed in these
+  connectors. The shared `HttpConnector._clients` connection pool stays keyed
+  on `target.name` (a pooling concern, tracked separately) (#1672).
 
 ### Breaking changes
 

@@ -38,9 +38,10 @@ when the env var is absent — they do not count as passing gates.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock, patch
+from uuid import UUID, uuid4
 
 import pytest
 import respx
@@ -98,6 +99,9 @@ class _StubTarget:
     auth_model: str | None = AuthModel.IMPERSONATION.value
     host: str = "gcp.invalid"
     port: int | None = None
+    # Tenant-unique cache key components (#1642/#1672).
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _E2E_TARGET = _StubTarget(

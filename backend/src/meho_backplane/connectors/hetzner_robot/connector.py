@@ -79,6 +79,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.hetzner_robot.session import (
@@ -127,8 +128,10 @@ def _basic_auth_header(username: str, password: str) -> str:
 class HetznerRobotConnector(HttpConnector):
     """Hetzner Robot Webservice connector with HTTP Basic auth.
 
-    Per-target credentials cached in :attr:`_creds_cache` (loaded once via
-    the injectable :class:`HetznerRobotCredentialsLoader`). HTTP Basic auth
+    Per-target credentials cached in :attr:`_creds_cache` keyed on the
+    tenant-unique ``(tenant_id, target.id)`` tuple (#1642/#1672), loaded
+    once via the injectable :class:`HetznerRobotCredentialsLoader`. HTTP
+    Basic auth
     is sent on every request via ``Authorization: Basic <base64>`` — no
     session token is established.
 
@@ -154,7 +157,10 @@ class HetznerRobotConnector(HttpConnector):
         credentials_loader: HetznerRobotCredentialsLoader | None = None,
     ) -> None:
         super().__init__()
-        self._creds_cache: dict[str, dict[str, str]] = {}
+        # Keyed on the tenant-unique ``(tenant_id, target.id)`` tuple
+        # (``target_cache_key``) so two same-named targets in different
+        # tenants never share cached credentials (#1642/#1672).
+        self._creds_cache: dict[tuple[str, str], dict[str, str]] = {}
         self._creds_lock = asyncio.Lock()
         self._credentials_loader: HetznerRobotCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
@@ -195,8 +201,9 @@ class HetznerRobotConnector(HttpConnector):
         missing keys raise :exc:`RuntimeError` naming the target and the missing
         key so operators can identify a misconfigured Vault path.
         """
+        cache_key = target_cache_key(target)
         async with self._creds_lock:
-            cached = self._creds_cache.get(target.name)
+            cached = self._creds_cache.get(cache_key)
             if cached is not None:
                 return cached
             raw = await self._credentials_loader(target)
@@ -209,7 +216,7 @@ class HetznerRobotConnector(HttpConnector):
                     f"a dict missing required key {exc.args[0]!r}; need "
                     "{'username': str, 'password': str}"
                 ) from exc
-            self._creds_cache[target.name] = raw
+            self._creds_cache[cache_key] = raw
             _log.info(
                 "hetzner_robot_credentials_loaded",
                 target=target.name,

@@ -47,7 +47,9 @@ violation.
   passes through as the bearer credential. Documented but not
   first-class.
 
-Per-target cache scoping mirrors vmware-rest: keyed on ``target.name``,
+Per-target cache scoping mirrors vmware-rest: keyed on the tenant-unique
+``(tenant_id, target.id)`` tuple (#1642/#1672) so two same-named targets
+in different tenants never share a cached token,
 serialised under a single :class:`asyncio.Lock` so two concurrent
 first-use callers don't double-mint. The cache fast-path additionally
 rejects an empty operator JWT (defense-in-depth — the loader's
@@ -98,6 +100,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -185,13 +188,16 @@ class GitHubRestConnector(HttpConnector):
         passing ``None`` is the production shape.
         """
         super().__init__()
-        # Per-target installation-token cache. Keyed on target.name; the
-        # value's ``expires_at_monotonic`` drives cache-validity checks.
-        self._installation_tokens: dict[str, InstallationToken] = {}
-        # Per-target PAT cache — same shape but the token never expires
-        # from MEHO's side (the PAT carries its own GitHub-set TTL).
-        # Caching keeps the Vault read off the hot path.
-        self._pat_tokens: dict[str, str] = {}
+        # Per-target installation-token cache. Keyed on the tenant-unique
+        # ``(tenant_id, target.id)`` tuple (``target_cache_key``, #1642/#1672)
+        # so two same-named targets in different tenants never share a
+        # cached token; the value's ``expires_at_monotonic`` drives
+        # cache-validity checks.
+        self._installation_tokens: dict[tuple[str, str], InstallationToken] = {}
+        # Per-target PAT cache — same shape and tenant-unique key but the
+        # token never expires from MEHO's side (the PAT carries its own
+        # GitHub-set TTL). Caching keeps the Vault read off the hot path.
+        self._pat_tokens: dict[tuple[str, str], str] = {}
         self._token_lock = asyncio.Lock()
         # The injected http client is reserved for a future bring-your-
         # own-client test path; production uses the inherited per-target
@@ -289,12 +295,13 @@ class GitHubRestConnector(HttpConnector):
         / ``GitHubRateLimitedError``) when the App-mint round-trip
         itself fails.
         """
+        cache_key = target_cache_key(target)
         async with self._token_lock:
             now = time.monotonic()
-            cached_app = self._installation_tokens.get(target.name)
+            cached_app = self._installation_tokens.get(cache_key)
             if cached_app is not None and cached_app.expires_at_monotonic > now:
                 return cached_app.token
-            cached_pat = self._pat_tokens.get(target.name)
+            cached_pat = self._pat_tokens.get(cache_key)
             if cached_pat is not None:
                 return cached_pat
 
@@ -302,7 +309,7 @@ class GitHubRestConnector(HttpConnector):
             if isinstance(creds, GitHubAppCredentials):
                 return await self._mint_and_cache_installation_token(target, creds)
             if isinstance(creds, GitHubPATCredentials):
-                self._pat_tokens[target.name] = creds.token
+                self._pat_tokens[cache_key] = creds.token
                 _log.info(
                     "github_pat_token_loaded",
                     target=target.name,
@@ -344,7 +351,7 @@ class GitHubRestConnector(HttpConnector):
             installation_id=creds.installation_id,
             api_base_url=self._BASE_URL,
         )
-        self._installation_tokens[target.name] = installation
+        self._installation_tokens[target_cache_key(target)] = installation
         _log.info(
             "github_installation_token_minted",
             target=target.name,

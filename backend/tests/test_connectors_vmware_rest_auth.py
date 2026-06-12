@@ -33,14 +33,15 @@ Coverage matrix (per #498 acceptance criteria):
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
-from uuid import UUID
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -134,6 +135,10 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    # Tenant-unique cache key components (#1642/#1672). Distinct ``id`` per
+    # instance so two stub targets never collapse onto one cache entry.
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -260,6 +265,7 @@ def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
     async def _aclose() -> None:
         connector._session_tokens.clear()
         connector._session_paths.clear()
+        connector._session_names.clear()
         for client in connector._clients.values():
             await client.aclose()
         connector._clients.clear()
@@ -329,9 +335,66 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
     assert h_b == {"vmware-api-session-id": "token-for-b"}
     # Both tokens cached.
     assert connector._session_tokens == {
-        "vcenter-a": "token-for-a",
-        "vcenter-b": "token-for-b",
+        target_cache_key(_TARGET_A): "token-for-a",
+        target_cache_key(_TARGET_B): "token-for-b",
     }
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_name_targets_in_different_tenants_get_distinct_sessions() -> None:
+    """Same-named targets in DIFFERENT tenants never share a cached session.
+
+    Regression guard for #1642/#1672: the session-token cache used to key
+    on ``target.name`` alone, so two same-named targets in different
+    tenants collapsed onto one entry and one tenant could be served
+    another tenant's session. The cache keys on the tenant-unique
+    ``(tenant_id, id)`` tuple instead. Both stub targets share one host
+    so the established session token, not the per-target HTTP-client pool,
+    is the variable under test.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    tenant_one = _StubTarget(
+        name="vcenter-shared",
+        host="vcenter-shared.test.invalid",
+        port=443,
+        secret_ref="vsphere/vcenter-shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="vcenter-shared",
+        host="vcenter-shared.test.invalid",
+        port=443,
+        secret_ref="vsphere/vcenter-shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+
+    async with respx.mock(base_url="https://vcenter-shared.test.invalid") as mock:
+        route = mock.post("/api/session").mock(
+            side_effect=[
+                httpx.Response(200, json="token-tenant-one"),
+                httpx.Response(200, json="token-tenant-two"),
+            ]
+        )
+        h_one = await connector.auth_headers(tenant_one, _make_operator())
+        h_two = await connector.auth_headers(tenant_two, _make_operator())
+
+    # Each tenant established its own session — no cross-tenant cache hit.
+    assert route.call_count == 2
+    assert h_one == {"vmware-api-session-id": "token-tenant-one"}
+    assert h_two == {"vmware-api-session-id": "token-tenant-two"}
+    assert connector._session_tokens == {
+        target_cache_key(tenant_one): "token-tenant-one",
+        target_cache_key(tenant_two): "token-tenant-two",
+    }
+
+    # Same-tenant re-fetch is a cache HIT — behaviour unchanged.
+    h_one_again = await connector.auth_headers(tenant_one, _make_operator())
+    assert h_one_again == {"vmware-api-session-id": "token-tenant-one"}
+    assert route.call_count == 2
     await connector.aclose()
 
 
@@ -428,7 +491,7 @@ async def test_modern_session_endpoint_is_tried_first_no_fallback_on_200() -> No
     assert headers == {"vmware-api-session-id": "modern-path-token"}
     assert modern.called and modern.call_count == 1
     # The cached path records the modern endpoint so aclose targets it.
-    assert connector._session_paths == {"vcenter-a": "/api/session"}
+    assert connector._session_paths == {target_cache_key(_TARGET_A): "/api/session"}
     await connector.aclose()
 
 
@@ -454,7 +517,7 @@ async def test_session_falls_back_to_legacy_path_on_modern_404() -> None:
     assert legacy.called and legacy.call_count == 1
     assert headers == {"vmware-api-session-id": "legacy-path-token"}
     # The legacy path is recorded so aclose DELETEs against it.
-    assert connector._session_paths == {"vcenter-a": "/rest/com/vmware/cis/session"}
+    assert connector._session_paths == {target_cache_key(_TARGET_A): "/rest/com/vmware/cis/session"}
     await connector.aclose()
 
 

@@ -31,14 +31,15 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Iterator
-from dataclasses import dataclass
-from uuid import UUID
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -109,6 +110,9 @@ class _StubTarget:
     domain: str | None = None
     provider_username: str | None = None
     provider_secret_ref: str | None = None
+    # Tenant-unique cache key components (#1642/#1672).
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -443,8 +447,8 @@ async def test_provider_and_tenant_caches_are_independent_per_target() -> None:
             _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
         )
 
-    assert connector._provider_tokens == {"vcfa-a": "p-jwt-1"}
-    assert connector._tenant_tokens == {"vcfa-a": "t-tok-1"}
+    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt-1"}
+    assert connector._tenant_tokens == {target_cache_key(_TARGET_A): "t-tok-1"}
     await connector.aclose()
 
 
@@ -476,8 +480,80 @@ async def test_per_target_isolation_keeps_both_plane_caches_separate() -> None:
             _TARGET_B, operator=_make_operator(), path="/iaas/api/projects"
         )
 
-    assert connector._provider_tokens == {"vcfa-a": "p-a", "vcfa-b": "p-b"}
-    assert connector._tenant_tokens == {"vcfa-a": "t-a", "vcfa-b": "t-b"}
+    assert connector._provider_tokens == {
+        target_cache_key(_TARGET_A): "p-a",
+        target_cache_key(_TARGET_B): "p-b",
+    }
+    assert connector._tenant_tokens == {
+        target_cache_key(_TARGET_A): "t-a",
+        target_cache_key(_TARGET_B): "t-b",
+    }
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> None:
+    """Same-named targets in DIFFERENT tenants never share cached plane tokens.
+
+    Regression guard for #1642/#1672: both per-plane token caches used to
+    key on ``target.name`` alone, so two same-named targets in different
+    tenants collapsed onto one entry. The caches key on the tenant-unique
+    ``(tenant_id, id)`` tuple instead. Both stub targets share one host so
+    the established tokens, not the per-target HTTP-client pool, are under
+    test.
+    """
+    connector = _make_connector()
+    tenant_one = _StubTarget(
+        name="vcfa-shared",
+        host="vcfa-shared.test.invalid",
+        port=443,
+        secret_ref="vcfa/vcfa-shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="vcfa-shared",
+        host="vcfa-shared.test.invalid",
+        port=443,
+        secret_ref="vcfa/vcfa-shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+
+    async with respx.mock(base_url="https://vcfa-shared.test.invalid") as mock:
+        mock.post("/cloudapi/1.0.0/sessions/provider").mock(
+            side_effect=[
+                httpx.Response(200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-one"}),
+                httpx.Response(200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-two"}),
+            ]
+        )
+        mock.post("/iaas/api/login").mock(
+            side_effect=[
+                httpx.Response(200, json={"token": "t-one"}),
+                httpx.Response(200, json={"token": "t-two"}),
+            ]
+        )
+        await connector.auth_headers(
+            tenant_one, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
+        await connector.auth_headers(
+            tenant_two, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
+        await connector.auth_headers(
+            tenant_one, operator=_make_operator(), path="/iaas/api/projects"
+        )
+        await connector.auth_headers(
+            tenant_two, operator=_make_operator(), path="/iaas/api/projects"
+        )
+
+    assert connector._provider_tokens == {
+        target_cache_key(tenant_one): "p-one",
+        target_cache_key(tenant_two): "p-two",
+    }
+    assert connector._tenant_tokens == {
+        target_cache_key(tenant_one): "t-one",
+        target_cache_key(tenant_two): "t-two",
+    }
     await connector.aclose()
 
 
@@ -742,7 +818,7 @@ async def test_provider_plane_401_triggers_relogin_and_retry_once() -> None:
     assert login.call_count == 2
     assert orgs.call_count == 2
     # Cache holds the refreshed token; tenant cache untouched.
-    assert connector._provider_tokens == {"vcfa-a": "p-jwt-second"}
+    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt-second"}
     assert connector._tenant_tokens == {}
     await connector.aclose()
 
@@ -803,8 +879,8 @@ async def test_tenant_plane_401_triggers_independent_relogin_and_retry_once() ->
     assert tenant_login.call_count == 2
     assert projects.call_count == 2
     # The provider cache survived the tenant-plane re-login.
-    assert connector._provider_tokens == {"vcfa-a": "p-jwt-stable"}
-    assert connector._tenant_tokens == {"vcfa-a": "t-second"}
+    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt-stable"}
+    assert connector._tenant_tokens == {target_cache_key(_TARGET_A): "t-second"}
     await connector.aclose()
 
 
@@ -958,8 +1034,8 @@ async def test_aclose_clears_both_plane_caches_and_pool() -> None:
             _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
         )
 
-    assert connector._provider_tokens == {"vcfa-a": "p-jwt"}
-    assert connector._tenant_tokens == {"vcfa-a": "t-tok"}
+    assert connector._provider_tokens == {target_cache_key(_TARGET_A): "p-jwt"}
+    assert connector._tenant_tokens == {target_cache_key(_TARGET_A): "t-tok"}
     await connector.aclose()
     assert connector._provider_tokens == {}
     assert connector._tenant_tokens == {}

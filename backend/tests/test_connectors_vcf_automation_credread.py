@@ -61,6 +61,7 @@ from structlog.testing import capture_logs
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
@@ -204,6 +205,9 @@ class _CredReadTarget:
         self.fingerprint = type("_FP", (), {"version": _VERSION})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
+        # Tenant-unique cache key component (#1642/#1672); without it
+        # ``target_cache_key`` would raise AttributeError at runtime.
+        self.tenant_id: UUID = UUID("00000000-0000-0000-0000-00000000a0fa")
         self.name = "vcfa-credread-target"
         self.host = _VCFA_FQDN
         self.port = 443
@@ -496,8 +500,9 @@ async def test_session_token_fast_paths_fail_closed_on_empty_raw_jwt() -> None:
 
     assert primed_provider == _CANARY_PROVIDER_JWT
     assert primed_tenant == _CANARY_TENANT_TOKEN
-    assert connector._provider_tokens[target.name] == _CANARY_PROVIDER_JWT
-    assert connector._tenant_tokens[target.name] == _CANARY_TENANT_TOKEN
+    cache_key = target_cache_key(target)
+    assert connector._provider_tokens[cache_key] == _CANARY_PROVIDER_JWT
+    assert connector._tenant_tokens[cache_key] == _CANARY_TENANT_TOKEN
 
     system_operator = Operator(
         sub="system",
@@ -520,7 +525,7 @@ async def test_session_token_fast_paths_fail_closed_on_empty_raw_jwt() -> None:
 
     # Both caches still hold the primed tokens; the guards ran ahead
     # of any cache mutation.
-    assert connector._provider_tokens[target.name] == _CANARY_PROVIDER_JWT
-    assert connector._tenant_tokens[target.name] == _CANARY_TENANT_TOKEN
+    assert connector._provider_tokens[cache_key] == _CANARY_PROVIDER_JWT
+    assert connector._tenant_tokens[cache_key] == _CANARY_TENANT_TOKEN
 
     await connector.aclose()

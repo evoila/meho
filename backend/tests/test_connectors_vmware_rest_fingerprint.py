@@ -21,8 +21,9 @@ Coverage matrix (per #498 acceptance criteria):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -52,6 +53,9 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    # Tenant-unique cache key components (#1642/#1672).
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET = _StubTarget(
@@ -73,6 +77,7 @@ def _make_connector() -> VmwareRestConnector:
 def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
     async def _aclose() -> None:
         connector._session_tokens.clear()
+        connector._session_names.clear()
         for client in connector._clients.values():
             await client.aclose()
         connector._clients.clear()

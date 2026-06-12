@@ -23,15 +23,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock, patch
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.gcloud import GcloudConnector, GcloudTargetLike
@@ -76,6 +78,9 @@ class _StubTarget:
     auth_model: str | None = AuthModel.IMPERSONATION.value
     host: str = "gcp.invalid"
     port: int | None = None
+    # Tenant-unique cache key components (#1642/#1672).
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -336,7 +341,7 @@ async def test_auth_headers_refuses_sa_json_key_in_secret_ref() -> None:
     assert "private_key" in msg
     assert "disableServiceAccountKeyCreation" in msg
     # No token should have been built
-    assert _TARGET_A.name not in connector._token_cache
+    assert target_cache_key(_TARGET_A) not in connector._token_cache
     await connector.aclose()
 
 
@@ -446,6 +451,69 @@ async def test_per_target_token_isolation() -> None:
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> None:
+    """Same-named targets in DIFFERENT tenants never share a cached token.
+
+    Regression guard for #1642/#1672: the token / creds / lock caches used
+    to key on ``target.name`` alone, so two same-named targets in different
+    tenants collapsed onto one entry and one tenant could be served
+    another tenant's token. The caches key on the tenant-unique
+    ``(tenant_id, id)`` tuple instead.
+    """
+    tenant_one = _StubTarget(
+        name="gcloud-shared",
+        gcp_project="proj-one",
+        gcp_impersonate_sa="svc@proj-one.iam.gserviceaccount.com",
+        secret_ref="gcloud/gcloud-shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="gcloud-shared",
+        gcp_project="proj-two",
+        gcp_impersonate_sa="svc@proj-two.iam.gserviceaccount.com",
+        secret_ref="gcloud/gcloud-shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+
+    def _adc(scopes: list[str] | None = None) -> tuple[Any, str | None]:
+        return _make_mock_source_creds(), "p"
+
+    creds_seq = [_make_mock_creds("token-one"), _make_mock_creds("token-two")]
+    call_idx = 0
+
+    def _patch_impersonated(
+        source_credentials: Any,
+        target_principal: str,
+        target_scopes: list[str],
+        lifetime: int = 3600,
+    ) -> Any:
+        nonlocal call_idx
+        c = creds_seq[call_idx]
+        call_idx += 1
+        return c
+
+    connector = GcloudConnector(credentials_loader=_empty_loader, adc_loader=_adc)
+    with patch(
+        "google.auth.impersonated_credentials.Credentials",
+        side_effect=_patch_impersonated,
+    ):
+        h_one = await connector.auth_headers(tenant_one, operator=_OPERATOR)
+        h_two = await connector.auth_headers(tenant_two, operator=_OPERATOR)
+
+    # Each tenant minted its own token — no cross-tenant cache hit.
+    assert h_one["Authorization"] == "Bearer token-one"
+    assert h_two["Authorization"] == "Bearer token-two"
+    assert call_idx == 2
+    assert set(connector._token_cache) == {
+        target_cache_key(tenant_one),
+        target_cache_key(tenant_two),
+    }
+    await connector.aclose()
+
+
 # ---------------------------------------------------------------------------
 # 401 → token refresh → retry
 # ---------------------------------------------------------------------------
@@ -477,7 +545,7 @@ async def test_401_triggers_token_refresh_and_retry() -> None:
     ):
         # Pre-populate the token cache so the first call uses "initial-token"
         await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
-        assert connector._token_cache.get("gcloud-a") == "initial-token"
+        assert connector._token_cache.get(target_cache_key(_TARGET_A)) == "initial-token"
 
         # First call: 401; second call: 200 (after token refresh)
         call_count = 0
@@ -699,7 +767,7 @@ async def test_aclose_clears_token_and_creds_cache() -> None:
     ):
         await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
 
-    assert "gcloud-a" in connector._token_cache
+    assert target_cache_key(_TARGET_A) in connector._token_cache
     await connector.aclose()
     assert connector._token_cache == {}
     assert connector._creds_cache == {}
@@ -743,7 +811,7 @@ async def test_op_handler_get_path_refuses_sa_json_key() -> None:
     assert "gcloud-a" in msg
     assert "private_key" in msg
     assert "disableServiceAccountKeyCreation" in msg
-    assert _TARGET_A.name not in connector._token_cache
+    assert target_cache_key(_TARGET_A) not in connector._token_cache
     assert not connector._creds_cache
     await connector.aclose()
 
@@ -761,7 +829,7 @@ async def test_op_handler_post_path_refuses_sa_json_key() -> None:
     msg = str(exc_info.value)
     assert "gcloud-a" in msg
     assert "private_key" in msg
-    assert _TARGET_A.name not in connector._token_cache
+    assert target_cache_key(_TARGET_A) not in connector._token_cache
     await connector.aclose()
 
 
@@ -795,7 +863,7 @@ async def test_op_handler_compliant_secret_does_not_refuse() -> None:
     assert result["project_id"] == "my-project-123"
     assert result["project_number"] == "987654321"
     assert result["organization"] == "112233445566"
-    assert connector._token_cache.get("gcloud-a") == "tok"
+    assert connector._token_cache.get(target_cache_key(_TARGET_A)) == "tok"
     await connector.aclose()
 
 
@@ -814,7 +882,7 @@ async def test_fingerprint_refuses_sa_json_key_returns_unreachable() -> None:
     assert "error" in fp.extras
     assert "ValueError" in fp.extras["error"]
     assert "private_key" in fp.extras["error"]
-    assert _TARGET_A.name not in connector._token_cache
+    assert target_cache_key(_TARGET_A) not in connector._token_cache
     await connector.aclose()
 
 
@@ -828,7 +896,7 @@ async def test_probe_refuses_sa_json_key_returns_ok_false() -> None:
     assert result.reason is not None
     assert "ValueError" in result.reason
     assert "private_key" in result.reason
-    assert _TARGET_A.name not in connector._token_cache
+    assert target_cache_key(_TARGET_A) not in connector._token_cache
     await connector.aclose()
 
 

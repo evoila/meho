@@ -2064,6 +2064,142 @@ paths:
     assert grouping["operations_assigned"] == 2
 
 
+@pytest.mark.asyncio
+async def test_cross_surface_reingest_under_global_scope_creates_shadow_copy(
+    client: TestClient,
+    tmp_path: Any,
+) -> None:
+    """REST (tenant scope) then MCP-global re-ingest re-inserts every op (#1699).
+
+    Pins the cross-surface tenant-scope contract on the ingest surface:
+
+    1. ``POST /api/v1/connectors/ingest`` exposes no ``tenant_id``
+       parameter — rows always land under the calling operator's tenant
+       (here :data:`tests.mcp_test_fixtures.OPERATOR_TENANT_ID`).
+    2. The MCP sibling ``meho.connector.ingest`` with ``tenant_id``
+       *omitted* targets the built-in / global scope
+       (``tenant_id IS NULL``).
+    3. Re-ingesting the **same spec** under the other scope is *expected*
+       to insert every operation again (``skipped_count == 0``): the
+       dedup lookup in ``operations/ingest/_upsert`` scopes its
+       natural-key match by ``tenant_id`` (``IS NULL`` for global,
+       ``== UUID`` for tenant rows), so rows in one namespace are
+       invisible to a write in the other. This is by design — the global
+       and per-tenant connector namespaces are isolated — but it
+       surprises operators who mix surfaces expecting an idempotent
+       re-ingest, which is why both surfaces document the contract
+       rather than changing the behaviour (#1699; the v0.14.0 cycle-10
+       dogfood hit this as a 136-op shadow copy).
+
+    Lives here rather than in ``test_mcp_tools_connector_ingest.py``
+    because the REST leg needs this module's real-pipeline machinery
+    (JWT mint + SSRF mock + LLM stub); the MCP-side behaviour tests use
+    a *fake* pipeline service, which cannot exercise the scope-aware
+    dedup. The MCP leg follows that file's established convention of
+    driving the handler coroutine directly.
+    """
+    from meho_backplane.mcp.tools import connector_ingest as ci_mod
+    from tests.mcp_test_fixtures import OPERATOR_TENANT_ID, build_operator
+
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: t
+  version: '1'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+  /items/{id}:
+    get:
+      summary: get item
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    propose_json = (
+        '[{"group_key": "items", "name": "Items", '
+        '"when_to_use": "Use these operations to manage items."}]'
+    )
+    assign_json = '{"GET:/items": "items", "GET:/items/{id}": "items"}'
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+
+    key, token = _admin_token(tenant_id=OPERATOR_TENANT_ID)
+    triple = {"product": "scopeprobe", "version": "1.0", "impl_id": "scopeprobe-rest"}
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-scopeprobe.yaml")
+
+        # Leg 1 — REST with the operator's JWT. The body carries no
+        # tenant_id field (the schema rejects one); the route hard-codes
+        # ``tenant_id=operator.tenant_id`` from the JWT.
+        rest_response = client.post(
+            "/api/v1/connectors/ingest",
+            json={**triple, "specs": [{"uri": spec_url}], "async": False},
+            headers=_authed(token),
+        )
+        assert rest_response.status_code == 200, rest_response.text
+        rest_ingestion = rest_response.json()["ingestion"]
+        assert rest_ingestion["inserted_count"] == 2
+        assert rest_ingestion["skipped_count"] == 0
+
+        # Leg 2 — the MCP handler with ``tenant_id`` omitted → global
+        # scope. Same spec, same triple, real pipeline service (the
+        # handler reads the stub LLM factory installed above via
+        # ``get_llm_client_factory``).
+        mcp_payload = await ci_mod._ingest_handler(
+            build_operator(TenantRole.TENANT_ADMIN),
+            {**triple, "specs": [{"uri": spec_url}]},
+        )
+
+    # Expected (though potentially surprising) behaviour: the scope-aware
+    # dedup found no match in the global namespace, so every op inserts
+    # again — nothing is skipped or updated across the scope boundary.
+    mcp_ingestion = mcp_payload["ingestion"]
+    assert mcp_ingestion["inserted_count"] == 2
+    assert mcp_ingestion["skipped_count"] == 0
+    assert mcp_ingestion["updated_count"] == 0
+
+    # The DB now carries the shadow copy: the same two op rows exist once
+    # under the operator's tenant and once under the global scope.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor).where(EndpointDescriptor.product == "scopeprobe"),
+        )
+        rows = result.scalars().all()
+    by_scope: dict[str | None, set[str]] = {}
+    for row in rows:
+        scope = str(row.tenant_id) if row.tenant_id is not None else None
+        by_scope.setdefault(scope, set()).add(row.op_id)
+    assert by_scope == {
+        str(OPERATOR_TENANT_ID): {"GET:/items", "GET:/items/{id}"},
+        None: {"GET:/items", "GET:/items/{id}"},
+    }
+
+
 def test_ingest_bad_spec_returns_400(client: TestClient, tmp_path: Any) -> None:
     """Unparseable spec → 400 from the InvalidSpecError mapper."""
     spec_path = tmp_path / "bad.yaml"

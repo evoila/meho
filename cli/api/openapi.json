@@ -13207,7 +13207,8 @@
             "enum": [
               "running",
               "succeeded",
-              "failed"
+              "failed",
+              "degraded"
             ],
             "title": "Status"
           },
@@ -13239,7 +13240,8 @@
             "enum": [
               "running",
               "succeeded",
-              "failed"
+              "failed",
+              "degraded"
             ],
             "title": "Status"
           },
@@ -13305,7 +13307,7 @@
           "started_at"
         ],
         "title": "IngestJobStatusResponse",
-        "description": "Response body for ``GET /api/v1/connectors/ingest/jobs/{job_id}``.\n\nMirrors the in-memory\n:class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,\nprojecting it into a Pydantic-typed shape the route returns.\nThree field clusters:\n\n* **Identity** -- ``job_id`` + the originator's request descriptors\n  (``catalog_entry`` / ``product`` / ``version`` / ``impl_id`` /\n  ``spec_uris``). Echo so the polling caller doesn't need to\n  correlate against their own state.\n* **Lifecycle** -- ``status`` + ``started_at`` + optional\n  ``ended_at``. Status moves ``running`` \u2192 ``succeeded`` or\n  ``running`` \u2192 ``failed`` once.\n* **Result vs error** -- exactly one of ``ingestion`` (with\n  optional ``grouping``) or ``error`` is populated, keyed on\n  status. ``running`` leaves both ``None`` so polling clients\n  branch on ``status`` rather than checking presence.\n\n``error`` is the capped exception message; ``error_class`` is the\nPython exception class name -- structured enough for agents that\nwant to branch (``VersionMismatchError`` vs\n``LlmClientUnavailable``) without parsing prose. The structured\n422 envelopes the synchronous ingest path used to return (the\nerror-shape convention's classifier + ``detail`` body) are NOT\navailable off the request thread; the polling response is the\nnew error surface for the async path."
+        "description": "Response body for ``GET /api/v1/connectors/ingest/jobs/{job_id}``.\n\nMirrors the in-memory\n:class:`~meho_backplane.operations.ingest.jobs.IngestJob` row,\nprojecting it into a Pydantic-typed shape the route returns.\nThree field clusters:\n\n* **Identity** -- ``job_id`` + the originator's request descriptors\n  (``catalog_entry`` / ``product`` / ``version`` / ``impl_id`` /\n  ``spec_uris``). Echo so the polling caller doesn't need to\n  correlate against their own state.\n* **Lifecycle** -- ``status`` + ``started_at`` + optional\n  ``ended_at``. Status moves ``running`` \u2192 one of ``succeeded`` /\n  ``degraded`` / ``failed`` exactly once.\n* **Result vs error** -- keyed on status. ``succeeded`` populates\n  ``ingestion`` (with optional ``grouping``) and leaves ``error``\n  ``None``; ``failed`` populates ``error`` / ``error_class`` and\n  leaves ``ingestion`` ``None`` (the pipeline raised, no result).\n  ``degraded`` populates **both** \u2014 the pipeline returned a result\n  (so ``ingestion`` carries the counts that landed) but a\n  postcondition found it non-dispatchable (so ``error`` /\n  ``error_class`` carry the reason). ``running`` leaves them ``None``\n  so polling clients branch on ``status`` rather than presence.\n\n``error`` is the capped message; ``error_class`` is the structured\ndiscriminator -- the Python exception class name for ``failed``\n(``VersionMismatchError`` vs ``LlmClientUnavailable``), or the fixed\n``ingested_not_dispatchable`` token for ``degraded`` -- so agents\nbranch without parsing prose. The structured 422 envelopes the\nsynchronous ingest path used to return (the error-shape convention's\nclassifier + ``detail`` body) are NOT available off the request\nthread; the polling response is the new error surface for the async\npath."
       },
       "IngestKbRequest": {
         "properties": {

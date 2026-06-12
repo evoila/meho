@@ -140,6 +140,7 @@ def next_step_for_registered_connector(
                 registry_product=reg_product,
                 registry_version=reg_version,
                 registry_impl_id=reg_impl_id,
+                dispatch_product=parsed_product,
             )
     return None
 
@@ -150,55 +151,38 @@ def _next_step_for_registered(
     registry_product: str,
     registry_version: str,
     registry_impl_id: str,
+    dispatch_product: str,
 ) -> NextStep:
     """Build the ``next_step`` hint for a ``state="registered"`` row.
 
     Looks up the registry's ``(product, version)`` in the connector-spec
-    catalog (#743). The registry product is the right lookup key (not the
-    parser-derived one): the catalog stores ``product="sddc-manager"`` but
-    the listing emits ``product="sddc"`` per
-    :func:`parse_connector_id`'s deterministic shortening, and looking up
-    ``("sddc", "9.0")`` would always miss for SDDC.
+    catalog (#743) — the right lookup key, since the catalog stores
+    ``product="sddc-manager"`` while the listing emits the parser-derived
+    ``"sddc"``, and ``("sddc", "9.0")`` would always miss for SDDC.
 
-    Three branches:
+    *dispatch_product* is the parser-derived product the listing row
+    advertises and the dispatch/query surface keys on
+    (``parse_connector_id("vrli-rest-9.0") -> "vrli"``) — the
+    ``--product`` the **catalog-miss** verb emits so an operator copying
+    it lands a *dispatchable* connector (the ingest path persists rows
+    under this spelling). Emitting the registry product (``vcf-logs``)
+    here was the claude-rdc-hetzner-dc#1136 false-success: the verb said
+    ``vcf-logs`` while the row carried ``product="vrli"``, so it never
+    round-tripped and the catalog kept reporting ``registered, 0 ops``.
+    The catalog-hit branches keep ``entry.product`` (a catalogued
+    connector's catalog product already equals the dispatcher's derived
+    one; no VCF-family entry is catalogued).
 
-    * **Catalog hit, ``catalog_ingest="supported"``** — verb points at
-      ``meho connector ingest --catalog <product>/<version>``; rationale
-      says the spec is available in the catalog. The CLI form is the
-      same one the curated-on-ramp ships (#915 / G0.7-T5); copying the
-      verb verbatim closes the workflow.
-    * **Catalog hit, ``catalog_ingest="spec-only"``** — verb points at
-      the manual-mode ``meho connector ingest --product <p> --version
-      <v> --impl <i> --spec <uri>`` form using the catalog's native
-      product/version/impl triple. Rationale calls out that the
-      catalog row exists but its upstream is HTML-portal or
-      fqdn-templated, so catalog-driven ingest would 422 -- the
-      operator must fetch the spec themselves. Closes the v0.8.1
-      RDC dogfood signal (#789 N8): the previous "spec available in
-      catalog; run ingest" hint over-promised the VCF-family rows
-      whose upstream is fundamentally not raw YAML/JSON (G0.18-T8 /
-      #1361). The same triple the operator would have used after a
-      hit lands here, so the verb still copies-and-runs.
-    * **Catalog miss** — verb points at the manual-mode ``meho connector
-      ingest --product <p> --version <v> --impl <i> --spec <uri>``;
-      rationale calls out the missing catalog entry so the operator
-      knows they need to source the OpenAPI spec themselves. Manual
-      mode is the same path G0.7-T5 already supports for one-off /
-      not-yet-curated specs (see ``ingest.go``'s mode dispatch). The
-      rationale also names the **hand-authored** route so a spec-less
-      product (the vendor publishes no OpenAPI at all — VCF Fleet /
-      vRSLCM, Hetzner Robot) doesn't read as a dead end: author a
-      minimal OpenAPI 3.x covering just the ops you need and pass it
-      via ``--spec file://…`` (#1533 / ci-07). See
-      ``docs/cross-repo/connector-ingestion.md`` §"Product publishes
-      no OpenAPI spec".
+    Three branches: **supported** catalog hit → ``--catalog`` verb;
+    **spec-only** catalog hit → manual ``--spec`` verb on the catalog's
+    native triple (upstream is HTML-portal / fqdn-templated, #789 N8 /
+    #1361); **catalog miss** → manual ``--spec`` verb on
+    *dispatch_product* + the hand-authored-spec on-ramp for spec-less
+    vendors (#1533 / ci-07, see ``connector-ingestion.md``).
 
-    *catalog* is ``None`` when the package-data load failed (a malformed
-    catalog at startup would have crashed the lifespan, so this branch
-    only fires in tests where the loader was monkeypatched or the
-    process is mid-catalog-reload); the helper degrades to the
-    manual-mode rationale rather than raising, because the operator's
-    workflow doesn't depend on the catalog being live.
+    *catalog* ``None`` (load failed — only in tests / mid-reload, a
+    malformed catalog would have crashed the lifespan) degrades to the
+    manual-mode rationale rather than raising.
     """
     entry = catalog.get(registry_product, registry_version) if catalog is not None else None
     if entry is not None and entry.catalog_ingest == "supported":
@@ -221,7 +205,7 @@ def _next_step_for_registered(
         )
     return NextStep(
         verb=(
-            f"meho connector ingest --product {registry_product} "
+            f"meho connector ingest --product {dispatch_product} "
             f"--version {registry_version} --impl {registry_impl_id} "
             f"--spec <upstream-openapi-uri>"
         ),
@@ -684,10 +668,15 @@ def _maybe_build_class_only_item(
             # holds ``product="sddc-manager"`` while the listing emits
             # ``product="sddc"``. The catalog is keyed on the registry
             # side; this is the lookup the operator-facing verb
-            # resolves against.
+            # resolves against. The manual-mode verb, however, must hand
+            # back the parser-derived ``--product`` (the same spelling
+            # this row advertises and the ingest path persists rows
+            # under) so it round-trips to a dispatchable ingest
+            # (claude-rdc-hetzner-dc#1136).
             registry_product=registry_product,
             registry_version=registry_version,
             registry_impl_id=registry_impl_id,
+            dispatch_product=parsed_product,
         ),
     )
 

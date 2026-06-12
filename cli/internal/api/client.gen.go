@@ -151,6 +151,7 @@ const (
 
 // Defines values for IngestJobHandleStatus.
 const (
+	IngestJobHandleStatusDegraded  IngestJobHandleStatus = "degraded"
 	IngestJobHandleStatusFailed    IngestJobHandleStatus = "failed"
 	IngestJobHandleStatusRunning   IngestJobHandleStatus = "running"
 	IngestJobHandleStatusSucceeded IngestJobHandleStatus = "succeeded"
@@ -158,6 +159,7 @@ const (
 
 // Defines values for IngestJobStatusResponseStatus.
 const (
+	IngestJobStatusResponseStatusDegraded  IngestJobStatusResponseStatus = "degraded"
 	IngestJobStatusResponseStatusFailed    IngestJobStatusResponseStatus = "failed"
 	IngestJobStatusResponseStatusRunning   IngestJobStatusResponseStatus = "running"
 	IngestJobStatusResponseStatusSucceeded IngestJobStatusResponseStatus = "succeeded"
@@ -2567,21 +2569,27 @@ type IngestJobHandleStatus string
 //     “spec_uris“). Echo so the polling caller doesn't need to
 //     correlate against their own state.
 //   - **Lifecycle** -- “status“ + “started_at“ + optional
-//     “ended_at“. Status moves “running“ → “succeeded“ or
-//     “running“ → “failed“ once.
-//   - **Result vs error** -- exactly one of “ingestion“ (with
-//     optional “grouping“) or “error“ is populated, keyed on
-//     status. “running“ leaves both “None“ so polling clients
-//     branch on “status“ rather than checking presence.
+//     “ended_at“. Status moves “running“ → one of “succeeded“ /
+//     “degraded“ / “failed“ exactly once.
+//   - **Result vs error** -- keyed on status. “succeeded“ populates
+//     “ingestion“ (with optional “grouping“) and leaves “error“
+//     “None“; “failed“ populates “error“ / “error_class“ and
+//     leaves “ingestion“ “None“ (the pipeline raised, no result).
+//     “degraded“ populates **both** — the pipeline returned a result
+//     (so “ingestion“ carries the counts that landed) but a
+//     postcondition found it non-dispatchable (so “error“ /
+//     “error_class“ carry the reason). “running“ leaves them “None“
+//     so polling clients branch on “status“ rather than presence.
 //
-// “error“ is the capped exception message; “error_class“ is the
-// Python exception class name -- structured enough for agents that
-// want to branch (“VersionMismatchError“ vs
-// “LlmClientUnavailable“) without parsing prose. The structured
-// 422 envelopes the synchronous ingest path used to return (the
-// error-shape convention's classifier + “detail“ body) are NOT
-// available off the request thread; the polling response is the
-// new error surface for the async path.
+// “error“ is the capped message; “error_class“ is the structured
+// discriminator -- the Python exception class name for “failed“
+// (“VersionMismatchError“ vs “LlmClientUnavailable“), or the fixed
+// “ingested_not_dispatchable“ token for “degraded“ -- so agents
+// branch without parsing prose. The structured 422 envelopes the
+// synchronous ingest path used to return (the error-shape convention's
+// classifier + “detail“ body) are NOT available off the request
+// thread; the polling response is the new error surface for the async
+// path.
 type IngestJobStatusResponse struct {
 	CatalogEntry *string  `json:"catalog_entry"`
 	EndedAt      *float32 `json:"ended_at"`

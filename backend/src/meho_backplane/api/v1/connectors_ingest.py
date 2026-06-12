@@ -142,6 +142,7 @@ from meho_backplane.api.v1._envelope import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.operations._lookup import connector_exists, parse_connector_id
 from meho_backplane.operations.ingest import (
     CatalogListResponse,
     ConnectorNotFoundError,
@@ -486,6 +487,22 @@ async def _spawn_async_ingest(
             spec_info_versions_compatible=spec_info_versions_compatible,
         )
 
+    async def _dispatchability_check(result: IngestionPipelineResult) -> bool:
+        # Post-run honesty gate (claude-rdc-hetzner-dc#1136): resolve the
+        # connector exactly the way the dispatch/query meta-tools do —
+        # parse the connector_id into its natural-key triple and probe
+        # connector_exists under the operator's tenant scope. A run that
+        # returned without raising but leaves this False persisted
+        # nothing the dispatcher can route, so the job ends ``degraded``
+        # rather than lying with ``succeeded``.
+        probe_product, probe_version, probe_impl_id = parse_connector_id(result.connector_id)
+        return await connector_exists(
+            tenant_id=operator.tenant_id,
+            product=probe_product,
+            version=probe_version,
+            impl_id=probe_impl_id,
+        )
+
     # ``asyncio.create_task`` (not ``BackgroundTasks``) so the work
     # survives the response close -- the FastAPI ``BackgroundTasks``
     # path runs *after* response send but still inside the request
@@ -496,7 +513,11 @@ async def _spawn_async_ingest(
     # agent reaper, scheduler loop -- see
     # ``meho_backplane.main._BackgroundTasks``).
     task = asyncio.create_task(
-        run_ingest_job(job.job_id, pipeline_call=_pipeline_call),
+        run_ingest_job(
+            job.job_id,
+            pipeline_call=_pipeline_call,
+            dispatchability_check=_dispatchability_check,
+        ),
         name=f"ingest-job-{job.job_id}",
     )
     # Stash a strong reference inside the registry so a future
@@ -588,13 +609,19 @@ def _job_to_response(job: IngestJob) -> IngestJobStatusResponse:
     can be unit-tested without spinning up an HTTP client. The
     branches mirror the lifecycle of the dataclass: a terminal
     success populates ``ingestion`` (+ optional ``grouping``);
-    a terminal failure populates ``error`` + ``error_class``;
-    ``running`` leaves both clusters ``None`` so clients branch
+    a ``degraded`` terminal populates both the ``ingestion`` counts
+    *and* ``error`` / ``error_class`` (the pipeline returned but its
+    output was non-dispatchable); a terminal failure populates
+    ``error`` + ``error_class`` only (the pipeline raised, no result);
+    ``running`` leaves the result cluster ``None`` so clients branch
     on ``status`` instead of presence-checking.
     """
     ingestion_model: IngestionResultModel | None = None
     grouping_model: GroupingResultModel | None = None
-    if job.status == "succeeded" and job.result is not None:
+    # ``degraded`` carries a populated ``result`` too (the counts that
+    # landed before the dispatchability postcondition failed), so it
+    # projects the ingestion/grouping cluster alongside its error.
+    if job.status in ("succeeded", "degraded") and job.result is not None:
         ingestion_model, grouping_model = job.result.to_api_models()
     return IngestJobStatusResponse(
         job_id=job.job_id,

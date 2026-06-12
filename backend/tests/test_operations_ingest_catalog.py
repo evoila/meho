@@ -23,6 +23,7 @@ typed-vs-generic ``upstream`` contract, and the ``GET
 from __future__ import annotations
 
 import contextlib
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -30,6 +31,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from packaging.version import Version
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from meho_backplane.api.v1.connectors_ingest import (
     catalog_endpoint,
@@ -824,3 +826,107 @@ def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
             assert entry.catalog_ingest == "supported", (
                 f"{entry.product}/{entry.version} should default to catalog_ingest: supported"
             )
+
+
+# ---------------------------------------------------------------------------
+# next_step.verb round-trips to a dispatchable ingest (claude-rdc-hetzner-dc#1136)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_registered_next_step_verb_round_trips_to_dispatchable_ingest() -> None:
+    """The ``vcf-logs`` registered-row ``next_step.verb`` ingests dispatchably.
+
+    The claude-rdc-hetzner-dc#1136 false-success had two halves: the
+    catalog's own ``next_step.verb`` printed ``--product vcf-logs`` while
+    the row it decorated carried ``product="vrli"``, so an operator
+    copying the verb ingested under a product the dispatcher never
+    queried. This test pins the fix end-to-end:
+
+    1. The verb for the ``vcf-logs`` registered row emits the
+       parser-derived ``--product`` (``vrli``) — the same product the
+       row advertises.
+    2. Ingesting under exactly that ``--product`` yields a connector the
+       dispatch/query surface resolves (``connector_exists`` True): the
+       verb round-trips to a *dispatchable* ingest.
+    """
+    import re
+    from unittest.mock import AsyncMock
+
+    from meho_backplane.connectors.registry import _eager_import_connectors
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import EndpointDescriptor
+    from meho_backplane.operations._lookup import connector_exists, parse_connector_id
+    from meho_backplane.operations.ingest import register_ingested_operations
+    from meho_backplane.operations.ingest.list_connectors import (
+        _load_catalog_or_none,
+        _maybe_build_class_only_item,
+    )
+    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+
+    # Real connectors registered (the session-level baseline import is a
+    # no-op when already populated; defensive against collection order).
+    _eager_import_connectors()
+
+    item = _maybe_build_class_only_item(
+        registry_product="vcf-logs",
+        registry_version="9.0",
+        registry_impl_id="vrli-rest",
+        db_triples=set(),
+        catalog=_load_catalog_or_none(),
+    )
+    assert item is not None
+    assert item.state == "registered"
+    # The row advertises the parser-derived product, and the verb agrees.
+    assert item.product == "vrli"
+    assert item.next_step is not None
+    verb = item.next_step.verb
+    match = re.search(r"--product (\S+)", verb)
+    assert match is not None, f"verb has no --product flag: {verb!r}"
+    verb_product = match.group(1)
+    assert verb_product == "vrli", (
+        f"next_step.verb emits --product {verb_product!r}; expected the "
+        f"dispatch product 'vrli' so the verb round-trips. Full verb: {verb!r}"
+    )
+
+    # Round-trip: ingest under the verb's --product and assert dispatchable.
+    stub = AsyncMock()
+    stub.encode_one.return_value = [0.25] * 384
+    stub.encode.return_value = [[0.25] * 384]
+    stub.dimension = 384
+    result = await register_ingested_operations(
+        product=verb_product,  # exactly what the verb told the operator to use
+        version="9.0",
+        impl_id="vrli-rest",
+        spec_source="vrli.yaml",
+        operations=[
+            EndpointDescriptorProto(
+                op_id="GET:/api/v2/version",
+                method="GET",
+                path="/api/v2/version",
+                summary="version",
+                description="appliance version",
+                tags=["vrli"],
+                parameter_schema={"type": "object", "properties": {}},
+                response_schema={"type": "object"},
+                safety_level="safe",
+                requires_approval=False,
+            )
+        ],
+        embedding_service=stub,
+    )
+    assert result.inserted_count == 1
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (await fresh.execute(select(EndpointDescriptor))).scalars().all()
+    assert rows and rows[0].product == "vrli"
+
+    probe_product, probe_version, probe_impl_id = parse_connector_id(item.connector_id)
+    exists = await connector_exists(
+        tenant_id=uuid.uuid4(),
+        product=probe_product,
+        version=probe_version,
+        impl_id=probe_impl_id,
+    )
+    assert exists is True, "verb round-trip did not yield a dispatchable connector"

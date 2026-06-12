@@ -75,7 +75,16 @@ _MAX_JOBS_RETAINED = 256
 #: Snapshot of an ingest run's lifecycle. The status enum lives at
 #: module scope so the route layer + tests share one source of truth
 #: rather than re-declaring the literal in each Pydantic projection.
-IngestJobStatus = Literal["running", "succeeded", "failed"]
+#:
+#: ``degraded`` (G0.24 / claude-rdc-hetzner-dc#1136) is a terminal state
+#: distinct from ``failed``: the pipeline coroutine returned without
+#: raising, but a postcondition found nothing dispatchable was persisted
+#: (zero inserts, or rows that are invisible to the dispatch/query
+#: surface). A bare ``succeeded`` there is a lie — the catalog row reads
+#: ``registered, 0 ops`` immediately after — so the job ends ``degraded``
+#: carrying a structured ``error_class`` while still surfacing the
+#: ingestion counts so the operator sees what (didn't) land.
+IngestJobStatus = Literal["running", "succeeded", "failed", "degraded"]
 
 
 class IngestJobNotFoundError(LookupError):
@@ -106,9 +115,13 @@ class IngestJob:
 
     A live job has ``status="running"`` and ``ended_at is None``.
     Terminal jobs carry one of ``status="succeeded"`` (with
-    ``result`` populated) or ``status="failed"`` (with ``error`` and
-    ``error_class`` populated). The route projects the right subset
-    of fields per status into the polling response.
+    ``result`` populated), ``status="failed"`` (with ``error`` and
+    ``error_class`` populated, no ``result`` — the pipeline raised), or
+    ``status="degraded"`` (the pipeline returned but its output was not
+    dispatchable: ``result`` *and* ``error`` / ``error_class`` are both
+    populated so the operator sees the counts that landed alongside the
+    structured reason they're not usable). The route projects the right
+    subset of fields per status into the polling response.
 
     The dataclass is mutable on purpose -- the background coroutine
     flips ``status`` / ``ended_at`` / ``result`` / ``error`` on
@@ -212,6 +225,41 @@ class IngestJobRegistry:
             job.status = "succeeded"
             job.ended_at = time.time()
             job.result = result
+            self._jobs.move_to_end(job_id)
+
+    async def degrade(
+        self,
+        job_id: UUID,
+        *,
+        result: IngestionPipelineResult,
+        error_class: str,
+        error: str,
+    ) -> None:
+        """Flip *job_id* to ``degraded`` — the pipeline returned but nothing dispatchable landed.
+
+        The pipeline coroutine completed without raising, so *result*
+        carries real counts, but a postcondition (see
+        :func:`run_ingest_job`) found the run produced nothing the
+        dispatch/query surface can resolve. Records *result* (so the
+        operator still sees inserted/skipped counts) **and** the
+        structured *error_class* / *error* (so the failure is
+        machine-branchable and operator-readable) — a job that lied with
+        a bare ``succeeded`` is the failure mode this state closes
+        (claude-rdc-hetzner-dc#1136).
+
+        No-op when *job_id* was evicted between the background-task
+        launch and this call — same eviction-during-run contract as
+        :meth:`complete`.
+        """
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.status = "degraded"
+            job.ended_at = time.time()
+            job.result = result
+            job.error_class = error_class
+            job.error = error if len(error) <= 1024 else error[:1024] + "...<truncated>"
             self._jobs.move_to_end(job_id)
 
     async def fail(
@@ -325,11 +373,30 @@ def reset_job_registry_for_tests() -> None:
     _registry = IngestJobRegistry()
 
 
+#: Structured ``error_class`` an async ingest carries when it ran to
+#: completion but left the connector non-dispatchable. The CLI / agent
+#: branch on this string to tell "the pipeline raised" (``failed`` with
+#: the exception class) apart from "the pipeline returned but nothing
+#: usable landed" (``degraded`` with this class). claude-rdc-hetzner-dc#1136.
+INGESTED_NOT_DISPATCHABLE = "ingested_not_dispatchable"
+
+#: Post-run dispatchability probe injected by the route. Given the
+#: pipeline's :class:`IngestionPipelineResult`, returns whether the
+#: connector it produced is resolvable by the dispatch/query surface
+#: (``connector_exists`` under the parser-derived natural key, scoped to
+#: the originating tenant). A closure (not an inline DB call) so
+#: :func:`run_ingest_job` stays free of a session/tenant dependency and
+#: tests can inject a deterministic verdict; the route closes over the
+#: operator's ``tenant_id`` + ``connector_exists`` to build the real one.
+DispatchabilityCheck = Callable[[IngestionPipelineResult], Awaitable[bool]]
+
+
 async def run_ingest_job(
     job_id: UUID,
     *,
     pipeline_call: Callable[[], Awaitable[IngestionPipelineResult]],
     registry: IngestJobRegistry | None = None,
+    dispatchability_check: DispatchabilityCheck | None = None,
 ) -> None:
     """Drive *pipeline_call* off the request thread and reconcile the job row.
 
@@ -343,14 +410,36 @@ async def run_ingest_job(
     1. Runs the closure under a structlog binding tagged with
        ``ingest_job_id`` so the log output during the long-running
        pass is correlatable with the polling responses.
-    2. On success, flips the job to ``succeeded`` carrying the
-       structured :class:`IngestionPipelineResult`.
+    2. On success, applies the dispatchability postcondition (see
+       below) and flips the job to ``succeeded`` (with the structured
+       :class:`IngestionPipelineResult`) only when it holds; otherwise
+       to ``degraded``.
     3. On any exception, flips the job to ``failed`` and records the
        exception class + capped message. The exception is swallowed
        (no re-raise) -- the request that started the job has already
        returned 202, and re-raising into the asyncio default exception
        handler would log a noisy traceback for what is now a routine
        operator-facing failure mode.
+
+    Dispatchability postcondition (claude-rdc-hetzner-dc#1136)
+    ---------------------------------------------------------
+
+    A pipeline coroutine that returns without raising is **not**
+    sufficient evidence the ingest succeeded: an async ``--spec`` run
+    can persist rows under a product key the dispatch surface never
+    queries (the VCF-family long↔short split, now reconciled at
+    register-time) or skip every op against a prior run, leaving the
+    catalog row ``registered, 0 ops`` and ``search_operations`` returning
+    ``connector_not_ingested``. Flipping such a job to ``succeeded``
+    reports a green run that produced nothing callable.
+
+    The postcondition is: ``inserted_count > 0`` **and**
+    *dispatchability_check* (the route's ``connector_exists`` probe under
+    the parser-derived natural key) returns ``True``. When it fails the
+    job ends ``degraded`` carrying ``error_class=
+    "ingested_not_dispatchable"``, never a bare ``succeeded``.
+    *dispatchability_check* is ``None`` only for legacy callers / tests
+    that opt out of the probe; the production route always supplies one.
 
     The structured failure logged at :func:`structlog.get_logger`
     INFO level preserves the diagnostic for ops dashboards even
@@ -374,6 +463,27 @@ async def run_ingest_job(
         if isinstance(exc, (SystemExit, KeyboardInterrupt)):
             raise
         return
+
+    degraded_reason = await _dispatchability_failure_reason(
+        result=result,
+        dispatchability_check=dispatchability_check,
+    )
+    if degraded_reason is not None:
+        log.warning(
+            "ingest_job_degraded",
+            connector_id=result.connector_id,
+            inserted_count=result.ingestion.inserted_count,
+            error_class=INGESTED_NOT_DISPATCHABLE,
+            reason=degraded_reason,
+        )
+        await registry.degrade(
+            job_id,
+            result=result,
+            error_class=INGESTED_NOT_DISPATCHABLE,
+            error=degraded_reason,
+        )
+        return
+
     log.info(
         "ingest_job_succeeded",
         connector_id=result.connector_id,
@@ -381,3 +491,73 @@ async def run_ingest_job(
         groups_created=result.grouping.groups_created if result.grouping else None,
     )
     await registry.complete(job_id, result=result)
+
+
+async def _dispatchability_failure_reason(
+    *,
+    result: IngestionPipelineResult,
+    dispatchability_check: DispatchabilityCheck | None,
+) -> str | None:
+    """Return an operator-facing reason the run is non-dispatchable, or ``None`` if it is.
+
+    Two failure modes collapse to the one ``ingested_not_dispatchable``
+    ``error_class`` but carry distinct messages so the operator knows
+    which one fired:
+
+    * **Nothing persisted** — ``inserted_count == 0``. The run touched no
+      new rows (an empty spec, or every op skipped against an earlier
+      run that itself persisted nothing dispatchable). Reported without
+      consulting *dispatchability_check*: a zero-insert run is
+      non-dispatchable by definition for a *fresh* connector, and the
+      probe would only add a redundant DB round-trip.
+    * **Persisted-but-invisible** — ``inserted_count > 0`` yet
+      *dispatchability_check* returns ``False``: rows landed under a key
+      the dispatch/query surface does not resolve. This is the exact
+      claude-rdc-hetzner-dc#1136 mis-keyed-product symptom (pre the
+      register-time reconciliation) and any future drift of the same
+      shape.
+
+    *dispatchability_check* ``None`` (legacy caller / opt-out) treats a
+    non-empty insert as dispatchable — the probe is the only way to
+    detect the invisible-rows case and an opted-out caller has accepted
+    that gap.
+    """
+    if result.ingestion.inserted_count == 0:
+        return (
+            "ingest completed but persisted no new operations "
+            f"(inserted_count=0) for connector_id={result.connector_id!r}; "
+            "nothing is dispatchable. If a prior run already persisted "
+            "these ops dispatchably this is benign idempotency, but a "
+            "first run reaching zero inserts means the spec yielded no "
+            "operations under this connector."
+        )
+    if dispatchability_check is None:
+        return None
+    try:
+        dispatchable = await dispatchability_check(result)
+    except Exception:
+        # The probe itself failed (e.g. a transient DB error on the
+        # connector_exists read). The pipeline DID complete, so do not
+        # strand the job in ``running`` or degrade it on a false signal —
+        # fail open to ``succeeded`` and log the probe failure for the
+        # observability trail. A genuinely non-dispatchable run is far
+        # more likely to surface as ``inserted_count==0`` (handled above)
+        # or a clean ``False`` than a probe exception.
+        _log.warning(
+            "ingest_job_dispatchability_probe_failed",
+            connector_id=result.connector_id,
+            inserted_count=result.ingestion.inserted_count,
+            exc_info=True,
+        )
+        return None
+    if not dispatchable:
+        return (
+            f"ingest persisted {result.ingestion.inserted_count} operation(s) "
+            f"but connector_id={result.connector_id!r} is not resolvable by "
+            "the dispatch/query surface (search_operations / "
+            "list_operation_groups return connector_not_ingested); the rows "
+            "landed under a product key the dispatcher does not look them up "
+            "under. Re-ingest under the --product the catalog's next_step "
+            "verb prints."
+        )
+    return None

@@ -1090,13 +1090,21 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
     doesn't carry the registered connector, the rationale says so and
     points at manual-mode ``meho connector ingest`` with ``--spec``.
 
-    Uses a synthetic ``("custom-vendor", "1.0")`` v2 registration with
-    no catalog entry. The hint must:
+    Uses a synthetic ``("custom-vendor", "1.0", "custom-rest")`` v2
+    registration with no catalog entry. The registry product
+    (``custom-vendor``) differs from the product the dispatcher derives
+    from the connector_id (``parse_connector_id("custom-rest-1.0") ->
+    "custom"``) — the same long↔short split shape the VCF family carries.
+    The hint must:
 
-    * point at ``meho connector ingest --product custom-vendor --version
+    * point at ``meho connector ingest --product custom --version
       1.0 --impl custom-rest --spec <upstream-openapi-uri>`` (the
-      manual-mode invocation), echoing the registry's natural key so
-      the operator copies the right values verbatim;
+      manual-mode invocation), emitting the **parser-derived**
+      ``--product`` (the same one the listing row advertises) so the
+      verb round-trips to a *dispatchable* ingest. Emitting the registry
+      product (``custom-vendor``) was the claude-rdc-hetzner-dc#1136
+      false-success: rows ingested under it land where the dispatcher
+      never queries, leaving the catalog ``registered, 0 ops``;
     * carry a rationale that says the catalog has no entry so the
       operator knows they need to source the OpenAPI spec themselves;
     * name the hand-authored on-ramp (#1533 / ci-07) so a spec-less
@@ -1114,10 +1122,15 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
 
     custom = by_id["custom-rest-1.0"]
     assert custom["state"] == "registered"
+    # The listing row advertises the parser-derived product.
+    assert custom["product"] == "custom"
     assert custom["next_step"] is not None
     verb = custom["next_step"]["verb"]
     assert "--catalog" not in verb
-    assert "--product custom-vendor" in verb
+    # The verb emits the parser-derived product (round-trips dispatchably),
+    # NOT the registry product custom-vendor (claude-rdc-hetzner-dc#1136).
+    assert "--product custom " in verb
+    assert "--product custom-vendor" not in verb
     assert "--version 1.0" in verb
     assert "--impl custom-rest" in verb
     assert "--spec" in verb

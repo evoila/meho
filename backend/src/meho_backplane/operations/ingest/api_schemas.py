@@ -677,7 +677,12 @@ class EditOpResponse(BaseModel):
 #: the Pydantic projection and the internal dataclass share one
 #: spelling; the route layer projects ``IngestJob`` rows through the
 #: response models defined below.
-IngestJobStatusLiteral = Literal["running", "succeeded", "failed"]
+#:
+#: ``degraded`` (G0.24 / claude-rdc-hetzner-dc#1136) is terminal-but-not-
+#: green: the pipeline ran to completion yet persisted nothing the
+#: dispatcher can resolve, so the job carries both ``ingestion`` counts
+#: and a structured ``error_class`` (``ingested_not_dispatchable``).
+IngestJobStatusLiteral = Literal["running", "succeeded", "failed", "degraded"]
 
 
 class IngestJobHandle(BaseModel):
@@ -718,21 +723,27 @@ class IngestJobStatusResponse(BaseModel):
       ``spec_uris``). Echo so the polling caller doesn't need to
       correlate against their own state.
     * **Lifecycle** -- ``status`` + ``started_at`` + optional
-      ``ended_at``. Status moves ``running`` → ``succeeded`` or
-      ``running`` → ``failed`` once.
-    * **Result vs error** -- exactly one of ``ingestion`` (with
-      optional ``grouping``) or ``error`` is populated, keyed on
-      status. ``running`` leaves both ``None`` so polling clients
-      branch on ``status`` rather than checking presence.
+      ``ended_at``. Status moves ``running`` → one of ``succeeded`` /
+      ``degraded`` / ``failed`` exactly once.
+    * **Result vs error** -- keyed on status. ``succeeded`` populates
+      ``ingestion`` (with optional ``grouping``) and leaves ``error``
+      ``None``; ``failed`` populates ``error`` / ``error_class`` and
+      leaves ``ingestion`` ``None`` (the pipeline raised, no result).
+      ``degraded`` populates **both** — the pipeline returned a result
+      (so ``ingestion`` carries the counts that landed) but a
+      postcondition found it non-dispatchable (so ``error`` /
+      ``error_class`` carry the reason). ``running`` leaves them ``None``
+      so polling clients branch on ``status`` rather than presence.
 
-    ``error`` is the capped exception message; ``error_class`` is the
-    Python exception class name -- structured enough for agents that
-    want to branch (``VersionMismatchError`` vs
-    ``LlmClientUnavailable``) without parsing prose. The structured
-    422 envelopes the synchronous ingest path used to return (the
-    error-shape convention's classifier + ``detail`` body) are NOT
-    available off the request thread; the polling response is the
-    new error surface for the async path.
+    ``error`` is the capped message; ``error_class`` is the structured
+    discriminator -- the Python exception class name for ``failed``
+    (``VersionMismatchError`` vs ``LlmClientUnavailable``), or the fixed
+    ``ingested_not_dispatchable`` token for ``degraded`` -- so agents
+    branch without parsing prose. The structured 422 envelopes the
+    synchronous ingest path used to return (the error-shape convention's
+    classifier + ``detail`` body) are NOT available off the request
+    thread; the polling response is the new error surface for the async
+    path.
     """
 
     model_config = ConfigDict(frozen=True)

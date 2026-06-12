@@ -266,8 +266,11 @@ shared `IngestJobRegistry`, fires the pipeline off the request via
 `asyncio.create_task`, and returns an `IngestJobHandle` immediately —
 well inside the agent's tool-call deadline. The agent polls
 `meho.connector.ingest_status` with the returned `job_id` until the
-status is `succeeded` (carries the final ingestion + grouping counts)
-or `failed` (carries `error_class` + `error`). Because both surfaces
+status is `succeeded` (carries the final ingestion + grouping counts),
+`degraded` (the pipeline ran but persisted nothing dispatchable —
+carries the counts **and** `error_class="ingested_not_dispatchable"` +
+`error`; see "Dispatchability postcondition" below), or `failed`
+(the pipeline raised — carries `error_class` + `error`). Because both surfaces
 share `get_job_registry()`, a run started over MCP is poll-able over
 the REST `GET /api/v1/connectors/ingest/jobs/{job_id}` endpoint and
 vice versa. `dry_run=true` and `async` unset keep the inline shape —
@@ -726,18 +729,77 @@ G0.18-T8 / #1361, RDC #789 N8). Three branches:
   resolve, so the verb still copies-and-runs once the operator
   sources the spec URI.
 * **Catalog miss** — verb points at `meho connector ingest --product
-  <p> --version <v> --impl <i> --spec <upstream-openapi-uri>`.
-  Rationale calls out the missing catalog entry so the operator
+  <p> --version <v> --impl <i> --spec <upstream-openapi-uri>` where
+  `<p>` is the **parser-derived** (dispatch) product, not the registry
+  product. Rationale calls out the missing catalog entry so the operator
   knows they need to source the OpenAPI spec themselves. Manual
   mode is the same path G0.7-T5 already supports for one-off /
-  not-yet-curated specs (see `ingest.go`'s mode dispatch).
+  not-yet-curated specs (see `ingest.go`'s mode dispatch). Emitting the
+  registry product here was the claude-rdc-hetzner-dc#1136 false-success
+  (see "Product-slug reconciliation" below): the verb said
+  `--product vcf-logs` while the row it decorated advertised
+  `product="vrli"`, so the verb did not round-trip to a dispatchable
+  ingest.
 
-The catalog lookup uses the **registry's** `(product, version)`, not
-the parser-derived shortening. The SDDC case is canonical: the
+The **catalog lookup** uses the **registry's** `(product, version)`,
+not the parser-derived shortening. The SDDC case is canonical: the
 catalog stores `product="sddc-manager"`, the listing emits
 `product="sddc"`, but the hint says `--catalog sddc-manager/9.0`
 because that is what `meho connector ingest --catalog ...` resolves
-against. Looking up the parsed product would always miss for SDDC.
+against. Looking up the parsed product would always miss for SDDC. The
+catalog-hit branches keep the catalog-native `--product` (an operator
+running `--catalog` or copying the catalog's triple matches the
+registered class); the catalog-miss branch emits the parser-derived
+product so the manual-mode verb round-trips dispatchably.
+
+#### Product-slug reconciliation (claude-rdc-hetzner-dc#1136)
+
+The VCF-family connectors register their class under a *long* product
+(`VcfLogsConnector.product = "vcf-logs"`) while the dispatch/query
+surface derives a *short* product from the connector_id
+(`parse_connector_id("vrli-rest-9.0") -> "vrli"`) — the same long↔short
+split SDDC carries (`sddc-manager` vs `sddc`), and the six splits are
+`hetzner-robot/hetzner`, `sddc-manager/sddc`, `vcf-automation/vcfa`,
+`vcf-fleet/fleet`, `vcf-logs/vrli`, `vcf-operations/vrops`.
+
+A manual `--spec` ingest persists `endpoint_descriptor` /
+`operation_group` rows keyed on the **operator-supplied** product, but
+the dispatch/query surface (`connector_exists` /
+`search_operations` / `list_operation_groups`) keys on the short,
+parser-derived product. Ingesting under the long product therefore
+landed rows the dispatcher never queried — the listing's round-trip
+integrity gate dropped them and the catalog reported
+`registered, 0 ops` even though the rows existed.
+
+`register_ingested_operations` reconciles this: it normalises the row
+product to the dispatch-canonical spelling
+(`_reconciled_row_product` → `dispatch_product` in
+`operations/_lookup.py`) before persisting descriptors, and the
+pipeline's grouping pass keys on the same spelling so descriptors and
+groups agree. The version-coverage pre-flight and the auto-shim
+registration deliberately stay on the **supplied** (registry) product
+so the coverage check finds the real `VcfLogsConnector` class and no
+redundant shim is synthesised. For aligned connectors
+(`vmware`/`vmware-rest`) the normalisation is a no-op. Regression
+coverage:
+`tests/test_operations_register_ingested.py::test_ingest_under_registry_product_persists_dispatchable_rows`
+(parametrised over all six splits) and
+`tests/test_operations_ingest_catalog.py::test_registered_next_step_verb_round_trips_to_dispatchable_ingest`
+(the verb round-trip).
+
+#### Dispatchability postcondition on async jobs (claude-rdc-hetzner-dc#1136)
+
+A background pipeline coroutine that returns without raising is **not**
+sufficient evidence the ingest succeeded: it can persist rows under a
+mis-keyed product (above) or skip every op against a prior run, leaving
+nothing dispatchable. `run_ingest_job` (`ingest/jobs.py`) therefore
+applies a postcondition before flipping the job to `succeeded`:
+`inserted_count > 0` **and** a `dispatchability_check` closure (the
+route's `connector_exists` probe under the parser-derived natural key,
+scoped to the originating tenant) returns `True`. When it fails the job
+ends `degraded` carrying `error_class="ingested_not_dispatchable"` and
+the counts that landed — never a bare `succeeded`. Regression coverage:
+`tests/test_operations_ingest_jobs.py`.
 
 If `load_catalog()` raises `CatalogError` at listing time (only
 possible mid-test-monkeypatch or mid-reload — startup parse failures

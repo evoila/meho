@@ -119,6 +119,7 @@ from meho_backplane.broadcast import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.operations._audit import work_ref_var
 
 __all__ = ["AuditMiddleware", "bind_preallocated_audit_id"]
 
@@ -370,6 +371,15 @@ async def _write_audit_row(
     after the audit commit succeeds.
     """
     sessionmaker = get_sessionmaker()
+    # work_ref I1-T1 #1655 -- read the external change-ticket reference
+    # off the contextvar. The ``work_ref`` column is added by migration
+    # ``0039``; guard on the attribute so the writer stays
+    # forward-compatible if the model predates the migration (the same
+    # discipline the dispatcher writer uses for the runbook columns).
+    # ``None`` until the bind source (I1-T2) lands.
+    soft_fk_kwargs: dict[str, Any] = {}
+    if hasattr(AuditLog, "work_ref"):
+        soft_fk_kwargs["work_ref"] = work_ref_var.get()
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
@@ -384,6 +394,7 @@ async def _write_audit_row(
             request_id=request_id,
             duration_ms=Decimal(str(duration_ms)),
             payload=payload,
+            **soft_fk_kwargs,
         )
         session.add(row)
         await session.commit()

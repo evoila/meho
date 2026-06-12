@@ -502,6 +502,23 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # External change-ticket reference (work_ref I1-T1 #1655). Correlates
+    # a governed MEHO operation to the out-of-band change record that
+    # authorised it (a GitHub issue, a Jira ticket, a CR id) -- an opaque
+    # string such as ``"gh:evoila/meho#1"`` carried on the same ContextVar
+    # mechanism as ``run_id`` / ``agent_session_id`` / ``parent_audit_id``
+    # (:data:`meho_backplane.operations._audit.work_ref_var`). NULL when no
+    # work_ref is bound: the bind source is a separate task (I1-T2), so
+    # today only a direct contextvar bind populates it, and the
+    # system-internal writers (memory/topology/reaper/ui-session) leave it
+    # NULL by design. No FK -- same soft-reference discipline as
+    # ``tenant_id`` / ``target_id`` / ``parent_audit_id``. Added by
+    # migration ``0039``.
+    work_ref: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -542,6 +559,11 @@ class AuditLog(Base):
         Index(
             "audit_log_run_id_idx",
             "run_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "audit_log_work_ref_idx",
+            "work_ref",
             postgresql_using="btree",
         ),
     )

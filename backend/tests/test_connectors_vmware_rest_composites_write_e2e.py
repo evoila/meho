@@ -193,6 +193,9 @@ class _FakeVmwareTarget:
         self.fingerprint = _FakeFingerprint(version="9.0")
         self.preferred_impl_id: str | None = "vmware-rest"
         self.id: UUID = target_id or uuid.uuid4()
+        # Tenant-unique cache key component (#1642/#1672); without it
+        # ``target_cache_key`` raises AttributeError at runtime.
+        self.tenant_id: UUID = _TENANT_ID
         self.name = "test-vcenter"
         self.host = "vcenter.test"
         self.port = 443

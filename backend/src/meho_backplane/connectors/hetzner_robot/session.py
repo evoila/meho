@@ -66,8 +66,15 @@ class HetznerRobotTargetLike(Protocol):
     ``port`` is optional — the Robot API is HTTPS/443 and
     :meth:`HttpConnector._base_url` already handles the ``port is None or
     443`` case correctly.
+
+    ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)``
+    cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
+    the credential cache uses, so two same-named targets in different
+    tenants never share cached credentials (#1642/#1672).
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

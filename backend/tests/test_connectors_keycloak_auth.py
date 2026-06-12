@@ -34,12 +34,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.keycloak import KeycloakConnector
@@ -111,6 +112,9 @@ class _StubTarget:
     secret_ref: str | None = "rdc-hetzner-dc/keycloak/admin"
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
     extras: dict[str, Any] = field(default_factory=dict)
+    # Tenant-unique cache key components (#1642/#1672).
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET = _StubTarget(name="keycloak-a", host="keycloak-a.test.invalid")
@@ -287,6 +291,58 @@ async def test_admin_token_cached_across_calls() -> None:
 
     assert h1 == h2 == {"Authorization": f"Bearer {_ADMIN_TOKEN}"}
     assert token_route.call_count == 1
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> None:
+    """Same-named targets in DIFFERENT tenants never share a cached admin token.
+
+    Regression guard for #1642/#1672: the admin-token cache used to key on
+    ``target.name`` alone, so two same-named targets in different tenants
+    collapsed onto one entry and one tenant could be served another
+    tenant's token. The cache keys on the tenant-unique ``(tenant_id, id)``
+    tuple instead. Both stub targets share one host so the established
+    admin token, not the per-target HTTP-client pool, is under test.
+    """
+    connector = _make_connector()
+    tenant_one = _StubTarget(
+        name="keycloak-shared",
+        host="keycloak-shared.test.invalid",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="keycloak-shared",
+        host="keycloak-shared.test.invalid",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+
+    async with respx.mock(base_url="https://keycloak-shared.test.invalid") as mock:
+        token_route = mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": _ADMIN_TOKEN, "expires_in": 3600}
+        )
+        await connector.auth_headers(tenant_one, operator=_make_operator())
+        await connector.auth_headers(tenant_two, operator=_make_operator())
+
+    # Each tenant minted its own token — no cross-tenant cache hit.
+    assert token_route.call_count == 2
+    assert set(connector._admin_tokens) == {
+        target_cache_key(tenant_one),
+        target_cache_key(tenant_two),
+    }
+
+    # Same-tenant re-fetch is a cache HIT — token endpoint not re-hit.
+    async with respx.mock(
+        base_url="https://keycloak-shared.test.invalid", assert_all_called=False
+    ) as mock:
+        again = mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": "different", "expires_in": 3600}
+        )
+        await connector.auth_headers(tenant_one, operator=_make_operator())
+        assert again.call_count == 0
 
     await connector.aclose()
 

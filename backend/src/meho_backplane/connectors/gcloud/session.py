@@ -81,8 +81,15 @@ class GcloudTargetLike(Protocol):
     ``auth_model`` is checked at the boundary: only ``IMPERSONATION`` or
     ``None`` (pre-G0.3 sentinel) are accepted. Any other value raises a
     clear :exc:`NotImplementedError`.
+
+    ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)``
+    cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
+    the token / credential / lock caches use, so two same-named targets in
+    different tenants never share a cached token (#1642/#1672).
     """
 
+    id: object
+    tenant_id: object
     name: str
     gcp_project: str
     gcp_impersonate_sa: str

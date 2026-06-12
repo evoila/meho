@@ -33,8 +33,8 @@ use.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
-from uuid import UUID
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -94,6 +94,9 @@ class _FakeTarget:
     port: int | None = None
     secret_ref: str | None = "targets/github/test"
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    # Tenant-unique cache key components (#1642/#1672).
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 @pytest.fixture

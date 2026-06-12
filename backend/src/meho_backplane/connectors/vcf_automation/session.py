@@ -120,8 +120,15 @@ class VcfAutomationTargetLike(Protocol):
     password differs from the SSO secret -- the connector reads the
     provider plane via the override loader when set, the default loader
     otherwise.
+
+    ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)``
+    cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
+    the per-plane token caches use, so two same-named targets in different
+    tenants never share a cached token (#1642/#1672).
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Iterator
-from dataclasses import dataclass
-from uuid import UUID
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.hetzner_robot import (
     HetznerRobotConnector,
@@ -82,6 +83,9 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    # Tenant-unique cache key components (#1642/#1672).
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -313,6 +317,58 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
     assert username_a == "svc-robot-a"
     assert username_b == "svc-robot-b"
     assert call_log == ["robot-a", "robot-b"]
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_name_targets_in_different_tenants_get_distinct_credentials() -> None:
+    """Same-named targets in DIFFERENT tenants never share cached credentials.
+
+    Regression guard for #1642/#1672: the credential cache used to key on
+    ``target.name`` alone, so two same-named targets in different tenants
+    collapsed onto one entry. The cache keys on the tenant-unique
+    ``(tenant_id, id)`` tuple instead.
+    """
+    tenant_one = _StubTarget(
+        name="robot-shared",
+        host="robot.your-server.de",
+        port=443,
+        secret_ref="hetzner/robot-shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_two = _StubTarget(
+        name="robot-shared",
+        host="robot.your-server.de",
+        port=443,
+        secret_ref="hetzner/robot-shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+    call_log: list[str] = []
+
+    async def _tracking_loader(target: HetznerRobotTargetLike) -> dict[str, str]:
+        call_log.append(str(target.tenant_id))
+        return {"username": f"svc-{target.tenant_id}", "password": "pass"}
+
+    connector = HetznerRobotConnector(credentials_loader=_tracking_loader)
+    h_one = await connector.auth_headers(tenant_one, operator=_make_operator())
+    h_two = await connector.auth_headers(tenant_two, operator=_make_operator())
+
+    user_one, _ = _decode_basic_auth(h_one["Authorization"])
+    user_two, _ = _decode_basic_auth(h_two["Authorization"])
+    # Each tenant loaded its own credential — no cross-tenant cache hit.
+    assert user_one == f"svc-{tenant_one.tenant_id}"
+    assert user_two == f"svc-{tenant_two.tenant_id}"
+    assert len(call_log) == 2
+    assert set(connector._creds_cache) == {
+        target_cache_key(tenant_one),
+        target_cache_key(tenant_two),
+    }
+
+    # Same-tenant re-fetch is a cache HIT — loader not re-invoked.
+    await connector.auth_headers(tenant_one, operator=_make_operator())
+    assert len(call_log) == 2
     await connector.aclose()
 
 
@@ -552,7 +608,7 @@ async def test_aclose_clears_credential_cache_and_pool() -> None:
     """aclose() clears the in-memory credential cache and tears down the httpx pool."""
     connector = _make_connector()
     await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    assert "robot-a" in connector._creds_cache
+    assert target_cache_key(_TARGET_A) in connector._creds_cache
     await connector.aclose()
     assert connector._creds_cache == {}
     assert connector._clients == {}

@@ -32,13 +32,15 @@ dependency — respx runs in-process.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import (
     VmwareRestConnector,
@@ -102,6 +104,12 @@ class _VcsimTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    # Tenant-unique cache key components (#1642/#1672); without them
+    # ``target_cache_key`` raises AttributeError at runtime — the exact
+    # gap the Harbor integration double had that only the testcontainers
+    # lane caught in #1642.
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 @pytest.fixture
@@ -182,11 +190,12 @@ async def test_session_reused_across_consecutive_fingerprint_calls(
 ) -> None:
     """Two consecutive fingerprint calls share the same cached session token."""
     connector, target = vcsim_connector
+    cache_key = target_cache_key(target)
     await connector.fingerprint(target)
-    token_after_first = connector._session_tokens.get(target.name)
+    token_after_first = connector._session_tokens.get(cache_key)
     assert token_after_first is not None
     await connector.fingerprint(target)
-    token_after_second = connector._session_tokens.get(target.name)
+    token_after_second = connector._session_tokens.get(cache_key)
     # Load-bearing: the cached token is byte-identical across calls
     # (no re-establish).
     assert token_after_first == token_after_second
@@ -200,7 +209,7 @@ async def test_aclose_revokes_session_against_vcsim(
     connector, target = vcsim_connector
 
     await connector.fingerprint(target)
-    assert target.name in connector._session_tokens
+    assert target_cache_key(target) in connector._session_tokens
 
     await connector.aclose()
     # Post-aclose: token cache + client pool both emptied. (The fixture

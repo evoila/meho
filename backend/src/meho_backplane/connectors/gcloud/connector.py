@@ -28,7 +28,8 @@ Impersonation** per decision #12 (transport = B). There are two layers:
    ``https://www.googleapis.com/auth/cloud-platform`` scope and
    ``lifetime=3600`` (the GCP maximum for impersonated tokens).
 
-The bearer token is cached per ``target.name``. On a 401 response,
+The bearer token is cached per tenant-unique ``(tenant_id, target.id)``
+tuple (#1642/#1672). On a 401 response,
 :meth:`_refresh_token` re-calls ``creds.refresh()`` to get a new token and
 retries the original request once.
 
@@ -94,6 +95,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.gcloud.session import (
@@ -227,7 +229,9 @@ class GcloudConnector(HttpConnector):
     Auth: ``google.auth.default()`` for ADC source credentials, wrapped
     by ``google.auth.impersonated_credentials.Credentials`` targeting the
     SA in ``target.gcp_impersonate_sa``. Bearer token is cached per
-    ``target.name``; auto-refreshed on 401 via ``_ensure_token(target)``.
+    tenant-unique ``(tenant_id, target.id)`` tuple (#1642/#1672) so two
+    same-named targets in different tenants never share a cached token;
+    auto-refreshed on 401 via ``_ensure_token(target)``.
 
     SA-JSON-key material in the Vault ``secret_ref`` payload is refused
     before any token is built. The refusal is unconditional — org policy
@@ -273,10 +277,14 @@ class GcloudConnector(HttpConnector):
         self._adc_loader = adc_loader
         # Per-target cache: token string + impersonated Credentials object.
         # Per-target locks allow concurrent fetch/refresh for different targets
-        # without serialising across all targets (M1 fix).
-        self._token_cache: dict[str, str] = {}
-        self._creds_cache: dict[str, Any] = {}  # google.auth.impersonated_credentials.Credentials
-        self._token_locks: dict[str, asyncio.Lock] = {}
+        # without serialising across all targets (M1 fix). All three are keyed
+        # on the tenant-unique ``(tenant_id, target.id)`` tuple
+        # (``target_cache_key``) so two same-named targets in different tenants
+        # never share a cached token / credential / lock (#1642/#1672).
+        self._token_cache: dict[tuple[str, str], str] = {}
+        # google.auth.impersonated_credentials.Credentials
+        self._creds_cache: dict[tuple[str, str], Any] = {}
+        self._token_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # HttpConnector overrides
@@ -387,7 +395,8 @@ class GcloudConnector(HttpConnector):
         ``google.auth.default()`` + ``google.auth.impersonated_credentials.Credentials``.
         Caches the token string and the Credentials object.
 
-        A per-target lock (keyed by ``target.name``) serialises concurrent
+        A per-target lock (keyed by the tenant-unique ``(tenant_id, id)``
+        tuple) serialises concurrent
         first-use callers for the same target without blocking callers for
         different targets (M1 fix). Subsequent calls take the fast path
         (cached token still valid) without acquiring any lock.
@@ -404,19 +413,20 @@ class GcloudConnector(HttpConnector):
         """
         await self._gate_sa_key_refusal(target, operator)
 
+        cache_key = target_cache_key(target)
         # Fast path: cached and valid
-        cached_token = self._token_cache.get(target.name)
+        cached_token = self._token_cache.get(cache_key)
         if cached_token is not None:
-            creds = self._creds_cache.get(target.name)
+            creds = self._creds_cache.get(cache_key)
             if creds is not None and getattr(creds, "valid", False):
                 return cached_token
 
-        lock = self._token_locks.setdefault(target.name, asyncio.Lock())
+        lock = self._token_locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
             # Re-check under lock in case another coroutine fetched first.
-            cached_token = self._token_cache.get(target.name)
+            cached_token = self._token_cache.get(cache_key)
             if cached_token is not None:
-                creds = self._creds_cache.get(target.name)
+                creds = self._creds_cache.get(cache_key)
                 if creds is not None and getattr(creds, "valid", False):
                     return cached_token
 
@@ -431,8 +441,9 @@ class GcloudConnector(HttpConnector):
         """
         loop = asyncio.get_running_loop()
         token, creds = await loop.run_in_executor(None, self._fetch_token_sync, target)
-        self._token_cache[target.name] = token
-        self._creds_cache[target.name] = creds
+        cache_key = target_cache_key(target)
+        self._token_cache[cache_key] = token
+        self._creds_cache[cache_key] = creds
         _log.info(
             "gcloud_token_fetched",
             target=target.name,
@@ -478,9 +489,10 @@ class GcloudConnector(HttpConnector):
         updates the cache, and returns the new token.
         """
         loop = asyncio.get_running_loop()
-        lock = self._token_locks.setdefault(target.name, asyncio.Lock())
+        cache_key = target_cache_key(target)
+        lock = self._token_locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
-            creds = self._creds_cache.get(target.name)
+            creds = self._creds_cache.get(cache_key)
             if creds is None:
                 return await self._fetch_token(target)
 
@@ -492,7 +504,7 @@ class GcloudConnector(HttpConnector):
                 return str(creds.token)
 
             new_token = await loop.run_in_executor(None, _refresh_sync)
-            self._token_cache[target.name] = new_token
+            self._token_cache[cache_key] = new_token
             _log.info(
                 "gcloud_token_refreshed",
                 target=target.name,

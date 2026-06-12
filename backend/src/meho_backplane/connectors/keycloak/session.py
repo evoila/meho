@@ -157,8 +157,14 @@ class KeycloakTargetLike(Protocol):
       only ``"shared_service_account"`` / ``None`` accepted.
     * ``extras`` — free-form mapping carrying the optional
       ``admin_realm`` / ``managed_realm`` overrides.
+    * ``id`` / ``tenant_id`` — the tenant-unique ``(tenant_id, id)``
+      cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
+      the admin-token cache uses, so two same-named targets in different
+      tenants never share a cached token (#1642/#1672).
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

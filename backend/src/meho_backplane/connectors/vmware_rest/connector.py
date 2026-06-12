@@ -35,8 +35,10 @@ JSON-string-body response (or legacy ``{"value": "<token>"}`` shape) is
 the session token; subsequent calls reuse the cached value. Per-target
 isolation is the load-bearing invariant: two targets must never share a
 session token even if their names collide across tenants — the cache is
-keyed on ``target.name`` because that's the operator-supplied identifier
-the connector receives at the boundary.
+keyed on the tenant-unique ``(tenant_id, target.id)`` tuple via the
+shared :func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`
+helper (#1642/#1672), so two same-named targets in different tenants
+never collapse onto one cached session.
 
 The session-establish flow runs under an :class:`asyncio.Lock` so two
 concurrent first-use callers against the same target don't both POST to
@@ -87,6 +89,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
@@ -210,7 +213,8 @@ def _is_acceptable_auth_model(value: Any) -> bool:
 class VmwareRestConnector(HttpConnector):
     """vSphere REST connector for vCenter 8.5+ / ESXi 8.5+ targets.
 
-    Per-target session cached in ``self._session_tokens``; token
+    Per-target session cached in ``self._session_tokens`` keyed on the
+    tenant-unique ``(tenant_id, target.id)`` tuple (#1642/#1672); token
     established on first call to :meth:`auth_headers` via
     ``POST /api/session`` with HTTP basic (service-account creds from
     the injectable :class:`VsphereSessionLoader`); revoked on
@@ -243,14 +247,23 @@ class VmwareRestConnector(HttpConnector):
         session_loader: VsphereSessionLoader | None = None,
     ) -> None:
         super().__init__()
-        self._session_tokens: dict[str, str] = {}
+        # Keyed on the tenant-unique ``(tenant_id, target.id)`` tuple
+        # (``target_cache_key``) so two same-named targets in different
+        # tenants never share a cached session (#1642/#1672).
+        self._session_tokens: dict[tuple[str, str], str] = {}
         # Tracks which session endpoint minted each cached token so
         # :meth:`aclose` can DELETE against the same path. Production
         # vCenter serves both ``/api/session`` and the legacy
         # ``/rest/com/vmware/cis/session``; vcsim serves only the legacy
         # path. See ``SESSION_PATH_MODERN`` / ``SESSION_PATH_LEGACY``
-        # for the rationale and source citations.
-        self._session_paths: dict[str, str] = {}
+        # for the rationale and source citations. Keyed on the same
+        # tenant-unique tuple as ``_session_tokens``.
+        self._session_paths: dict[tuple[str, str], str] = {}
+        # Maps each tenant-unique cache key back to its ``target.name`` so
+        # :meth:`aclose` can locate the per-target client in the shared
+        # ``HttpConnector._clients`` pool (which is keyed on ``target.name``
+        # and is explicitly out of scope for the #1672 re-keying).
+        self._session_names: dict[tuple[str, str], str] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: VsphereSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -313,7 +326,7 @@ class VmwareRestConnector(HttpConnector):
         and force a spurious session establish on the pre-auth probe.
         """
         await self._session_token(target, operator)
-        session_path = self._session_paths.get(target.name, SESSION_PATH_MODERN)
+        session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
         return mounted_path(session_path, path)
 
     async def _session_token(self, target: VsphereTargetLike, operator: Operator) -> str:
@@ -365,59 +378,78 @@ class VmwareRestConnector(HttpConnector):
                 f"target={target.name!r} has no operator JWT (system-initiated calls "
                 "cannot read per-target vendor credentials)"
             )
+        cache_key = target_cache_key(target)
         async with self._session_lock:
-            cached = self._session_tokens.get(target.name)
+            cached = self._session_tokens.get(cache_key)
             if cached is not None:
                 return cached
-            creds = await self._session_loader(target, operator)
-            client = await self._http_client(target)
-            try:
-                username = creds["username"]
-                password = creds["password"]
-            except KeyError as exc:
-                # Surface a clear error if the loader returned a dict
-                # missing one of the two required keys — a typo in a
-                # production loader implementation otherwise surfaces
-                # as a confusing TypeError deep inside httpx's auth
-                # builder.
-                raise RuntimeError(
-                    f"vsphere session loader for target {target.name!r} returned "
-                    f"a dict missing required key {exc.args[0]!r}; need "
-                    "{'username': str, 'password': str}"
-                ) from exc
-            auth = (username, password)
-            resp = await client.post(SESSION_PATH_MODERN, auth=auth)
-            established_path = SESSION_PATH_MODERN
-            if resp.status_code == 404:
-                # Modern endpoint not served (vcsim, very old vCenter,
-                # or a reverse-proxy that hasn't been updated). Try the
-                # legacy path before declaring failure.
-                resp = await client.post(SESSION_PATH_LEGACY, auth=auth)
-                established_path = SESSION_PATH_LEGACY
-            try:
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                # Wrap so the operator-facing message names the target;
-                # httpx's default str() shows only the URL/status, which
-                # loses the per-target identification the dispatcher's
-                # audit row needs. The path in the message is the last
-                # one attempted, which distinguishes a real 404 (legacy
-                # also missing) from auth/server failure on the modern
-                # path.
-                raise RuntimeError(
-                    f"vsphere session establish failed for target {target.name!r}: "
-                    f"POST {established_path} returned HTTP {exc.response.status_code}"
-                ) from exc
-            token = _extract_session_token(resp.json(), target.name)
-            self._session_tokens[target.name] = token
-            self._session_paths[target.name] = established_path
-            _log.info(
-                "vsphere_session_established",
-                target=target.name,
-                host=target.host,
-                session_path=established_path,
-            )
-            return token
+            return await self._establish_and_cache_session(target, operator, cache_key)
+
+    async def _establish_and_cache_session(
+        self,
+        target: VsphereTargetLike,
+        operator: Operator,
+        cache_key: tuple[str, str],
+    ) -> str:
+        """Establish a fresh vSphere session for *target* and cache it.
+
+        Called by :meth:`_session_token` under ``self._session_lock`` on a
+        cold cache. Resolves credentials via the loader, POSTs to the modern
+        session endpoint (falling back to the legacy path on a 404 only),
+        and records the token, the endpoint that minted it, and the target's
+        ``name`` (so :meth:`aclose` can find the per-target client in the
+        ``target.name``-keyed pool) against the tenant-unique *cache_key*.
+        """
+        creds = await self._session_loader(target, operator)
+        client = await self._http_client(target)
+        try:
+            username = creds["username"]
+            password = creds["password"]
+        except KeyError as exc:
+            # Surface a clear error if the loader returned a dict
+            # missing one of the two required keys — a typo in a
+            # production loader implementation otherwise surfaces
+            # as a confusing TypeError deep inside httpx's auth
+            # builder.
+            raise RuntimeError(
+                f"vsphere session loader for target {target.name!r} returned "
+                f"a dict missing required key {exc.args[0]!r}; need "
+                "{'username': str, 'password': str}"
+            ) from exc
+        auth = (username, password)
+        resp = await client.post(SESSION_PATH_MODERN, auth=auth)
+        established_path = SESSION_PATH_MODERN
+        if resp.status_code == 404:
+            # Modern endpoint not served (vcsim, very old vCenter,
+            # or a reverse-proxy that hasn't been updated). Try the
+            # legacy path before declaring failure.
+            resp = await client.post(SESSION_PATH_LEGACY, auth=auth)
+            established_path = SESSION_PATH_LEGACY
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Wrap so the operator-facing message names the target;
+            # httpx's default str() shows only the URL/status, which
+            # loses the per-target identification the dispatcher's
+            # audit row needs. The path in the message is the last
+            # one attempted, which distinguishes a real 404 (legacy
+            # also missing) from auth/server failure on the modern
+            # path.
+            raise RuntimeError(
+                f"vsphere session establish failed for target {target.name!r}: "
+                f"POST {established_path} returned HTTP {exc.response.status_code}"
+            ) from exc
+        token = _extract_session_token(resp.json(), target.name)
+        self._session_tokens[cache_key] = token
+        self._session_paths[cache_key] = established_path
+        self._session_names[cache_key] = target.name
+        _log.info(
+            "vsphere_session_established",
+            target=target.name,
+            host=target.host,
+            session_path=established_path,
+        )
+        return token
 
     async def fingerprint(
         self,
@@ -588,10 +620,18 @@ class VmwareRestConnector(HttpConnector):
         async with self._session_lock:
             tokens = dict(self._session_tokens)
             paths = dict(self._session_paths)
+            names = dict(self._session_names)
             self._session_tokens.clear()
             self._session_paths.clear()
-        for target_name, token in tokens.items():
-            client = self._clients.get(target_name)
+            self._session_names.clear()
+        for cache_key, token in tokens.items():
+            # ``_session_tokens`` is keyed on the tenant-unique
+            # ``(tenant_id, target.id)`` tuple (#1672), but the shared
+            # ``HttpConnector._clients`` pool is keyed on ``target.name``
+            # (explicitly out of scope). ``_session_names`` maps each
+            # cache key back to its name so we can locate the client.
+            target_name = names.get(cache_key)
+            client = self._clients.get(target_name) if target_name is not None else None
             if client is None:
                 # Theoretically unreachable — every cached token was
                 # established against a per-target client that was
@@ -603,7 +643,7 @@ class VmwareRestConnector(HttpConnector):
             # ``_session_token``; the default keeps shutdown safe if
             # a future code path ever caches a token without recording
             # its endpoint.
-            revoke_path = paths.get(target_name, SESSION_PATH_MODERN)
+            revoke_path = paths.get(cache_key, SESSION_PATH_MODERN)
             try:
                 resp = await client.request(
                     "DELETE",

@@ -96,6 +96,36 @@ def _split_ingested_params(
     return path_params, query_params, header_params, body_params
 
 
+def _unwrap_body(body_params: dict[str, Any]) -> Any:
+    """Return the request body to send for the ``loc=="body"`` bucket.
+
+    An ingested op models its OpenAPI ``requestBody`` as a *single*
+    parameter (named ``body``, tagged ``x-meho-param-loc: "body"`` by the
+    G0.7 ingester -- see ``ingest.openapi``'s parameter-schema builder).
+    :func:`_split_ingested_params` collects it into ``body_params`` keyed
+    by that parameter name. The HTTP request body is that param's
+    **value** -- not a ``{name: value}`` wrapper. Returning the wrapper
+    would serialize ``{"body": {"title": "X"}}`` onto the wire, so an
+    upstream that expects the requestBody schema at the top level (GitHub's
+    issue-create wants ``{"title": "X"}``) rejects it as malformed (422).
+
+    Empty bucket -> ``None`` (no body; httpx omits the request body).
+    Exactly one entry -> its value, unwrapped. The single-entry shape is
+    an ingest invariant; should a malformed descriptor ever carry more
+    than one ``loc=="body"`` property, fail loudly rather than silently
+    pick one and send a body the caller never asked for.
+    """
+    if not body_params:
+        return None
+    if len(body_params) > 1:
+        raise RuntimeError(
+            "ingested op declares multiple 'body' params "
+            f"{sorted(body_params)!r}; requestBody must be a single container "
+            "param (x-meho-param-loc='body'). This is an ingest-modelling fault."
+        )
+    return next(iter(body_params.values()))
+
+
 def _substitute_path(path_template: str, path_params: dict[str, Any]) -> str:
     """Substitute ``{var}`` placeholders in *path_template* from *path_params*.
 
@@ -181,7 +211,7 @@ async def dispatch_ingested(
             substituted,
             operator=operator,
             params=query_params or None,
-            json=body_params or None,
+            json=_unwrap_body(body_params),
         )
     # Non-idempotent verb -- POST / PUT / PATCH / DELETE. v0.2 routes
     # through ``_post_json``-shaped httpx call (no retry). The connector
@@ -196,7 +226,7 @@ async def dispatch_ingested(
         target,
         substituted,
         operator=operator,
-        json=body_params or None,
+        json=_unwrap_body(body_params),
     )
 
 

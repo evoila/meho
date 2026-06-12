@@ -270,17 +270,39 @@ async def test_schema_drift_fails_closed(monkeypatch: pytest.MonkeyPatch) -> Non
 
 @pytest.mark.asyncio
 async def test_forwarded_jwt_never_logged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The forwarded operator JWT must not appear in any structlog event."""
+    """The forwarded operator JWT must not appear in any structlog event.
+
+    Capture surface (#1254 pattern, see ``docs/codebase/backend.md``): we
+    bind a private :class:`structlog.testing.LogCapture` onto a
+    freshly-wrapped logger and monkeypatch the subject module's
+    module-level ``_log`` instead of using
+    :func:`structlog.testing.capture_logs`. Production sets
+    ``cache_logger_on_first_use=True`` (``logging.configure_logging``);
+    once another test on the same xdist worker warms ``corpus._log`` and
+    a later ``structlog.configure(...)`` replaces the processor-list
+    instance, the cached ``BoundLogger`` is orphaned and ``capture_logs``
+    silently misses every event — which would let the JWT-absence check
+    below pass vacuously against an empty list. The private capture is
+    process-local and contextvar-free, so it is immune to any concurrent
+    ``configure`` regardless of xdist scheduling.
+    """
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
     transport = _transport_capturing([], httpx.Response(503, text="down"))
     _patch_async_client(monkeypatch, transport, [])
 
-    with structlog.testing.capture_logs() as logs, pytest.raises(CorpusUnavailable):
+    capture = structlog.testing.LogCapture()
+    private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    monkeypatch.setattr(corpus_mod, "_log", private_log)
+
+    with pytest.raises(CorpusUnavailable):
         await search_corpus(_make_operator(), "q")
 
+    logs = capture.entries
     serialised = repr(logs)
     assert _JWT not in serialised
-    # The failure is still observable by status.
+    # The failure is still observable by status — this canary fails loudly
+    # if the capture ever misses, so the JWT-absence check above cannot
+    # pass vacuously against an empty list.
     assert any(event.get("status") == 503 for event in logs)
 
 

@@ -214,6 +214,20 @@ connector-related release-notes line.
 
 ### Fixed
 
+- Deflaked three unit-lane tests that asserted on structlog events from
+  module-level production loggers via `structlog.testing.capture_logs()`
+  (`test_corpus_client.py::test_forwarded_jwt_never_logged`, plus two
+  orphaned-class log assertions in `test_operations_register_ingested.py`).
+  Under `pytest -n 6 --dist loadscope` a logger warmed-and-orphaned by an
+  earlier test on the same xdist worker — `cache_logger_on_first_use=True`
+  pins a `BoundLogger` to a processor-list instance that a later
+  `structlog.configure(...)` then replaces — caused `capture_logs` to miss
+  the event (empty list), reddening the whole `Python (ruff + mypy +
+  pytest)` job and letting the JWT-absence check pass vacuously. Each test
+  now binds a private `structlog.testing.LogCapture` and monkeypatches the
+  subject module's `_log`, the established #1254 pattern; the convention is
+  documented in `docs/codebase/backend.md`. No production logging config
+  change. (#1622)
 - An async `--spec` ingest no longer false-succeeds when nothing became
   dispatchable, and the `--product` the catalog's `next_step` verb prints
   now round-trips. Two tangled defects: (1) ingesting under a VCF-family

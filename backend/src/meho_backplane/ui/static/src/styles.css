@@ -20,6 +20,15 @@
  *
  * No ``node_modules`` participates in either path. The standalone
  * Tailwind binary is pinned by SHA256 in the Dockerfile.
+ *
+ * ── Brand: "Graphite & Signal" ─────────────────────────────────────
+ * Cool graphite neutrals (faint blue cast — never warm/brown), one
+ * signal hue: indigo/periwinkle for actions, location, and the brand
+ * mark. Fuchsia/teal are quiet supporting accents for data badges;
+ * red/amber/blue/green stay strictly semantic. Two themes (meho-dark
+ * default + meho-light) toggled by static/src/app/theme.js via the
+ * <html data-theme> attribute; both override the full DaisyUI
+ * variable set below.
  */
 
 /*
@@ -33,41 +42,507 @@
 /*
  * DaisyUI 5 plugin loader. The vendored plugin sits beside this CSS
  * (same directory) so the relative `./vendor/daisyui.js` resolves
- * during the Tailwind CLI build. DaisyUI's docs cover the Tailwind 4
- * loading path explicitly: https://daisyui.com/docs/install/
+ * during the Tailwind CLI build.
+ *
+ * Theme strategy: the vendored plugin's options handler only accepts
+ * {themes, root, logs, include, exclude, prefix} — a custom *named*
+ * theme would require vendoring DaisyUI's separate `daisyui-theme.js`
+ * release asset forever in lock-step. Instead we enable the built-in
+ * dark theme `dim` as the single plugin-level default and override
+ * its full variable set in the unlayered blocks below — once for
+ * meho-dark (also bound to :root so it is the no-attribute default),
+ * once for meho-light. Unlayered author CSS always beats the plugin's
+ * `@layer base` output, and `dim` remains a complete dark fallback
+ * floor underneath: a missed variable fails *dark*, never white.
  */
 @plugin "./vendor/daisyui.js" {
-  /*
-   * Enabled themes. ``corporate`` is the chassis default
-   * (cool blues, professional feel); ``dim`` is the dark-mode
-   * sibling. ``themes: false`` would disable DaisyUI's component
-   * theming entirely; we keep two so dark mode is trivially
-   * addable later (out of scope for v0.2 per Initiative #337
-   * "Out of scope").
-   */
-  themes: corporate --default, dim --prefersdark;
-  /*
-   * Strip DaisyUI's default rounded-element radii globally; the
-   * console aesthetic is squarish-corporate. Override per-component
-   * with the standard DaisyUI utilities.
-   */
+  themes: dim --default;
   root: ":root";
   logs: false;
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   Brand typography — self-hosted, latin-subset woff2 (see fonts/FONTS.md)
+   ════════════════════════════════════════════════════════════════════ */
+
+@font-face {
+  font-family: "Bricolage Grotesque";
+  /* Variable: opsz 12–96, wght 200–800. Display voice — wordmark,
+     page titles. Absolute src URL so the CLI never rebases it
+     between src/ (input) and dist/ (output). */
+  src: url("/ui/static/src/fonts/bricolage-grotesque-latin-var.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Schibsted Grotesk";
+  /* Variable: wght 400–900. The UI voice. */
+  src: url("/ui/static/src/fonts/schibsted-grotesk-latin-var.woff2") format("woff2");
+  font-weight: 400 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/ui/static/src/fonts/ibm-plex-mono-latin-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/ui/static/src/fonts/ibm-plex-mono-latin-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+
 /*
- * Operator-console palette overrides. Tailwind 4 reads the
- * `@theme` block (CSS-first config) to extend the default token set.
- * DaisyUI consumes the theme tokens so the brand-tinted variants
- * flow through every component without per-component overrides.
- *
- * Keep this block intentionally small in the chassis -- per-surface
- * Initiatives can extend with their own tokens as they land.
+ * Tailwind theme tokens (CSS-first config). The --font-* tokens swap
+ * the stacks behind the `font-sans` / `font-mono` utilities already
+ * used across templates (zero markup edits), and add `font-display`
+ * for headings.
  */
 @theme {
-  --color-meho-50: oklch(0.97 0.02 250);
-  --color-meho-500: oklch(0.55 0.18 250);
-  --color-meho-900: oklch(0.25 0.08 250);
+  --font-sans: "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque", "Schibsted Grotesk", ui-sans-serif, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   meho-dark — full DaisyUI variable override (brand default).
+   Bound to :root as well so a missing/unknown data-theme value still
+   lands on the brand dark. Variable list mirrors the vendored
+   plugin's `dim` theme object verbatim; keep in lock-step when
+   bumping DaisyUI.
+   ════════════════════════════════════════════════════════════════════ */
+
+:root,
+[data-theme="meho-dark"] {
+  color-scheme: dark;
+
+  /* Canvas — cool graphite (hue ~255, near-zero chroma). */
+  --color-base-100: oklch(18.5% 0.008 255);  /* card surface */
+  --color-base-200: oklch(14.5% 0.007 255);  /* page canvas */
+  --color-base-300: oklch(24% 0.01 255);     /* raised / hover */
+  --color-base-content: oklch(93% 0.005 255);
+
+  /* Primary — THE signal: indigo/periwinkle. Analogous to the
+     graphite base (hue 255 vs 275) and ≥45° from every status hue,
+     so punctuation can never be misread as state. */
+  --color-primary: oklch(62% 0.16 275);
+  --color-primary-content: oklch(97% 0.01 275);
+
+  /* Secondary — fuchsia (write-class data accents; 55° from both
+     the indigo signal and error-red). */
+  --color-secondary: oklch(70% 0.13 330);
+  --color-secondary-content: oklch(16% 0.04 330);
+
+  /* Accent — teal (informational accents; 35° from info-sky). */
+  --color-accent: oklch(73% 0.09 190);
+  --color-accent-content: oklch(16% 0.03 190);
+
+  --color-neutral: oklch(26% 0.01 255);
+  --color-neutral-content: oklch(90% 0.005 255);
+
+  /* Status — strictly semantic. Info sits at sky (225), 50° from
+     the indigo signal. */
+  --color-info: oklch(72% 0.1 225);
+  --color-info-content: oklch(16% 0.03 225);
+  --color-success: oklch(74% 0.13 162);
+  --color-success-content: oklch(16% 0.04 162);
+  --color-warning: oklch(80% 0.13 85);
+  --color-warning-content: oklch(18% 0.04 85);
+  --color-error: oklch(66% 0.19 25);
+  --color-error-content: oklch(14% 0.03 25);
+
+  /* Geometry — softly rounded boxes, tighter fields. */
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.875rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0; /* DaisyUI's own noise stays off — we layer our own grain. */
+
+  /* Atmosphere — a whisper of indigo at the horizon. Saturation x
+     area must stay constant (color theory): a hue covering this much
+     canvas has to sit near-imperceptible or it reads as light leak. */
+  --meho-glow:
+    radial-gradient(ellipse 70% 38% at 50% -12%, oklch(50% 0.08 275 / 0.07), transparent 60%),
+    radial-gradient(ellipse 40% 34% at 100% 104%, oklch(45% 0.05 255 / 0.06), transparent 60%);
+  --meho-grain-opacity: 0.022;
+
+  /* Topology graph palette — read by topology-graph.js via
+     getComputedStyle. MUST stay hex (not oklch): Cytoscape's canvas
+     color parser can't parse oklch(), and getPropertyValue returns
+     the token text exactly as authored here. */
+  --meho-graph-target: #6ee7b4;     /* mint — entry points        */
+  --meho-graph-vm: #7dd3fc;         /* sky — workloads            */
+  --meho-graph-host: #e8b35a;       /* amber — iron               */
+  --meho-graph-cluster: #c4a5f5;    /* violet                     */
+  --meho-graph-datastore: #d9c069;  /* gold — storage             */
+  --meho-graph-network: #67d1dd;    /* cyan — wires               */
+  --meho-graph-node-fallback: #8b93a5;
+  --meho-graph-node-border: #2e333d;
+  --meho-graph-label: #b5bac4;
+  --meho-graph-edge: #424857;
+  --meho-graph-edge-label: #8b93a5;
+  --meho-graph-label-bg: #191c23;
+  --meho-graph-selected: #818cf8;
+  --meho-graph-highlight: #818cf8;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   meho-light — the daylight sibling. Same single indigo signal,
+   deeper shades for contrast on white.
+   ════════════════════════════════════════════════════════════════════ */
+
+[data-theme="meho-light"] {
+  color-scheme: light;
+
+  --color-base-100: oklch(100% 0 0);          /* card surface */
+  --color-base-200: oklch(97.3% 0.002 255);   /* page canvas  */
+  --color-base-300: oklch(93.5% 0.004 255);   /* raised / hover */
+  --color-base-content: oklch(22% 0.012 255);
+
+  --color-primary: oklch(50% 0.19 275);
+  --color-primary-content: oklch(99% 0.01 275);
+
+  --color-secondary: oklch(52% 0.16 330);
+  --color-secondary-content: oklch(99% 0.01 330);
+
+  --color-accent: oklch(55% 0.1 190);
+  --color-accent-content: oklch(99% 0.01 190);
+
+  --color-neutral: oklch(92% 0.004 255);
+  --color-neutral-content: oklch(25% 0.012 255);
+
+  --color-info: oklch(56% 0.11 225);
+  --color-info-content: oklch(99% 0.01 225);
+  --color-success: oklch(56% 0.12 162);
+  --color-success-content: oklch(99% 0.01 162);
+  --color-warning: oklch(68% 0.13 80);
+  --color-warning-content: oklch(20% 0.04 80);
+  --color-error: oklch(55% 0.19 25);
+  --color-error-content: oklch(99% 0.01 25);
+
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.875rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+
+  --meho-glow:
+    radial-gradient(ellipse 70% 38% at 50% -12%, oklch(89% 0.03 275 / 0.22), transparent 60%);
+  --meho-grain-opacity: 0.012;
+
+  --meho-graph-target: #0d9468;
+  --meho-graph-vm: #0284c7;
+  --meho-graph-host: #b45309;
+  --meho-graph-cluster: #7c3aed;
+  --meho-graph-datastore: #a16207;
+  --meho-graph-network: #0e7490;
+  --meho-graph-node-fallback: #64748b;
+  --meho-graph-node-border: #cbd5e1;
+  --meho-graph-label: #334155;
+  --meho-graph-edge: #94a3b8;
+  --meho-graph-edge-label: #64748b;
+  --meho-graph-label-bg: #f8fafc;
+  --meho-graph-selected: #4f46e5;
+  --meho-graph-highlight: #4f46e5;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Atmosphere — horizon glow + film grain.
+   The glow lives in the <html> background stack (under everything);
+   page-level wrappers stay transparent so it shows through, while
+   cards (bg-base-100) stay opaque. The grain is a fixed body::after
+   overlay — pure CSS + one data-URI SVG, no scripts.
+   Note for a future CSP: the data-URI needs `img-src data:`.
+   ════════════════════════════════════════════════════════════════════ */
+
+html {
+  background: var(--meho-glow), var(--color-base-200);
+  background-attachment: fixed;
+  min-height: 100%;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+  opacity: var(--meho-grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Chrome + component voice
+   ════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Layered card: subtle vertical sheen, 1px low-contrast border,
+ * a hairline top highlight, and a slow lift on hover. Used alongside
+ * DaisyUI's `card` behavior classes. color-mix against base tokens
+ * keeps it correct in both themes.
+ */
+.meho-card {
+  position: relative;
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
+  border-radius: var(--radius-box);
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in oklch, var(--color-base-300) 45%, var(--color-base-100)),
+      var(--color-base-100) 38%
+    );
+}
+
+[data-theme="meho-light"] .meho-card {
+  background: var(--color-base-100);
+  box-shadow: 0 1px 2px oklch(0% 0 0 / 0.04), 0 4px 16px -8px oklch(0% 0 0 / 0.06);
+}
+
+.meho-card::before {
+  content: "";
+  position: absolute;
+  inset-inline: 1rem;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in oklch, var(--color-base-content) 20%, transparent),
+    transparent
+  );
+}
+
+[data-theme="meho-light"] .meho-card::before {
+  display: none;
+}
+
+a.meho-card,
+.meho-card-hover {
+  transition: border-color 200ms ease, transform 200ms ease, box-shadow 200ms ease;
+}
+
+/* Hover: neutral value-contrast only — the accent is reserved for
+   action/location punctuation (60-30-10 discipline), never card
+   chrome. Emphasis here comes from border brightening + lift. */
+a.meho-card:hover,
+.meho-card-hover:hover {
+  border-color: color-mix(in oklch, var(--color-base-content) 24%, transparent);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px -16px oklch(0% 0 0 / 0.5);
+}
+
+/*
+ * Wordmark caret — the brand mark: a terminal insertion cursor after
+ * "meho", as if the console is mid-keystroke. Blinks with hard steps
+ * (authentic terminal cadence) unless the operator prefers reduced
+ * motion, in which case it stays solid.
+ */
+.meho-caret {
+  display: inline-block;
+  /* Thin italic beam, not a block — width scales with the wordmark
+     (≈2px at the sidebar size); the slight skew echoes a cursive
+     insertion point. */
+  width: 0.09em;
+  height: 0.84em;
+  margin-left: 0.18ch;
+  border-radius: 1px;
+  background: var(--color-primary);
+  transform: skewX(-12deg);
+  vertical-align: -0.04em;
+}
+
+/*
+ * Wordmark type-on: each letter is an inline-block that snaps from
+ * max-width 0 to full width at a staggered delay (steps(1) = no
+ * tween, a discrete keystroke). Because the caret sits in flow after
+ * the letters, it rides along as the word grows — the cursor
+ * "types" the brand on every page load. Letters are aria-hidden;
+ * an sr-only "meho" carries the accessible name.
+ */
+.meho-type > span {
+  display: inline-block;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes meho-type-in {
+    from { max-width: 0; }
+    to { max-width: 1.6ch; }
+  }
+
+  .meho-type > span {
+    animation: meho-type-in 1ms steps(1, end) both;
+  }
+
+  .meho-type > span:nth-child(1) { animation-delay: 75ms; }
+  .meho-type > span:nth-child(2) { animation-delay: 150ms; }
+  .meho-type > span:nth-child(3) { animation-delay: 225ms; }
+  .meho-type > span:nth-child(4) { animation-delay: 300ms; }
+
+  @keyframes meho-caret-blink {
+    0%, 54% { opacity: 1; }
+    55%, 100% { opacity: 0; }
+  }
+
+  .meho-caret {
+    /* Solid while "typing", blinking once idle. */
+    animation: meho-caret-blink 1.2s steps(1, end) infinite;
+    animation-delay: 400ms;
+  }
+}
+
+/* Quiet uppercase-mono section label ("SURFACES", drawer headings…). */
+.meho-overline {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in oklch, var(--color-base-content) 58%, transparent);
+}
+
+/* Navbar glass: translucent over the glow, hairline bottom border. */
+.meho-glass {
+  background: color-mix(in oklch, var(--color-base-200) 78%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid color-mix(in oklch, var(--color-base-content) 9%, transparent);
+}
+
+/*
+ * Sidebar nav voice. DaisyUI's `menu` / `menu-active` mechanism is a
+ * test-pinned contract (test_ui_broadcast_feed asserts menu-active) —
+ * we restyle it rather than replace it: active link gets an indigo
+ * left indicator bar + tint; inactive links get a quiet hover.
+ */
+.meho-nav .menu li > a {
+  position: relative;
+  border-radius: 0.5rem;
+  gap: 0.625rem;
+  font-weight: 500;
+  color: color-mix(in oklch, var(--color-base-content) 75%, transparent);
+  transition: color 150ms ease, background-color 150ms ease;
+}
+
+.meho-nav .menu li > a:hover {
+  color: var(--color-base-content);
+  background: color-mix(in oklch, var(--color-base-content) 6%, transparent);
+}
+
+.meho-nav .menu li > a.menu-active {
+  color: var(--color-base-content);
+  /* Neutral raised surface; the accent lives ONLY in the indicator
+     bar below — small area, full saturation (punctuation). */
+  background: color-mix(in oklch, var(--color-base-content) 7%, transparent);
+}
+
+.meho-nav .menu li > a.menu-active::before {
+  content: "";
+  position: absolute;
+  left: -0.5rem;
+  top: 50%;
+  translate: 0 -50%;
+  height: 1.125rem;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--color-primary);
+  box-shadow: 0 0 8px color-mix(in oklch, var(--color-primary) 80%, transparent);
+}
+
+/* Live indicator — pulsing signal dot for SSE-connected states. */
+.meho-live-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--color-success);
+  box-shadow: 0 0 6px color-mix(in oklch, var(--color-success) 80%, transparent);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Motion — one orchestrated load reveal + micro-interactions.
+   CSS-only (CSP-ready), all gated behind prefers-reduced-motion.
+   ════════════════════════════════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes meho-reveal {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .meho-reveal {
+    animation: meho-reveal 500ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Staggered children: cap at 8 steps, then settle on the cap. */
+  .meho-stagger > :nth-child(1) { animation-delay: 40ms; }
+  .meho-stagger > :nth-child(2) { animation-delay: 90ms; }
+  .meho-stagger > :nth-child(3) { animation-delay: 140ms; }
+  .meho-stagger > :nth-child(4) { animation-delay: 190ms; }
+  .meho-stagger > :nth-child(5) { animation-delay: 240ms; }
+  .meho-stagger > :nth-child(6) { animation-delay: 290ms; }
+  .meho-stagger > :nth-child(7) { animation-delay: 340ms; }
+  .meho-stagger > :nth-child(n + 8) { animation-delay: 390ms; }
+
+  @keyframes meho-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+
+  .meho-live-dot {
+    animation: meho-pulse 2.2s ease-in-out infinite;
+  }
+
+  /* SSE row entrance — used by the broadcast feed list items. */
+  @keyframes meho-row-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+      background-color: color-mix(in oklch, var(--color-primary) 12%, transparent);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+      background-color: transparent;
+    }
+  }
+
+  .meho-row-in {
+    animation: meho-row-in 600ms ease-out both;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Field finish — selection, focus, scrollbars
+   ════════════════════════════════════════════════════════════════════ */
+
+::selection {
+  background: color-mix(in oklch, var(--color-primary) 30%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--color-primary) 70%, transparent);
+  outline-offset: 2px;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--color-base-content) 18%, transparent) transparent;
 }
 
 /*

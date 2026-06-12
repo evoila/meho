@@ -68,48 +68,49 @@ from meho_backplane.ui.templating import get_templates
 __all__ = ["build_dashboard_router"]
 
 
-#: 3x2 surface-card grid descriptors. Each tile renders a DaisyUI
-#: ``card`` with an icon, a title, a one-line summary, and an
-#: ``href`` to the surface stub T5 also lands. The 6th tile is the
-#: "deploy info" cell so the grid stays balanced; the surface
-#: Initiatives (G10.1-G10.5) re-style this when their dashboards
-#: ship richer per-surface widgets.
+#: Surface-card grid descriptors. Each tile renders a branded card
+#: with an icon, a title, a one-line summary, and an ``href`` to the
+#: surface stub T5 also lands. ``icon`` is a name resolved by the
+#: ``icon()`` macro in ``templates/_icons.html`` (inline Lucide SVG) —
+#: the rebrand replaced the chassis emoji. The surface Initiatives
+#: (G10.1-G10.5) re-style this when their dashboards ship richer
+#: per-surface widgets.
 _SURFACE_TILES: Final[tuple[dict[str, str], ...]] = (
     {
         "title": "Broadcast",
         "summary": "Live activity feed across the tenant.",
         "href": "/ui/broadcast",
-        "icon": "\U0001f4e1",  # satellite antenna
+        "icon": "radio-tower",
     },
     {
         "title": "Knowledge",
         "summary": "Search + browse the team's distilled knowledge base.",
         "href": "/ui/kb",
-        "icon": "\U0001f4da",  # books
+        "icon": "book-open",
     },
     {
         "title": "Topology",
         "summary": "Targets, clusters, and dependencies.",
         "href": "/ui/topology",
-        "icon": "\U0001f578",  # spider web
+        "icon": "waypoints",
     },
     {
         "title": "Connectors",
         "summary": "Manage tenant targets + per-target credentials.",
         "href": "/ui/connectors",
-        "icon": "\U0001f50c",  # electric plug
+        "icon": "plug",
     },
     {
         "title": "Memory",
         "summary": "Operator + tenant + target memories across 5 scopes.",
         "href": "/ui/memory",
-        "icon": "\U0001f9e0",  # brain
+        "icon": "brain",
     },
     {
         "title": "Runbooks",
         "summary": "Browse runbook templates + lifecycle state.",
         "href": "/ui/runbooks",
-        "icon": "\U0001f4d8",  # blue book
+        "icon": "scroll",
     },
 )
 

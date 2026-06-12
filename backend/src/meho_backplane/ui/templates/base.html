@@ -2,20 +2,22 @@
   SPDX-License-Identifier: Apache-2.0
   Copyright (c) 2026 evoila Group
 
-  Base layout for the MEHO Operator Console (Initiative #337, Task #863).
+  Base layout for the MEHO Operator Console (Initiative #337, Task #863;
+  rebranded "Graphite & Signal" — see static/src/styles.css).
 
-  Structure:
-    * <head> -- vendored DaisyUI/Tailwind CSS (one compiled file at
-      /ui/static/dist/tailwind.css), vendored htmx + alpine JS, plus
-      the chassis meta tags. The HEAD intentionally has zero inline
-      script -- a forthcoming nonce-based CSP would otherwise have to
-      special-case inline.
-    * <body> -- DaisyUI ``drawer`` shell: top navbar + collapsible
-      sidebar + content slot + footer. Alpine wires sidebar collapse
-      (persisted to localStorage) and the user-menu open/close.
-    * The sidebar enumerates the 5 surface routes G10.1-G10.5 fill in.
-      Stub URLs land in T5 #866; this template references them by
-      name today so the chassis renders end-to-end.
+  Structure — app-shell, not navbar-shell:
+    * <head> -- shared asset block (_head_assets.html: theme bootstrap,
+      compiled CSS, brand font preloads, vendored htmx + sse + alpine).
+      Zero inline script -- a forthcoming nonce-based CSP would
+      otherwise have to special-case inline.
+    * <body> -- DaisyUI ``drawer`` shell. The sidebar is the chrome:
+      brand block on top, surface nav in the middle, tenant + account +
+      version anchored at the bottom. On desktop there is NO top bar —
+      content owns the full column. On <lg a slim ``navbar`` appears
+      with the hamburger + wordmark + theme toggle (the ``navbar``
+      class is a test-pinned contract).
+    * The page canvas is transparent: the aurora glow painted on
+      <html> (styles.css) shows through; cards stay opaque.
 
   Conventions every G10.x surface follows when extending this base:
     * Inherits via {% extends "base.html" %}.
@@ -24,11 +26,21 @@
     * HTMX partial responses bypass this base entirely (render only
       the fragment template).
 -#}
+{% from "_icons.html" import icon %}
 {#- ``active_surface`` highlights the matching sidebar link. Routes
     that render a surface pass it (e.g. ``"broadcast"``); the dashboard
-    and stubs don't, so default to ``""`` here so the ``StrictUndefined``
+    doesn't, so default to ``""`` here so the ``StrictUndefined``
     env does not raise when a route omits it. -#}
 {% set active_surface = active_surface | default("") %}
+{#- Sidebar surface registry: (key, href, icon name, label). -#}
+{% set nav_surfaces = [
+  ("broadcast", "/ui/broadcast", "radio-tower", "Broadcast"),
+  ("knowledge", "/ui/kb", "book-open", "Knowledge"),
+  ("topology", "/ui/topology", "waypoints", "Topology"),
+  ("connectors", "/ui/connectors", "plug", "Connectors"),
+  ("memory", "/ui/memory", "brain", "Memory"),
+  ("runbooks", "/ui/runbooks", "scroll", "Runbooks"),
+] %}
 {#- ``session_tenant`` is injected by the
     :func:`_ui_session_context_processor` chassis context processor on
     every UI template render -- it carries the active BFF session's
@@ -39,40 +51,29 @@
     ``StrictUndefined``. -#}
 {% set session_tenant = session_tenant | default(none) %}
 <!doctype html>
-<html lang="en" data-theme="corporate" class="h-full">
+<html lang="en" data-theme="meho-dark" class="h-full">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block page_title %}MEHO Operator Console{% endblock %}</title>
-    {# Compiled Tailwind 4 + DaisyUI 5 bundle; built by the
-       ``tailwindcss`` CLI step in backend/Dockerfile from
-       static/src/styles.css. Cache-busted by image rebuild
-       (immutable per backplane version). #}
-    <link rel="stylesheet" href="/ui/static/dist/tailwind.css" />
-    {# Vendored HTMX 2 + the SSE extension + Alpine 3 -- pinned SHA256
-       in static/src/vendor/VENDOR.md. Script order is load-bearing:
-       ``sse.min.js`` calls ``htmx.defineExtension`` at load, so it
-       must execute after ``htmx.min.js``; ``defer`` preserves
-       document order across all three. HTMX 2 split the SSE extension
-       out of core (HTMX 1 bundled it), so the dashboard recent-
-       activity snippet and the broadcast live feed both depend on
-       this separate plugin -- without it every ``hx-ext="sse"``
-       wrapper is inert. Alpine's ``defer`` is also load-bearing:
-       x-data initialisation must run after the DOM is parsed (Alpine
-       docs, "Manually starting Alpine"). #}
-    <script src="/ui/static/src/vendor/htmx.min.js" defer></script>
-    <script src="/ui/static/src/vendor/sse.min.js" defer></script>
-    <script src="/ui/static/src/vendor/alpine.min.js" defer></script>
+    {% include "_head_assets.html" %}
   </head>
-  <body class="min-h-full bg-base-200 text-base-content">
+  <body class="min-h-full text-base-content antialiased">
     <div
       class="drawer lg:drawer-open"
       x-data="{
-        sidebarOpen: (localStorage.getItem('meho.sidebar') ?? 'open') === 'open',
+        sidebarOpen: true,
         userMenuOpen: false,
+        init() {
+          try {
+            this.sidebarOpen = (localStorage.getItem('meho.sidebar') ?? 'open') === 'open';
+          } catch (_) { this.sidebarOpen = true; }
+        },
         toggleSidebar() {
           this.sidebarOpen = !this.sidebarOpen;
-          localStorage.setItem('meho.sidebar', this.sidebarOpen ? 'open' : 'closed');
+          try {
+            localStorage.setItem('meho.sidebar', this.sidebarOpen ? 'open' : 'closed');
+          } catch (_) {}
         }
       }"
     >
@@ -84,192 +85,169 @@
         x-on:change="toggleSidebar()"
       />
 
-      {# ---------- Main pane: navbar + content + footer ---------- #}
-      <div class="drawer-content flex flex-col">
-        {# ---------- Top navbar ---------- #}
-        <header class="navbar bg-base-100 border-base-300 border-b shadow-sm">
-          <div class="flex-none lg:hidden">
+      {# ---------- Main pane ---------- #}
+      <div class="drawer-content flex min-h-screen flex-col">
+        {# Slim mobile-only top bar — desktop chrome lives entirely in
+           the sidebar. ``navbar`` as the first class is a test-pinned
+           contract (test_ui_templates). #}
+        <header class="navbar meho-glass sticky top-0 z-30 min-h-12 px-3 lg:hidden">
+          <div class="flex-none">
             <label
               for="meho-drawer-toggle"
-              class="btn btn-ghost btn-square"
+              class="btn btn-ghost btn-square btn-sm"
               aria-label="Toggle navigation sidebar"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                class="h-5 w-5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M4 6h16M4 12h16M4 18h16"
-                />
-              </svg>
+              {{ icon("menu", class="size-5") }}
             </label>
           </div>
-          <div class="flex-1">
-            <a href="/ui/" class="btn btn-ghost text-xl font-semibold">MEHO</a>
-            <span class="badge badge-outline ml-2 hidden sm:inline-flex">
-              Operator Console
-            </span>
+          <div class="flex flex-1 items-center px-2">
+            <a
+              href="/ui/"
+              class="font-display text-lg leading-none font-bold tracking-tight"
+            ><span class="sr-only">meho</span><span class="meho-type" aria-hidden="true"><span>m</span><span>e</span><span>h</span><span>o</span></span><span class="meho-caret" aria-hidden="true"></span></a>
           </div>
-          <div class="flex-none gap-2">
-            {# Tenant chip. G0.15-T9 #1217 -- the operator's tenant is
-               auto-selected from the JWT's ``tenant_id`` claim at
-               session-create time; the BFF session middleware lifts
-               that tenant's slug + name into ``session_tenant`` via
-               the chassis context processor on every render. The chip
-               renders the human-readable name (slug fallback when the
-               name is empty, UUID fallback when the tenant row was
-               deleted out from under the session). Cross-tenant
-               switching is a future Initiative; today the operator
-               always acts on exactly one tenant, so the chip is a
-               read-only label, not a selector. The auth surfaces
-               themselves (``/ui/auth/login`` etc.) render before a
-               session exists -- ``session_tenant`` is then ``None``
-               and the chip is hidden. #}
-            {% if session_tenant is not none %}
-              <div class="form-control hidden md:block" aria-label="Active tenant">
-                <span class="badge badge-outline">
-                  tenant:&nbsp;
-                  <code class="font-mono">
-                    {{- session_tenant.name or session_tenant.slug or session_tenant.id -}}
-                  </code>
-                </span>
-              </div>
-            {% endif %}
-            {# User menu. Alpine-driven open/close with click-outside
-               dismissal. Real menu items land in T4 #865. #}
-            <div class="relative" x-on:click.outside="userMenuOpen = false">
-              <button
-                type="button"
-                class="btn btn-ghost btn-circle avatar placeholder"
-                aria-haspopup="menu"
-                x-bind:aria-expanded="userMenuOpen.toString()"
-                x-on:click="userMenuOpen = !userMenuOpen"
-              >
-                <div class="bg-neutral text-neutral-content w-8 rounded-full">
-                  <span class="text-xs">OP</span>
-                </div>
-              </button>
-              <ul
-                class="menu menu-sm bg-base-100 rounded-box absolute right-0 z-50 mt-2 w-52 p-2 shadow"
-                role="menu"
-                x-show="userMenuOpen"
-                x-transition
-                x-cloak
-              >
-                <li>
-                  <a href="/ui/auth/logout">Sign out</a>
-                </li>
-              </ul>
-            </div>
+          <div class="flex flex-none items-center">
+            <button
+              type="button"
+              class="btn btn-ghost btn-square btn-sm text-base-content/70"
+              aria-label="Toggle color theme"
+              x-data="{ theme: document.documentElement.getAttribute('data-theme') }"
+              x-on:click="theme = window.mehoToggleTheme()"
+              x-on:meho-theme-changed.window="theme = $event.detail.theme"
+            >
+              <span x-show="theme === 'meho-dark'">{{ icon("sun", class="size-4") }}</span>
+              <span x-show="theme !== 'meho-dark'" x-cloak>{{ icon("moon", class="size-4") }}</span>
+            </button>
           </div>
         </header>
 
         {# ---------- Content slot ---------- #}
-        <main class="flex-1 p-6">
+        <main class="mx-auto w-full max-w-[1500px] flex-1 px-5 py-6 lg:px-10 lg:py-9">
           {% block content %}{% endblock %}
         </main>
-
-        {# ---------- Footer ---------- #}
-        <footer
-          class="footer footer-center bg-base-100 text-base-content border-base-300 border-t p-4"
-        >
-          <aside class="flex items-center gap-4 text-xs">
-            <span>MEHO backplane v{{ app_version }}</span>
-            <span class="flex items-center gap-1">
-              <span
-                class="inline-block h-2 w-2 rounded-full {% if ready %}bg-success{% else %}bg-warning{% endif %}"
-                aria-hidden="true"
-              ></span>
-              <span>{% if ready %}ready{% else %}starting{% endif %}</span>
-            </span>
-          </aside>
-        </footer>
       </div>
 
-      {# ---------- Sidebar drawer ---------- #}
+      {# ---------- Sidebar: the chrome ---------- #}
       <aside class="drawer-side z-40">
         <label
           for="meho-drawer-toggle"
           aria-label="Close navigation sidebar"
           class="drawer-overlay"
         ></label>
-        <nav class="menu bg-base-100 border-base-300 min-h-full w-64 border-r p-4">
-          <div class="mb-4 px-2 text-xs font-semibold tracking-wider uppercase opacity-60">
-            Surfaces
+        <nav
+          class="meho-nav flex min-h-full w-64 flex-col border-r border-base-content/8 bg-base-200/95 backdrop-blur-xl lg:bg-transparent"
+        >
+          {# Brand block #}
+          <div class="px-6 pt-7 pb-3">
+            <a
+              href="/ui/"
+              class="font-display text-2xl leading-none font-bold tracking-tight"
+            ><span class="sr-only">meho</span><span class="meho-type" aria-hidden="true"><span>m</span><span>e</span><span>h</span><span>o</span></span><span class="meho-caret" aria-hidden="true"></span></a>
+            <div class="meho-overline mt-2">Operator Console</div>
           </div>
-          {#- Sidebar links. DaisyUI's ``menu-active`` class marks the
-              current surface; ``aria-current="page"`` carries the same
-              signal to assistive tech. ``active_surface`` is set by the
-              rendering route (e.g. the broadcast view passes
-              ``"broadcast"``). -#}
-          <ul class="menu-vertical w-full gap-1">
-            <li>
-              <a
-                href="/ui/broadcast"
-                class="flex items-center gap-2{% if active_surface == 'broadcast' %} menu-active{% endif %}"
-                {% if active_surface == 'broadcast' %}aria-current="page"{% endif %}
+
+          {# Surface nav #}
+          <div class="px-3 pt-5">
+            <div class="meho-overline mb-2 px-3">
+              Surfaces
+            </div>
+            {#- DaisyUI's ``menu-active`` class marks the current
+                surface; ``aria-current="page"`` carries the same
+                signal to assistive tech. ``active_surface`` is set by
+                the rendering route. -#}
+            <ul class="menu menu-vertical w-full gap-1 p-0">
+              {% for key, href, icon_name, label in nav_surfaces %}
+              <li>
+                <a
+                  href="{{ href }}"
+                  class="flex items-center gap-2.5 px-3 py-2.5 text-[0.92rem]{% if active_surface == key %} menu-active{% endif %}"
+                  {% if active_surface == key %}aria-current="page"{% endif %}
+                >
+                  {{ icon(icon_name, class="size-[1.05rem] shrink-0") }}
+                  <span>{{ label }}</span>
+                </a>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+
+          {# Bottom block: tenant + account + status #}
+          <div class="mt-auto px-5 pb-6">
+            <div class="space-y-4 border-t border-base-content/8 pt-5">
+              {# Live read-only tenant chip (G0.15-T9 #1217): the BFF
+                 session's tenant, lifted into ``session_tenant`` by the
+                 chassis context processor (human name, slug fallback,
+                 UUID fallback). ``None`` on the pre-session auth surfaces,
+                 so the chip shows the sign-in hint. A cross-tenant
+                 *selector* is still future (T4 #865). #}
+              <div>
+                <div class="meho-overline mb-1.5">Tenant</div>
+                <div
+                  class="truncate rounded-lg border border-base-content/10 bg-base-100/60 px-2.5 py-2 font-mono text-xs text-base-content/55"
+                  {% if session_tenant is not none %}aria-label="Active tenant"{% endif %}
+                  title="{% if session_tenant is not none %}Active tenant{% else %}Sign in to choose a tenant{% endif %}"
+                >
+                  {% if session_tenant is not none %}{{ session_tenant.name or session_tenant.slug or session_tenant.id }}{% else %}(sign in to choose){% endif %}
+                </div>
+              </div>
+
+              {# Account row: user menu (opens upward) + theme toggle #}
+              <div class="flex items-center justify-between">
+                <div class="relative" x-on:click.outside="userMenuOpen = false">
+                  <button
+                    type="button"
+                    class="btn btn-ghost h-auto min-h-0 gap-2 px-1.5 py-1.5"
+                    aria-haspopup="menu"
+                    x-bind:aria-expanded="userMenuOpen.toString()"
+                    x-on:click="userMenuOpen = !userMenuOpen"
+                  >
+                    <span class="grid size-7 place-items-center rounded-full bg-base-content/8 font-mono text-[0.62rem] font-medium text-base-content/70 ring-1 ring-base-content/15">OP</span>
+                    <span class="text-xs font-medium text-base-content/70">Operator</span>
+                    {{ icon("chevron-down", class="size-3 rotate-180 text-base-content/40") }}
+                  </button>
+                  <ul
+                    class="menu menu-sm absolute bottom-full left-0 z-50 mb-2 w-48 rounded-box border border-base-content/10 bg-base-100 p-2 shadow-xl"
+                    role="menu"
+                    x-show="userMenuOpen"
+                    x-transition
+                    x-cloak
+                  >
+                    <li>
+                      <a href="/ui/auth/logout" class="flex items-center gap-2">
+                        {{ icon("log-out", class="size-3.5 opacity-60") }}
+                        <span>Sign out</span>
+                      </a>
+                    </li>
+                  </ul>
+                </div>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-square btn-sm text-base-content/60"
+                  aria-label="Toggle color theme"
+                  x-data="{ theme: document.documentElement.getAttribute('data-theme') }"
+                  x-on:click="theme = window.mehoToggleTheme()"
+                  x-on:meho-theme-changed.window="theme = $event.detail.theme"
+                >
+                  <span x-show="theme === 'meho-dark'">{{ icon("sun", class="size-4") }}</span>
+                  <span x-show="theme !== 'meho-dark'" x-cloak>{{ icon("moon", class="size-4") }}</span>
+                </button>
+              </div>
+
+              {# Status line #}
+              <div
+                class="flex items-center gap-2 px-0.5 font-mono text-[0.68rem] text-base-content/50"
+                title="MEHO backplane v{{ app_version }}"
               >
-                <span aria-hidden="true">&#x1F4E1;</span>
-                <span>Broadcast</span>
-              </a>
-            </li>
-            <li>
-              <a
-                href="/ui/kb"
-                class="flex items-center gap-2{% if active_surface == 'knowledge' %} menu-active{% endif %}"
-                {% if active_surface == 'knowledge' %}aria-current="page"{% endif %}
-              >
-                <span aria-hidden="true">&#x1F4DA;</span>
-                <span>Knowledge</span>
-              </a>
-            </li>
-            <li>
-              <a
-                href="/ui/topology"
-                class="flex items-center gap-2{% if active_surface == 'topology' %} menu-active{% endif %}"
-                {% if active_surface == 'topology' %}aria-current="page"{% endif %}
-              >
-                <span aria-hidden="true">&#x1F578;</span>
-                <span>Topology</span>
-              </a>
-            </li>
-            <li>
-              <a
-                href="/ui/connectors"
-                class="flex items-center gap-2{% if active_surface == 'connectors' %} menu-active{% endif %}"
-                {% if active_surface == 'connectors' %}aria-current="page"{% endif %}
-              >
-                <span aria-hidden="true">&#x1F50C;</span>
-                <span>Connectors</span>
-              </a>
-            </li>
-            <li>
-              <a
-                href="/ui/memory"
-                class="flex items-center gap-2{% if active_surface == 'memory' %} menu-active{% endif %}"
-                {% if active_surface == 'memory' %}aria-current="page"{% endif %}
-              >
-                <span aria-hidden="true">&#x1F9E0;</span>
-                <span>Memory</span>
-              </a>
-            </li>
-            <li>
-              <a
-                href="/ui/runbooks"
-                class="flex items-center gap-2{% if active_surface == 'runbooks' %} menu-active{% endif %}"
-                {% if active_surface == 'runbooks' %}aria-current="page"{% endif %}
-              >
-                <span aria-hidden="true">&#x1F4D8;</span>
-                <span>Runbooks</span>
-              </a>
-            </li>
-          </ul>
+                <span
+                  class="inline-block h-1.5 w-1.5 rounded-full {% if ready %}bg-success{% else %}bg-warning{% endif %}"
+                  aria-hidden="true"
+                ></span>
+                <span>v{{ app_version }}</span>
+                <span aria-hidden="true">&middot;</span>
+                <span>{% if ready %}ready{% else %}starting{% endif %}</span>
+              </div>
+            </div>
+          </div>
         </nav>
       </aside>
     </div>

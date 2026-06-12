@@ -46,6 +46,7 @@ __all__ = [
     "all_connectors_v2",
     "canonical_product_token",
     "clear_registry",
+    "deregister_connector_v2",
     "get_connector",
     "list_connector_impls",
     "register_connector",
@@ -176,6 +177,59 @@ def register_connector_v2(
         impl_id=impl_id,
         cls=cls.__name__,
     )
+
+
+def deregister_connector_v2(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> bool:
+    """Remove one v2 three-tuple registration. Returns whether a key was removed.
+
+    Counterpart to :func:`register_connector_v2`, added for the
+    connector DELETE surface (G0.25 #1700): operators can remove the
+    :class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`
+    auto-shims that aborted ingests leave behind. The function itself
+    is mechanism-only — it pops exactly the ``(product, version,
+    impl_id)`` key it is given and never inspects the class. Policy
+    (only auto-shims are ever deregistered; hand-coded classes stay)
+    lives with the caller in
+    :mod:`meho_backplane.operations.ingest.delete_connector`, because
+    this module cannot import the shim base class without creating an
+    import cycle.
+
+    The v1 table is deliberately untouched: v1 entries are written at
+    module import time by shipped connector packages and re-appear on
+    every process start, so removing them here would only manufacture
+    a restart-inconsistent half-state. The v1-compat padding rows the
+    v1 path writes into the v2 table (``(product, "", "")``) are
+    likewise never passed in by the production caller — parsed
+    connector triples always carry a non-empty version.
+
+    Removing an absent key returns ``False`` and is not an error —
+    the v2 registry is process-local, so a delete replayed against a
+    freshly-restarted pod (where the shim was never re-registered)
+    must stay a no-op rather than a crash.
+    """
+    key = (product, version, impl_id)
+    cls = _REGISTRY_V2.pop(key, None)
+    if cls is None:
+        _log.info(
+            "connector_deregister_v2_missed",
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        )
+        return False
+    _log.info(
+        "connector_deregistered_v2",
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        cls=cls.__name__,
+    )
+    return True
 
 
 def get_connector(product: str) -> type[Connector] | None:

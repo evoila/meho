@@ -5286,6 +5286,11 @@ type GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams defines parameters for DeleteEndpointApiV1ConnectorsConnectorIdDelete.
+type DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams defines parameters for DisableEndpointApiV1ConnectorsConnectorIdDisablePost.
 type DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -7065,6 +7070,9 @@ type ClientInterface interface {
 	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet request
 	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DeleteEndpointApiV1ConnectorsConnectorIdDelete request
+	DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DisableEndpointApiV1ConnectorsConnectorIdDisablePost request
 	DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -8148,6 +8156,18 @@ func (c *Client) IngestEndpointApiV1ConnectorsIngestPost(ctx context.Context, pa
 
 func (c *Client) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetRequest(c.Server, jobId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteEndpointApiV1ConnectorsConnectorIdDeleteRequest(c.Server, connectorId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -12483,6 +12503,55 @@ func NewGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetRequest(server stri
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteEndpointApiV1ConnectorsConnectorIdDeleteRequest generates requests for DeleteEndpointApiV1ConnectorsConnectorIdDelete
+func NewDeleteEndpointApiV1ConnectorsConnectorIdDeleteRequest(server string, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -20728,6 +20797,9 @@ type ClientWithResponsesInterface interface {
 	// GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse request
 	GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetWithResponse(ctx context.Context, jobId openapi_types.UUID, params *GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetParams, reqEditors ...RequestEditorFn) (*GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse, error)
 
+	// DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request
+	DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error)
+
 	// DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse request
 	DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error)
 
@@ -22065,6 +22137,28 @@ func (r GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse) Status() 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -25455,6 +25549,15 @@ func (c *ClientWithResponses) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobId
 	return ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp)
 }
 
+// DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request returning *DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse
+func (c *ClientWithResponses) DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
+	rsp, err := c.DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx, connectorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse(rsp)
+}
+
 // DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse request returning *DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse
 func (c *ClientWithResponses) DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error) {
 	rsp, err := c.DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx, connectorId, params, reqEditors...)
@@ -28215,6 +28318,32 @@ func ParseGetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGetResponse(rsp *htt
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse parses an HTTP response from a DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse call
+func ParseDeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse(rsp *http.Response) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

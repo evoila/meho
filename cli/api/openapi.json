@@ -3374,6 +3374,52 @@
         }
       }
     },
+    "/api/v1/connectors/{connector_id}": {
+      "delete": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Delete Endpoint",
+        "description": "Delete *connector_id* \u2014 rows under the operator's tenant + the ingest shim.\n\nG0.25-T2 (#1700): clean-up surface for the zero-op registry stubs\naborted ingests leave behind, and for removing an unwanted\ningested connector outright. Removes the connector's\n``endpoint_descriptor`` + ``operation_group`` rows and writes one\n``meho.connector.delete`` audit row in the same transaction; when\nno rows remain for the triple under any scope, the\nauto-registered ``GenericRestConnector`` shim is also popped from\nthe v2 registry (hand-coded connector classes are never\nderegistered). A zero-op stub \u2014 registered class, no rows \u2014 is\ndeletable here too: that delete is registry-only.\n\nTenant scoping (#1699 contract): this route exposes **no**\n``tenant_id`` parameter \u2014 the delete scope is always the calling\noperator's tenant from the JWT. Built-in / global connectors\n(``tenant_id IS NULL`` rows) are deleted via the MCP sibling\n``meho.connector.delete`` with ``tenant_id`` omitted\n(tenant_admin only). Unknown ids, cross-tenant probes, and rows\nvisible only under a scope this route cannot name all collapse\ninto the same 404 the other connector routes use; a repeat\nDELETE therefore returns 404 once the first one landed.\n\nA connector that still has enabled operations is deleted anyway \u2014\nthe advisory is deliberate, not an error: it surfaces as the\n``connector_delete_enabled_ops`` structured log event plus the\naudit payload's ``enabled_operations_deleted`` count. The wire\nresponse stays ``204 No Content`` per the task contract, so the\nstructured warning body lives on the MCP sibling (the\n``edit_op`` 200-promotion precedent from #1630 remains available\nif a REST wire home is ever needed). Re-ingesting the same triple\nafterwards re-registers the connector from scratch.",
+        "operationId": "delete_endpoint_api_v1_connectors__connector_id__delete",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/kb": {
       "get": {
         "tags": [

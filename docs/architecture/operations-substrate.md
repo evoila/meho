@@ -379,7 +379,7 @@ Frozen Pydantic model with `MappingProxyType`-wrapped nested mappings (via `@mod
 
 ### `list_operation_groups(connector_id)`
 
-Returns enabled operation groups for a connector. Tenant scoping: union of built-in + tenant-curated rows. Only `review_status='enabled'` groups surface; staged/disabled rows remain hidden from the agent. Operation counts per group are aggregated in a single DB pass (no N+1).
+Returns the operation groups for a connector that are visible to the agent. Tenant scoping: union of built-in + tenant-curated rows. A group surfaces when it is `review_status='enabled'` **or** still staged/disabled at the group level yet holding ≥1 per-op-enabled descriptor (`edit_op is_enabled=true`); the latter is flagged `partial=true` with a non-zero `enabled_op_count` so groups-first discovery isn't blind to per-op enablement that `search_operations` + dispatch already honour (claude-rdc-hetzner-dc#1136). A group that is not enabled and holds zero enabled ops stays hidden. Operation counts per group are aggregated in a single DB pass (no N+1).
 
 The agent uses this **first** when it doesn't know which group to search within.
 

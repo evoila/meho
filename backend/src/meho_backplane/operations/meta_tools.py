@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing >600-line shared meta-tool
+# module (915 lines before this change; it co-locates the four agent
+# meta-tool handlers + their Pydantic wire models, shared verbatim across
+# the MCP, REST, and CLI surfaces — that wire identity is the point). The
+# #1648 change is a localised list_operation_groups visibility fix
+# (partial-marker fields + one query predicate); a module split would
+# touch every surface and is explicitly out of scope here. Tracked
+# separately if it lands.
 
 """Three operation meta-tools backing the agent's working surface.
 
@@ -202,13 +210,32 @@ SEARCH_LIMIT_MAX: int = 50
 
 
 class OperationGroupSummary(BaseModel):
-    """One enabled operation group as returned by :func:`list_operation_groups`.
+    """One operation group as returned by :func:`list_operation_groups`.
 
     ``when_to_use`` is the LLM-summarised string the agent reads to pick
     which group to search within. Populated by G0.7's ingestion pipeline
     for ``source_kind='ingested'`` connectors; supplied verbatim by
     :func:`~meho_backplane.operations.register_typed_operation` callers
     for typed connectors.
+
+    A group surfaces here when it is either fully enabled
+    (``review_status='enabled'``) **or** still ``staged``/``disabled`` at
+    the group level yet holding at least one per-op-enabled descriptor
+    (``edit_op is_enabled=true``). The latter is flagged ``partial=True``
+    so groups-first discovery isn't blind to per-op enablement — an agent
+    that called ``list_operation_groups`` FIRST (as the tool description
+    instructs) still sees the group whose ops ``search_operations`` and
+    dispatch already treat as live (claude-rdc-hetzner-dc#1136).
+
+    * ``operation_count`` / ``enabled_op_count`` — both count the group's
+      ``is_enabled=True`` descriptors. They are equal by construction;
+      ``enabled_op_count`` names the semantic explicitly so a ``partial``
+      group's live-op count reads unambiguously, and it stays stable if
+      ``operation_count`` is ever redefined to a total.
+    * ``partial`` — ``True`` exactly when the group's own
+      ``review_status`` is not ``'enabled'`` (so its visibility here is
+      owed solely to per-op enablement, which always implies
+      ``enabled_op_count >= 1``); ``False`` for a fully-enabled group.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -217,6 +244,8 @@ class OperationGroupSummary(BaseModel):
     name: str
     when_to_use: str
     operation_count: int
+    enabled_op_count: int
+    partial: bool
 
 
 class OperationSearchHit(BaseModel):
@@ -412,19 +441,40 @@ def _build_operation_groups_query(
 ) -> Any:
     """Build the keyset-paginated :class:`OperationGroup` SELECT.
 
-    Filters: matching connector triple + ``review_status='enabled'`` +
-    tenant scope (NULL global OR this tenant); orders by ``group_key``
+    Filters: matching connector triple + tenant scope (NULL global OR
+    this tenant) + a *visibility* predicate; orders by ``group_key``
     ASC; capped at ``limit``. ``cursor`` (when given) advances past
     the prior page's last ``group_key`` via strict ``>`` — keyset
     pagination with no offset and no overlap.
+
+    Visibility predicate (claude-rdc-hetzner-dc#1136): a group surfaces
+    when it is fully enabled (``review_status='enabled'``) **or** still
+    ``staged``/``disabled`` at the group level yet holding ≥1 per-op-
+    enabled descriptor. The per-op branch is a correlated ``EXISTS`` over
+    ``endpoint_descriptor`` tied by ``group_id``, so the connector triple
+    and tenant scope are inherited from the matched group row (the same
+    transitive scoping :func:`_count_ops_per_group` relies on) without
+    re-stating them on the descriptor. This keeps groups-first discovery
+    in sync with ``search_operations`` + dispatch, which already key off
+    per-op ``is_enabled``; the marker fields on
+    :class:`OperationGroupSummary` tell a fully-enabled group apart from
+    a per-op-only (``partial``) one.
     """
+    has_enabled_op = (
+        select(EndpointDescriptor.id)
+        .where(
+            EndpointDescriptor.group_id == OperationGroup.id,
+            EndpointDescriptor.is_enabled.is_(True),
+        )
+        .exists()
+    )
     stmt = (
         select(OperationGroup)
         .where(
             OperationGroup.product == product,
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
-            OperationGroup.review_status == "enabled",
+            (OperationGroup.review_status == "enabled") | has_enabled_op,
             (OperationGroup.tenant_id.is_(None)) | (OperationGroup.tenant_id == tenant_id),
         )
         .order_by(OperationGroup.group_key)
@@ -508,15 +558,27 @@ async def list_operation_groups(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return enabled operation groups for *connector_id*.
+    """Return the operation groups for *connector_id* visible to the agent.
 
     ``arguments`` shape: ``{"connector_id": str, "limit"?: int,
     "cursor"?: str}``.
 
-    Only ``review_status='enabled'`` groups are returned — staged /
-    disabled groups remain hidden from the agent. Tenant scoping: the
-    union of built-in (``tenant_id IS NULL``) and tenant-curated
+    A group is returned when it is fully enabled
+    (``review_status='enabled'``) **or** still ``staged``/``disabled`` at
+    the group level yet holding ≥1 per-op-enabled descriptor (set via
+    ``edit_op is_enabled=true``); the latter carries ``partial=True`` with
+    a non-zero ``enabled_op_count`` so groups-first discovery isn't blind
+    to per-op enablement that ``search_operations`` + dispatch already
+    honour (claude-rdc-hetzner-dc#1136). A group that is not enabled and
+    holds zero enabled ops stays hidden. Tenant scoping: the union of
+    built-in (``tenant_id IS NULL``) and tenant-curated
     (``tenant_id == operator.tenant_id``) rows.
+
+    Per-group enablement note: a service-layer
+    :meth:`~meho_backplane.operations.ingest.service.ReviewService.enable_group`
+    already exists for scope-minimal per-group enablement but is not yet
+    exposed as an MCP tool (out of scope for #1648); ``edit_op`` per-op
+    stays the agent-surface escape hatch in the meantime.
 
     Three connector-existence outcomes (gated by
     :func:`_require_dispatchable_connector`):
@@ -577,6 +639,13 @@ async def list_operation_groups(
             name=g.name,
             when_to_use=g.when_to_use,
             operation_count=counts.get(g.id, 0),
+            enabled_op_count=counts.get(g.id, 0),
+            # A group reaches this list either fully enabled or — when
+            # still staged/disabled — solely because it holds ≥1 per-op-
+            # enabled descriptor (the query's EXISTS branch). Flag the
+            # latter so groups-first discovery can tell the two apart;
+            # ``enabled_op_count >= 1`` is guaranteed in the partial case.
+            partial=g.review_status != "enabled",
         )
         for g in groups
     ]

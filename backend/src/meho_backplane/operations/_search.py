@@ -64,7 +64,26 @@ async def resolve_group_id(
     same key (same precedence as
     :func:`~meho_backplane.operations._lookup.lookup_descriptor`). Returns
     ``None`` when neither bucket has a match.
+
+    Visibility predicate (claude-rdc-hetzner-dc#1136): a group resolves
+    when it is fully enabled (``review_status='enabled'``) **or** still
+    ``staged``/``disabled`` at the group level yet holding ≥1 per-op-
+    enabled descriptor. This mirrors the ``list_operation_groups``
+    visibility branch (:func:`~meho_backplane.operations.meta_tools._build_operation_groups_query`)
+    so a group-scoped ``search_operations(group=<key>)`` on a ``partial``
+    group narrows to its live ops instead of short-circuiting to empty
+    hits — :func:`hybrid_search` already filters per-op ``is_enabled``,
+    so the resolved staged-group id then yields exactly its enabled ops.
     """
+    has_enabled_op = (
+        select(EndpointDescriptor.id)
+        .where(
+            EndpointDescriptor.group_id == OperationGroup.id,
+            EndpointDescriptor.is_enabled.is_(True),
+        )
+        .exists()
+    )
+    visible = (OperationGroup.review_status == "enabled") | has_enabled_op
     # Tenant-scoped first.
     result = await session.execute(
         select(OperationGroup.id).where(
@@ -73,7 +92,7 @@ async def resolve_group_id(
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
             OperationGroup.group_key == group_key,
-            OperationGroup.review_status == "enabled",
+            visible,
         )
     )
     row = result.scalar_one_or_none()
@@ -86,7 +105,7 @@ async def resolve_group_id(
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
             OperationGroup.group_key == group_key,
-            OperationGroup.review_status == "enabled",
+            visible,
         )
     )
     return result.scalar_one_or_none()

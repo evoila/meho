@@ -169,7 +169,11 @@ register_mcp_tool(
             "and `data.next_step.verb` = the `meho connector ingest …` "
             "command to run, then retry); a KNOWN connector with no "
             "enabled groups returns an empty list (operationally "
-            "meaningful: it exists, nothing enabled yet). Pagination "
+            "meaningful: it exists, nothing enabled yet). A group whose "
+            "own review is still staged but that holds ≥1 per-op-enabled "
+            "operation IS listed, flagged `partial=true` with a non-zero "
+            "`enabled_op_count` — only those ops are live and "
+            "dispatchable; `search_operations` will find them. Pagination "
             "(G0.18-T5 #1358): keyset on `group_key`; "
             "default `limit=100`, max 500; pass the response's "
             "`next_cursor` back as the next call's `cursor` to fetch "
@@ -228,12 +232,38 @@ register_mcp_tool(
                             "name": {"type": "string"},
                             "when_to_use": {"type": "string"},
                             "operation_count": {"type": "integer", "minimum": 0},
+                            "enabled_op_count": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": (
+                                    "Count of this group's enabled (live, "
+                                    "dispatchable) operations. Equal to "
+                                    "`operation_count`; named explicitly so a "
+                                    "`partial` group's live-op count reads "
+                                    "unambiguously."
+                                ),
+                            },
+                            "partial": {
+                                "type": "boolean",
+                                "description": (
+                                    "True when the group itself is NOT "
+                                    "`review_status=enabled` but holds ≥1 "
+                                    "per-op-enabled operation (so it is "
+                                    "surfaced here solely on per-op "
+                                    "enablement). False for a fully-enabled "
+                                    "group. When true, `enabled_op_count` is "
+                                    "≥1 and only those ops are live; the "
+                                    "rest of the group is still staged."
+                                ),
+                            },
                         },
                         "required": [
                             "group_key",
                             "name",
                             "when_to_use",
                             "operation_count",
+                            "enabled_op_count",
+                            "partial",
                         ],
                     },
                 },

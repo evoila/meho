@@ -282,6 +282,19 @@ connector-related release-notes line.
   `ConnectorListItem` fields and the canonical wire-shape test rejects
   unknown fixture keys so the mirror cannot silently regress. The
   human table is unchanged. (#1645)
+- `list_operation_groups` no longer hides a group that holds live ops just
+  because the group's own review is still `staged`. Group listing keyed off
+  the group's `review_status='enabled'` while `search_operations` + dispatch
+  key off per-op `is_enabled`, so a connector whose ops were made live one
+  at a time via `meho connector edit-op … --enable` (the scope-minimal path,
+  since `meho.connector.enable` cascades to **every** op) showed zero groups
+  to the discovery tool whose own description says to "call this FIRST."
+  Such a group is now surfaced, flagged `partial=true` with a non-zero
+  `enabled_op_count`, so groups-first discovery stays in sync with what is
+  actually dispatchable; a staged group with zero enabled ops still stays
+  hidden, and a fully-enabled group is returned without the marker. The
+  group-level cascade semantics of `meho.connector.enable` are unchanged
+  (#1648 — consumer signal claude-rdc-hetzner-dc#1136).
 
 ## [0.13.0] - 2026-06-11
 

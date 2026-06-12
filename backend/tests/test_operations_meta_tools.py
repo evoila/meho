@@ -576,6 +576,159 @@ async def test_list_operation_groups_includes_operation_count(
     assert result["groups"][0]["operation_count"] == 2
 
 
+async def _seed_descriptors(
+    *,
+    group_id: UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+    enabled_flags: list[bool],
+) -> None:
+    """Seed ``EndpointDescriptor`` rows in *group_id* with the given enablement.
+
+    One row per entry in *enabled_flags* (``True`` → ``is_enabled=True``).
+    Mirrors the inline seeding in
+    :func:`test_list_operation_groups_includes_operation_count`.
+    """
+    from datetime import UTC, datetime
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s, s.begin():
+        for i, enabled in enumerate(enabled_flags):
+            s.add(
+                EndpointDescriptor(
+                    id=uuid.uuid4(),
+                    tenant_id=None,
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                    op_id=f"{impl_id}.op{i}",
+                    source_kind="typed",
+                    method=None,
+                    path=None,
+                    handler_ref="tests.test_operations_meta_tools._module_handler",
+                    summary=f"Op {i}",
+                    description=f"Op {i} description.",
+                    group_id=group_id,
+                    tags=[],
+                    parameter_schema={"type": "object"},
+                    response_schema=None,
+                    llm_instructions=None,
+                    safety_level="safe",
+                    requires_approval=False,
+                    is_enabled=enabled,
+                    embedding=None,
+                    custom_description=None,
+                    custom_notes=None,
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
+
+@pytest.mark.asyncio
+async def test_list_operation_groups_surfaces_staged_group_with_enabled_ops() -> None:
+    """AC: a staged group holding per-op-enabled ops is surfaced as ``partial``.
+
+    claude-rdc-hetzner-dc#1136: on a connector whose group is still
+    ``review_status=staged`` but 3 of its ops were flipped
+    ``is_enabled=true`` via ``edit_op``, ``list_operation_groups`` returns
+    the containing group marked ``partial=true`` with ``enabled_op_count=3``
+    — so groups-first discovery isn't blind to per-op enablement.
+    """
+    group_id = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV v2",
+        when_to_use="use kv.",
+        review_status="staged",
+    )
+    # Three enabled ops + one left disabled (the rest of the staged group).
+    await _seed_descriptors(
+        group_id=group_id,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        enabled_flags=[True, True, True, False],
+    )
+    operator = _make_operator()
+
+    result = await list_operation_groups(operator, {"connector_id": "vault-1.x"})
+
+    assert len(result["groups"]) == 1
+    group = result["groups"][0]
+    assert group["group_key"] == "kv"
+    assert group["partial"] is True
+    assert group["enabled_op_count"] == 3
+    assert group["operation_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_list_operation_groups_staged_group_zero_enabled_ops_omitted() -> None:
+    """Regression: a fully-staged group with zero enabled ops stays hidden.
+
+    Guards against the new per-op-visibility branch adding noise — a
+    staged group whose ops are all ``is_enabled=false`` must not surface.
+    """
+    group_id = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="staged-only",
+        name="Staged",
+        when_to_use="staged.",
+        review_status="staged",
+    )
+    await _seed_descriptors(
+        group_id=group_id,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        enabled_flags=[False, False],
+    )
+    operator = _make_operator()
+
+    result = await list_operation_groups(operator, {"connector_id": "vault-1.x"})
+
+    assert result["groups"] == []
+    assert result["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_operation_groups_enabled_group_not_marked_partial() -> None:
+    """Regression: a fully-enabled group is returned WITHOUT the partial marker."""
+    group_id = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV v2",
+        when_to_use="use kv.",
+        review_status="enabled",
+    )
+    await _seed_descriptors(
+        group_id=group_id,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        enabled_flags=[True, True],
+    )
+    operator = _make_operator()
+
+    result = await list_operation_groups(operator, {"connector_id": "vault-1.x"})
+
+    assert len(result["groups"]) == 1
+    group = result["groups"][0]
+    assert group["partial"] is False
+    assert group["enabled_op_count"] == 2
+    assert group["operation_count"] == 2
+
+
 # ---------------------------------------------------------------------------
 # search_operations
 # ---------------------------------------------------------------------------
@@ -762,6 +915,53 @@ async def test_search_operations_filters_by_group(
     kv_op_ids = sorted(h["op_id"] for h in kv_hits)
     assert all_op_ids == ["vault.kv.read", "vault.sys.read"]
     assert kv_op_ids == ["vault.kv.read"]
+
+
+@pytest.mark.asyncio
+async def test_search_operations_group_scoped_on_partial_group_returns_enabled_ops(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """B1 (claude-rdc-hetzner-dc#1136): group-scoped search on a ``partial`` group.
+
+    A group still ``review_status=staged`` but holding per-op-enabled ops
+    is surfaced by ``list_operation_groups`` as ``partial`` — the agent is
+    told to then call ``search_operations(group=<key>)``. That path resolves
+    the group via :func:`resolve_group_id`, which must now honour per-op
+    enablement (not require ``review_status='enabled'``) so the scoped
+    search returns the live ops instead of ``[]``. Only the enabled ops
+    come back; the staged group's disabled op stays filtered out by
+    ``hybrid_search``.
+    """
+    group_id = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV v2",
+        when_to_use="use kv.",
+        review_status="staged",
+    )
+    # Two enabled ops + one disabled (the rest of the staged group).
+    await _seed_descriptors(
+        group_id=group_id,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        enabled_flags=[True, True, False],
+    )
+    operator = _make_operator()
+
+    scoped_hits = (
+        await search_operations(
+            operator,
+            {"connector_id": "vault-1.x", "query": "op", "group": "kv"},
+        )
+    )["hits"]
+
+    scoped_op_ids = sorted(h["op_id"] for h in scoped_hits)
+    # op0 + op1 are enabled; op2 is disabled and must not surface.
+    assert scoped_op_ids == ["vault.op0", "vault.op1"]
 
 
 @pytest.mark.asyncio

@@ -205,6 +205,7 @@ flowchart TD
     H -->|raw, handle| I["8. audit_and_broadcast_safe&#10;(write row, publish event)"]
     I --> J[9. return OperationResult]
     G -->|handler raises| Z6["connector_error&#10;+ audit_and_broadcast_safe"]
+    G -->|handler raises NotImplementedError| Z6a["connector_unsupported&#10;+ audit_and_broadcast_safe"]
     G -->|ImportError / TypeError| Z7["handler_unreachable&#10;+ audit_and_broadcast_safe"]
 ```
 
@@ -234,7 +235,8 @@ The dispatcher never raises; it always returns an `OperationResult`. Every error
 | `handler_unreachable`   | `importlib` couldn't resolve `handler_ref`, or the resolved symbol is not callable.   |
 | `denied`                | Policy gate denied the call.                                                          |
 | `awaiting_approval`     | Policy gate issued a `needs_approval` verdict; a durable `ApprovalRequest` row was created. `extras.approval_request_id` carries the UUID. |
-| `connector_error`       | Connector / handler / reducer raised. Exception class + (length-capped) message in `extras`. |
+| `connector_unsupported` | Connector / handler raised `NotImplementedError` — the deliberate "this connector doesn't do that" signal (an unsupported `target.auth_model`; an unreplaced ingest auto-shim). The raise-site message is promoted verbatim into the `error` string and `extras.detail`; `extras.cause` distinguishes `unsupported_feature` (fix the target config) from `unreplaced_auto_shim` (register the per-product subclass). G0.23-T1 (#1627). |
+| `connector_error`       | Connector / handler raised any other exception; reducer / redaction raised any exception (the `connector_unsupported` classification applies only to the source-kind branch where connector code runs). Exception class + (length-capped) message in `extras`. |
 
 Why always-return: two distinct surfaces consume `dispatch()`. HTTP routes via FastAPI — a raised exception turns into a 500 via the chassis handler, useful for genuine programming bugs (deleted module) but not for user-input errors. MCP tool handlers + CLI verbs + recursive composite calls — the caller wants a structured result it can render; a raised exception across the MCP JSON-RPC boundary turns into a generic 500 with no diagnostic surface. Returning a structured `OperationResult` for every operator-visible failure mode keeps the contract uniform across the three call sites.
 

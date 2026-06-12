@@ -197,6 +197,15 @@ async def _edit_op_handler(
 
     Same PATCH-semantic discipline as :func:`_edit_group_handler`:
     fields not present in ``arguments`` are never forwarded.
+
+    ``warnings`` mirrors the REST route's
+    :class:`~meho_backplane.operations.ingest.EditOpResponse` field
+    (G0.23-T4 #1630): enable-time advisories from the shared service
+    layer — today only the ``unreplaced_auto_shim`` probe —
+    serialized per-entry via ``model_dump(mode="json")``. Empty list
+    on the clean path; never blocks the write (``ok`` stays
+    ``True``). Surfacing it here keeps MCP↔REST parity, the same
+    discipline the ingest error envelopes follow (#1534 / #1610).
     """
     connector_id: str = arguments["connector_id"]
     op_id: str = arguments["op_id"]
@@ -211,13 +220,18 @@ async def _edit_op_handler(
     if "is_enabled" in arguments:
         patch["is_enabled"] = arguments["is_enabled"]
     service = ReviewService(operator)
-    await service.edit_op(
+    warnings = await service.edit_op(
         connector_id,
         op_id,
         tenant_id=tenant_id,
         **patch,
     )
-    return {"connector_id": connector_id, "op_id": op_id, "ok": True}
+    return {
+        "connector_id": connector_id,
+        "op_id": op_id,
+        "ok": True,
+        "warnings": [warning.model_dump(mode="json") for warning in warnings],
+    }
 
 
 async def _enable_handler(
@@ -254,13 +268,18 @@ register_mcp_tool(
         name="meho.connector.list",
         description=(
             "List ingested connectors visible to the operator's tenant "
-            "(plus built-in / global). Returns per-connector counts and "
-            "the aggregate review status (staged / enabled / disabled). "
-            "Use as the entry point when an operator needs to find a "
-            "connector to review or to see what's already in place. "
-            "Filter via status=staged to surface only connectors that "
-            "need review. Pair with meho.connector.review to drill into "
-            "an individual connector. Read-only; visible to operator and "
+            "(plus built-in / global). Returns per-connector counts — "
+            "group counts split by review status, plus the operation "
+            "rollup split enabled-vs-total (enabled_operation_count = "
+            "ops whose per-op is_enabled flag is set, i.e. actually "
+            "dispatchable; operation_count = every ingested/typed/"
+            "composite op) — and the aggregate review status (staged / "
+            "enabled / disabled). Use as the entry point when an "
+            "operator needs to find a connector to review or to see "
+            "what's already in place. Filter via status=staged to "
+            "surface only connectors that need review. Pair with "
+            "meho.connector.review to drill into an individual "
+            "connector. Read-only; visible to operator and "
             "tenant_admin roles."
         ),
         inputSchema={

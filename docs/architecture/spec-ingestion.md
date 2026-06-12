@@ -239,7 +239,7 @@ Defined in [`api/v1/connectors_ingest.py`](../../backend/src/meho_backplane/api/
 | `/api/v1/connectors` | `GET` | `operator` | `ConnectorListResponse` (200) |
 | `/api/v1/connectors/{id}/review` | `GET` | `operator` | `ConnectorReviewPayload` (200) |
 | `/api/v1/connectors/{id}/groups/{group_key}` | `PATCH` | `tenant_admin` | 204 No Content |
-| `/api/v1/connectors/{id}/operations/{op_id:path}` | `PATCH` | `tenant_admin` | 204 No Content |
+| `/api/v1/connectors/{id}/operations/{op_id:path}` | `PATCH` | `tenant_admin` | `EditOpResponse` (200) — enable-time advisories in `warnings` ([#1630](https://github.com/evoila/meho/issues/1630)) |
 | `/api/v1/connectors/{id}/enable` | `POST` | `tenant_admin` | 204 No Content |
 | `/api/v1/connectors/{id}/disable` | `POST` | `tenant_admin` | 204 No Content |
 

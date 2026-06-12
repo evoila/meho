@@ -22,8 +22,9 @@ Class-side registrations from the v2 connector registry (entries
 registered via
 :func:`~meho_backplane.connectors.registry.register_connector_v2`
 that have no rows in ``endpoint_descriptor`` / ``operation_group``
-yet) are unioned into the response with ``group_count: 0,
-operation_count: 0``. This surfaces "State 0.5" connectors
+yet) are unioned into the response with every count zeroed
+(``group_count: 0, operation_count: 0, enabled_operation_count:
+0``). This surfaces "State 0.5" connectors
 (harbor, sddc-manager during pre-G3.5 windows) so operators see
 ``connector registered ⇒ visible in list`` rather than silent
 invisibility until the first op lands. v1-compat shim entries
@@ -326,8 +327,16 @@ async def _operation_count_by_connector(
     session: AsyncSession,
     *,
     operator_tenant_id: UUID,
-) -> dict[tuple[UUID | None, str, str, str], int]:
+) -> dict[tuple[UUID | None, str, str, str], dict[str, int]]:
     """Aggregate :class:`EndpointDescriptor` rows by connector triple.
+
+    Returns a dict keyed on ``(tenant_id, product, version,
+    impl_id)`` whose values are ``{total, enabled}`` op counts.
+    ``enabled`` counts the rows whose per-op ``is_enabled`` flag is
+    set -- the dispatchable subset -- via the same portable ``CASE
+    WHEN`` SUM technique as :func:`_aggregate_groups_by_connector`,
+    so an operator can tell how many of a connector's ops are
+    actually callable vs ingested-but-disabled (G0.23-T5 / #1636).
 
     Counts every ``source_kind`` -- ``"ingested"`` (G0.7 spec-driven),
     ``"typed"`` (G3.x hand-coded via :func:`register_typed_operation`),
@@ -343,15 +352,23 @@ async def _operation_count_by_connector(
     ``operation_count: 0`` -- the asymmetry between the two paired
     queries was the bug (Signal #4 in the v0.3.0 RDC dogfood), fixed
     by dropping the filter so both queries count the same universe
-    of rows.
+    of rows. The ``enabled`` split rides on the same unfiltered
+    universe: both numbers count the same rows, one of them narrowed
+    by ``is_enabled`` only.
     """
+    enabled_case = func.sum(
+        case((EndpointDescriptor.is_enabled.is_(True), 1), else_=0),
+    ).label("enabled")
+    total = func.count(EndpointDescriptor.id).label("total")
+
     stmt = (
         select(
             EndpointDescriptor.tenant_id,
             EndpointDescriptor.product,
             EndpointDescriptor.version,
             EndpointDescriptor.impl_id,
-            func.count(EndpointDescriptor.id).label("op_count"),
+            total,
+            enabled_case,
         )
         .where(
             (EndpointDescriptor.tenant_id.is_(None))
@@ -365,10 +382,13 @@ async def _operation_count_by_connector(
         )
     )
     result = await session.execute(stmt)
-    counts: dict[tuple[UUID | None, str, str, str], int] = {}
+    counts: dict[tuple[UUID | None, str, str, str], dict[str, int]] = {}
     for row in result.all():
-        tenant_uuid, product, version, impl_id, count = row
-        counts[(tenant_uuid, product, version, impl_id)] = int(count or 0)
+        tenant_uuid, product, version, impl_id, total_v, enabled_v = row
+        counts[(tenant_uuid, product, version, impl_id)] = {
+            "total": int(total_v or 0),
+            "enabled": int(enabled_v or 0),
+        }
     return counts
 
 
@@ -402,8 +422,8 @@ async def list_ingested_connectors(
       through) the review pipeline. These sort first and carry
       ``state="ingested"``.
     * Class-side registrations from the v2 connector registry that
-      have no DB rows yet ("State 0.5"). These append with
-      ``group_count: 0, operation_count: 0`` and ``state="registered"``
+      have no DB rows yet ("State 0.5"). These append with every
+      count zeroed and ``state="registered"``
       so an operator sees every registered connector but knows the
       dispatcher won't resolve a call against it until ingestion /
       typed-op registration lands rows. Class-only entries are always
@@ -462,7 +482,7 @@ async def _emit_db_backed_rows(
     *,
     operator: Operator,
     groups_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
-    op_counts_by_connector: dict[tuple[UUID | None, str, str, str], int],
+    op_counts_by_connector: dict[tuple[UUID | None, str, str, str], dict[str, int]],
     status: ConnectorStatusFilter | None,
 ) -> list[ConnectorListItem]:
     """Emit one ``state="ingested"`` :class:`ConnectorListItem` per DB-backed connector.
@@ -496,6 +516,7 @@ async def _emit_db_backed_rows(
             source="db",
         ):
             continue
+        op_counts = op_counts_by_connector.get(key, {})
         items.append(
             ConnectorListItem(
                 connector_id=connector_id,
@@ -507,7 +528,8 @@ async def _emit_db_backed_rows(
                 staged_group_count=row["staged"],
                 enabled_group_count=row["enabled"],
                 disabled_group_count=row["disabled"],
-                operation_count=op_counts_by_connector.get(key, 0),
+                operation_count=op_counts.get("total", 0),
+                enabled_operation_count=op_counts.get("enabled", 0),
                 state="ingested",
             ),
         )
@@ -653,6 +675,7 @@ def _maybe_build_class_only_item(
         enabled_group_count=0,
         disabled_group_count=0,
         operation_count=0,
+        enabled_operation_count=0,
         state="registered",
         next_step=_next_step_for_registered(
             catalog=catalog,

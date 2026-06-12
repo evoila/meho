@@ -231,6 +231,17 @@ class Settings(BaseModel):
         set, so capability-gated tools are simply absent for that
         operator (fail-closed). Override only when the realm exposes the
         capability list under a different attribute.
+    jwt_platform_admin_claim_name:
+        Name of the JWT claim that carries the cross-tenant
+        ``platform_admin`` flag (a JSON boolean). Default
+        ``platform_admin``. The flag is orthogonal to
+        :class:`~meho_backplane.auth.operator.TenantRole` and marks a
+        genuine platform / cross-tenant operator. The claim is
+        **optional** and **fail-closed** — tokens that carry no claim
+        (or a malformed value) resolve to ``False``, so every existing
+        token and every agent / service principal is non-platform-admin
+        unless a realm explicitly grants the claim. Override only when
+        the realm exposes the flag under a different attribute.
     keycloak_admin_url:
         Base URL of the Keycloak Admin REST API for the realm managing
         MEHO principals, e.g.
@@ -779,6 +790,7 @@ class Settings(BaseModel):
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
     jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
+    jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
     keycloak_admin_client_secret: str = Field(default="", repr=False)
@@ -1072,6 +1084,22 @@ class Settings(BaseModel):
     #: ``True`` — fail-closed scope discipline. Consumed by T3, not by the
     #: transport in this Task.
     corpus_require_filters: bool = True
+    #: Application-layer tenant-scope guard for the agent-supplied
+    #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
+    #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
+    #: an operator's KV calls must stay within — defense-in-depth *behind*
+    #: the Vault ``meho-mcp`` policy, not a replacement for it
+    #: (``docs/codebase/connectors-vault-tenant-scope.md``). When a caller
+    #: requests a ``path`` outside their rendered prefix the handler raises
+    #: :class:`~meho_backplane.connectors.vault.tenant_scope.VaultTenantScopeError`
+    #: *before* the hvac call. **Empty (the default) disables the guard** —
+    #: the shipped deploy convention scopes per operator ``sub``
+    #: (``secret/data/targets/<sub>/*``, ``connector-vault-policy.md`` §2),
+    #: not per tenant, so enforcing a hard tenant prefix unconditionally
+    #: would break every existing call; a deploy whose KV layout *is*
+    #: tenant-partitioned opts in by setting e.g. ``"tenant-{tenant_id}/"``.
+    #: Set via ``VAULT_KV_TENANT_SCOPE_PREFIX``.
+    vault_kv_tenant_scope_prefix: str = ""
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -1236,6 +1264,10 @@ def get_settings() -> Settings:
         jwt_capabilities_claim_name=os.environ.get(
             "JWT_CAPABILITIES_CLAIM_NAME",
             "capabilities",
+        ),
+        jwt_platform_admin_claim_name=os.environ.get(
+            "JWT_PLATFORM_ADMIN_CLAIM_NAME",
+            "platform_admin",
         ),
         keycloak_admin_url=os.environ.get("KEYCLOAK_ADMIN_URL", "").strip(),
         keycloak_admin_client_id=os.environ.get("KEYCLOAK_ADMIN_CLIENT_ID", "").strip(),
@@ -1420,4 +1452,5 @@ def get_settings() -> Settings:
         corpus_require_filters=parse_bool_env(
             os.environ.get("CORPUS_REQUIRE_FILTERS", "true"),
         ),
+        vault_kv_tenant_scope_prefix=os.environ.get("VAULT_KV_TENANT_SCOPE_PREFIX", "").strip(),
     )

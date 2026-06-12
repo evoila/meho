@@ -57,6 +57,7 @@ from structlog.testing import capture_logs
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vcf_logs import VcfLogsConnector
@@ -170,6 +171,7 @@ class _CredReadTarget:
         self.fingerprint = type("_FP", (), {"version": _VERSION})()
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
+        self.tenant_id: UUID = UUID("00000000-0000-0000-0000-00000000a0a2")
         self.name = "vrli-credread"
         self.host = _VRLI_HOST
         self.port = 443
@@ -427,7 +429,7 @@ async def test_session_token_fast_path_fails_closed_on_empty_raw_jwt() -> None:
         mock.post(_SESSION_PATH).respond(200, json={"sessionId": _SESSION_TOKEN, "ttl": 1800})
         primed = await connector._session_token(target, _make_operator())
     assert primed == _SESSION_TOKEN
-    assert connector._session_tokens[target.name] == _SESSION_TOKEN
+    assert connector._session_tokens[target_cache_key(target)] == _SESSION_TOKEN
 
     system_operator = Operator(
         sub="system",
@@ -444,6 +446,6 @@ async def test_session_token_fast_path_fails_closed_on_empty_raw_jwt() -> None:
     assert "operator" in str(exc_info.value).lower()
     # The cache still holds the primed token; the guard ran ahead of
     # any cache mutation.
-    assert connector._session_tokens[target.name] == _SESSION_TOKEN
+    assert connector._session_tokens[target_cache_key(target)] == _SESSION_TOKEN
 
     await connector.aclose()

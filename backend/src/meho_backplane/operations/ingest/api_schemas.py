@@ -404,8 +404,26 @@ class ConnectorListItem(BaseModel):
     review-queue backlog at a glance.
 
     ``operation_count`` is the sum of operations across all groups
-    in scope. Useful for the CLI's
-    ``meho connector list --status staged`` summary view.
+    in scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the
+    subset of those rows whose per-op ``is_enabled`` flag is set --
+    the operations the dispatcher will actually resolve
+    (dispatchable), vs ingested-but-disabled rows that only surface
+    in review. The naming mirrors the ``*_group_count`` family above:
+    the unprefixed field is the total, the ``enabled_``-prefixed
+    field is the subset. Kept additive (rather than renaming the
+    total to ``total_operation_count``) so existing consumers of
+    ``operation_count`` -- the CLI's ``listEntry`` decode shape and
+    every ``meho.connector.list`` client -- keep working unchanged.
+    Mind the axis difference between the two ``enabled_*`` fields:
+    ``enabled_group_count`` buckets groups by *review_status*, while
+    ``enabled_operation_count`` counts the per-op ``is_enabled`` bit
+    (the dispatchability flag that survives connector-level
+    enable/disable cycles via operator overrides). Useful for the
+    CLI's ``meho connector list --status staged`` summary view and
+    for an LLM browsing the catalog: ``vmware-rest-9.0`` ingests
+    ~2,211 ops of which only a fraction are enabled, and before the
+    split nothing on the row said which of the two numbers
+    ``operation_count`` was.
 
     ``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows
     (``"ingested"`` — DB-backed, resolves through the dispatcher) from
@@ -448,6 +466,7 @@ class ConnectorListItem(BaseModel):
     enabled_group_count: int
     disabled_group_count: int
     operation_count: int
+    enabled_operation_count: int
     state: ConnectorState = "ingested"
     next_step: NextStep | None = None
 
@@ -525,6 +544,63 @@ class EditOpBody(BaseModel):
     safety_level: Literal["safe", "caution", "dangerous"] | None = None
     requires_approval: bool | None = None
     is_enabled: bool | None = None
+
+
+class EditOpWarning(BaseModel):
+    """One advisory attached to an ``edit_op`` write (G0.23-T4 #1630).
+
+    Emitted when the edit is legal and **was applied**, but the
+    operator should know it leads somewhere unpleasant. The only
+    producer today is the enable-time auto-shim probe:
+    ``is_enabled=True`` on an op whose resolved connector is the
+    unconfigured ingest auto-shim
+    (:class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`)
+    — dispatch is then guaranteed to fail with the
+    ``connector_unsupported`` / ``cause='unreplaced_auto_shim'``
+    structured error (G0.23-T1 #1627), so this warning surfaces the
+    dead end at enable time instead of one dispatch later.
+
+    ``code`` reuses the dispatch-time cause vocabulary verbatim
+    (``unreplaced_auto_shim``) so an operator — or an SDK — can
+    correlate the proactive warning with the reactive dispatch error
+    without a translation table. Declared as a one-member ``Literal``
+    so the OpenAPI schema names the vocabulary; future advisory codes
+    extend the union (an additive, client-compatible change).
+
+    ``connector_class`` carries the resolved shim class's name
+    (``AutoShim_<product>_<version>_<impl_id>``) — the same key the
+    dispatch error's ``extras`` payload uses. ``message`` is the
+    operator-facing prose: what was applied, why dispatch will still
+    fail, and the remediation imperative (register the per-product
+    subclass; re-ingesting will not replace the shim).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    code: Literal["unreplaced_auto_shim"]
+    connector_class: str
+    message: str
+
+
+class EditOpResponse(BaseModel):
+    """Response body for ``PATCH /api/v1/connectors/{id}/operations/{op_id}``.
+
+    G0.23-T4 (#1630) promoted the route from ``204 No Content`` to
+    ``200`` with this envelope so enable-time advisories have a
+    structured home on the wire. ``warnings`` is empty on the
+    overwhelmingly common clean path; a non-empty list never blocks
+    the write it annotates (the PATCH semantics are unchanged — the
+    edit landed, audit row included, warnings or not).
+
+    Shaped as a list (not a single nullable field) so multiple
+    advisories can ride one response without another schema bump.
+    Required (no default) so the OpenAPI schema marks it as
+    always-present and the generated Go client gets a plain slice
+    instead of a pointer — same convention as
+    :class:`~meho_backplane.operations.ingest.payload.ConnectorReviewPayload.groups`.
+    """
+
+    warnings: list[EditOpWarning]
 
 
 #: Lifecycle of an async ingest job. Mirrors

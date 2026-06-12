@@ -18,13 +18,14 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Iterator
-from dataclasses import dataclass
-from uuid import UUID
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vcf_auth import VcfTargetLike
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
@@ -91,6 +92,10 @@ class _StubTarget:
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
     auth_source: str | None = None
+    # Tenant-unique cache key components (#1642). Distinct ``id`` per
+    # instance so two stub targets never collapse onto one cache entry.
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -539,7 +544,7 @@ async def test_aclose_clears_credential_cache_and_pool() -> None:
     """aclose() clears the in-memory credential cache and tears down the httpx pool."""
     connector = _make_connector()
     await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    assert "vrops-a" in connector._creds.cached_targets
+    assert target_cache_key(_TARGET_A) in connector._creds.cached_targets
     await connector.aclose()
     assert connector._creds.cached_targets == frozenset()
     assert connector._clients == {}

@@ -76,7 +76,10 @@ dispatch params — infrastructure topology, never credential material.
 
 Fail-soft: every builder either declines (``None`` → identifier-only
 default) on malformed params or lets resolution faults propagate into
-``build_proposed_effect``'s catch — the park always proceeds.
+``build_proposed_effect``'s catch, which parks with the identifier
+fields plus an explicit ``preview_unavailable`` marker + reason (#1628)
+— the park always proceeds, and a reviewer can tell "blast-radius
+unknown" from a genuinely small action.
 """
 
 from __future__ import annotations

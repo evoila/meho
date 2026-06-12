@@ -12,7 +12,8 @@ Each builder owns one ``error_code`` from the contract documented in
 :mod:`meho_backplane.operations.dispatcher`'s module docstring:
 ``unknown_op`` / ``invalid_params`` / ``no_connector`` /
 ``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
-``awaiting_approval`` / ``connector_error``. The ``status`` field maps
+``awaiting_approval`` / ``connector_unsupported`` /
+``connector_error``. The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
 (``error.startswith("unknown_op:")``) and parse the code for structured
@@ -22,15 +23,17 @@ handling.
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from meho_backplane.connectors import OperationResult, ResultHandle
 
 __all__ = [
     "result_ambiguous_connector",
     "result_awaiting_approval",
+    "result_composite_l2_disabled",
     "result_composite_l2_missing",
     "result_connector_error",
+    "result_connector_unsupported",
     "result_denied",
     "result_handler_unreachable",
     "result_invalid_params",
@@ -439,6 +442,97 @@ def result_connector_error(
             "error_code": "connector_error",
             "exception_class": type(exc).__name__,
             "exception_message": msg,
+        },
+    )
+
+
+def result_connector_unsupported(
+    op_id: str,
+    exc: BaseException,
+    cause: Literal["unsupported_feature", "unreplaced_auto_shim"],
+    connector_class: str | None,
+    duration_ms: float,
+) -> OperationResult:
+    """Connector / handler raised :exc:`NotImplementedError` on dispatch.
+
+    G0.23-T1 (#1627). :exc:`NotImplementedError` from a connector is a
+    *deliberate* "I don't do this" signal, not an unforeseen crash --
+    the raise sites already carry actionable, operator-readable
+    messages (``VmwareRestConnector.auth_headers`` naming the
+    unsupported ``target.auth_model``; the ingest auto-shim's
+    "must be replaced with a per-product Connector subclass"). Routing
+    it through :func:`result_connector_error` flattened that diagnostic
+    to an opaque ``connector_error: NotImplementedError`` with the
+    message buried in ``extras["exception_message"]`` where the
+    operator never looked -- exactly the opaque-error class the
+    ``docs/codebase/error-message-shape.md`` convention exists to
+    prevent (the RDC cycle-8 ``vmware-l2-dispatch-notimplemented``
+    dead end).
+
+    This builder promotes the exception message verbatim into the
+    operator-facing ``error`` string and appends a per-*cause*
+    remediation:
+
+    * ``unsupported_feature`` -- a hand-rolled connector explicitly
+      does not implement what the dispatch requires for this target
+      (an unsupported ``target.auth_model``, an unwired session mode).
+      Remediation: fix the target configuration against the modes the
+      connector supports -- a config matter, not a code gap.
+    * ``unreplaced_auto_shim`` -- the resolved connector is the
+      auto-registered :class:`GenericRestConnector` ingest shim, which
+      can never authenticate or execute. Remediation: register the
+      hand-rolled per-product subclass before enabling dispatch.
+
+    The dispatcher classifies the cause via ``isinstance(...,
+    GenericRestConnector)`` at the catch site -- precise, not
+    message-fragile. The shape complies with the #1141 convention: a
+    stable ``connector_unsupported`` code, a diagnostic-bearing human
+    message (verbatim detail + remediation imperative + doc
+    reference), and a structured ``extras`` payload (``cause`` /
+    ``connector_class`` / ``detail``) so an agent can branch without
+    re-parsing the text. ``detail`` reuses the
+    :data:`_EXC_MESSAGE_CAP` discipline from
+    :func:`result_connector_error` (both production raise sites are
+    comfortably under the cap, so their texts survive verbatim).
+    """
+    detail = str(exc)
+    if len(detail) > _EXC_MESSAGE_CAP:
+        detail = detail[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    origin = (
+        f"The resolved connector ({connector_class})"
+        if connector_class is not None
+        else "The resolved handler"
+    )
+    if cause == "unreplaced_auto_shim":
+        remediation = (
+            f"{origin} is the auto-registered ingest shim, which cannot "
+            f"authenticate or execute against the upstream. Register the "
+            f"hand-rolled per-product Connector subclass for this "
+            f"(product, version, impl_id) and redeploy before enabling "
+            f"dispatch on this connector's ops -- re-ingesting the spec "
+            f"will NOT replace the shim. See "
+            f"docs/codebase/spec-ingestion.md for the auto-shim "
+            f"lifecycle."
+        )
+    else:
+        remediation = (
+            f"{origin} deliberately does not implement what this "
+            f"dispatch requires for the target. Re-check the target's "
+            f"configuration (e.g. auth_model) against the modes the "
+            f"connector supports, or route the op at a connector that "
+            f"implements them. See docs/architecture/connector-auth.md "
+            f"for the connector auth contract."
+        )
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"connector_unsupported: {detail}. {remediation}",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_unsupported",
+            "cause": cause,
+            "connector_class": connector_class,
+            "detail": detail,
         },
     )
 

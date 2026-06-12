@@ -16,8 +16,9 @@ Two tools, exactly two — ``query_topology`` (parametric) and
 * ``tools/call query_topology {kind: dependents, target: <node>}``
   dispatches through the T4 service and returns the dependents list.
 * ``list_targets`` returns the operator's tenant's targets;
-  ``tenant_admin`` + ``tenant`` works cross-tenant; an ``operator``
-  passing ``tenant`` is rejected.
+  a ``platform_admin`` + ``tenant`` works cross-tenant (#1641); a
+  non-platform-admin (any rank, incl. ``tenant_admin``) passing a
+  foreign ``tenant`` is rejected — naming one's own tenant is allowed.
 * Tool descriptions name the blast-radius use-case verbatim ("call
   this *before* recommending a destructive op").
 * Tenant scope comes from the operator JWT, never the arguments dict.
@@ -699,21 +700,44 @@ async def test_list_targets_connector_id_filters_by_product(
 async def test_list_targets_operator_cannot_cross_tenant(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """An operator passing `tenant` is rejected (-32602), not silently scoped."""
+    """A non-platform-admin operator naming a foreign tenant is rejected (-32602)."""
     client, _op = client_with_operator
     await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
+    await _seed_tenant(_OTHER_TENANT_ID, "other-tenant")
+    await _seed_target(_OTHER_TENANT_ID, "other-vc", "vmware", "ovc.example")
 
     response = _list_targets_call(client, 22, {"tenant": "other-tenant"})
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "tenant_admin" in body["error"]["message"]
+    assert "platform_admin" in body["error"]["message"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-async def test_list_targets_tenant_admin_cross_tenant_by_slug(
+async def test_list_targets_tenant_admin_cannot_cross_tenant(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """tenant_admin + `tenant` slug lists the other tenant's targets."""
+    """A `tenant_admin` (not platform-admin) naming a foreign tenant is denied (#1641).
+
+    Cross-tenant enumeration moved off `tenant_admin` rank onto the
+    `platform_admin` capability — a tenant-admin of A must not be able
+    to enumerate B's targets (the cross-tenant IDOR this task closes).
+    """
+    client, _op = client_with_operator
+    await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
+    await _seed_tenant(_OTHER_TENANT_ID, "other-tenant")
+    await _seed_target(_OTHER_TENANT_ID, "other-vc", "vmware", "ovc.example")
+
+    response = _list_targets_call(client, 23, {"tenant": "other-tenant"})
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "platform_admin" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("client_with_operator", [(TenantRole.TENANT_ADMIN, True)], indirect=True)
+async def test_list_targets_platform_admin_cross_tenant_by_slug(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A `platform_admin` + `tenant` slug lists the other tenant's targets (#1641)."""
     client, _op = client_with_operator
     await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
     await _seed_tenant(_OTHER_TENANT_ID, "other-tenant")
@@ -722,6 +746,22 @@ async def test_list_targets_tenant_admin_cross_tenant_by_slug(
     response = _list_targets_call(client, 23, {"tenant": "other-tenant"})
     payload = json.loads(response.json()["result"]["content"][0]["text"])
     assert [t["name"] for t in payload["targets"]] == ["other-vc"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_list_targets_own_tenant_slug_is_allowed(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """Naming one's OWN tenant explicitly (slug) is allowed for any role (#1641)."""
+    client, _op = client_with_operator
+    await _seed_tenant(OPERATOR_TENANT_ID, "op-tenant")
+    await _seed_target(OPERATOR_TENANT_ID, "rdc-vcenter", "vmware", "vc.example")
+
+    response = _list_targets_call(client, 25, {"tenant": "op-tenant"})
+    body = response.json()
+    assert "error" not in body, body
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert [t["name"] for t in payload["targets"]] == ["rdc-vcenter"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)

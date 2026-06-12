@@ -90,8 +90,150 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security
+
+- Closed a cross-tenant IDOR on the scheduler
+  (`GET`/`POST`/`DELETE /api/v1/scheduler/triggers`) and retrieval
+  (`GET /api/v1/retrieve/usage`, `POST /api/v1/retrieve/retire-checklist`)
+  routes: a caller-supplied `tenant_id` / `tenant_filter` was authorized on
+  `tenant_admin` **rank** alone, so a tenant-admin of tenant A could
+  read/act on tenant B. A new shared `authorize_tenant_scope` helper now
+  requires the cross-tenant `platform_admin` capability (#1638) to target
+  another tenant; requesting one's own tenant (or omitting the filter) is
+  unchanged. The 403 detail token changes from
+  `tenant_filter_requires_tenant_admin` to
+  `cross_tenant_requires_platform_admin` (#1640).
+- Added a defense-in-depth tenant-scope guard on the agent-supplied
+  `vault.kv.*` ops (`read` / `list` / `versions` / `put` / `patch` /
+  `delete`): the requested `mount`/`path` is now checked against the
+  operator's tenant namespace **before** the hvac call, so a tenant-A
+  caller reaching for a tenant-B path is denied with a structured
+  `connector_error` (`exception_class=VaultTenantScopeError`) even if the
+  shared Vault `meho-mcp` policy is mis-provisioned too broadly. The guard
+  is **opt-in** via `VAULT_KV_TENANT_SCOPE_PREFIX` (a `{tenant_id}`
+  format template, e.g. `tenant-{tenant_id}/`); empty (the default) leaves
+  behaviour unchanged because the shipped Vault layout scopes per operator
+  `sub`, not per tenant. The convention is documented in
+  `docs/codebase/connectors-vault-tenant-scope.md` (#1643).
+- Closed a cross-tenant enumeration hole on the MCP `list_targets` tool:
+  the caller-supplied `tenant_id` / `tenant` argument was resolved with
+  no equality check and gated on `tenant_admin` **rank** alone, so a
+  tenant-admin of tenant A could enumerate tenant B's targets. Cross-
+  tenant listing now requires the `platform_admin` capability (#1638);
+  naming one's own tenant (by slug or UUID) or omitting the argument is
+  unchanged, and an unauthorized cross-tenant request surfaces as the
+  MCP `-32602` (INVALID_PARAMS) error (#1641).
+- Re-keyed the VCF (vROps / vRLI / Fleet), Harbor, NSX, and SDDC-Manager
+  connectors' per-target credential and session-token caches on the
+  tenant-unique `(tenant_id, target.id)` tuple instead of `target.name`.
+  Two same-named targets in different tenants previously collapsed onto one
+  cache entry, so one tenant could be served another tenant's cached
+  service-account credential or session token (#1642).
+
+### Breaking changes
+
+- `meho connector edit-op --enable` no longer reports a silent
+  `ok` on an op whose resolved connector is the unconfigured
+  spec-ingest `GenericRestConnector` auto-shim: the CLI prints
+  `warning (unreplaced_auto_shim): ...` to stderr naming the missing
+  per-product Connector subclass (and that re-ingesting the spec will
+  not replace the shim), the REST route returns the same advisory as
+  a structured `warnings[]` field, and the `meho.connector.edit_op`
+  MCP tool mirrors it — closing the dead-end remediation chain where
+  `composite_l2_disabled` pointed at an enable that succeeded and
+  then dispatch failed one layer deeper with `connector_unsupported`
+  / `cause=unreplaced_auto_shim` (#1627's dispatch-time error; this
+  is its proactive enable-time counterpart). The enable still
+  applies — warnings never block the write. **Wire change:** to
+  carry the advisory, `PATCH
+  /api/v1/connectors/{id}/operations/{op_id}` now returns `200` with
+  an `EditOpResponse` body (`{"warnings": [...]}`) instead of `204
+  No Content`. Migration: clients asserting `status == 204` accept
+  `200` (and may read `warnings`); clients generated from
+  `cli/api/openapi.json` regenerate against the refreshed snapshot —
+  the bundled `meho` CLI in this release already is. (#1630)
+
+### Added
+
+- `Operator` now carries a `platform_admin: bool` flag, parsed from a
+  configurable JWT claim (`JWT_PLATFORM_ADMIN_CLAIM_NAME`, default
+  `platform_admin`) and defaulting to `False` when the claim is absent or
+  malformed. The flag is **orthogonal** to `TenantRole` (which is scoped
+  *within* a tenant) and marks a genuine cross-tenant *platform*
+  operator. It is fail-closed — every existing token, and every agent /
+  service principal, materialises as non-platform-admin unless a realm
+  explicitly grants the claim — and no surface consumes it yet: it is the
+  substrate a later cross-tenant authorization gate checks, so a
+  `tenant_admin` is never mistaken for a platform operator on role rank
+  alone (#1638).
+- `GET /api/v1/connectors` rows now split the operation rollup
+  enabled-vs-total: `enabled_operation_count` (ops whose per-op
+  `is_enabled` dispatchability flag is set) lands next to the
+  existing `operation_count` total, mirroring the `*_group_count`
+  family's naming, so an operator (or an LLM browsing the catalog)
+  can tell how many of a connector's operations are actually
+  dispatchable vs ingested-but-disabled (`vmware-rest-9.0`: ~2,211
+  ingested, only a fraction enabled). The `meho.connector.list` MCP
+  tool returns the same rows. Additive — existing `operation_count`
+  consumers are unaffected. (#1636)
+- The backplane now emits a single structured startup advisory
+  (`vault_tenant_scope_unenforced`) when the opt-in Vault `vault.kv.*`
+  tenant-scope guard (#1643) is left default-off
+  (`VAULT_KV_TENANT_SCOPE_PREFIX` unset), so an operator running a
+  tenant-partitioned Vault has a signal that cross-tenant `vault.kv.*`
+  isolation is unenforced at the app layer instead of the guard silently
+  no-op'ing. The advisory names the enabling env var and the doc; it is
+  observability-only — dispatch behaviour and the empty default are
+  unchanged (flipping the guard on is an explicit infra decision). A new
+  "Choosing a layout" section in
+  `docs/codebase/connectors-vault-tenant-scope.md` documents the
+  per-`sub` vs tenant-partitioned choice and what enabling the prefix
+  requires (#1673).
+
 ### Fixed
 
+- A failed park-time `proposed_effect` preview no longer degrades
+  silently to the identifier-only default: the parked approval now
+  carries `preview_unavailable: true` plus a `preview_error` reason
+  alongside the identifier fields (visible on REST
+  `GET /api/v1/approvals`, `meho.approvals.list` / `.get`, and `meho
+  approvals show`), so a four-eyes reviewer can tell "blast-radius
+  unknown" from a genuinely small action when a `vmware.composite.*`
+  preview's listing read cannot execute. The park itself still always
+  proceeds; successful previews are unchanged. (#1628)
+- A reduced result whose rows exceed the inline sample but could not be
+  spilled to the read-back store no longer fails silently: the handle's
+  `fetch_more.drill_in` now carries a machine-readable `reason`
+  (`no_tenant_context` / `result_store_unavailable`) next to a
+  reason-specific rationale, and every skipped spill logs a structured
+  `jsonflux_spill_skipped` warning. Diagnoses the RDC cycle-8
+  `k8s.logs tail=300` 5-of-300-sample finding — not a #1507 regression
+  and not a k8s.logs-shape gap (pinned by repro tests); see
+  `docs/codebase/result-spill.md` for the triage runbook. (#1629)
+- A connector raising `NotImplementedError` on dispatch now returns a
+  structured `connector_unsupported` error instead of the opaque
+  `connector_error: NotImplementedError` that buried the descriptive
+  raise-site message in `extras.exception_message`. The message is
+  promoted verbatim into the operator-facing `error` string and
+  `extras.detail`, and `extras.cause` distinguishes
+  `unsupported_feature` (e.g. a target `auth_model` the connector
+  doesn't support — fix the target config) from `unreplaced_auto_shim`
+  (the resolved connector is the spec-ingest auto-shim — register the
+  per-product Connector subclass), each with its remediation and doc
+  reference in the message. Reaches both the REST dispatch response
+  and the MCP `call_operation` tool, matching the `composite_l2_*`
+  envelope parity (#1627).
+- `meho connector list --json` no longer silently drops the `state`,
+  `next_step` and `enabled_operation_count` fields the backend ships on
+  every `GET /api/v1/connectors` row — the machine surface was
+  advertising an incomplete row shape, so scripts and LLM consumers
+  could not tell a dispatchable (`ingested`) connector from a
+  registered-but-empty one, see the self-describing remediation verb
+  for half-registered connectors, or read the enabled-vs-total
+  operation split. The CLI's decode shape now mirrors all 13
+  `ConnectorListItem` fields and the canonical wire-shape test rejects
+  unknown fixture keys so the mirror cannot silently regress. The
+  human table is unchanged. (#1645)
 - `list_operation_groups` no longer hides a group that holds live ops just
   because the group's own review is still `staged`. Group listing keyed off
   the group's `review_status='enabled'` while `search_operations` + dispatch

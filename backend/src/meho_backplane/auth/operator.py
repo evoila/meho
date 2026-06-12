@@ -44,6 +44,15 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   immutable and the membership test is O(1). Defaults to the empty set
   so tokens minted before the capability mapper existed simply see no
   capability-gated tools (fail-closed).
+* ``platform_admin`` — whether this principal holds the cross-tenant
+  *platform* capability, orthogonal to :class:`TenantRole` (which is
+  scoped *within* a single tenant). Lifted from a configurable JWT claim
+  (default ``platform_admin``) and defaults to ``False`` so every token
+  minted before the claim existed — and every agent / service principal —
+  materialises as non-platform-admin (fail-closed). No surface consumes
+  this field yet; it is the substrate a later cross-tenant authorization
+  gate will check, so that a ``tenant_admin`` cannot be mistaken for a
+  platform operator on the strength of role rank alone.
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -137,3 +146,4 @@ class Operator(BaseModel):
     tenant_role: TenantRole
     principal_kind: PrincipalKind = PrincipalKind.USER
     capabilities: frozenset[str] = frozenset()
+    platform_admin: bool = False

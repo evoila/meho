@@ -108,8 +108,15 @@ def _token(
     sub: str = "op-admin",
     role: TenantRole = TenantRole.TENANT_ADMIN,
     tenant_id: UUID = _TENANT_A,
+    platform_admin: bool = False,
 ) -> str:
-    return mint_token(key, sub=sub, tenant_role=role.value, tenant_id=str(tenant_id))
+    return mint_token(
+        key,
+        sub=sub,
+        tenant_role=role.value,
+        tenant_id=str(tenant_id),
+        platform_admin=platform_admin if platform_admin else None,
+    )
 
 
 @pytest.fixture
@@ -703,7 +710,62 @@ async def test_rest_operator_blocked_from_tenant_filter(client: TestClient) -> N
             params={"tenant_filter": str(_TENANT_B)},
         )
         assert rejected.status_code == 403
-        assert rejected.json()["detail"] == "tenant_filter_requires_tenant_admin"
+        assert rejected.json()["detail"] == "cross_tenant_requires_platform_admin"
+
+
+@pytest.mark.asyncio
+async def test_rest_tenant_admin_blocked_from_foreign_tenant_filter(
+    client: TestClient,
+) -> None:
+    """A tenant-admin of A passing tenant B's id is now 403 (the cross-tenant IDOR fix).
+
+    Pre-#1640 the route gated ``tenant_filter`` on ``tenant_admin`` *rank*
+    alone, so any tenant-admin could read another tenant's triggers. Only a
+    platform-admin may now cross the boundary.
+    """
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    await _seed_tenant(_TENANT_B, "tenant-b")
+    admin_key = make_rsa_keypair("kid-admin-foreign")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(admin_key))
+        token = _token(
+            admin_key,
+            sub="a-admin",
+            role=TenantRole.TENANT_ADMIN,
+            tenant_id=_TENANT_A,
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        rejected = client.get(
+            "/api/v1/scheduler/triggers",
+            headers=headers,
+            params={"tenant_filter": str(_TENANT_B)},
+        )
+        assert rejected.status_code == 403
+        assert rejected.json()["detail"] == "cross_tenant_requires_platform_admin"
+
+
+@pytest.mark.asyncio
+async def test_rest_platform_admin_allowed_cross_tenant(client: TestClient) -> None:
+    """A platform-admin may list another tenant's triggers."""
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    await _seed_tenant(_TENANT_B, "tenant-b")
+    pa_key = make_rsa_keypair("kid-platform-admin")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(pa_key))
+        token = _token(
+            pa_key,
+            sub="platform-op",
+            role=TenantRole.TENANT_ADMIN,
+            tenant_id=_TENANT_A,
+            platform_admin=True,
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        ok = client.get(
+            "/api/v1/scheduler/triggers",
+            headers=headers,
+            params={"tenant_filter": str(_TENANT_B)},
+        )
+        assert ok.status_code == 200, ok.text
 
 
 @pytest.mark.asyncio

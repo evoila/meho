@@ -734,6 +734,48 @@ def _extract_capabilities(claims: Any, settings: Settings) -> frozenset[str]:
     return frozenset()
 
 
+def _extract_platform_admin(claims: Any, settings: Settings) -> bool:
+    """Extract the cross-tenant ``platform_admin`` flag from *claims*.
+
+    The ``platform_admin`` claim is **optional** and **fail-closed**: a
+    token that carries no claim — every pre-existing token, and every
+    agent / service principal whose Keycloak client does not emit it —
+    resolves to ``False``. The flag is orthogonal to
+    :class:`~meho_backplane.auth.operator.TenantRole`; it marks a genuine
+    platform / cross-tenant operator, the substrate a later cross-tenant
+    authorization gate checks so that ``tenant_admin`` *rank* alone never
+    confers cross-tenant reach.
+
+    Accepted shapes: a JSON boolean ``true`` / ``false`` (the canonical
+    Keycloak boolean protocol-mapper output) or the strings ``"true"`` /
+    ``"false"`` (case-insensitive) for realms whose mapper emits the claim
+    as a string. Only an explicit truthy value grants the flag; every
+    other shape (absent, ``null``, a number, an object, an unrecognised
+    string) fails closed to ``False`` — a malformed claim must never
+    *grant* the cross-tenant capability. A present-but-malformed value is
+    logged under ``malformed_platform_admin_claim``.
+
+    The claim name is configurable via ``JWT_PLATFORM_ADMIN_CLAIM_NAME``
+    (default ``platform_admin``) so realms that surface the flag under a
+    different attribute are accommodated without a code change.
+    """
+    claim_name = settings.jwt_platform_admin_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
+        return raw.strip().lower() == "true"
+    log = structlog.get_logger(__name__)
+    log.warning(
+        "malformed_platform_admin_claim",
+        claim_name=claim_name,
+        reason="not_a_boolean",
+    )
+    return False
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -782,6 +824,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     tenant_role = _extract_tenant_role(claims, settings)
     principal_kind = _extract_principal_kind(claims, settings)
     capabilities = _extract_capabilities(claims, settings)
+    platform_admin = _extract_platform_admin(claims, settings)
     try:
         return Operator(
             sub=sub,
@@ -792,6 +835,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             tenant_role=tenant_role,
             principal_kind=principal_kind,
             capabilities=capabilities,
+            platform_admin=platform_admin,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

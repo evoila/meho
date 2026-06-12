@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 __all__ = [
     "AuthModel",
     "CandidateHint",
+    "DrillInUnavailableReason",
     "EdgeHint",
     "EdgeKind",
     "FetchMore",
@@ -53,6 +54,17 @@ __all__ = [
     "ResultHandle",
     "TopologyHints",
 ]
+
+
+#: Machine-readable cause for ``FetchMoreDrillIn.available=False`` (#1629).
+#: ``no_tenant_context`` -- the reduce ran without a usable
+#: ``tenant_id`` / ``operator_sub`` pair in the reducer context, so the
+#: spill could not be keyed to a tenant (a non-dispatch reduce; never a
+#: real authenticated dispatch, where ``Operator.tenant_id`` is a
+#: required field). ``result_store_unavailable`` -- tenant context was
+#: present but the Valkey-backed read-back store did not persist the
+#: rows (unreachable, rejected the write, or disabled by configuration).
+DrillInUnavailableReason = Literal["no_tenant_context", "result_store_unavailable"]
 
 
 NodeKind = Literal[
@@ -154,6 +166,16 @@ class FetchMoreDrillIn(BaseModel):
     names the tool + the handle id to call it with. The ``mcp_tool`` /
     ``mcp_resource_uri`` / ``example_call`` / ``expires_at`` fields are
     populated only on the ``available=True`` branch.
+
+    ``reason`` (#1629) is the machine-readable counterpart of the
+    ``available=False`` rationale: one of
+    :data:`DrillInUnavailableReason`, naming *which* no-spill branch
+    fired (``no_tenant_context`` vs ``result_store_unavailable``) so a
+    reduced-but-unspilled result is self-explanatory instead of a
+    silent N-of-M sample. ``None`` on the ``available=True`` branch.
+    Hardens the RDC cycle-8 ``k8s.logs tail=300`` finding where the
+    operator saw a 5-of-300 sample with no way to page and no stated
+    cause.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -165,6 +187,16 @@ class FetchMoreDrillIn(BaseModel):
             "For ``available=False`` this names the workaround (typically "
             "re-call with native pagination); for ``available=True`` it "
             "names the read-back tool + the handle id to call it with."
+        ),
+    )
+    reason: DrillInUnavailableReason | None = Field(
+        default=None,
+        description=(
+            "Machine-readable cause when ``available=False``: "
+            "``no_tenant_context`` (the reduce ran outside a "
+            "tenant-scoped dispatch, so the spill could not be keyed) or "
+            "``result_store_unavailable`` (the read-back store did not "
+            "persist the rows). ``None`` when ``available=True``."
         ),
     )
     mcp_tool: str | None = Field(

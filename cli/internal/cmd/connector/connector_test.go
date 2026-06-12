@@ -731,12 +731,17 @@ func TestDeriveRollupLabelTable(t *testing.T) {
 }
 
 // TestListEntryDecodesCanonical pins the wire shape: the canonical
-// ConnectorListItem (PR #488 api_schemas.py) ships per-status group
-// counts and no top-level review_status. The list endpoint
-// deliberately returns `dict[str, list[dict[str, object]]]` (no
-// `response_model`), so we keep a package-private listEntry struct
-// for the decode; drift here surfaces as a Major-class wire-contract
-// failure on the next list round-trip.
+// ConnectorListItem (operations/ingest/api_schemas.py) ships the
+// per-status group counts, the enabled-vs-total op split (#1636),
+// the dispatchability state (#773), the next_step hint (#1133) and
+// no top-level review_status. The list endpoint deliberately returns
+// `dict[str, list[dict[str, object]]]` (no `response_model`), so we
+// keep a package-private listEntry struct for the decode. The strict
+// decoder makes the fixture⇄struct direction fail loudly: a canonical
+// key without a matching listEntry field is exactly the drift class
+// that silently dropped three backend fields from `--json` (#1645) —
+// plain json.Unmarshal ignores unknown keys, so three backend
+// additions sailed past the previous shape of this test.
 func TestListEntryDecodesCanonical(t *testing.T) {
 	raw := []byte(`{
 		"connector_id": "vmware-rest-9.0",
@@ -748,10 +753,15 @@ func TestListEntryDecodesCanonical(t *testing.T) {
 		"staged_group_count": 5,
 		"enabled_group_count": 3,
 		"disabled_group_count": 1,
-		"operation_count": 961
+		"operation_count": 961,
+		"enabled_operation_count": 14,
+		"state": "ingested",
+		"next_step": null
 	}`)
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
 	var got listEntry
-	if err := json.Unmarshal(raw, &got); err != nil {
+	if err := dec.Decode(&got); err != nil {
 		t.Fatalf("decode listEntry: %v", err)
 	}
 	if got.ConnectorID != "vmware-rest-9.0" {
@@ -763,6 +773,111 @@ func TestListEntryDecodesCanonical(t *testing.T) {
 	if got.StagedGroupCount != 5 || got.EnabledGroupCount != 3 || got.DisabledGroupCount != 1 {
 		t.Errorf("per-status counts: got %+v", got)
 	}
+	if got.OperationCount != 961 || got.EnabledOperationCount != 14 {
+		t.Errorf("op rollup: want 961 total / 14 enabled; got %+v", got)
+	}
+	if got.State != "ingested" {
+		t.Errorf("state: got %q", got.State)
+	}
+	if got.NextStep != nil {
+		t.Errorf("next_step must decode JSON null to nil on an ingested row; got %+v", got.NextStep)
+	}
+}
+
+// TestListEntryJSONRoundTrip pins the machine surface end to end:
+// decode a canonical row, re-marshal through output.PrintJSON — the
+// exact `--json` emit path (`runList` marshals the decoded envelope,
+// not the raw response body) — and assert the fields #773 / #1133 /
+// #1636 added survive the round trip. This is the regression class
+// #1645 closes: any ConnectorListItem field the struct doesn't
+// mirror silently vanishes from machine-readable output.
+func TestListEntryJSONRoundTrip(t *testing.T) {
+	t.Run("registered row carries next_step", func(t *testing.T) {
+		raw := []byte(`{
+			"connector_id": "nsx-rest-4.2",
+			"product": "nsx",
+			"version": "4.2",
+			"impl_id": "nsx-rest",
+			"tenant_id": null,
+			"group_count": 0,
+			"staged_group_count": 0,
+			"enabled_group_count": 0,
+			"disabled_group_count": 0,
+			"operation_count": 0,
+			"enabled_operation_count": 0,
+			"state": "registered",
+			"next_step": {
+				"verb": "meho connector ingest --catalog nsx/4.2",
+				"rationale": "registered without descriptor rows; ingest the catalog spec to make it dispatchable"
+			}
+		}`)
+		var got listEntry
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode listEntry: %v", err)
+		}
+		if got.State != "registered" {
+			t.Errorf("state: got %q", got.State)
+		}
+		if got.NextStep == nil {
+			t.Fatal("next_step must decode to a non-nil pointer on a registered row")
+		}
+		if got.NextStep.Verb != "meho connector ingest --catalog nsx/4.2" {
+			t.Errorf("next_step.verb: got %q", got.NextStep.Verb)
+		}
+		if got.NextStep.Rationale == "" {
+			t.Error("next_step.rationale must survive decode")
+		}
+		var buf bytes.Buffer
+		if err := output.PrintJSON(&buf, &connectorListEnvelope{Connectors: []listEntry{got}}); err != nil {
+			t.Fatalf("PrintJSON: %v", err)
+		}
+		out := buf.String()
+		for _, want := range []string{
+			`"state": "registered"`,
+			`"verb": "meho connector ingest --catalog nsx/4.2"`,
+			`"rationale": "registered without descriptor rows; ingest the catalog spec to make it dispatchable"`,
+			`"enabled_operation_count": 0`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("--json re-marshal missing %s in:\n%s", want, out)
+			}
+		}
+	})
+	t.Run("ingested row re-marshals next_step as null", func(t *testing.T) {
+		raw := []byte(`{
+			"connector_id": "vault-1.x",
+			"product": "vault",
+			"version": "1.x",
+			"impl_id": "vault",
+			"tenant_id": null,
+			"group_count": 2,
+			"staged_group_count": 0,
+			"enabled_group_count": 2,
+			"disabled_group_count": 0,
+			"operation_count": 7,
+			"enabled_operation_count": 7,
+			"state": "ingested",
+			"next_step": null
+		}`)
+		var got listEntry
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode listEntry: %v", err)
+		}
+		if got.NextStep != nil {
+			t.Fatalf("next_step must be nil on an ingested row; got %+v", got.NextStep)
+		}
+		var buf bytes.Buffer
+		if err := output.PrintJSON(&buf, &connectorListEnvelope{Connectors: []listEntry{got}}); err != nil {
+			t.Fatalf("PrintJSON: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, `"next_step": null`) {
+			t.Errorf("nil next_step must re-marshal as JSON null, not be dropped or rendered as {}; got:\n%s", out)
+		}
+		if !strings.Contains(out, `"state": "ingested"`) {
+			t.Errorf("state must survive the --json round trip; got:\n%s", out)
+		}
+	})
 }
 
 // TestPrintReviewTableHappyPath — review render shows groups + ops
@@ -1833,19 +1948,90 @@ func TestPatchOpEscapesOpID(t *testing.T) {
 			if decodedOp != "GET:/api/vcenter/cluster" {
 				t.Errorf("op_id round-trip: got %q (raw path %q)", decodedOp, raw)
 			}
-			// Canonical T6 response: 204 No Content with no body.
-			w.WriteHeader(http.StatusNoContent)
+			// Canonical response since G0.23-T4 (#1630): 200 with an
+			// EditOpResponse envelope (empty warnings on the clean path).
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"warnings": []}`))
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
 	safety := api.Dangerous
-	if err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", api.EditOpBody{SafetyLevel: &safety}); err != nil {
+	resp, err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", api.EditOpBody{SafetyLevel: &safety})
+	if err != nil {
 		t.Fatalf("patchOp: %v", err)
+	}
+	if len(resp.Warnings) != 0 {
+		t.Errorf("expected no warnings on the clean path; got %+v", resp.Warnings)
 	}
 	if !called {
 		t.Fatalf("mock handler not invoked")
+	}
+}
+
+// TestPatchOpSurfacesEnableTimeWarnings — the 200 EditOpResponse's
+// `warnings` field (G0.23-T4 #1630) must round-trip through patchOp so
+// runEditOp can render the unreplaced_auto_shim advisory on stderr.
+func TestPatchOpSurfacesEnableTimeWarnings(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"": func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != "PATCH" {
+				t.Errorf("expected PATCH; got %s", r.Method)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"warnings": [{
+				"code": "unreplaced_auto_shim",
+				"connector_class": "AutoShim_acme_1_2_acme_rest",
+				"message": "register the per-product Connector subclass"
+			}]}`))
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	enabled := true
+	resp, err := patchOp(context.Background(), srv.URL, "acme-rest-1.2", "GET:/api/v1/group-0/0", api.EditOpBody{IsEnabled: &enabled})
+	if err != nil {
+		t.Fatalf("patchOp: %v", err)
+	}
+	if len(resp.Warnings) != 1 {
+		t.Fatalf("expected 1 warning; got %+v", resp.Warnings)
+	}
+	warning := resp.Warnings[0]
+	if warning.Code != "unreplaced_auto_shim" {
+		t.Errorf("warning code: got %q", warning.Code)
+	}
+	if warning.ConnectorClass != "AutoShim_acme_1_2_acme_rest" {
+		t.Errorf("warning connector_class: got %q", warning.ConnectorClass)
+	}
+}
+
+// TestPrintEditOpWarnings — the stderr rendering names the stable code
+// so operators (and log scrapers) can grep `unreplaced_auto_shim`; the
+// clean path prints nothing.
+func TestPrintEditOpWarnings(t *testing.T) {
+	var buf bytes.Buffer
+	printEditOpWarnings(&buf, nil)
+	if buf.Len() != 0 {
+		t.Errorf("clean path must print nothing; got %q", buf.String())
+	}
+
+	printEditOpWarnings(&buf, []api.EditOpWarning{{
+		Code:           "unreplaced_auto_shim",
+		ConnectorClass: "AutoShim_acme_1_2_acme_rest",
+		Message:        "register the per-product Connector subclass",
+	}})
+	out := buf.String()
+	for _, want := range []string{
+		"warning (unreplaced_auto_shim):",
+		"register the per-product Connector subclass",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning render missing %q in:\n%s", want, out)
+		}
 	}
 }
 

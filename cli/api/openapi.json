@@ -205,7 +205,7 @@
           "retrieval"
         ],
         "summary": "Usage Endpoint",
-        "description": "Return audit-backed retrieval usage aggregates for *operator*.\n\nTenant scoping: ``operator`` / ``read_only`` callers are scoped\nto ``operator.tenant_id``; passing a non-null ``tenant_filter``\nreturns 403. Only ``tenant_admin`` may cross tenants. *since*\naccepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;\nmalformed \u2192 400. ``surface=all`` (default) covers all three;\n``surface=<one>`` narrows. Empty result is a structured zero\nreport, not 404. Audit overrides + enrichment contextvars are\nbound before :func:`compute_usage` runs so a handler exception\nstill produces an audit row with partial payload.",
+        "description": "Return audit-backed retrieval usage aggregates for *operator*.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638). *since*\naccepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;\nmalformed \u2192 400. ``surface=all`` (default) covers all three;\n``surface=<one>`` narrows. Empty result is a structured zero\nreport, not 404. Audit overrides + enrichment contextvars are\nbound before :func:`compute_usage` runs so a handler exception\nstill produces an audit row with partial payload.",
         "operationId": "usage_endpoint_api_v1_retrieve_usage_get",
         "parameters": [
           {
@@ -344,7 +344,7 @@
           "retrieval"
         ],
         "summary": "Retire Checklist Endpoint",
-        "description": "Return the five-criterion retire-decision checklist per surface.\n\nTenant scoping mirrors the sibling usage route:\n``operator`` / ``read_only`` callers are scoped to\n``operator.tenant_id``; passing a non-null ``tenant_filter`` query\nparameter returns 403. Only ``tenant_admin`` may cross tenants.\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
+        "description": "Return the five-criterion retire-decision checklist per surface.\n\nTenant scoping mirrors the sibling usage route:\nCallers are scoped to ``operator.tenant_id``; a ``tenant_filter``\nquery parameter naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638).\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
         "operationId": "retire_checklist_endpoint_api_v1_retrieve_retire_checklist_post",
         "parameters": [
           {
@@ -3160,7 +3160,7 @@
           "connectors"
         ],
         "summary": "Edit Op Endpoint",
-        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho.connector.edit_op`` audit\nrow. Returns 204 on success.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/api/vcenter/cluster\"``) round-trip without\nURL-encoding the colon-prefixed path segment.",
+        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho.connector.edit_op`` audit\nrow. Returns 200 with an :class:`EditOpResponse` on success.\n\nG0.23-T4 (#1630) promoted the route from 204 No Content to 200\nso enable-time advisories have a structured wire home:\n``is_enabled=true`` on an op whose resolved connector is the\nunconfigured ingest auto-shim returns\n``warnings=[{code='unreplaced_auto_shim', ...}]`` \u2014 the edit\nstill lands (warnings never block the write), but the operator\nlearns about the guaranteed dispatch dead end here instead of\none ``call_operation`` later. The sibling ``edit_group`` route\nstays at 204 \u2014 it has no advisory to carry.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/api/vcenter/cluster\"``) round-trip without\nURL-encoding the colon-prefixed path segment.",
         "operationId": "edit_op_endpoint_api_v1_connectors__connector_id__operations__op_id__patch",
         "parameters": [
           {
@@ -3203,8 +3203,15 @@
           }
         },
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EditOpResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -6207,7 +6214,7 @@
           "scheduler"
         ],
         "summary": "List Triggers",
-        "description": "List scheduled triggers for the operator's tenant, newest-first.\n\nTenant scoping: ``operator`` / ``read_only`` callers are scoped to\n``operator.tenant_id`` and any non-null ``tenant_filter`` returns\n403. Only ``tenant_admin`` may cross tenants.",
+        "description": "List scheduled triggers for the operator's tenant, newest-first.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a *different* tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability. Passing one's own tenant\nid (or omitting the filter) is always allowed.",
         "operationId": "list_triggers_api_v1_scheduler_triggers_get",
         "parameters": [
           {
@@ -12876,6 +12883,48 @@
         "type": "object",
         "title": "EditOpBody",
         "description": "PATCH body for ``/api/v1/connectors/{id}/operations/{op_id}``.\n\nPer-op operator overrides. At least one field must be set.\n\n``safety_level`` is the bounded enum from\n:class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`\n(``safe`` / ``caution`` / ``dangerous``); a value outside the set\nis rejected by Pydantic before the service layer sees it.\n\n``is_enabled`` is the per-op override that wins over the group\ncascade (see :meth:`ReviewService.edit_op` for the full\nsemantics). ``requires_approval`` flips the per-op flag that\nforces the dispatcher to write an audit row in\n``status='pending'`` and wait for an operator decision before\nexecuting.\n\n``custom_description`` is the operator's free-form override\nthat the agent surfaces in place of the upstream spec's\n``description`` field; capped at 4096 chars to keep audit-log\npayloads bounded.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` \u2014 same fail-loud posture as every other\npublic v1 request schema."
+      },
+      "EditOpResponse": {
+        "properties": {
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/EditOpWarning"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "warnings"
+        ],
+        "title": "EditOpResponse",
+        "description": "Response body for ``PATCH /api/v1/connectors/{id}/operations/{op_id}``.\n\nG0.23-T4 (#1630) promoted the route from ``204 No Content`` to\n``200`` with this envelope so enable-time advisories have a\nstructured home on the wire. ``warnings`` is empty on the\noverwhelmingly common clean path; a non-empty list never blocks\nthe write it annotates (the PATCH semantics are unchanged \u2014 the\nedit landed, audit row included, warnings or not).\n\nShaped as a list (not a single nullable field) so multiple\nadvisories can ride one response without another schema bump.\nRequired (no default) so the OpenAPI schema marks it as\nalways-present and the generated Go client gets a plain slice\ninstead of a pointer \u2014 same convention as\n:class:`~meho_backplane.operations.ingest.payload.ConnectorReviewPayload.groups`."
+      },
+      "EditOpWarning": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "const": "unreplaced_auto_shim",
+            "title": "Code"
+          },
+          "connector_class": {
+            "type": "string",
+            "title": "Connector Class"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "connector_class",
+          "message"
+        ],
+        "title": "EditOpWarning",
+        "description": "One advisory attached to an ``edit_op`` write (G0.23-T4 #1630).\n\nEmitted when the edit is legal and **was applied**, but the\noperator should know it leads somewhere unpleasant. The only\nproducer today is the enable-time auto-shim probe:\n``is_enabled=True`` on an op whose resolved connector is the\nunconfigured ingest auto-shim\n(:class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`)\n\u2014 dispatch is then guaranteed to fail with the\n``connector_unsupported`` / ``cause='unreplaced_auto_shim'``\nstructured error (G0.23-T1 #1627), so this warning surfaces the\ndead end at enable time instead of one dispatch later.\n\n``code`` reuses the dispatch-time cause vocabulary verbatim\n(``unreplaced_auto_shim``) so an operator \u2014 or an SDK \u2014 can\ncorrelate the proactive warning with the reactive dispatch error\nwithout a translation table. Declared as a one-member ``Literal``\nso the OpenAPI schema names the vocabulary; future advisory codes\nextend the union (an additive, client-compatible change).\n\n``connector_class`` carries the resolved shim class's name\n(``AutoShim_<product>_<version>_<impl_id>``) \u2014 the same key the\ndispatch error's ``extras`` payload uses. ``message`` is the\noperator-facing prose: what was applied, why dispatch will still\nfail, and the remediation imperative (register the per-product\nsubclass; re-ingesting will not replace the shim)."
       },
       "EditTemplateResponse": {
         "properties": {

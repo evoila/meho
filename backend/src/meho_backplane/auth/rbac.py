@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Final
+from uuid import UUID
 
 import structlog
 from fastapi import Depends, HTTPException, status
@@ -47,7 +48,7 @@ from fastapi import Depends, HTTPException, status
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.middleware import verify_jwt_and_bind
 
-__all__ = ["require_role"]
+__all__ = ["authorize_tenant_scope", "require_role"]
 
 #: Linear role ordering. Index = rank; ``read_only`` is rank 0,
 #: ``tenant_admin`` is rank 2. The dependency compares the actual
@@ -160,3 +161,35 @@ def require_role(min_role: TenantRole) -> Callable[[Operator], Operator]:
         return operator
 
     return _checker
+
+
+def authorize_tenant_scope(operator: Operator, requested: UUID | None) -> UUID:
+    """Resolve the effective tenant for a request, authorizing a cross-tenant claim.
+
+    Returns ``operator.tenant_id`` when *requested* is ``None`` or equals
+    the operator's own tenant — the common, same-tenant path. A request
+    naming a *different* tenant is the cross-tenant case: it is allowed
+    **only** for a platform-admin (``operator.platform_admin``, the
+    cross-tenant capability primitive #1638) and otherwise raises HTTP 403
+    ``cross_tenant_requires_platform_admin``.
+
+    This replaces the prior per-route gate that allowed the claim on
+    ``tenant_admin`` *rank* alone — a tenant-admin of tenant A could pass
+    tenant B's id and read/act on B (a cross-tenant IDOR). Tenant role
+    governs *what* an operator may do within their tenant; crossing the
+    tenant boundary is a separate, platform-level capability.
+    """
+    if requested is None or requested == operator.tenant_id:
+        return operator.tenant_id
+    if operator.platform_admin:
+        return requested
+    structlog.get_logger(__name__).warning(
+        "cross_tenant_denied",
+        operator_sub=operator.sub,
+        operator_tenant_id=str(operator.tenant_id),
+        requested_tenant_id=str(requested),
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="cross_tenant_requires_platform_admin",
+    )

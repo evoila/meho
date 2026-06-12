@@ -878,18 +878,23 @@ def test_route_operator_with_tenant_filter_returns_403(
             headers={"Authorization": f"Bearer {token}"},
         )
     assert response.status_code == 403
-    assert response.json() == {"detail": "tenant_filter_requires_tenant_admin"}
+    assert response.json() == {"detail": "cross_tenant_requires_platform_admin"}
 
 
-def test_route_tenant_admin_with_tenant_filter_returns_200(
+def test_route_platform_admin_with_tenant_filter_returns_200(
     usage_client: TestClient,
 ) -> None:
-    """``tenant_admin`` + ``tenant_filter`` → 200 with the filtered scope."""
+    """A ``platform_admin`` + ``tenant_filter`` → 200 with the filtered scope.
+
+    Cross-tenant access requires the platform-admin capability (#1638); a
+    plain ``tenant_admin`` is now denied (see the operator-403 sibling test).
+    """
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(
         key,
         sub="op-admin",
         tenant_role=TenantRole.TENANT_ADMIN.value,
+        platform_admin=True,
     )
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
@@ -1003,16 +1008,17 @@ async def test_route_audit_payload_carries_canonical_op_id(
 async def test_route_audit_tenant_scope_other_for_cross_tenant_admin(
     usage_client: TestClient,
 ) -> None:
-    """``tenant_admin`` + cross-tenant filter → ``tenant_scope="other"``.
+    """``platform_admin`` + cross-tenant filter → ``tenant_scope="other"``.
 
     Lets G8 audit-trail queries distinguish operators inspecting
-    their own tenant from tenant_admins genuinely cross-cutting.
+    their own tenant from platform-admins genuinely cross-cutting.
     """
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(
         key,
         sub="op-admin",
         tenant_role=TenantRole.TENANT_ADMIN.value,
+        platform_admin=True,
     )
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))

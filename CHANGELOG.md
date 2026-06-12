@@ -158,6 +158,12 @@ connector-related release-notes line.
   instead of reporting `registered, 0 ops`. Built-in rows only
   (`tenant_id IS NULL`); idempotent; rows whose short-spelling twin
   already exists (post-upgrade re-ingest) are left untouched (#1701)
+- Operator console: the memory list's tag-autocomplete fetch wiped the
+  card grid on page load because the `<datalist>` inherited the filter
+  form's `hx-target="#memory-cards"` (htmx closest-wins attribute
+  inheritance); the datalist now pins `hx-target="this"` so the
+  `<option>` fragment lands in the datalist and the cards stay intact
+  (#1695)
 
 ## [0.14.0] - 2026-06-12
 

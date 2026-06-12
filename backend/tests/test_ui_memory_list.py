@@ -522,6 +522,31 @@ def test_tags_endpoint_returns_distinct_sorted_tag_options() -> None:
     assert body.count("<option ") == 3
 
 
+def test_list_datalist_overrides_inherited_hx_target() -> None:
+    """The tag datalist pins ``hx-target="this"`` against form inheritance.
+
+    Regression for #1695: htmx resolves ``hx-target`` closest-wins up
+    the ancestor chain, so without a local override the datalist
+    inherits the filter form's ``hx-target="#memory-cards"`` and the
+    ``hx-trigger="load"`` options fetch replaces the card grid with
+    bare ``<option>`` elements on every page load.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _, jwks = _make_keypair_and_jwks()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token="unused", operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/memory")
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    body = response.text
+    start = body.index("<datalist")
+    datalist_tag = body[start : body.index(">", start)]
+    assert 'id="memory-tag-options"' in datalist_tag
+    assert 'hx-target="this"' in datalist_tag
+
+
 # ---------------------------------------------------------------------------
 # Detail view -- 200 + Markdown render + 404 + cross-user
 # ---------------------------------------------------------------------------

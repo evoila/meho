@@ -64,6 +64,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.operations._audit import work_ref_var
 
 __all__ = ["compute_params_hash", "write_mcp_audit_row"]
 
@@ -266,6 +267,16 @@ async def write_mcp_audit_row(
     agent_session_id = _resolve_uuid_contextvar("mcp_session_id")
     parent_audit_id = _resolve_uuid_contextvar("parent_audit_id")
     target_id = _resolve_uuid_contextvar("target_id")
+    # work_ref I1-T1 #1655 -- external change-ticket reference. Read from
+    # the shared :data:`work_ref_var` ContextVar (not the structlog
+    # ``audit_*`` payload-merge convention the graph columns above use),
+    # so all three primary writers source it from one place. The
+    # ``work_ref`` column is added by migration ``0038``; guard on the
+    # attribute for forward-compat. ``None`` until the bind source
+    # (I1-T2) lands.
+    soft_fk_kwargs: dict[str, Any] = {}
+    if hasattr(AuditLog, "work_ref"):
+        soft_fk_kwargs["work_ref"] = work_ref_var.get()
 
     log = structlog.get_logger(__name__)
     if audit_id is None:
@@ -294,6 +305,7 @@ async def write_mcp_audit_row(
             # conversion artifacts ``Decimal(float)`` would introduce.
             duration_ms=Decimal(str(duration_ms)),
             payload=payload,
+            **soft_fk_kwargs,
         )
         session.add(row)
         await session.commit()

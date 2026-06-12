@@ -54,6 +54,7 @@ __all__ = [
     "publish_broadcast",
     "run_id_var",
     "step_id_var",
+    "work_ref_var",
     "write_audit_row",
 ]
 
@@ -134,6 +135,32 @@ run_id_var: ContextVar[uuid.UUID | None] = ContextVar(
 #: runbook step execution.
 step_id_var: ContextVar[str | None] = ContextVar(
     "step_id",
+    default=None,
+)
+
+
+#: ContextVar carrying the external change-ticket reference for the
+#: operation in flight (work_ref I1-T1 #1655). An opaque string -- a
+#: GitHub issue (``"gh:evoila/meho#1"``), a Jira key, a CR id -- that
+#: correlates the governed MEHO operation to the out-of-band change
+#: record that authorised it. Read by the three primary audit writers
+#: (the chassis HTTP middleware's
+#: :func:`meho_backplane.audit._write_audit_row`, this module's
+#: :func:`write_audit_row` dispatcher path, and the MCP
+#: :func:`meho_backplane.mcp.audit.write_mcp_audit_row`) into the real
+#: ``audit_log.work_ref`` column added by migration ``0038``.
+#:
+#: Same source-of-truth-contextvar mechanism as
+#: :data:`parent_audit_id_var` / :data:`agent_session_id_var` /
+#: :data:`run_id_var`: one var bound at a boundary, read at every
+#: audit-write call site that lives inside the same async task
+#: (``asyncio.create_task`` snapshots the contextvars, so spawned
+#: helpers inherit the binding for their whole life). ``None`` is the
+#: correct default -- where the work_ref is bound FROM (the request
+#: transport / agent loop) is a separate task (I1-T2); until then the
+#: column stays NULL except where a caller binds the var directly.
+work_ref_var: ContextVar[str | None] = ContextVar(
+    "work_ref",
     default=None,
 )
 
@@ -401,6 +428,13 @@ async def write_audit_row(
         runbook_kwargs["run_id"] = run_id
     if hasattr(AuditLog, "step_id"):
         runbook_kwargs["step_id"] = step_id
+    # work_ref I1-T1 #1655 -- read the external change-ticket reference
+    # off the contextvar. Same hasattr forward-compat guard as the
+    # runbook columns: the ``work_ref`` column is added by migration
+    # ``0038`` and the bind source is a separate task (I1-T2), so this
+    # is ``None`` until a caller binds the var.
+    if hasattr(AuditLog, "work_ref"):
+        runbook_kwargs["work_ref"] = work_ref_var.get()
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,

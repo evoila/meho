@@ -329,11 +329,14 @@ class NsxConnector(HttpConnector):
         Holds the lock so a concurrent re-establish doesn't race with
         the invalidation.
         """
+        cache_key = target_cache_key(target)
         async with self._session_lock:
-            self._session_tokens.pop(target_cache_key(target), None)
-            # ``_clients`` (the shared HttpConnector pool) is keyed on
-            # ``target.name``; only the session-token cache is tenant-keyed.
-            client = self._clients.get(target.name)
+            self._session_tokens.pop(cache_key, None)
+            # The shared ``HttpConnector._clients`` pool is keyed on the
+            # same tenant-unique ``(tenant_id, id)`` tuple as the
+            # session-token cache (evoila/meho#1682), so the cookie jar we
+            # clear here belongs to exactly this tenant's host-bound client.
+            client = self._clients.get(cache_key)
             if client is not None:
                 client.cookies.clear()
 

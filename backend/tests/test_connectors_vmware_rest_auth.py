@@ -265,7 +265,6 @@ def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
     async def _aclose() -> None:
         connector._session_tokens.clear()
         connector._session_paths.clear()
-        connector._session_names.clear()
         for client in connector._clients.values():
             await client.aclose()
         connector._clients.clear()

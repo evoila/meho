@@ -177,6 +177,7 @@ class _FakeTarget:
         product: str = "test-product",
         version: str | None = None,
         target_id: UUID | None = None,
+        tenant_id: UUID | None = None,
         name: str = "test-target",
         host: str = "test.example.com",
         port: int = 443,
@@ -186,6 +187,10 @@ class _FakeTarget:
         self.fingerprint = _FakeFingerprint(version=version)
         self.preferred_impl_id: str | None = None
         self.id: UUID = target_id or uuid.uuid4()
+        # The shared HTTP client pool keys on ``target_cache_key``
+        # (``(tenant_id, id)``); without ``tenant_id`` any double that
+        # reaches the pool hits ``AttributeError`` (evoila/meho#1682).
+        self.tenant_id: UUID = tenant_id or UUID("00000000-0000-0000-0000-00000000a0a0")
         self.name = name
         self.host = host
         self.port = port

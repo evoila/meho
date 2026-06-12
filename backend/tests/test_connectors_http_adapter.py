@@ -15,8 +15,11 @@ Coverage matrix (per Task #242 acceptance criteria):
   :exc:`httpx.HTTPStatusError`.
 * 4xx response (e.g. 404) does NOT retry — exactly 1 call, then re-raise.
 * :exc:`httpx.ConnectError` retries exactly 3 times (4 total calls).
-* Per-target client pool: same ``target.name`` reuses the same
-  :class:`httpx.AsyncClient`; different names get distinct clients.
+* Per-target client pool: the same target reuses the same
+  :class:`httpx.AsyncClient`; distinct targets get distinct clients.
+* Cross-tenant isolation (evoila/meho#1682): two same-named targets in
+  different tenants with different hosts get distinct host-bound clients,
+  and a dispatch for one tenant never reaches the other tenant's host.
 * ``aclose()`` closes all pooled clients and empties the pool dict.
 """
 
@@ -58,11 +61,28 @@ def _make_operator(raw_jwt: str = "") -> Operator:
 
 
 def _make_target(
-    name: str = "test-target", host: str = "vcenter.example.com", port: int = 443
+    name: str = "test-target",
+    host: str = "vcenter.example.com",
+    port: int = 443,
+    *,
+    target_id: str = "11111111-1111-1111-1111-111111111111",
+    tenant_id: str = "00000000-0000-0000-0000-000000000000",
 ) -> Any:
-    """Return a minimal duck-typed Target stub."""
-    t = types.SimpleNamespace(name=name, host=host, port=port, auth_model="impersonation")
-    return t
+    """Return a minimal duck-typed Target stub.
+
+    Carries ``id`` and ``tenant_id`` because the pooled-client cache is
+    keyed on ``target_cache_key`` (``(tenant_id, id)``); a double missing
+    either field raises ``AttributeError`` the moment it reaches the pool
+    (evoila/meho#1682).
+    """
+    return types.SimpleNamespace(
+        name=name,
+        host=host,
+        port=port,
+        id=target_id,
+        tenant_id=tenant_id,
+        auth_model="impersonation",
+    )
 
 
 class _ConcreteHttpConnector(HttpConnector):
@@ -292,17 +312,61 @@ async def test_same_target_reuses_client() -> None:
 
 @pytest.mark.asyncio
 async def test_different_targets_get_different_clients() -> None:
-    """Each distinct target.name gets its own httpx.AsyncClient."""
+    """Each distinct target gets its own httpx.AsyncClient."""
     conn = _ConcreteHttpConnector()
-    target_a = _make_target(name="vc-01", host="vc01.example.com")
-    target_b = _make_target(name="vc-02", host="vc02.example.com")
+    target_a = _make_target(name="vc-01", host="vc01.example.com", target_id="aaaa")
+    target_b = _make_target(name="vc-02", host="vc02.example.com", target_id="bbbb")
 
     client_a = await conn._http_client(target_a)
     client_b = await conn._http_client(target_b)
 
     assert client_a is not client_b
-    assert "vc-01" in conn._clients
-    assert "vc-02" in conn._clients
+    # Pool is keyed on the tenant-unique ``(tenant_id, id)`` tuple.
+    assert (target_a.tenant_id, target_a.id) in conn._clients
+    assert (target_b.tenant_id, target_b.id) in conn._clients
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_name_different_tenant_get_distinct_host_bound_clients() -> None:
+    """Cross-tenant misrouting regression (evoila/meho#1682).
+
+    Two targets both named ``prod-vcenter`` but owned by different
+    tenants and pointing at different hosts must get *distinct* pooled
+    clients, and a dispatch issued for tenant B must reach B's host —
+    never tenant A's host-bound client. We assert on the resolved
+    ``base_url`` of each pooled client (the host the request would be
+    routed to), not merely dict identity, because the bug is a wrong
+    *route*, not a shared object per se.
+    """
+    conn = _ConcreteHttpConnector()
+    target_a = _make_target(
+        name="prod-vcenter",
+        host="vc-tenant-a.example.com",
+        target_id="a-id",
+        tenant_id="tenant-a",
+    )
+    target_b = _make_target(
+        name="prod-vcenter",
+        host="vc-tenant-b.example.com",
+        target_id="b-id",
+        tenant_id="tenant-b",
+    )
+
+    # Tenant A dispatches first — first-writer-wins would have bound the
+    # name-keyed pool to A's host.
+    client_a = await conn._http_client(target_a)
+    # Tenant B's dispatch against its *own* same-named target.
+    client_b = await conn._http_client(target_b)
+
+    assert client_a is not client_b
+    # The load-bearing assertion: B's client routes to B's host, A's to
+    # A's host. Under the old name-keyed pool, client_b would be
+    # client_a and this would resolve to vc-tenant-a.example.com.
+    assert str(client_a.base_url) == "https://vc-tenant-a.example.com"
+    assert str(client_b.base_url) == "https://vc-tenant-b.example.com"
+    # Re-fetching B's client returns B's, not A's (no first-writer bleed).
+    assert await conn._http_client(target_b) is client_b
     await conn.aclose()
 
 
@@ -316,8 +380,8 @@ async def test_aclose_closes_all_clients_and_empties_pool() -> None:
     """aclose() calls .aclose() on every pooled client and clears the dict."""
     conn = _ConcreteHttpConnector()
 
-    target_a = _make_target(name="t-a", host="a.example.com")
-    target_b = _make_target(name="t-b", host="b.example.com")
+    target_a = _make_target(name="t-a", host="a.example.com", target_id="id-a")
+    target_b = _make_target(name="t-b", host="b.example.com", target_id="id-b")
 
     client_a = await conn._http_client(target_a)
     client_b = await conn._http_client(target_b)

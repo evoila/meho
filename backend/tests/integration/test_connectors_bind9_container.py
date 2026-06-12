@@ -77,6 +77,17 @@ class _Bind9Target:
     host: str
     port: int | None
     secret_ref: dict[str, Any]
+    # The SSH connection pool keys on ``target_cache_key`` (``(tenant_id,
+    # id)``); a double missing either field raises ``AttributeError`` the
+    # moment it reaches the pool. This testcontainers lane is the only one
+    # that exercises the real SSH pool, so the missing fields surface only
+    # here (the #1642 lesson — evoila/meho#1682).
+    id: str = ""
+    tenant_id: str = "00000000-0000-0000-0000-000000000000"
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = f"id-{self.name}"
 
 
 # ---------------------------------------------------------------------------

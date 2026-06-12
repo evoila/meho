@@ -179,6 +179,10 @@ class _Bind9Target:
 
     def __post_init__(self) -> None:
         self.id: UUID = uuid4()
+        # The SSH connection pool keys on ``target_cache_key`` (``(tenant_id,
+        # id)``); without ``tenant_id`` the real SSH pool raises
+        # ``AttributeError`` in this testcontainers lane (evoila/meho#1682).
+        self.tenant_id: UUID = UUID(int=0)
         self.preferred_impl_id: str | None = None
 
         class _FP:

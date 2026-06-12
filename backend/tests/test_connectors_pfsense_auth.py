@@ -83,6 +83,16 @@ class _StubTarget:
     host: str
     port: int | None
     secret_ref: dict[str, Any]
+    # The SSH connection pool keys on ``target_cache_key`` (``(tenant_id,
+    # id)``); a double missing either field hits ``AttributeError`` at the
+    # pool (evoila/meho#1682). ``id`` defaults off ``name`` so distinct
+    # targets in one tenant land on distinct pool keys.
+    id: str = ""
+    tenant_id: str = "00000000-0000-0000-0000-000000000000"
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = f"id-{self.name}"
 
 
 _KEY_TARGET = _StubTarget(
@@ -586,7 +596,7 @@ async def test_execute_about_unreachable_returns_connector_error_not_ok() -> Non
 
 
 async def test_per_target_connection_isolation() -> None:
-    """Distinct targets get distinct connections -- pool is keyed by target.name."""
+    """Distinct targets get distinct connections -- pool keyed by ``(tenant_id, id)``."""
     private_key = asyncssh.generate_private_key("ssh-ed25519")
     pem = private_key.export_private_key().decode()
 

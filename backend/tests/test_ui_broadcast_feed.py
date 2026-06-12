@@ -362,6 +362,28 @@ def test_feed_page_wires_sse_extension_to_ui_bridge() -> None:
     assert "/ui/static/src/vendor/sse.min.js" in body
 
 
+def test_feed_page_loads_controller_before_alpine() -> None:
+    """The controller script tag precedes the Alpine bundle (#1692).
+
+    Both tags are ``defer``red, and deferred scripts execute in
+    document order -- the only ordering that lets the controller's
+    ``alpine:init`` listener register before the Alpine CDN bundle
+    auto-starts (it fires ``alpine:init`` from a microtask at the end
+    of its own script task, before any later deferred script runs). A
+    regression here makes Alpine process ``x-data="broadcastFeed(...)"``
+    with the component unregistered: both broadcast tabs render dead
+    and every SSE frame throws in the console.
+    """
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/broadcast")
+    body = response.text
+    controller_pos = body.index("/ui/static/src/app/broadcast-feed.js")
+    alpine_pos = body.index("/ui/static/src/vendor/alpine.min.js")
+    assert controller_pos < alpine_pos
+
+
 def test_feed_page_renders_empty_state() -> None:
     """The empty-state copy renders (shown until the first event lands)."""
     session_id = _seed_session_sync(tenant_id=_TENANT_A)

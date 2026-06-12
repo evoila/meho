@@ -744,6 +744,33 @@ def test_detail_renders_recent_ops_for_target() -> None:
     assert "/api/v1/operations/call" in body
 
 
+def test_detail_loads_recent_ops_controller_before_alpine() -> None:
+    """The recent-ops controller script precedes the Alpine bundle (#1692).
+
+    Both tags are ``defer``red, and deferred scripts execute in
+    document order -- the only ordering that lets the controller's
+    ``alpine:init`` listener register before the Alpine CDN bundle
+    auto-starts (it fires ``alpine:init`` from a microtask at the end
+    of its own script task, before any later deferred script runs). A
+    regression here makes Alpine process
+    ``x-data="connectorsRecentOps(...)"`` with the component
+    unregistered: the recent-ops card renders dead, with no seeded
+    rows and no live SSE updates.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="ordered-target", product="ssh")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/connectors/ordered-target")
+    assert response.status_code == 200, response.text
+    body = response.text
+    controller_pos = body.index("/ui/static/src/app/connectors-feed.js")
+    alpine_pos = body.index("/ui/static/src/vendor/alpine.min.js")
+    assert controller_pos < alpine_pos
+
+
 def test_detail_isolates_recent_ops_from_other_tenants() -> None:
     """Audit rows under another tenant's target id never seed into the card."""
     _seed_tenant(_TENANT_A, "tenant-a")

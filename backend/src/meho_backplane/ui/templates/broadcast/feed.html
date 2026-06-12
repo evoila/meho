@@ -157,10 +157,15 @@
 </section>
 {% endblock %}
 
-{# Surface JS -- the ``broadcastFeed`` Alpine controller. Loaded as an
-   external deferred script (not inline) so a future nonce-based CSP
-   needs no special-casing. Registers on ``alpine:init`` before Alpine
-   processes the ``x-data`` in the feed fragment. #}
-{% block scripts %}
+{# Surface JS -- the ``broadcastFeed`` Alpine controller. Injected into
+   the head-level ``component_scripts`` block so it executes BEFORE
+   ``vendor/alpine.min.js`` (deferred scripts run in document order):
+   the controller registers on ``alpine:init``, and Alpine's CDN bundle
+   fires that event from a microtask at the end of its own script task
+   -- a body-end script registers the listener too late and the
+   ``x-data="broadcastFeed(...)"`` wrapper stays dead (#1692). External
+   src, not inline, so a future nonce-based CSP needs no
+   special-casing. #}
+{% block component_scripts %}
   <script src="/ui/static/src/app/broadcast-feed.js" defer></script>
 {% endblock %}

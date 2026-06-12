@@ -10,7 +10,12 @@
   vendored HTMX 2 + SSE extension + Alpine 3. Script order is
   load-bearing: ``sse.min.js`` calls ``htmx.defineExtension`` at load,
   so it must execute after ``htmx.min.js``; ``defer`` preserves
-  document order across all three. Zero inline script — CSP-ready.
+  document order across all three. Equally load-bearing: any surface
+  script that registers Alpine components on ``alpine:init`` must be
+  injected BEFORE this include (base.html's ``component_scripts``
+  block / wall.html's head) — ``alpine.min.js`` auto-starts in a
+  microtask at the end of its own script task, before any later
+  deferred script runs (#1692). Zero inline script — CSP-ready.
 -#}
 {# Theme bootstrap — synchronous on purpose (NO defer): it must set
    <html data-theme> from localStorage / OS preference BEFORE first

@@ -281,6 +281,28 @@ class TestWallMode:
         # The shared controller script is loaded.
         assert "/ui/static/src/app/broadcast-feed.js" in body
 
+    def test_wall_view_loads_controller_before_alpine(self) -> None:
+        """The controller script tag precedes the Alpine bundle (#1692).
+
+        The wall page is a standalone document, so it places the
+        controller ``<script>`` in its own head, before the
+        ``_head_assets.html`` include that loads ``alpine.min.js`` --
+        the same document-order contract base.html's
+        ``component_scripts`` block gives the in-chrome view. Deferred
+        scripts execute in document order, and the Alpine CDN bundle
+        fires ``alpine:init`` from a microtask at the end of its own
+        script task; a body-end controller registers too late and the
+        wall renders permanently empty with no auto-scroll.
+        """
+        session_id = _seed_session_sync(tenant_id=_TENANT_A)
+        with respx.mock(assert_all_called=False):
+            client = _authenticated_client(session_id)
+            response = client.get("/ui/broadcast?wall=1")
+        body = response.text
+        controller_pos = body.index("/ui/static/src/app/broadcast-feed.js")
+        alpine_pos = body.index("/ui/static/src/vendor/alpine.min.js")
+        assert controller_pos < alpine_pos
+
     def test_in_chrome_view_keeps_chrome_and_no_autoscroll(self) -> None:
         """The default (non-wall) view still renders base.html chrome."""
         session_id = _seed_session_sync(tenant_id=_TENANT_A)

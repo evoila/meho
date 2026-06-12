@@ -164,6 +164,27 @@ def test_base_template_exposes_content_block(ui_env: Environment) -> None:
     assert "{% endblock %}" in template_source
 
 
+def test_base_template_orders_component_scripts_before_alpine() -> None:
+    """``component_scripts`` renders before the Alpine-loading include.
+
+    The vendored Alpine CDN bundle auto-starts via
+    ``queueMicrotask(() => Alpine.start())`` at the end of its own
+    script task, and the microtask queue drains before the next
+    deferred script executes -- so an ``alpine:init`` listener
+    registered by a script that renders AFTER ``alpine.min.js`` in
+    document order never sees the event, and its ``Alpine.data()``
+    component silently never registers (#1692). Deferred scripts
+    execute in document order, so the chassis must place the
+    ``component_scripts`` block (where surfaces inject their
+    controller-registration scripts) before the ``_head_assets.html``
+    include that loads ``alpine.min.js``.
+    """
+    template_source = (templates_dir() / "base.html").read_text(encoding="utf-8")
+    block_pos = template_source.index("{% block component_scripts %}")
+    include_pos = template_source.index('{% include "_head_assets.html" %}')
+    assert block_pos < include_pos
+
+
 def test_base_template_footer_shows_readiness_pill(ui_env: Environment) -> None:
     """Footer flips between 'ready' and 'starting' on the ``ready`` flag."""
     ready_html = ui_env.get_template("base.html").render(ready=True)

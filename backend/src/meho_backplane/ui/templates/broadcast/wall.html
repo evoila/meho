@@ -47,6 +47,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Broadcast wall &middot; MEHO Operator Console</title>
+    {# Surface JS -- the shared ``broadcastFeed`` Alpine controller.
+       MUST precede the _head_assets.html include (the standalone-
+       document equivalent of base.html's ``component_scripts``
+       block): deferred scripts execute in document order, and the
+       controller's ``alpine:init`` listener has to be registered
+       before ``vendor/alpine.min.js`` auto-starts Alpine from its
+       end-of-task microtask (#1692). #}
+    <script src="/ui/static/src/app/broadcast-feed.js" defer></script>
     {# Shared asset block — same CSS/fonts/JS + load order as base.html
        (the include is what keeps the two heads from drifting). #}
     {% include "_head_assets.html" %}
@@ -88,8 +96,5 @@
         aria-label="Event detail drawer"
       ></aside>
     </section>
-
-    {# Surface JS -- the shared ``broadcastFeed`` Alpine controller. #}
-    <script src="/ui/static/src/app/broadcast-feed.js" defer></script>
   </body>
 </html>

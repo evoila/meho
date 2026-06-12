@@ -223,11 +223,30 @@ Current as of Task #863 (refresh procedure documented in
 | Cytoscape.js | 3.33.4 |
 
 `htmx-ext-sse` (`sse.min.js`) is the SSE extension HTMX 2 split out of
-core (HTMX 1 bundled it). It is loaded in `base.html` right after
-`htmx.min.js` (script order matters — the extension calls
+core (HTMX 1 bundled it). It is loaded in `_head_assets.html` right
+after `htmx.min.js` (script order matters — the extension calls
 `htmx.defineExtension` at load) and is required by both the dashboard
 recent-activity snippet (G10.0) and the broadcast live feed (G10.1):
 without it every `hx-ext="sse"` wrapper is inert.
+
+**Alpine component-registration ordering (#1692).** The vendored
+Alpine CDN bundle auto-starts via `queueMicrotask(() =>
+Alpine.start())` at the end of its own script task; the microtask
+queue drains before the next deferred script executes, so any surface
+script that registers components on `alpine:init` must appear BEFORE
+`alpine.min.js` in document order (deferred scripts execute in
+document order — the [Alpine extension
+contract](https://alpinejs.dev/advanced/extending)). `base.html`
+exposes a head-level `{% block component_scripts %}` rendered before
+the `_head_assets.html` include for exactly this: the broadcast feed
+and connectors detail pages inject their controller scripts there
+(the standalone `wall.html` places the tag directly in its head). A
+controller loaded from the body-end `{% block scripts %}` instead
+registers its `alpine:init` listener after the event has fired —
+`Alpine.data()` never runs and every `x-data` element referencing the
+component renders dead (the v0.14.0 cycle-10 broadcast outage).
+Plain-JS page scripts and heavy vendor bundles (Cytoscape, CodeMirror)
+stay in the body-end block so they don't delay Alpine boot.
 
 Every bump lands on its own `chore(ui): bump <library> to <version>`
 PR so the supply-chain trail records each move (same discipline the
@@ -238,10 +257,14 @@ backplane Python base image already follows).
 `base.html` is the only template Task #863 ships. Its structure:
 
 ```html
-<html data-theme="corporate">
+<html data-theme="meho-dark">
   <head>
+    {% block component_scripts %}{% endblock %}   <!-- Alpine.data() registrations; MUST precede alpine.min.js (#1692) -->
+    <!-- _head_assets.html include (shared with wall.html): -->
+    <script src="/ui/static/src/app/theme.js">    <!-- sync: pre-paint theme -->
     <link href="/ui/static/dist/tailwind.css">
     <script src="/ui/static/src/vendor/htmx.min.js" defer>
+    <script src="/ui/static/src/vendor/sse.min.js" defer>
     <script src="/ui/static/src/vendor/alpine.min.js" defer>
   </head>
   <body>
@@ -623,7 +646,7 @@ the colour policy stays one auditable map.
 
 | File | Purpose |
 | ---- | ------- |
-| `broadcast/feed.html` | Full-page view: header, filter bar include, feed-fragment include, drawer slot, `<script src>` for the controller. |
+| `broadcast/feed.html` | Full-page view: header, filter bar include, feed-fragment include, drawer slot. Injects the controller `<script src>` into the head-level `{% block component_scripts %}` so it executes before `alpine.min.js` (#1692). |
 | `broadcast/_filter_bar.html` | The op_class / principal / target / op_id controls. The three server filters `hx-get` to `/ui/broadcast/feed`; op_id dispatches a `broadcast-op-id-changed` window event for the client-side filter. |
 | `broadcast/_feed.html` | The swappable feed fragment: the SSE sink (with the filtered `sse-connect` URL), status bar, column header, empty state, `<template x-for>`. Wraps the `broadcastFeed` Alpine controller so a filter re-render resets the event list and re-subscribes. |
 | `broadcast/_event_row.html` | Server-authored row markup (timestamp · principal badge · op_id · op_class badge · result_status icon · target · payload summary). Click opens the drawer; aggregate-only events render the 🔒 marker + placeholder. |
@@ -631,7 +654,7 @@ the colour policy stays one auditable map.
 | `broadcast/_event_drawer_not_found.html` | The 404 drawer fragment for a missing / cross-tenant audit id. |
 | `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the sidebar / navbar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
 | `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the historical events the `/ui/broadcast/history` route pulled via `XRANGE`, so the rows render through `_event_row.html` and open the same drawer as the live feed. |
-| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap, gated to `#broadcast-feed` only), the `openDrawer` helper, the badge/timestamp/payload/aggregate-only helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
+| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`; loaded from the head-level `component_scripts` block — before `alpine.min.js`, or the registration is lost, #1692). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap, gated to `#broadcast-feed` only), the `openDrawer` helper, the badge/timestamp/payload/aggregate-only helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
 
 ### Performance + empty state
 

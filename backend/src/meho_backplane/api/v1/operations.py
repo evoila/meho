@@ -43,10 +43,12 @@ from meho_backplane.operations.meta_tools import (
     CallOperationBody,
     ConnectorNotIngestedError,
     OperationDescriptor,
+    PreviewOperationBody,
     UnknownConnectorError,
     call_operation,
     describe_descriptor,
     list_operation_groups,
+    preview_operation,
     search_operations,
 )
 
@@ -227,6 +229,37 @@ async def post_call(
     """
     try:
         return await call_operation(operator, body.model_dump())
+    except ValueError as exc:
+        # Missing `target.name` is the only ValueError the meta-tool raises.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/preview")
+async def post_preview(
+    body: PreviewOperationBody,
+    operator: Operator = _require_operator,
+) -> dict[str, Any]:
+    """Resolve an op + params to the literal would-be HTTP request, without sending.
+
+    Delegates to :func:`preview_operation` (#1683). The read-only diagnosis
+    sibling of ``POST /api/v1/operations/call``: it resolves the same op +
+    target + params and returns the literal request
+    (``{method, resolved_path, query, redacted_body}``) for an
+    ``source_kind='ingested'`` op **instead of dispatching it**. Use it to
+    diagnose a write 4xx from the inside -- the audit row persists only a
+    hashed ``params_hash``, so the wire shape is otherwise unrecoverable.
+
+    Returns ``200`` with the structured envelope; operator-input faults
+    (unknown op, invalid params, unresolvable connector) land inside the
+    envelope (``status="error"`` / ``status="unavailable"`` +
+    ``extras.error_code``) rather than as HTTP 4xx, the same contract as
+    ``/call``. The one HTTP-side gate is target resolution: a missing-target
+    name (``{"target": {}}`` without ``"name"``) surfaces as a ``400``. The
+    body is redacted through the same connector-boundary pipeline the
+    response path uses; nothing is written to the audit row.
+    """
+    try:
+        return await preview_operation(operator, body.model_dump())
     except ValueError as exc:
         # Missing `target.name` is the only ValueError the meta-tool raises.
         raise HTTPException(status_code=400, detail=str(exc)) from exc

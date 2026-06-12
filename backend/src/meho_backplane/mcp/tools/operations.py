@@ -61,6 +61,7 @@ from meho_backplane.operations.meta_tools import (
     UnknownConnectorError,
     call_operation,
     list_operation_groups,
+    preview_operation,
     search_operations,
 )
 
@@ -142,6 +143,14 @@ async def _call_operation_handler(
 ) -> dict[str, Any]:
     """Thin shim over :func:`call_operation`."""
     return await call_operation(operator, arguments)
+
+
+async def _preview_operation_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Thin shim over :func:`preview_operation` (#1683)."""
+    return await preview_operation(operator, arguments)
 
 
 # ---------------------------------------------------------------------------
@@ -509,4 +518,128 @@ register_mcp_tool(
         op_class="tool_call",
     ),
     handler=_call_operation_handler,
+)
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="preview_operation",
+        description=(
+            "Preview an operation WITHOUT running it. Resolves the same "
+            "op + target + params `call_operation` would and returns the "
+            "literal would-be HTTP request -- `method`, `resolved_path` "
+            "(path placeholders substituted + connector mount prefix "
+            "applied), `query`, and a REDACTED `redacted_body` -- instead "
+            "of dispatching. Use this to diagnose a write failure: when a "
+            "`call_operation` write returned a 4xx (e.g. a gh-rest 422 / "
+            "403), re-issue the SAME arguments here to read back exactly "
+            "what would be put on the wire (the operation audit persists "
+            "only a hashed params_hash, so the request shape is otherwise "
+            "unrecoverable). Inspection only -- it never sends the request "
+            "and never re-dispatches a past one. Covers ingested HTTP ops "
+            "(`source_kind='ingested'`); for a typed/composite op it "
+            'returns `status="unavailable"` (no single literal HTTP '
+            "request to preview). Arguments mirror `call_operation`: "
+            "`connector_id` (required), `op_id` (required), `target` "
+            '(optional; bare string `"rdc-vcenter"` or dict '
+            '`{"name": "rdc-vcenter"}`), `params` (operation-specific).'
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string", "minLength": 1},
+                "op_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Operation id as returned by `search_operations`. "
+                        'Examples: "POST:/repos/{owner}/{repo}/issues", '
+                        '"GET:/api/vcenter/cluster".'
+                    ),
+                },
+                "target": {
+                    "type": ["string", "object", "null"],
+                    "description": (
+                        "Target reference. Same two shapes as "
+                        '`call_operation`: a bare string `"rdc-vcenter"` '
+                        'or a dict `{"name": "rdc-vcenter"}` (with an '
+                        "optional `fqdn` override). Pass null for ops that "
+                        "do not act on a target. Resolving the target lets "
+                        "the preview reflect the same connector + mount "
+                        "prefix the real dispatch would hit."
+                    ),
+                    "minLength": 1,
+                    "properties": {
+                        "name": {"type": "string", "minLength": 1},
+                        "fqdn": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": (
+                                "Per-call override for the resolved "
+                                "target's `fqdn` column; threaded into the "
+                                "connector for vhost routing. Dict-shape "
+                                "only."
+                            ),
+                        },
+                    },
+                },
+                "params": {
+                    "type": "object",
+                    "description": (
+                        "Operation-specific parameters. Validated against "
+                        "the operation's parameter_schema before the "
+                        "request is resolved; an invalid shape returns "
+                        '`status="error"` + `extras.validation_errors` '
+                        "(the same shape `call_operation` rejects with)."
+                    ),
+                },
+            },
+            "required": ["connector_id", "op_id"],
+            "additionalProperties": False,
+        },
+        outputSchema={
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["ok", "error", "unavailable"],
+                },
+                "op_id": {"type": "string"},
+                "connector_id": {"type": "string"},
+                "source_kind": {"type": "string"},
+                "method": {
+                    "type": "string",
+                    "description": "Resolved HTTP verb (present on status=ok).",
+                },
+                "resolved_path": {
+                    "type": "string",
+                    "description": (
+                        "Fully resolved request path -- placeholders "
+                        "substituted, mount prefix applied (status=ok)."
+                    ),
+                },
+                "query": {
+                    "type": ["object", "null"],
+                    "description": "Query-string params, or null (status=ok).",
+                },
+                "redacted_body": {
+                    "description": (
+                        "The would-be JSON request body after the "
+                        "connector-boundary redaction pipeline; null when "
+                        "the op declares no body (status=ok)."
+                    ),
+                },
+                "error": {"type": ["string", "null"]},
+                "extras": {"type": "object"},
+            },
+            "required": ["status", "op_id", "connector_id"],
+        },
+        required_role=TenantRole.OPERATOR,
+        # A read-only request-shape inspection. No dispatch, no audit row,
+        # no mutation -- ``"read"`` matches the actual op-class (unlike
+        # ``call_operation``'s ``"tool_call"`` envelope, which wraps a
+        # dispatch whose true class lives on the inner DISPATCH row).
+        op_class="read",
+    ),
+    handler=_preview_operation_handler,
 )

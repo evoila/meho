@@ -103,14 +103,17 @@ async def test_dispatchable_run_flips_to_succeeded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_zero_insert_run_degrades_not_succeeds() -> None:
-    """A pipeline that returns but inserted nothing ends ``degraded`` (not ``succeeded``).
+async def test_zero_insert_first_run_degrades_not_succeeds() -> None:
+    """An empty first-run (0 inserts, probe says non-dispatchable) ends ``degraded``.
 
     This is the false-success the gate closes: the coroutine returned
     without raising, so the pre-#1136 code flipped the job to
-    ``succeeded`` even though zero operations landed. The job must now
-    end ``degraded`` with the structured ``ingested_not_dispatchable``
-    class. The zero-insert branch does not even need the probe.
+    ``succeeded`` even though zero operations landed under a connector the
+    dispatcher cannot resolve. The job must end ``degraded`` with the
+    structured ``ingested_not_dispatchable`` class. The probe IS consulted
+    on the zero-insert branch (a re-run that skips every op also reaches
+    ``inserted_count == 0`` but stays dispatchable — see the idempotent
+    re-run case below), and here returns ``False``.
     """
     registry = IngestJobRegistry()
     job = await _create_running_job(registry)
@@ -121,7 +124,7 @@ async def test_zero_insert_run_degrades_not_succeeds() -> None:
     async def _check(_result: IngestionPipelineResult) -> bool:
         nonlocal probe_calls
         probe_calls += 1
-        return True
+        return False
 
     await run_ingest_job(
         job.job_id,
@@ -136,8 +139,40 @@ async def test_zero_insert_run_degrades_not_succeeds() -> None:
     assert stored.error is not None and "inserted_count=0" in stored.error
     # The counts that landed (none) still ride along for diagnosis.
     assert stored.result is result
-    # Zero-insert is non-dispatchable by definition; the probe is skipped.
-    assert probe_calls == 0
+    assert probe_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_idempotent_zero_insert_rerun_succeeds() -> None:
+    """A benign idempotent re-run (0 inserts, already dispatchable) stays ``succeeded``.
+
+    Re-ingesting an already-persisted spec skips every op
+    (``_upsert.upsert_one_operation`` returns ``"skipped"``), so
+    ``inserted_count == 0`` on a perfectly healthy, already-dispatchable
+    connector. Degrading it unconditionally (the pre-fix behaviour) flipped
+    a no-op re-run into a non-zero CLI failure; consulting the probe keeps
+    it ``succeeded`` because the connector still resolves under its dispatch
+    key.
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+    result = _pipeline_result(inserted_count=0)
+
+    async def _check_dispatchable(_result: IngestionPipelineResult) -> bool:
+        return True
+
+    await run_ingest_job(
+        job.job_id,
+        pipeline_call=lambda: _async_return(result),
+        registry=registry,
+        dispatchability_check=_check_dispatchable,
+    )
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "succeeded"
+    assert stored.error is None
+    assert stored.error_class is None
+    assert stored.result is result
 
 
 @pytest.mark.asyncio
@@ -263,6 +298,8 @@ async def test_probe_failure_fails_open_to_succeeded() -> None:
     stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
     assert stored.status == "succeeded"
     assert stored.error_class is None
+    # Fail-open must not copy the probe exception text into the row either.
+    assert stored.error is None
 
 
 async def _async_return(value: IngestionPipelineResult) -> IngestionPipelineResult:

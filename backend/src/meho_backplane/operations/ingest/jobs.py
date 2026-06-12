@@ -505,11 +505,16 @@ async def _dispatchability_failure_reason(
     which one fired:
 
     * **Nothing persisted** — ``inserted_count == 0``. The run touched no
-      new rows (an empty spec, or every op skipped against an earlier
-      run that itself persisted nothing dispatchable). Reported without
-      consulting *dispatchability_check*: a zero-insert run is
-      non-dispatchable by definition for a *fresh* connector, and the
-      probe would only add a redundant DB round-trip.
+      new rows. Two shapes collapse here and the probe is what tells them
+      apart: an empty/first-run spec that yielded nothing dispatchable
+      (degraded), versus a **benign idempotent re-run** where every op was
+      ``skipped`` because a prior run already persisted them dispatchably
+      (succeeded). ``_upsert.upsert_one_operation`` returns ``"skipped"``
+      for an unchanged op, so a re-ingest of an already-dispatchable
+      connector lands ``inserted_count == 0`` on a perfectly healthy
+      connector — degrading it unconditionally would flip a no-op re-run
+      to a non-zero CLI failure. The probe (when supplied) breaks the tie:
+      already-dispatchable ⇒ ``succeeded``, else ⇒ degraded.
     * **Persisted-but-invisible** — ``inserted_count > 0`` yet
       *dispatchability_check* returns ``False``: rows landed under a key
       the dispatch/query surface does not resolve. This is the exact
@@ -518,11 +523,37 @@ async def _dispatchability_failure_reason(
       shape.
 
     *dispatchability_check* ``None`` (legacy caller / opt-out) treats a
-    non-empty insert as dispatchable — the probe is the only way to
-    detect the invisible-rows case and an opted-out caller has accepted
-    that gap.
+    non-empty insert as dispatchable and — having no way to tell an
+    idempotent re-run from a genuinely empty first run apart — degrades a
+    zero-insert run. An opted-out caller has accepted both gaps.
     """
+    # The probe is the only authority on whether the connector resolves
+    # under its dispatch key, so run it once (when supplied) and let both
+    # the zero-insert and the persisted-but-invisible branches read its
+    # verdict. Fail open: a probe that *raises* (e.g. a transient DB error
+    # on the connector_exists read) must not strand the job in ``running``
+    # or degrade it on a false signal — the pipeline DID complete.
+    dispatchable: bool | None = None
+    if dispatchability_check is not None:
+        try:
+            dispatchable = await dispatchability_check(result)
+        except Exception:
+            _log.warning(
+                "ingest_job_dispatchability_probe_failed",
+                connector_id=result.connector_id,
+                inserted_count=result.ingestion.inserted_count,
+                exc_info=True,
+            )
+            return None
+
     if result.ingestion.inserted_count == 0:
+        # A re-ingest of an already-persisted spec skips every op, so
+        # ``inserted_count == 0`` on a perfectly healthy, already-dispatchable
+        # connector (benign idempotency) — keep it ``succeeded``. Only a
+        # zero-insert run that is *also* non-dispatchable (empty/first-run
+        # spec, or no probe to confirm) degrades.
+        if dispatchable:
+            return None
         return (
             "ingest completed but persisted no new operations "
             f"(inserted_count=0) for connector_id={result.connector_id!r}; "
@@ -531,26 +562,8 @@ async def _dispatchability_failure_reason(
             "first run reaching zero inserts means the spec yielded no "
             "operations under this connector."
         )
-    if dispatchability_check is None:
-        return None
-    try:
-        dispatchable = await dispatchability_check(result)
-    except Exception:
-        # The probe itself failed (e.g. a transient DB error on the
-        # connector_exists read). The pipeline DID complete, so do not
-        # strand the job in ``running`` or degrade it on a false signal —
-        # fail open to ``succeeded`` and log the probe failure for the
-        # observability trail. A genuinely non-dispatchable run is far
-        # more likely to surface as ``inserted_count==0`` (handled above)
-        # or a clean ``False`` than a probe exception.
-        _log.warning(
-            "ingest_job_dispatchability_probe_failed",
-            connector_id=result.connector_id,
-            inserted_count=result.ingestion.inserted_count,
-            exc_info=True,
-        )
-        return None
-    if not dispatchable:
+
+    if dispatchable is False:
         return (
             f"ingest persisted {result.ingestion.inserted_count} operation(s) "
             f"but connector_id={result.connector_id!r} is not resolvable by "

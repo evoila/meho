@@ -56,6 +56,23 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block page_title %}MEHO Operator Console{% endblock %}</title>
+    {#- Alpine component-registration scripts. This block MUST render
+       BEFORE the _head_assets.html include: every script here and in
+       the include is ``defer``red, and deferred scripts execute in
+       document order, so a script injected here runs before
+       ``vendor/alpine.min.js`` evaluates. The vendored Alpine CDN
+       bundle auto-starts via ``queueMicrotask(() => Alpine.start())``
+       at the end of its own script task -- the microtask drains
+       BEFORE the next deferred script runs -- so an ``alpine:init``
+       listener registered from the body-end ``scripts`` block is too
+       late: the event has already fired and the ``Alpine.data()``
+       component never registers, leaving its ``x-data`` element dead
+       (#1692). Surfaces whose JS registers components on
+       ``alpine:init`` (broadcast feed, connectors recent-ops) inject
+       their ``<script src=... defer>`` here; plain-JS page scripts
+       and vendor bundles (Cytoscape, CodeMirror) stay in the
+       body-end ``scripts`` block so they don't delay Alpine boot. -#}
+    {% block component_scripts %}{% endblock %}
     {% include "_head_assets.html" %}
   </head>
   <body class="min-h-full text-base-content antialiased">
@@ -251,10 +268,15 @@
         </nav>
       </aside>
     </div>
-    {# Per-surface deferred JS. Surfaces that ship a static app script
-       (e.g. the broadcast feed's Alpine controller) inject a
-       ``<script src=... defer>`` here -- external src, not inline, so a
-       future nonce-based CSP needs no special-casing. Empty by default. #}
+    {# Per-surface deferred JS that does NOT register Alpine
+       components -- plain-JS page scripts (topology) and heavy vendor
+       bundles (Cytoscape, CodeMirror). External src, not inline, so a
+       future nonce-based CSP needs no special-casing. Empty by
+       default. Scripts that call ``Alpine.data()`` inside an
+       ``alpine:init`` listener belong in the head-level
+       ``component_scripts`` block instead -- from here they execute
+       after Alpine has already started and the registration is lost
+       (#1692). #}
     {% block scripts %}{% endblock %}
   </body>
 </html>

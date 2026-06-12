@@ -4,11 +4,16 @@
 // Connectors recent-ops Alpine controller (Initiative #340; Task #873
 // G10.3-T1). Registers on ``alpine:init`` so the
 // ``x-data="connectorsRecentOps(...)"`` wrapper in
-// ``connectors/_recent_ops.html`` resolves to this component. Kept
-// in a static file (loaded via ``<script src=... defer>``) rather
-// than an inline ``<script>`` block so a future nonce-based CSP
-// needs no inline-script exception -- matching the chassis
-// ``base.html`` "zero inline script" posture.
+// ``connectors/_recent_ops.html`` resolves to this component. Loaded
+// via ``<script src=... defer>`` from the detail page's HEAD-level
+// ``component_scripts`` block, which renders BEFORE
+// ``vendor/alpine.min.js`` -- deferred scripts execute in document
+// order, and Alpine's CDN bundle auto-starts in a microtask at the
+// end of its own script task, so this listener must already be
+// registered by then or the component never registers (#1692). Kept
+// in a static file rather than an inline ``<script>`` block so a
+// future nonce-based CSP needs no inline-script exception --
+// matching the chassis ``base.html`` "zero inline script" posture.
 //
 // Responsibilities:
 //   * Seed ``events`` from the server-rendered payload passed in

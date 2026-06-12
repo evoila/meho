@@ -90,6 +90,15 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- Operator console: broadcast feed/wall and the connectors recent-ops
+  card rendered dead (empty state despite a healthy stream, console
+  errors on every SSE frame) because their Alpine component scripts
+  loaded after Alpine had already started; component registration now
+  loads from a head-level `component_scripts` block that precedes
+  `alpine.min.js` (#1692)
+
 ## [0.14.0] - 2026-06-12
 
 ### Security
